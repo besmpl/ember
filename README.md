@@ -1,0 +1,60 @@
+# Ember
+
+Ember is a Go-native Luau-compatible scripting runtime for Hearth.
+
+The long-term goal is not to mechanically translate Luau's C++ source into Go.
+The goal is to grow a small, testable Go implementation piece by piece, using
+upstream Luau as the behavioral reference and Hearth as the first host that
+proves the embedding API.
+
+## Current Shape
+
+Ember starts as documentation and scaffolding. The first useful runtime slice is
+expected to be small:
+
+1. bytecode constants and instruction decoding;
+2. a tiny value model;
+3. a minimal interpreter loop;
+4. one source-to-bytecode path or bytecode fixture;
+5. focused compatibility tests against upstream Luau behavior.
+
+## Import Path
+
+```go
+import "github.com/besmpl/ember"
+```
+
+The root package should remain small. Future packages should exist only after a
+slice proves that the split makes the public interface smaller or the
+implementation easier to test.
+
+## Project Direction
+
+Ember should be:
+
+- Go-native, with ordinary Go values, errors, tests, and package structure;
+- Luau-compatible where compatibility is claimed;
+- deterministic enough for headless Hearth simulations;
+- embeddable without hidden global runtime ownership;
+- explicit about host callbacks, clocks, I/O, randomness, and cancellation;
+- built in vertical slices that run real scripts or conformance fixtures.
+
+## Docs
+
+Start with the documentation inventory:
+
+- [docs/README.md](docs/README.md)
+- [docs/principles.md](docs/principles.md)
+- [docs/design.md](docs/design.md)
+- [docs/roadmap.md](docs/roadmap.md)
+- [docs/checks.md](docs/checks.md)
+
+## Checks
+
+```sh
+scripts/check-fast
+scripts/check
+```
+
+For focused Go work, run package-local tests first, then use the scripts before
+calling a slice done.

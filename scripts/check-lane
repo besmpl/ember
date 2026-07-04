@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+cd "$(dirname "$0")/.."
+
+if [ "${1:-}" = "--list" ]; then
+    printf '%s\n' root
+    exit 0
+fi
+
+lane="${1:-}"
+case "$lane" in
+    root)
+        go test -vet=off -count=1 ./...
+        ;;
+    "")
+        printf 'usage: scripts/check-lane <lane>\nvalid lanes:\n  root\n' >&2
+        exit 2
+        ;;
+    *)
+        printf 'unknown lane: %s\nvalid lanes:\n  root\n' "$lane" >&2
+        exit 2
+        ;;
+esac
