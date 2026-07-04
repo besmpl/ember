@@ -9,14 +9,22 @@ proves the embedding API.
 
 ## Current Shape
 
-Ember starts as documentation and scaffolding. The first useful runtime slice is
-expected to be small:
+Ember currently has a tiny root-package vertical slice:
 
-1. bytecode constants and instruction decoding;
-2. a tiny value model;
+1. a value model for nil, booleans, numbers, strings, and host-visible tables;
+2. internal bytecode for constants, globals, register moves, table fields and
+   indexes, addition, calls, and return;
 3. a minimal interpreter loop;
-4. one source-to-bytecode path or bytecode fixture;
-5. focused compatibility tests against upstream Luau behavior.
+4. a narrow `Compile` path for scalar local bindings, assignments to existing
+   locals and table indexes, array and named-field table literals, dot-field
+   and bracket reads, `if`/`then`/`else`/`end` control flow with Luau
+   truthiness, host-visible table mutation, host function calls, and numeric
+   expressions joined by `+`;
+5. source-to-result tests such as `return 1 + 2`, scalar literals, and local
+   references.
+
+This is only a seed. Full Luau grammar, Lua functions, standard libraries, and
+analyzer behavior remain future slices.
 
 ## Import Path
 

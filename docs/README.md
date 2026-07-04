@@ -23,6 +23,8 @@ Use the smallest relevant document set for the change you are making.
 - `hearth-integration.md`: host boundary notes for Hearth.
 - `golang-rules.md`: Go coding rules for this repository.
 - `checks.md`: local verification commands.
+- `adr/0001-go-native-runtime-mapping.md`: decision to prefer Go objects,
+  Go GC, and Go runtime features behind Ember interfaces.
 
 ## Workflow Documents
 

@@ -30,6 +30,9 @@ lifecycles remain explicit outer layers.
   target.
 - Preserve deterministic behavior where Hearth simulation needs it.
 - Prefer compatibility tests and vertical examples over speculative public API.
+- Prefer Go-native runtime mapping behind Ember interfaces: ordinary Go objects,
+  Go GC, and standard Go runtime tools before custom allocator, GC, or scheduler
+  machinery.
 - Keep unsafe code, native codegen, and host I/O at explicit seams.
 
 ## Working Rules
@@ -45,6 +48,22 @@ lifecycles remain explicit outer layers.
   slice proves the interface.
 - Prefer a flat root package until implementation pressure proves a split is
   needed.
+
+## Recommended Plugins
+
+Use `real-engineering-stack:tdd` and `real-engineering-stack:codebase-design`
+for future compiler, VM, runtime, and embedding slices.
+
+- Use `real-engineering-stack:tdd` to grow Ember through source-to-result or
+  bytecode-to-result behavior tests before implementation. Tests should prove
+  observable Luau-shaped behavior through public interfaces such as `Compile`
+  and `Run`, not private parser, emitter, or VM internals.
+- Use `real-engineering-stack:codebase-design` to keep modules deep: small
+  public interfaces, private internal seams, and package splits only when real
+  implementation pressure proves they improve locality or testability.
+
+Together, these plugins keep the runtime moving in vertical slices while
+protecting the root package from speculative architecture.
 
 ## Context Budget
 

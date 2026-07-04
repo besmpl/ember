@@ -16,6 +16,9 @@ Use these principles as decision rules when designing the runtime.
   networking, Hearth worlds, process lifecycle, and native code.
 - Avoid hidden global runtime ownership.
 - Avoid unsafe code until profiling or compatibility proves it is necessary.
+- Prefer ordinary Go objects and Go runtime features behind Ember interfaces:
+  Go GC for object lifetime, Go structs/maps/slices for runtime objects, and
+  goroutines only behind explicit cooperative coroutine semantics when needed.
 - Let examples and conformance fixtures drive ergonomics before adding
   abstractions.
 - Add compatibility costs deliberately. Bytecode shapes, error behavior, and

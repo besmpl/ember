@@ -18,6 +18,26 @@ The root vocabulary should grow around a few concepts:
 - Host: the outer adapter that provides callbacks, modules, I/O, clocks,
   randomness, logging, and Hearth integration.
 
+## Go-Native Mapping
+
+Ember should map Luau runtime concepts onto ordinary Go objects and Go runtime
+features wherever that preserves the claimed Luau behavior. Tables, closures,
+threads, and host values should first be designed as small Ember interfaces
+backed by Go structs, pointers, maps, slices, channels, goroutines, or other
+standard library tools as appropriate.
+
+Use Go's garbage collector by default. Do not build an Ember-specific GC until a
+proven feature needs it, such as weak tables, finalization, memory quotas,
+deterministic memory accounting, or performance work that cannot be solved
+behind the existing interfaces.
+
+Goroutines may become an implementation tool for Luau coroutine or thread
+support, but they are not the public semantic model. Luau coroutines are
+cooperative and resume/yield shaped; any goroutine-backed implementation must
+preserve that behavior behind an Ember-owned interface.
+
+See `docs/adr/0001-go-native-runtime-mapping.md` for the full decision.
+
 ## Early Boundary
 
 The root package should not own Hearth worlds, rendering, audio, assets,

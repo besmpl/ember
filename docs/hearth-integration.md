@@ -12,9 +12,10 @@ messages.
 
 ## Early Integration Goals
 
-- Run a script in a headless test.
-- Call a Go host function from script.
-- Pass simple values across the host seam.
+- Run a script in a headless test. Seeded in the root package.
+- Call a Go host function from script. Seeded through `RunWithGlobals`.
+- Pass simple values across the host seam. Seeded for nil, booleans, numbers,
+  and strings.
 - Let a script request an explicit Hearth action through an adapter.
 - Keep world mutation owned by Hearth, not hidden in the VM.
 
