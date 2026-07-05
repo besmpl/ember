@@ -282,6 +282,8 @@ func TestAnalyzerCheckAllowsKnownBaseGlobalsInStrictMode(t *testing.T) {
 --!strict
 local kind: string = type(1)
 local ok: boolean = coroutine.isyieldable()
+local protected = pcall
+local protectedWithHandler = xpcall
 return kind
 `,
 	})

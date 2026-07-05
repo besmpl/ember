@@ -2470,32 +2470,6 @@ func (a *analysisState) functionAnnotation(annotation *typeExpression) (*typeExp
 	return annotation, substitutions
 }
 
-func standardLibraryFunctionFact(target term) (functionFact, bool) {
-	if target.name != "coroutine" || len(target.selectors) != 1 || target.selectors[0].field == "" {
-		return functionFact{}, false
-	}
-	switch target.selectors[0].field {
-	case "create":
-		return functionFact{returnType: simpleTypeUnknown}, true
-	case "resume":
-		return functionFact{returnType: simpleTypeBoolean}, true
-	case "yield":
-		return functionFact{returnType: simpleTypeUnknown}, true
-	case "status":
-		return functionFact{returnType: simpleTypeString}, true
-	case "close":
-		return functionFact{returnType: simpleTypeBoolean}, true
-	case "running":
-		return functionFact{returnType: simpleTypeUnknown}, true
-	case "isyieldable":
-		return functionFact{returnType: simpleTypeBoolean}, true
-	case "wrap":
-		return functionFact{returnType: simpleTypeUnknown}, true
-	default:
-		return functionFact{}, false
-	}
-}
-
 func (a *analysisState) inferFieldRead(value term) simpleType {
 	if value.name == "" || len(value.selectors) != 1 {
 		return simpleTypeUnknown

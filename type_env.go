@@ -15,20 +15,10 @@ type globalTypeFact struct {
 
 func defaultTypeEnv() typeEnv {
 	env := typeEnv{globals: make(map[string]globalTypeFact)}
-	for _, name := range []string{
-		"assert", "getmetatable", "ipairs", "math", "next", "pairs",
-		"rawget", "rawlen", "rawset", "require", "select", "setmetatable", "table",
-		"tonumber", "tostring", "unpack",
-	} {
+	for _, name := range []string{"assert", "require"} {
 		env.globals[name] = globalTypeFact{typ: simpleTypeUnknown}
 	}
-	env.setGlobalSummary("type", functionSummary(
-		[]TypeSummary{{Kind: TypeSummaryUnknown, Display: "unknown"}},
-		TypeSummary{Kind: TypeSummaryName, Display: "string"},
-	))
-	for name, summary := range standardLibraryValueSummaries() {
-		env.setGlobalSummary(name, summary)
-	}
+	addBaseGlobalTypeFacts(&env)
 	return env
 }
 
