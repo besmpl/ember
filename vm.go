@@ -958,6 +958,28 @@ func (frame *vmFrame) applyProtectedErrorResults(results []Value) {
 	frame.applyResultDestination(call.destination, results)
 }
 
+func (frame *vmFrame) callValueToDestination(callee Value, globals *globalEnv, args []Value, destination vmResultDestination) (vmFrameResult, bool, error) {
+	results, err := callValue(callee, globals, args)
+	if err != nil {
+		if yield, ok := err.(vmYieldRequest); ok {
+			frame.pendingCall = vmPendingCall{
+				destination: destination,
+				protected:   yield.protected,
+				host:        yield.host,
+			}
+			frame.hasPendingCall = true
+			frame.pc++
+			return vmFrameResult{state: vmCallStateYielded, results: yield.values}, true, nil
+		}
+		if isVMHostInterrupt(err) {
+			return vmFrameResult{}, true, err
+		}
+		return vmFrameResult{}, true, fmt.Errorf("run: call failed: %w", err)
+	}
+	frame.applyResultDestination(destination, results)
+	return vmFrameResult{}, false, nil
+}
+
 func (frame *vmFrame) clearPendingCall() {
 	frame.pendingCall = vmPendingCall{}
 	frame.hasPendingCall = false
@@ -3502,24 +3524,9 @@ func (thread *vmThread) runGenericFrame(frame *vmFrame) (vmFrameResult, error) {
 				frame.applyInlineResultDestination(destination, [2]Value{NilValue()}, 1)
 				break
 			}
-			results, err := callValue(callee, globals, args)
-			if err != nil {
-				if yield, ok := err.(vmYieldRequest); ok {
-					frame.pendingCall = vmPendingCall{
-						destination: destination,
-						protected:   yield.protected,
-						host:        yield.host,
-					}
-					frame.hasPendingCall = true
-					frame.pc++
-					return vmFrameResult{state: vmCallStateYielded, results: yield.values}, nil
-				}
-				if isVMHostInterrupt(err) {
-					return vmFrameResult{}, err
-				}
-				return vmFrameResult{}, fmt.Errorf("run: call failed: %w", err)
+			if result, done, err := frame.callValueToDestination(callee, globals, args, destination); done || err != nil {
+				return result, err
 			}
-			frame.applyResultDestination(destination, results)
 
 		case opTableRemove:
 			args := frame.scriptCallArgs(ins.a, ins.b)
@@ -3536,24 +3543,9 @@ func (thread *vmThread) runGenericFrame(frame *vmFrame) (vmFrameResult, error) {
 				frame.applyInlineResultDestination(destination, [2]Value{removed}, 1)
 				break
 			}
-			results, err := callValue(callee, globals, args)
-			if err != nil {
-				if yield, ok := err.(vmYieldRequest); ok {
-					frame.pendingCall = vmPendingCall{
-						destination: destination,
-						protected:   yield.protected,
-						host:        yield.host,
-					}
-					frame.hasPendingCall = true
-					frame.pc++
-					return vmFrameResult{state: vmCallStateYielded, results: yield.values}, nil
-				}
-				if isVMHostInterrupt(err) {
-					return vmFrameResult{}, err
-				}
-				return vmFrameResult{}, fmt.Errorf("run: call failed: %w", err)
+			if result, done, err := frame.callValueToDestination(callee, globals, args, destination); done || err != nil {
+				return result, err
 			}
-			frame.applyResultDestination(destination, results)
 
 		case opCoroutineResume:
 			args := frame.scriptCallArgs(ins.a, ins.b)
@@ -3570,24 +3562,9 @@ func (thread *vmThread) runGenericFrame(frame *vmFrame) (vmFrameResult, error) {
 				frame.applyResultDestination(destination, results)
 				break
 			}
-			results, err := callValue(callee, globals, args)
-			if err != nil {
-				if yield, ok := err.(vmYieldRequest); ok {
-					frame.pendingCall = vmPendingCall{
-						destination: destination,
-						protected:   yield.protected,
-						host:        yield.host,
-					}
-					frame.hasPendingCall = true
-					frame.pc++
-					return vmFrameResult{state: vmCallStateYielded, results: yield.values}, nil
-				}
-				if isVMHostInterrupt(err) {
-					return vmFrameResult{}, err
-				}
-				return vmFrameResult{}, fmt.Errorf("run: call failed: %w", err)
+			if result, done, err := frame.callValueToDestination(callee, globals, args, destination); done || err != nil {
+				return result, err
 			}
-			frame.applyResultDestination(destination, results)
 
 		case opMathMin:
 			args := frame.scriptCallArgs(ins.a, ins.b)
@@ -3604,24 +3581,9 @@ func (thread *vmThread) runGenericFrame(frame *vmFrame) (vmFrameResult, error) {
 				frame.applyInlineResultDestination(destination, [2]Value{NumberValue(minimum)}, 1)
 				break
 			}
-			results, err := callValue(callee, globals, args)
-			if err != nil {
-				if yield, ok := err.(vmYieldRequest); ok {
-					frame.pendingCall = vmPendingCall{
-						destination: destination,
-						protected:   yield.protected,
-						host:        yield.host,
-					}
-					frame.hasPendingCall = true
-					frame.pc++
-					return vmFrameResult{state: vmCallStateYielded, results: yield.values}, nil
-				}
-				if isVMHostInterrupt(err) {
-					return vmFrameResult{}, err
-				}
-				return vmFrameResult{}, fmt.Errorf("run: call failed: %w", err)
+			if result, done, err := frame.callValueToDestination(callee, globals, args, destination); done || err != nil {
+				return result, err
 			}
-			frame.applyResultDestination(destination, results)
 
 		case opSelectVarargCount:
 			destination := vmResultDestination{register: ins.a, count: ins.d}
@@ -3647,24 +3609,9 @@ func (thread *vmThread) runGenericFrame(frame *vmFrame) (vmFrameResult, error) {
 			args := make([]Value, 1+len(varargs))
 			args[0] = StringValue("#")
 			copy(args[1:], varargs)
-			results, err := callValue(callee, globals, args)
-			if err != nil {
-				if yield, ok := err.(vmYieldRequest); ok {
-					frame.pendingCall = vmPendingCall{
-						destination: destination,
-						protected:   yield.protected,
-						host:        yield.host,
-					}
-					frame.hasPendingCall = true
-					frame.pc++
-					return vmFrameResult{state: vmCallStateYielded, results: yield.values}, nil
-				}
-				if isVMHostInterrupt(err) {
-					return vmFrameResult{}, err
-				}
-				return vmFrameResult{}, fmt.Errorf("run: call failed: %w", err)
+			if result, done, err := frame.callValueToDestination(callee, globals, args, destination); done || err != nil {
+				return result, err
 			}
-			frame.applyResultDestination(destination, results)
 
 		case opCallLocalOne:
 			callee := frame.register(ins.b)
