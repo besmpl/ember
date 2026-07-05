@@ -1,0 +1,3130 @@
+package ember
+
+import "fmt"
+
+type compiler struct {
+	bytecodeBuilder
+	bind                bindResult
+	bindCursor          *int
+	symbolRegisters     map[int]int
+	locals              map[string]int
+	localStringSlots    map[int]map[string]int
+	localRowStringSlots map[int]map[string]int
+	localArrayElemSlots map[int]map[string]int
+	parent              *compiler
+	selfFunctionSymbol  int
+	selfNumericPairAdd  bool
+	selfNumericPairBase float64
+	variadic            bool
+	upvalues            map[string]int
+	upvaluesByID        map[int]int
+	upvalueDescs        []upvalueDesc
+	loops               []loopContext
+	nextReg             int
+	freeTemps           []int
+	options             compilerOptions
+}
+
+type variableKind int
+
+const (
+	variableLocal variableKind = iota
+	variableUpvalue
+)
+
+type variableRef struct {
+	kind  variableKind
+	index int
+}
+
+type loopContext struct {
+	breakJumps     []int
+	continueTarget int
+	continueJumps  []int
+}
+
+func compileProgram(source sourceArtifact) (*Proto, error) {
+	return compileProgramWithOptions(source, defaultCompilerOptions())
+}
+
+func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (*Proto, error) {
+	bindCursor := 0
+	c := compiler{
+		bind:                source.bind,
+		bindCursor:          &bindCursor,
+		symbolRegisters:     make(map[int]int),
+		locals:              make(map[string]int),
+		localStringSlots:    make(map[int]map[string]int),
+		localRowStringSlots: make(map[int]map[string]int),
+		localArrayElemSlots: make(map[int]map[string]int),
+		selfFunctionSymbol:  -1,
+		options:             options,
+	}
+	c.sourceText = source.source.Text
+
+	if err := c.compileStatements(source.program.statements); err != nil {
+		return nil, err
+	}
+	if !statementsHaveReturn(source.program.statements) {
+		c.emit(instruction{op: opReturn})
+	}
+
+	c.optimize(options.optimizations)
+	return c.finalizeProto(nil, c.nextReg, 0, false)
+}
+
+func (c *compiler) compileStatements(statements []statement) error {
+	for _, stmt := range statements {
+		if err := c.compileStatement(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *compiler) compileStatement(stmt statement) error {
+	return c.compileLoweredStatement(lowerStatement(stmt))
+}
+
+func (c *compiler) compileLoweredStatement(stmt loweredStatement) error {
+	switch stmt.kind {
+	case loweredStatementLocal:
+		return c.compileLoweredLocal(*stmt.local)
+	case loweredStatementLocalFunction:
+		return c.compileLocalFunction(*stmt.localFunction)
+	case loweredStatementFunctionDeclaration:
+		return c.compileFunctionDeclaration(*stmt.functionDeclaration)
+	case loweredStatementAssignment:
+		return c.compileLoweredAssignment(*stmt.assignment)
+	case loweredStatementCall:
+		return c.compileLoweredCallStatement(*stmt.call)
+	case loweredStatementIf:
+		return c.compileLoweredIf(*stmt.ifStatement)
+	case loweredStatementWhile:
+		return c.compileWhile(*stmt.while)
+	case loweredStatementNumericFor:
+		return c.compileFor(*stmt.numericFor)
+	case loweredStatementGenericFor:
+		return c.compileGenericFor(*stmt.genericFor)
+	case loweredStatementRepeat:
+		return c.compileRepeat(*stmt.repeat)
+	case loweredStatementBlock:
+		return c.compileLoweredBlock(*stmt.block)
+	case loweredStatementTypeAlias:
+		return nil
+	case loweredStatementBreak:
+		return c.compileBreak()
+	case loweredStatementContinue:
+		return c.compileContinue()
+	case loweredStatementReturn:
+		return c.compileLoweredReturn(*stmt.ret)
+	case loweredStatementEmpty:
+		return fmt.Errorf("compile: empty statement")
+	default:
+		return fmt.Errorf("compile: unknown lowered statement kind %d", stmt.kind)
+	}
+}
+
+func (c *compiler) compileLocal(stmt localStatement) error {
+	return c.compileLoweredLocal(lowerLocal(stmt))
+}
+
+func (c *compiler) compileLoweredLocal(lowered loweredLocal) error {
+	if len(lowered.names) == 0 {
+		return fmt.Errorf("compile: local statement has no names")
+	}
+
+	first := c.allocReg()
+	targets := make([]int, len(lowered.names))
+	for i := range targets {
+		targets[i] = first + i
+	}
+	c.reserveRegistersThrough(first + len(targets))
+
+	if err := c.compileLoweredValueListTo(lowered.values, lowered.sources, targets); err != nil {
+		return err
+	}
+	for i, name := range lowered.names {
+		c.locals[name] = targets[i]
+		if i < len(lowered.values.items) {
+			item := lowered.values.items[i]
+			if item.kind == loweredValueSingle && item.source >= 0 {
+				if slots, ok := expressionNamedTableFieldSlots(lowered.sources[item.source]); ok {
+					c.localStringSlots[targets[i]] = slots
+				}
+				if slots, ok := expressionArrayElementNamedTableFieldSlots(lowered.sources[item.source]); ok {
+					c.localArrayElemSlots[targets[i]] = slots
+				}
+			}
+		}
+		if symbol, ok := c.claimSymbol(name, symbolLocal); ok {
+			c.symbolRegisters[symbol.id] = targets[i]
+		}
+	}
+	return nil
+}
+
+func (c *compiler) compileReturn(stmt returnStatement) error {
+	return c.compileLoweredReturn(lowerReturn(stmt))
+}
+
+func (c *compiler) compileLoweredReturn(lowered loweredReturn) error {
+	if len(lowered.sources) == 0 {
+		c.emit(instruction{op: opReturn})
+		return nil
+	}
+
+	list := lowered.values
+	if len(list.items) == 1 && list.items[0].kind == loweredValueSingle {
+		if callAdd, ok := c.selfUpvaluePairAddReturn(lowered.sources[list.items[0].source]); ok {
+			target := c.allocReg()
+			c.reserveRegistersThrough(target + 1)
+			desc := c.addSelfCallAddOp(selfCallAddOp{
+				baseLess:  callAdd.baseLess,
+				firstSub:  callAdd.firstSub,
+				secondSub: callAdd.secondSub,
+			})
+			c.emit(instruction{op: opCallUpvalueSelfAddKOne, a: target, b: callAdd.upvalue, c: callAdd.source, d: desc})
+			c.emit(instruction{op: opReturnOne, a: target})
+			return nil
+		}
+		if ref, ok := c.expressionLocalRef(lowered.sources[list.items[0].source]); ok {
+			c.emit(instruction{op: opReturnOne, a: ref.index})
+			return nil
+		}
+	}
+	first := c.allocReg()
+	for i, item := range list.items {
+		target := first + i
+		c.reserveRegistersThrough(target + 1)
+		switch item.kind {
+		case loweredValueExpanded:
+			if vararg, ok := expressionSingleVararg(lowered.sources[item.source]); ok {
+				if err := c.compileVarargToResults(vararg, target, item.resultCount); err != nil {
+					return err
+				}
+			} else if call, ok := expressionSingleCall(lowered.sources[item.source]); ok {
+				if err := c.compileCallToResults(call, target, item.resultCount); err != nil {
+					return err
+				}
+			} else {
+				return fmt.Errorf("compile: expanded return value is not a call or vararg")
+			}
+			c.emit(instruction{op: opReturn, a: first, b: -(i + 1)})
+			return nil
+		case loweredValueSingle:
+			if err := c.compileExpressionTo(lowered.sources[item.source], target); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("compile: unknown lowered value kind %d", item.kind)
+		}
+	}
+	c.reserveRegistersThrough(first + len(list.items))
+	if len(list.items) == 1 {
+		c.emit(instruction{op: opReturnOne, a: first})
+		return nil
+	}
+	c.emit(instruction{op: opReturn, a: first, b: len(list.items)})
+	return nil
+}
+
+func (c *compiler) compileCallStatement(stmt term) error {
+	return c.compileLoweredCallStatement(lowerCallStatement(stmt))
+}
+
+func (c *compiler) compileLoweredCallStatement(lowered loweredCallStatement) error {
+	result := c.allocReg()
+	return c.compileLoweredCallToResults(lowered.call, lowered.args, result, lowered.resultCount)
+}
+
+func (c *compiler) compileExpressionListTo(values []expression, targets []int) error {
+	if len(targets) == 0 {
+		return nil
+	}
+	return c.compileLoweredValueListTo(lowerFixedValueList(values, len(targets)), values, targets)
+}
+
+func (c *compiler) compileLoweredValueListTo(list loweredValueList, values []expression, targets []int) error {
+	for i, item := range list.items {
+		target := targets[i]
+		c.reserveRegistersThrough(target + 1)
+		switch item.kind {
+		case loweredValueNil:
+			c.compileNilTo(target)
+			continue
+		case loweredValueExpanded:
+			if vararg, ok := expressionSingleVararg(values[item.source]); ok {
+				return c.compileVarargToResults(vararg, target, item.resultCount)
+			}
+			if call, ok := expressionSingleCall(values[item.source]); ok {
+				return c.compileCallToResults(call, target, item.resultCount)
+			}
+			return fmt.Errorf("compile: expanded value is not a call or vararg")
+		case loweredValueSingle:
+			if err := c.compileExpressionTo(values[item.source], target); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("compile: unknown lowered value kind %d", item.kind)
+		}
+	}
+	return nil
+}
+
+func (c *compiler) compileNilTo(target int) {
+	c.emitLoadConst(target, NilValue())
+}
+
+func (c *compiler) compileLocalFunction(stmt localFunctionStatement) error {
+	closure := lowerLocalFunctionClosure(stmt)
+	target := c.allocReg()
+	c.locals[stmt.name] = target
+	selfFunctionSymbol := -1
+	if symbol, ok := c.claimSymbol(stmt.name, symbolLocalFunction); ok {
+		c.symbolRegisters[symbol.id] = target
+		selfFunctionSymbol = symbol.id
+	}
+	if err := c.compileClosureToSelf(closure, target, selfFunctionSymbol); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *compiler) compileFunctionDeclaration(stmt functionDeclarationStatement) error {
+	closure := lowerFunctionDeclarationClosure(stmt)
+
+	value := c.allocReg()
+	if err := c.compileClosureTo(closure, value); err != nil {
+		return err
+	}
+	return c.compileAssignTargetFromRegister(stmt.target, value)
+}
+
+func (c *compiler) compileFunctionProto(closure loweredClosure, selfFunctionSymbol int) (*Proto, error) {
+	selfNumericPairBase, selfNumericPairAdd := selfNumericPairAddClosureBase(closure)
+	fn := compiler{
+		bind:                c.bind,
+		bindCursor:          c.bindCursor,
+		symbolRegisters:     make(map[int]int),
+		locals:              make(map[string]int),
+		localStringSlots:    make(map[int]map[string]int),
+		localRowStringSlots: make(map[int]map[string]int),
+		localArrayElemSlots: make(map[int]map[string]int),
+		parent:              c,
+		selfFunctionSymbol:  selfFunctionSymbol,
+		selfNumericPairAdd:  selfNumericPairAdd,
+		selfNumericPairBase: selfNumericPairBase,
+		variadic:            closure.variadic,
+		upvalues:            make(map[string]int),
+		upvaluesByID:        make(map[int]int),
+		nextReg:             len(closure.params),
+		options:             c.options,
+	}
+	fn.sourceText = c.sourceText
+	for i, param := range closure.params {
+		fn.locals[param] = i
+		if symbol, ok := fn.claimSymbol(param, symbolParameter); ok {
+			fn.symbolRegisters[symbol.id] = i
+		}
+	}
+	if err := fn.compileStatements(closure.body); err != nil {
+		return nil, err
+	}
+	if !statementsHaveReturn(closure.body) {
+		fn.emit(instruction{op: opReturn})
+	}
+
+	fn.optimize(c.options.optimizations)
+	return fn.finalizeProto(fn.upvalueDescs, fn.nextReg, len(closure.params), closure.variadic)
+}
+
+func (c *compiler) compileExpression(expr expression) (int, error) {
+	target := c.allocReg()
+	if err := c.compileExpressionTo(expr, target); err != nil {
+		return 0, err
+	}
+	return target, nil
+}
+
+func (c *compiler) compileExpressionTo(expr expression, target int) error {
+	c.claimRegister(target)
+	source := expressionRange(expr)
+	return c.withSourceRange(source, func() error {
+		expr = optimizeExpression(expr, c.options.optimizations)
+		if len(expr.terms) == 0 {
+			return fmt.Errorf("compile: empty expression")
+		}
+
+		if err := c.compileAndExpressionTo(expr.terms[0], target); err != nil {
+			return err
+		}
+
+		for _, term := range expr.terms[1:] {
+			jumpIfFalse := c.emitJumpIfFalse(target)
+			jumpEnd := c.emitJump()
+
+			c.patchJump(jumpIfFalse, c.pc())
+			if err := c.compileAndExpressionTo(term, target); err != nil {
+				return err
+			}
+			c.patchJump(jumpEnd, c.pc())
+		}
+
+		return nil
+	})
+}
+
+func (c *compiler) compileAndExpressionTo(expr andExpression, target int) error {
+	if len(expr.terms) == 0 {
+		return fmt.Errorf("compile: empty expression")
+	}
+
+	if err := c.compileComparisonExpressionTo(expr.terms[0], target); err != nil {
+		return err
+	}
+
+	for _, term := range expr.terms[1:] {
+		jumpEnd := c.emitJumpIfFalse(target)
+		if err := c.compileComparisonExpressionTo(term, target); err != nil {
+			return err
+		}
+		c.patchJump(jumpEnd, c.pc())
+	}
+
+	return nil
+}
+
+func (c *compiler) compileComparisonExpressionTo(expr comparisonExpression, target int) error {
+	if expr.op == "" {
+		return c.compileConcatExpressionTo(expr.left, target)
+	}
+
+	if expr.right == nil {
+		return fmt.Errorf("compile: missing comparison right operand")
+	}
+
+	if err := c.compileConcatExpressionTo(expr.left, target); err != nil {
+		return err
+	}
+
+	right := c.allocTemp()
+	if err := c.compileConcatExpressionTo(*expr.right, right); err != nil {
+		c.releaseTemp(right)
+		return err
+	}
+
+	switch expr.op {
+	case comparisonEqual:
+		c.emit(instruction{op: opEqual, a: target, b: target, c: right})
+	case comparisonNotEqual:
+		c.emit(instruction{op: opNotEqual, a: target, b: target, c: right})
+	case comparisonLess:
+		c.emit(instruction{op: opLess, a: target, b: target, c: right})
+	case comparisonLessEqual:
+		c.emit(instruction{op: opLessEqual, a: target, b: target, c: right})
+	case comparisonGreater:
+		c.emit(instruction{op: opGreater, a: target, b: target, c: right})
+	case comparisonGreaterEqual:
+		c.emit(instruction{op: opGreaterEqual, a: target, b: target, c: right})
+	default:
+		c.releaseTemp(right)
+		return fmt.Errorf("compile: unsupported comparison %q", expr.op)
+	}
+
+	c.releaseTemp(right)
+	return nil
+}
+
+func (c *compiler) compileConcatExpressionTo(expr concatExpression, target int) error {
+	if err := c.compileAdditiveExpressionTo(expr.first, target); err != nil {
+		return err
+	}
+
+	for _, part := range expr.rest {
+		right := c.allocTemp()
+		if err := c.compileAdditiveExpressionTo(part, right); err != nil {
+			c.releaseTemp(right)
+			return err
+		}
+		c.emit(instruction{op: opConcat, a: target, b: target, c: right})
+		c.releaseTemp(right)
+	}
+
+	return nil
+}
+
+func (c *compiler) compileAdditiveExpressionTo(expr additiveExpression, target int) error {
+	if err := c.compileMultiplicativeExpressionTo(expr.first, target); err != nil {
+		return err
+	}
+
+	for _, part := range expr.rest {
+		if right, ok := foldNumberMultiplicative(part.value); ok {
+			constant := c.addConstant(NumberValue(right))
+			switch part.op {
+			case additiveAdd:
+				c.emit(instruction{op: opAddK, a: target, b: target, c: constant})
+				continue
+			case additiveSubtract:
+				c.emit(instruction{op: opSubK, a: target, b: target, c: constant})
+				continue
+			}
+		}
+		right := c.allocArithmeticOperandRegister(part.value)
+		if err := c.compileMultiplicativeExpressionTo(part.value, right); err != nil {
+			c.releaseTemp(right)
+			return err
+		}
+		switch part.op {
+		case additiveAdd:
+			c.emit(instruction{op: opAdd, a: target, b: target, c: right})
+		case additiveSubtract:
+			c.emit(instruction{op: opSub, a: target, b: target, c: right})
+		default:
+			c.releaseTemp(right)
+			return fmt.Errorf("compile: unsupported additive operator %q", part.op)
+		}
+		c.releaseTemp(right)
+	}
+
+	return nil
+}
+
+func (c *compiler) allocArithmeticOperandRegister(expr multiplicativeExpression) int {
+	if _, ok := multiplicativeSingleCall(expr); ok {
+		return c.allocReg()
+	}
+	return c.allocTemp()
+}
+
+func multiplicativeSingleCall(expr multiplicativeExpression) (callExpression, bool) {
+	if len(expr.rest) != 0 {
+		return callExpression{}, false
+	}
+	value := termWithoutCasts(expr.first)
+	if value.call == nil || len(value.selectors) != 0 {
+		return callExpression{}, false
+	}
+	return *value.call, true
+}
+
+func (c *compiler) compileMultiplicativeExpressionTo(expr multiplicativeExpression, target int) error {
+	if err := c.compileTermTo(expr.first, target); err != nil {
+		return err
+	}
+
+	for _, part := range expr.rest {
+		if right, ok := foldNumberTerm(part.value); ok {
+			constant := c.addConstant(NumberValue(right))
+			switch part.op {
+			case multiplicativeMultiply:
+				c.emit(instruction{op: opMulK, a: target, b: target, c: constant})
+				continue
+			case multiplicativeDivide:
+				c.emit(instruction{op: opDivK, a: target, b: target, c: constant})
+				continue
+			case multiplicativeModulo:
+				c.emit(instruction{op: opModK, a: target, b: target, c: constant})
+				continue
+			case multiplicativeFloorDiv:
+				c.emit(instruction{op: opIDivK, a: target, b: target, c: constant})
+				continue
+			}
+		}
+		right := c.allocTemp()
+		if err := c.compileTermTo(part.value, right); err != nil {
+			c.releaseTemp(right)
+			return err
+		}
+		switch part.op {
+		case multiplicativeMultiply:
+			c.emit(instruction{op: opMul, a: target, b: target, c: right})
+		case multiplicativeDivide:
+			c.emit(instruction{op: opDiv, a: target, b: target, c: right})
+		case multiplicativeModulo:
+			c.emit(instruction{op: opMod, a: target, b: target, c: right})
+		case multiplicativeFloorDiv:
+			c.emit(instruction{op: opIDiv, a: target, b: target, c: right})
+		default:
+			c.releaseTemp(right)
+			return fmt.Errorf("compile: unsupported multiplicative operator %q", part.op)
+		}
+		c.releaseTemp(right)
+	}
+
+	return nil
+}
+
+func (c *compiler) compileTermTo(term term, target int) error {
+	if len(term.selectors) > 0 {
+		base := term
+		base.selectors = nil
+		if ref, ok := c.termLocalRef(base); ok {
+			return c.compileSelectorsFromBaseTo(ref.index, term.selectors, target)
+		}
+		if isNamedTerm(base) {
+			if err := c.compileNamedTermTo(base, target); err != nil {
+				return err
+			}
+		} else {
+			if err := c.compileTermTo(base, target); err != nil {
+				return err
+			}
+		}
+		return c.compileSelectorsTo(term.selectors, target)
+	}
+
+	if term.power != nil {
+		return c.compilePowerTo(*term.power, target)
+	}
+	if term.number != nil {
+		c.emitLoadConst(target, NumberValue(*term.number))
+		return nil
+	}
+	if term.lit != nil {
+		c.emitLoadConst(target, *term.lit)
+		return nil
+	}
+	if term.table != nil {
+		return c.compileTableTo(*term.table, target)
+	}
+	if term.function != nil {
+		return c.compileClosureTo(lowerClosure(*term.function), target)
+	}
+	if term.ifExpr != nil {
+		return c.compileIfExpressionTo(*term.ifExpr, target)
+	}
+	if term.call != nil {
+		return c.compileCallTo(*term.call, target)
+	}
+	if term.vararg {
+		return c.compileVarargToResults(term, target, 1)
+	}
+	if term.unaryNot != nil {
+		return c.compileNotTo(*term.unaryNot, target)
+	}
+	if term.unaryMinus != nil {
+		return c.compileUnaryMinusTo(*term.unaryMinus, target)
+	}
+	if term.unaryLen != nil {
+		return c.compileLengthTo(*term.unaryLen, target)
+	}
+	if term.group != nil {
+		return c.compileExpressionTo(*term.group, target)
+	}
+
+	return c.compileNamedTermTo(term, target)
+}
+
+func (c *compiler) compilePowerTo(power powerExpression, target int) error {
+	if err := c.compileTermTo(power.base, target); err != nil {
+		return err
+	}
+	exponent := c.allocTemp()
+	if err := c.compileTermTo(power.exponent, exponent); err != nil {
+		c.releaseTemp(exponent)
+		return err
+	}
+	c.emit(instruction{op: opPow, a: target, b: target, c: exponent})
+	c.releaseTemp(exponent)
+	return nil
+}
+
+func (c *compiler) compileClosureTo(closure loweredClosure, target int) error {
+	return c.compileClosureToSelf(closure, target, -1)
+}
+
+func (c *compiler) compileClosureToSelf(closure loweredClosure, target int, selfFunctionSymbol int) error {
+	proto, err := c.compileFunctionProto(closure, selfFunctionSymbol)
+	if err != nil {
+		return err
+	}
+
+	protoIndex := c.addPrototype(proto)
+	c.emit(instruction{op: opClosure, a: target, b: protoIndex})
+	return nil
+}
+
+func (c *compiler) compileSelectorsTo(selectors []selector, target int) error {
+	for len(selectors) > 0 {
+		if len(selectors) >= 2 && selectors[0].field != "" && selectors[1].field != "" {
+			firstKey := c.addConstant(StringValue(selectors[0].field))
+			secondKey := c.addConstant(StringValue(selectors[1].field))
+			c.emit(instruction{op: opGetStringField2, a: target, b: target, c: firstKey, d: secondKey})
+			selectors = selectors[2:]
+			continue
+		}
+
+		selector := selectors[0]
+		if selector.field != "" {
+			key := c.addConstant(StringValue(selector.field))
+			c.emit(instruction{op: opGetStringField, a: target, b: target, c: key})
+			selectors = selectors[1:]
+			continue
+		}
+
+		key := c.allocReg()
+		if err := c.compileExpressionTo(*selector.index, key); err != nil {
+			return err
+		}
+		c.emit(instruction{op: opGetIndex, a: target, b: target, c: key})
+		selectors = selectors[1:]
+	}
+	return nil
+}
+
+func (c *compiler) compileSelectorsFromBaseTo(base int, selectors []selector, target int) error {
+	if len(selectors) == 0 {
+		if target != base {
+			c.emit(instruction{op: opMove, a: target, b: base})
+		}
+		return nil
+	}
+	first := selectors[0]
+	if len(selectors) >= 2 && first.field != "" && selectors[1].field != "" {
+		firstKey := c.addConstant(StringValue(first.field))
+		secondKey := c.addConstant(StringValue(selectors[1].field))
+		c.emit(instruction{op: opGetStringField2, a: target, b: base, c: firstKey, d: secondKey})
+		return c.compileSelectorsTo(selectors[2:], target)
+	}
+	if first.field != "" {
+		key := c.addConstant(StringValue(first.field))
+		if slots, ok := c.localStringSlots[base]; ok {
+			if slot, ok := slots[first.field]; ok {
+				c.emit(instruction{op: opGetRowStringField, a: target, b: base, c: key, d: slot})
+				return c.compileSelectorsTo(selectors[1:], target)
+			}
+		}
+		c.emit(instruction{op: opGetStringField, a: target, b: base, c: key})
+		return c.compileSelectorsTo(selectors[1:], target)
+	}
+	key := c.allocReg()
+	if err := c.compileExpressionTo(*first.index, key); err != nil {
+		return err
+	}
+	c.emit(instruction{op: opGetIndex, a: target, b: base, c: key})
+	return c.compileSelectorsTo(selectors[1:], target)
+}
+
+func isNamedTerm(term term) bool {
+	return term.name != "" &&
+		term.number == nil &&
+		term.lit == nil &&
+		term.table == nil &&
+		term.function == nil &&
+		term.ifExpr == nil &&
+		term.call == nil &&
+		!term.vararg &&
+		term.unaryNot == nil &&
+		term.unaryMinus == nil &&
+		term.unaryLen == nil &&
+		term.group == nil &&
+		len(term.selectors) == 0
+}
+
+func (c *compiler) compileCallTargetTo(term term, target int) error {
+	if isNamedTerm(term) {
+		return c.compileNamedTermTo(term, target)
+	}
+	return c.compileTermTo(term, target)
+}
+
+func (c *compiler) compileNotTo(term term, target int) error {
+	if err := c.compileTermTo(term, target); err != nil {
+		return err
+	}
+
+	jumpIfFalse := c.emitJumpIfFalse(target)
+
+	c.emitLoadConst(target, BoolValue(false))
+
+	jumpEnd := c.emitJump()
+
+	c.patchJump(jumpIfFalse, c.pc())
+	c.emitLoadConst(target, BoolValue(true))
+
+	c.patchJump(jumpEnd, c.pc())
+	return nil
+}
+
+func (c *compiler) compileUnaryMinusTo(term term, target int) error {
+	if err := c.compileTermTo(term, target); err != nil {
+		return err
+	}
+	c.emit(instruction{op: opNeg, a: target, b: target})
+	return nil
+}
+
+func (c *compiler) compileLengthTo(term term, target int) error {
+	if err := c.compileTermTo(term, target); err != nil {
+		return err
+	}
+	c.emit(instruction{op: opLen, a: target, b: target})
+	return nil
+}
+
+func (c *compiler) compileAssignment(stmt assignStatement) error {
+	return c.compileLoweredAssignment(lowerAssignment(stmt))
+}
+
+func (c *compiler) compileLoweredAssignment(lowered loweredAssignment) error {
+	if len(lowered.targets) == 0 {
+		return fmt.Errorf("compile: assignment has no targets")
+	}
+
+	if addMod, ok := c.numericAddModAssignment(lowered); ok {
+		return c.compileNumericAddModAssignment(addMod)
+	}
+
+	if c.canCompileSingleLocalAssignmentInPlace(lowered) {
+		target := lowered.targets[0]
+		ref, _ := c.resolveAssignTarget(target)
+		return c.compileExpressionTo(lowered.sources[lowered.values.items[0].source], ref.index)
+	}
+
+	if addField, ok := c.addStringFieldAssignment(lowered); ok {
+		return c.compileAddStringFieldAssignment(addField)
+	}
+	if subField, ok := c.subStringFieldAssignment(lowered); ok {
+		return c.compileSubStringFieldAssignment(subField)
+	}
+	if subAddField, ok := c.subAddStringFieldAssignment(lowered); ok {
+		return c.compileSubAddStringFieldAssignment(subAddField)
+	}
+	if addSubField2, ok := c.addSubStringField2Assignment(lowered); ok {
+		return c.compileAddSubStringField2Assignment(addSubField2)
+	}
+
+	first := c.allocReg()
+	values := make([]int, len(lowered.targets))
+	for i := range values {
+		values[i] = first + i
+	}
+	c.reserveRegistersThrough(first + len(values))
+	if err := c.compileLoweredValueListTo(lowered.values, lowered.sources, values); err != nil {
+		return err
+	}
+
+	for i, target := range lowered.targets {
+		if err := c.compileAssignTargetFromRegister(target, values[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *compiler) canCompileSingleLocalAssignmentInPlace(lowered loweredAssignment) bool {
+	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
+		return false
+	}
+	if len(lowered.targets) != 1 || len(lowered.values.items) != 1 {
+		return false
+	}
+	target := lowered.targets[0]
+	if len(target.selectors) != 0 {
+		return false
+	}
+	item := lowered.values.items[0]
+	if item.kind != loweredValueSingle {
+		return false
+	}
+	ref, ok := c.resolveAssignTarget(target)
+	return ok && ref.kind == variableLocal
+}
+
+type addStringFieldAssignment struct {
+	table   int
+	field   string
+	operand expression
+}
+
+type subStringFieldAssignment struct {
+	table   int
+	field   string
+	operand expression
+}
+
+type subAddStringFieldAssignment struct {
+	table    int
+	target   string
+	subtract expression
+	add      string
+}
+
+type addSubStringField2Assignment struct {
+	base         int
+	targetFirst  string
+	targetSecond string
+	addFirst     string
+	addSecond    string
+	subFirst     string
+	subSecond    string
+}
+
+type numericAddModAssignment struct {
+	target int
+	source int
+	mul    float64
+	idiv   float64
+	mod    float64
+}
+
+func (c *compiler) addStringFieldAssignment(lowered loweredAssignment) (addStringFieldAssignment, bool) {
+	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
+		return addStringFieldAssignment{}, false
+	}
+	if len(lowered.targets) != 1 || len(lowered.values.items) != 1 {
+		return addStringFieldAssignment{}, false
+	}
+	item := lowered.values.items[0]
+	if item.kind != loweredValueSingle {
+		return addStringFieldAssignment{}, false
+	}
+	target := lowered.targets[0]
+	if len(target.selectors) != 1 || target.selectors[0].field == "" {
+		return addStringFieldAssignment{}, false
+	}
+	ref, ok := c.resolveAssignTarget(target)
+	if !ok || ref.kind != variableLocal {
+		return addStringFieldAssignment{}, false
+	}
+	operand, ok := fieldAddAssignmentOperand(lowered.sources[item.source], target)
+	if !ok {
+		return addStringFieldAssignment{}, false
+	}
+	return addStringFieldAssignment{
+		table:   ref.index,
+		field:   target.selectors[0].field,
+		operand: operand,
+	}, true
+}
+
+func (c *compiler) subStringFieldAssignment(lowered loweredAssignment) (subStringFieldAssignment, bool) {
+	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
+		return subStringFieldAssignment{}, false
+	}
+	if len(lowered.targets) != 1 || len(lowered.values.items) != 1 {
+		return subStringFieldAssignment{}, false
+	}
+	item := lowered.values.items[0]
+	if item.kind != loweredValueSingle {
+		return subStringFieldAssignment{}, false
+	}
+	target := lowered.targets[0]
+	if len(target.selectors) != 1 || target.selectors[0].field == "" {
+		return subStringFieldAssignment{}, false
+	}
+	ref, ok := c.resolveAssignTarget(target)
+	if !ok || ref.kind != variableLocal {
+		return subStringFieldAssignment{}, false
+	}
+	operand, ok := fieldSubAssignmentOperand(lowered.sources[item.source], target)
+	if !ok {
+		return subStringFieldAssignment{}, false
+	}
+	return subStringFieldAssignment{
+		table:   ref.index,
+		field:   target.selectors[0].field,
+		operand: operand,
+	}, true
+}
+
+func (c *compiler) subAddStringFieldAssignment(lowered loweredAssignment) (subAddStringFieldAssignment, bool) {
+	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
+		return subAddStringFieldAssignment{}, false
+	}
+	if len(lowered.targets) != 1 || len(lowered.values.items) != 1 {
+		return subAddStringFieldAssignment{}, false
+	}
+	item := lowered.values.items[0]
+	if item.kind != loweredValueSingle {
+		return subAddStringFieldAssignment{}, false
+	}
+	target := lowered.targets[0]
+	if len(target.selectors) != 1 || target.selectors[0].field == "" {
+		return subAddStringFieldAssignment{}, false
+	}
+	ref, ok := c.resolveAssignTarget(target)
+	if !ok || ref.kind != variableLocal {
+		return subAddStringFieldAssignment{}, false
+	}
+	subtract, add, ok := fieldSubAddAssignmentOperands(lowered.sources[item.source], target)
+	if !ok {
+		return subAddStringFieldAssignment{}, false
+	}
+	return subAddStringFieldAssignment{
+		table:    ref.index,
+		target:   target.selectors[0].field,
+		subtract: subtract,
+		add:      add,
+	}, true
+}
+
+func fieldAddAssignmentOperand(expr expression, target assignTarget) (expression, bool) {
+	return fieldAddSubAssignmentOperand(expr, target, additiveAdd)
+}
+
+func fieldSubAssignmentOperand(expr expression, target assignTarget) (expression, bool) {
+	return fieldAddSubAssignmentOperand(expr, target, additiveSubtract)
+}
+
+func fieldAddSubAssignmentOperand(expr expression, target assignTarget, op additiveOperator) (expression, bool) {
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+		return expression{}, false
+	}
+	comparison := expr.terms[0].terms[0]
+	if comparison.op != "" || comparison.right != nil || len(comparison.left.rest) != 0 {
+		return expression{}, false
+	}
+	additive := comparison.left.first
+	if len(additive.rest) != 1 || additive.rest[0].op != op {
+		return expression{}, false
+	}
+	if !multiplicativeMatchesAssignTarget(additive.first, target) {
+		return expression{}, false
+	}
+	operand := additive.rest[0].value
+	if !multiplicativeIsSideEffectFreeSingleValue(operand) {
+		return expression{}, false
+	}
+	return expression{
+		terms: []andExpression{{
+			terms: []comparisonExpression{{
+				left: concatExpression{
+					first: additiveExpression{
+						first: operand,
+					},
+				},
+			}},
+		}},
+	}, true
+}
+
+func fieldSubAddAssignmentOperands(expr expression, target assignTarget) (expression, string, bool) {
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+		return expression{}, "", false
+	}
+	comparison := expr.terms[0].terms[0]
+	if comparison.op != "" || comparison.right != nil || len(comparison.left.rest) != 0 {
+		return expression{}, "", false
+	}
+	additive := comparison.left.first
+	if len(additive.rest) != 2 ||
+		additive.rest[0].op != additiveSubtract ||
+		additive.rest[1].op != additiveAdd {
+		return expression{}, "", false
+	}
+	if !multiplicativeMatchesAssignTarget(additive.first, target) {
+		return expression{}, "", false
+	}
+	subtract := additive.rest[0].value
+	if !multiplicativeIsSideEffectFreeSingleValue(subtract) {
+		return expression{}, "", false
+	}
+	addBase, addField, ok := multiplicativeLocalStringField(additive.rest[1].value)
+	if !ok || addBase != target.name {
+		return expression{}, "", false
+	}
+	return expression{
+		terms: []andExpression{{
+			terms: []comparisonExpression{{
+				left: concatExpression{
+					first: additiveExpression{
+						first: subtract,
+					},
+				},
+			}},
+		}},
+	}, addField, true
+}
+
+func multiplicativeMatchesAssignTarget(expr multiplicativeExpression, target assignTarget) bool {
+	if len(expr.rest) != 0 {
+		return false
+	}
+	value := termWithoutCastsAndGroups(expr.first)
+	if value.name != target.name || len(value.selectors) != len(target.selectors) {
+		return false
+	}
+	for i, selector := range value.selectors {
+		targetSelector := target.selectors[i]
+		if selector.field != targetSelector.field || selector.index != nil || targetSelector.index != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func multiplicativeIsSideEffectFreeSingleValue(expr multiplicativeExpression) bool {
+	if len(expr.rest) != 0 {
+		return false
+	}
+	value := termWithoutCastsAndGroups(expr.first)
+	if value.name != "" && len(value.selectors) == 0 {
+		return true
+	}
+	return value.number != nil || value.lit != nil
+}
+
+func multiplicativeLocalStringField(expr multiplicativeExpression) (string, string, bool) {
+	if len(expr.rest) != 0 {
+		return "", "", false
+	}
+	value := termWithoutCastsAndGroups(expr.first)
+	if value.name == "" || len(value.selectors) != 1 {
+		return "", "", false
+	}
+	field := value.selectors[0]
+	if field.field == "" || field.index != nil {
+		return "", "", false
+	}
+	return value.name, field.field, true
+}
+
+func expressionNamedTableFieldSlots(expr expression) (map[string]int, bool) {
+	multiplicative, ok := expressionSingleMultiplicative(expr)
+	if !ok {
+		return nil, false
+	}
+	term := termWithoutCastsAndGroups(multiplicative.first)
+	if term.table == nil || len(term.selectors) != 0 {
+		return nil, false
+	}
+	slots := make(map[string]int)
+	for _, field := range term.table.fields {
+		if field.name == "" || field.key != nil || field.arrayIndex != 0 {
+			return nil, false
+		}
+		if _, exists := slots[field.name]; !exists {
+			slots[field.name] = len(slots)
+		}
+	}
+	if len(slots) == 0 {
+		return nil, false
+	}
+	return slots, true
+}
+
+func expressionArrayElementNamedTableFieldSlots(expr expression) (map[string]int, bool) {
+	multiplicative, ok := expressionSingleMultiplicative(expr)
+	if !ok {
+		return nil, false
+	}
+	term := termWithoutCastsAndGroups(multiplicative.first)
+	if term.table == nil || len(term.selectors) != 0 {
+		return nil, false
+	}
+	var shape map[string]int
+	for _, field := range term.table.fields {
+		if field.arrayIndex == 0 || field.name != "" || field.key != nil {
+			return nil, false
+		}
+		slots, ok := expressionNamedTableFieldSlots(field.value)
+		if !ok {
+			return nil, false
+		}
+		if shape == nil {
+			shape = slots
+			continue
+		}
+		if !stringSlotMapsEqual(shape, slots) {
+			return nil, false
+		}
+	}
+	if len(shape) == 0 {
+		return nil, false
+	}
+	return shape, true
+}
+
+func stringSlotMapsEqual(left map[string]int, right map[string]int) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *compiler) compileAddStringFieldAssignment(addField addStringFieldAssignment) error {
+	operand := c.allocTemp()
+	if err := c.compileExpressionTo(addField.operand, operand); err != nil {
+		c.releaseTemp(operand)
+		return err
+	}
+	key := c.addConstant(StringValue(addField.field))
+	c.emit(instruction{op: opAddStringField, a: addField.table, b: key, c: operand})
+	c.releaseTemp(operand)
+	return nil
+}
+
+func (c *compiler) compileSubStringFieldAssignment(subField subStringFieldAssignment) error {
+	operand := c.allocTemp()
+	if err := c.compileExpressionTo(subField.operand, operand); err != nil {
+		c.releaseTemp(operand)
+		return err
+	}
+	key := c.addConstant(StringValue(subField.field))
+	c.emit(instruction{op: opSubStringField, a: subField.table, b: key, c: operand})
+	c.releaseTemp(operand)
+	return nil
+}
+
+func (c *compiler) compileSubAddStringFieldAssignment(subAddField subAddStringFieldAssignment) error {
+	subtract := c.allocTemp()
+	if err := c.compileExpressionTo(subAddField.subtract, subtract); err != nil {
+		c.releaseTemp(subtract)
+		return err
+	}
+	target := c.addConstant(StringValue(subAddField.target))
+	add := c.addConstant(StringValue(subAddField.add))
+	targetSlot := -1
+	addSlot := -1
+	if slots, ok := c.localStringSlots[subAddField.table]; ok {
+		if slot, ok := slots[subAddField.target]; ok {
+			targetSlot = slot
+		}
+		if slot, ok := slots[subAddField.add]; ok {
+			addSlot = slot
+		}
+	}
+	desc := c.addRowFieldSubAddOp(rowFieldSubAddOp{
+		target:     target,
+		add:        add,
+		targetSlot: targetSlot,
+		addSlot:    addSlot,
+	})
+	c.emit(instruction{op: opSubAddStringField, a: subAddField.table, b: desc, c: subtract})
+	c.releaseTemp(subtract)
+	return nil
+}
+
+func (c *compiler) numericAddModAssignment(lowered loweredAssignment) (numericAddModAssignment, bool) {
+	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
+		return numericAddModAssignment{}, false
+	}
+	if len(lowered.targets) != 1 || len(lowered.values.items) != 1 {
+		return numericAddModAssignment{}, false
+	}
+	item := lowered.values.items[0]
+	if item.kind != loweredValueSingle {
+		return numericAddModAssignment{}, false
+	}
+	target := lowered.targets[0]
+	if len(target.selectors) != 0 {
+		return numericAddModAssignment{}, false
+	}
+	ref, ok := c.resolveAssignTarget(target)
+	if !ok || ref.kind != variableLocal {
+		return numericAddModAssignment{}, false
+	}
+	source, mul, idiv, mod, ok := c.numericAddModSource(lowered.sources[item.source], target.name)
+	if !ok {
+		return numericAddModAssignment{}, false
+	}
+	return numericAddModAssignment{
+		target: ref.index,
+		source: source,
+		mul:    mul,
+		idiv:   idiv,
+		mod:    mod,
+	}, true
+}
+
+func (c *compiler) numericAddModSource(expr expression, targetName string) (int, float64, float64, float64, bool) {
+	expr = optimizeExpression(expr, c.options.optimizations)
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+		return 0, 0, 0, 0, false
+	}
+	comparison := expr.terms[0].terms[0]
+	if comparison.op != "" || comparison.right != nil || len(comparison.left.rest) != 0 {
+		return 0, 0, 0, 0, false
+	}
+	additive := comparison.left.first
+	if len(additive.rest) != 1 || additive.rest[0].op != additiveAdd {
+		return 0, 0, 0, 0, false
+	}
+	targetRef, ok := c.multiplicativeLocalRef(additive.first)
+	if !ok || targetRef.kind != variableLocal {
+		return 0, 0, 0, 0, false
+	}
+	if targetRef.index != c.locals[targetName] {
+		return 0, 0, 0, 0, false
+	}
+	sourceRef, mul, idiv, mod, ok := c.numericModOperand(additive.rest[0].value)
+	if !ok || sourceRef.kind != variableLocal {
+		return 0, 0, 0, 0, false
+	}
+	return sourceRef.index, mul, idiv, mod, true
+}
+
+func (c *compiler) multiplicativeLocalRef(expr multiplicativeExpression) (variableRef, bool) {
+	if len(expr.rest) != 0 {
+		return variableRef{}, false
+	}
+	value := termWithoutCastsAndGroups(expr.first)
+	if !isNamedTerm(value) {
+		return variableRef{}, false
+	}
+	return c.termLocalRef(value)
+}
+
+func (c *compiler) numericModOperand(expr multiplicativeExpression) (variableRef, float64, float64, float64, bool) {
+	if len(expr.rest) == 0 {
+		value := termWithoutCasts(expr.first)
+		if value.group == nil || len(value.selectors) != 0 {
+			return variableRef{}, 0, 0, 0, false
+		}
+		grouped, ok := expressionSingleMultiplicative(*value.group)
+		if !ok {
+			return variableRef{}, 0, 0, 0, false
+		}
+		return c.numericModOperand(grouped)
+	}
+	if len(expr.rest) != 1 || expr.rest[0].op != multiplicativeModulo {
+		return variableRef{}, 0, 0, 0, false
+	}
+	mod, ok := foldNumberTerm(expr.rest[0].value)
+	if !ok {
+		return variableRef{}, 0, 0, 0, false
+	}
+	value := termWithoutCasts(expr.first)
+	if value.group == nil || len(value.selectors) != 0 {
+		return variableRef{}, 0, 0, 0, false
+	}
+	source, mul, idiv, ok := c.numericMulMinusIDiv(*value.group)
+	if !ok {
+		return variableRef{}, 0, 0, 0, false
+	}
+	return source, mul, idiv, mod, true
+}
+
+func expressionSingleMultiplicative(expr expression) (multiplicativeExpression, bool) {
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+		return multiplicativeExpression{}, false
+	}
+	comparison := expr.terms[0].terms[0]
+	if comparison.op != "" || comparison.right != nil || len(comparison.left.rest) != 0 {
+		return multiplicativeExpression{}, false
+	}
+	additive := comparison.left.first
+	if len(additive.rest) != 0 {
+		return multiplicativeExpression{}, false
+	}
+	return additive.first, true
+}
+
+func (c *compiler) numericMulMinusIDiv(expr expression) (variableRef, float64, float64, bool) {
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+		return variableRef{}, 0, 0, false
+	}
+	comparison := expr.terms[0].terms[0]
+	if comparison.op != "" || comparison.right != nil || len(comparison.left.rest) != 0 {
+		return variableRef{}, 0, 0, false
+	}
+	additive := comparison.left.first
+	if len(additive.rest) != 1 || additive.rest[0].op != additiveSubtract {
+		return variableRef{}, 0, 0, false
+	}
+	source, mul, ok := c.numericLocalK(additive.first, multiplicativeMultiply)
+	if !ok {
+		return variableRef{}, 0, 0, false
+	}
+	idivSource, idiv, ok := c.numericLocalK(additive.rest[0].value, multiplicativeFloorDiv)
+	if !ok || idivSource != source {
+		return variableRef{}, 0, 0, false
+	}
+	return source, mul, idiv, true
+}
+
+func (c *compiler) numericLocalK(expr multiplicativeExpression, op multiplicativeOperator) (variableRef, float64, bool) {
+	if len(expr.rest) != 1 || expr.rest[0].op != op {
+		return variableRef{}, 0, false
+	}
+	value := termWithoutCastsAndGroups(expr.first)
+	if !isNamedTerm(value) {
+		return variableRef{}, 0, false
+	}
+	ref, ok := c.termLocalRef(value)
+	if !ok || ref.kind != variableLocal {
+		return variableRef{}, 0, false
+	}
+	number, ok := foldNumberTerm(expr.rest[0].value)
+	if !ok {
+		return variableRef{}, 0, false
+	}
+	return ref, number, true
+}
+
+func (c *compiler) compileNumericAddModAssignment(addMod numericAddModAssignment) error {
+	desc := c.addNumericAddModOp(numericAddModOp{
+		mul:  c.addConstant(NumberValue(addMod.mul)),
+		idiv: c.addConstant(NumberValue(addMod.idiv)),
+		mod:  c.addConstant(NumberValue(addMod.mod)),
+	})
+	c.emit(instruction{op: opAddNumericModK, a: addMod.target, b: addMod.source, c: desc})
+	return nil
+}
+
+func (c *compiler) addSubStringField2Assignment(lowered loweredAssignment) (addSubStringField2Assignment, bool) {
+	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
+		return addSubStringField2Assignment{}, false
+	}
+	if len(lowered.targets) != 1 || len(lowered.values.items) != 1 {
+		return addSubStringField2Assignment{}, false
+	}
+	item := lowered.values.items[0]
+	if item.kind != loweredValueSingle {
+		return addSubStringField2Assignment{}, false
+	}
+	target := lowered.targets[0]
+	if len(target.selectors) != 2 || target.selectors[0].field == "" || target.selectors[1].field == "" {
+		return addSubStringField2Assignment{}, false
+	}
+	ref, ok := c.resolveAssignTarget(target)
+	if !ok || ref.kind != variableLocal {
+		return addSubStringField2Assignment{}, false
+	}
+	addFirst, addSecond, subFirst, subSecond, ok := field2AddSubAssignmentOperands(lowered.sources[item.source], target)
+	if !ok {
+		return addSubStringField2Assignment{}, false
+	}
+	return addSubStringField2Assignment{
+		base:         ref.index,
+		targetFirst:  target.selectors[0].field,
+		targetSecond: target.selectors[1].field,
+		addFirst:     addFirst,
+		addSecond:    addSecond,
+		subFirst:     subFirst,
+		subSecond:    subSecond,
+	}, true
+}
+
+func field2AddSubAssignmentOperands(expr expression, target assignTarget) (string, string, string, string, bool) {
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+		return "", "", "", "", false
+	}
+	comparison := expr.terms[0].terms[0]
+	if comparison.op != "" || comparison.right != nil || len(comparison.left.rest) != 0 {
+		return "", "", "", "", false
+	}
+	additive := comparison.left.first
+	if len(additive.rest) != 2 || additive.rest[0].op != additiveAdd || additive.rest[1].op != additiveSubtract {
+		return "", "", "", "", false
+	}
+	base, first, second, ok := multiplicativeLocalStringField2(additive.first)
+	if !ok || base != target.name || first != target.selectors[0].field || second != target.selectors[1].field {
+		return "", "", "", "", false
+	}
+	addBase, addFirst, addSecond, ok := multiplicativeLocalStringField2(additive.rest[0].value)
+	if !ok || addBase != target.name {
+		return "", "", "", "", false
+	}
+	subBase, subFirst, subSecond, ok := multiplicativeLocalStringField2(additive.rest[1].value)
+	if !ok || subBase != target.name {
+		return "", "", "", "", false
+	}
+	return addFirst, addSecond, subFirst, subSecond, true
+}
+
+func multiplicativeLocalStringField2(expr multiplicativeExpression) (string, string, string, bool) {
+	if len(expr.rest) != 0 {
+		return "", "", "", false
+	}
+	value := termWithoutCastsAndGroups(expr.first)
+	if value.name == "" || len(value.selectors) != 2 {
+		return "", "", "", false
+	}
+	first := value.selectors[0]
+	second := value.selectors[1]
+	if first.field == "" || first.index != nil || second.field == "" || second.index != nil {
+		return "", "", "", false
+	}
+	return value.name, first.field, second.field, true
+}
+
+func (c *compiler) compileAddSubStringField2Assignment(addSubField addSubStringField2Assignment) error {
+	desc := c.addStringField2AddSubOp(stringField2AddSubOp{
+		targetFirst:  c.addConstant(StringValue(addSubField.targetFirst)),
+		targetSecond: c.addConstant(StringValue(addSubField.targetSecond)),
+		addFirst:     c.addConstant(StringValue(addSubField.addFirst)),
+		addSecond:    c.addConstant(StringValue(addSubField.addSecond)),
+		subFirst:     c.addConstant(StringValue(addSubField.subFirst)),
+		subSecond:    c.addConstant(StringValue(addSubField.subSecond)),
+	})
+	c.emit(instruction{op: opAddSubStringField2, a: addSubField.base, b: desc})
+	return nil
+}
+
+func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value int) error {
+	if len(target.selectors) == 0 {
+		ref, ok := c.resolveAssignTarget(target)
+		if !ok {
+			name := c.addConstant(StringValue(target.name))
+			c.emit(instruction{op: opSetGlobal, a: name, b: value})
+			return nil
+		}
+		if ref.kind == variableLocal {
+			c.emit(instruction{op: opMove, a: ref.index, b: value})
+			return nil
+		}
+
+		c.emit(instruction{op: opSetUpvalue, a: ref.index, b: value})
+		return nil
+	}
+
+	if ref, ok := c.resolveAssignTarget(target); ok && ref.kind == variableLocal && len(target.selectors) == 1 {
+		last := target.selectors[0]
+		if last.field != "" {
+			key := c.addConstant(StringValue(last.field))
+			if slots, ok := c.localStringSlots[ref.index]; ok {
+				if slot, ok := slots[last.field]; ok {
+					c.emit(instruction{op: opSetRowStringField, a: ref.index, b: key, c: value, d: slot})
+					return nil
+				}
+			}
+			c.emit(instruction{op: opSetStringField, a: ref.index, b: key, c: value})
+			return nil
+		}
+		key := c.allocReg()
+		if err := c.compileExpressionTo(*last.index, key); err != nil {
+			return err
+		}
+		c.emit(instruction{op: opSetIndex, a: ref.index, b: key, c: value})
+		return nil
+	}
+
+	if ref, ok := c.resolveAssignTarget(target); ok && ref.kind == variableLocal && len(target.selectors) == 2 {
+		first := target.selectors[0]
+		second := target.selectors[1]
+		if first.field != "" && second.field != "" {
+			firstKey := c.addConstant(StringValue(first.field))
+			secondKey := c.addConstant(StringValue(second.field))
+			c.emit(instruction{op: opSetStringField2, a: ref.index, b: firstKey, c: secondKey, d: value})
+			return nil
+		}
+	}
+
+	table := c.allocReg()
+	if err := c.compileAssignTargetBaseTo(target, table); err != nil {
+		return err
+	}
+
+	receivers := target.selectors[:len(target.selectors)-1]
+	if err := c.compileSelectorsTo(receivers, table); err != nil {
+		return err
+	}
+
+	last := target.selectors[len(target.selectors)-1]
+	if last.field != "" {
+		key := c.addConstant(StringValue(last.field))
+		if slots, ok := c.localStringSlots[table]; ok {
+			if slot, ok := slots[last.field]; ok {
+				c.emit(instruction{op: opSetRowStringField, a: table, b: key, c: value, d: slot})
+				return nil
+			}
+		}
+		c.emit(instruction{op: opSetStringField, a: table, b: key, c: value})
+		return nil
+	}
+
+	key := c.allocReg()
+	if err := c.compileExpressionTo(*last.index, key); err != nil {
+		return err
+	}
+	c.emit(instruction{op: opSetIndex, a: table, b: key, c: value})
+	return nil
+}
+
+func (c *compiler) compileIf(stmt ifStatement) error {
+	return c.compileLoweredIf(lowerIfStatement(stmt))
+}
+
+func (c *compiler) compileLoweredIf(branch loweredIfStatement) error {
+	jumpIfFalse, ok, err := c.compileConditionJumpIfFalse(branch.condition)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		condition, err := c.compileExpression(branch.condition)
+		if err != nil {
+			return err
+		}
+		jumpIfFalse = c.emitJumpIfFalse(condition)
+		c.releaseTemp(condition)
+	}
+
+	outerLocals := copyLocals(c.locals)
+	if err := c.compileStatements(branch.thenBody); err != nil {
+		return err
+	}
+	c.locals = copyLocals(outerLocals)
+
+	jumpEnd := c.emitJump()
+
+	elseStart := c.pc()
+	c.patchJump(jumpIfFalse, elseStart)
+
+	if len(branch.elseBody) > 0 {
+		if err := c.compileStatements(branch.elseBody); err != nil {
+			return err
+		}
+		c.locals = copyLocals(outerLocals)
+	}
+
+	c.patchJump(jumpEnd, c.pc())
+	return nil
+}
+
+func (c *compiler) compileIfExpressionTo(expr ifExpression, target int) error {
+	branch := lowerIfExpression(expr)
+	jumpIfFalse, ok, err := c.compileConditionJumpIfFalse(branch.condition)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		condition, err := c.compileExpression(branch.condition)
+		if err != nil {
+			return err
+		}
+		jumpIfFalse = c.emitJumpIfFalse(condition)
+		c.releaseTemp(condition)
+	}
+
+	if err := c.compileExpressionTo(branch.thenValue, target); err != nil {
+		return err
+	}
+
+	jumpEnd := c.emitJump()
+
+	c.patchJump(jumpIfFalse, c.pc())
+	if err := c.compileExpressionTo(branch.elseValue, target); err != nil {
+		return err
+	}
+
+	c.patchJump(jumpEnd, c.pc())
+	return nil
+}
+
+func (c *compiler) compileConditionJumpIfFalse(expr expression) (int, bool, error) {
+	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
+		return 0, false, nil
+	}
+	expr = optimizeExpression(expr, c.options.optimizations)
+	if jump, ok, err := c.compileStringFieldEqualityJumpIfFalse(expr); ok || err != nil {
+		return jump, ok, err
+	}
+	if jump, ok, err := c.compileStringFieldNumericJumpIfFalse(expr); ok || err != nil {
+		return jump, ok, err
+	}
+	if jump, ok, err := c.compileStringFieldTruthyJumpIfFalse(expr); ok || err != nil {
+		return jump, ok, err
+	}
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+		return 0, false, nil
+	}
+	comparison := expr.terms[0].terms[0]
+	if comparison.right == nil {
+		return 0, false, nil
+	}
+	right, ok := foldNumberConcat(*comparison.right)
+	if !ok {
+		return 0, false, nil
+	}
+	if condition, ok := c.moduloConstantEqualityCondition(comparison, right); ok {
+		mod := c.addConstant(NumberValue(condition.mod))
+		value := c.addConstant(NumberValue(condition.value))
+		jump := c.emit(instruction{op: opJumpIfModKNotEqualK, a: condition.source.index, b: mod, c: value})
+		return jump, true, nil
+	}
+	left, releaseLeft, err := c.compileConditionLeftRegister(comparison.left)
+	if err != nil {
+		return 0, false, err
+	}
+	constant := c.addConstant(NumberValue(right))
+	switch comparison.op {
+	case comparisonEqual:
+		jump := c.emit(instruction{op: opJumpIfNotEqualK, a: left, b: constant})
+		releaseLeft()
+		return jump, true, nil
+	case comparisonLess:
+		jump := c.emit(instruction{op: opJumpIfNotLessK, a: left, b: constant})
+		releaseLeft()
+		return jump, true, nil
+	default:
+		releaseLeft()
+		return 0, false, nil
+	}
+}
+
+type moduloConstantEqualityCondition struct {
+	source variableRef
+	mod    float64
+	value  float64
+}
+
+func (c *compiler) moduloConstantEqualityCondition(comparison comparisonExpression, right float64) (moduloConstantEqualityCondition, bool) {
+	if comparison.op != comparisonEqual || comparison.right == nil || len(comparison.left.rest) != 0 {
+		return moduloConstantEqualityCondition{}, false
+	}
+	additive := comparison.left.first
+	if len(additive.rest) != 0 || len(additive.first.rest) != 1 {
+		return moduloConstantEqualityCondition{}, false
+	}
+	modPart := additive.first.rest[0]
+	if modPart.op != multiplicativeModulo {
+		return moduloConstantEqualityCondition{}, false
+	}
+	mod, ok := foldNumberTerm(modPart.value)
+	if !ok {
+		return moduloConstantEqualityCondition{}, false
+	}
+	source, ok := c.termLocalRef(additive.first.first)
+	if !ok || source.kind != variableLocal {
+		return moduloConstantEqualityCondition{}, false
+	}
+	return moduloConstantEqualityCondition{source: source, mod: mod, value: right}, true
+}
+
+type stringFieldEqualityCondition struct {
+	table int
+	field string
+	value string
+	slot  int
+}
+
+func (c *compiler) compileStringFieldEqualityJumpIfFalse(expr expression) (int, bool, error) {
+	if len(expr.terms) == 0 || len(expr.terms) > 2 {
+		return 0, false, nil
+	}
+	conditions := make([]stringFieldEqualityCondition, 0, len(expr.terms))
+	for _, term := range expr.terms {
+		if len(term.terms) != 1 {
+			return 0, false, nil
+		}
+		condition, ok := c.stringFieldEqualityCondition(term.terms[0])
+		if !ok {
+			return 0, false, nil
+		}
+		if len(conditions) > 0 &&
+			(conditions[0].table != condition.table || conditions[0].field != condition.field) {
+			return 0, false, nil
+		}
+		conditions = append(conditions, condition)
+	}
+	if len(conditions) == 0 {
+		return 0, false, nil
+	}
+	firstJump := c.emitStringFieldEqualityJump(conditions[0])
+	if len(conditions) == 1 {
+		return firstJump, true, nil
+	}
+	jumpThen := c.emitJump()
+	secondStart := c.pc()
+	c.patchJump(firstJump, secondStart)
+	secondJump := c.emitStringFieldEqualityJump(conditions[1])
+	c.patchJump(jumpThen, c.pc())
+	return secondJump, true, nil
+}
+
+func (c *compiler) emitStringFieldEqualityJump(condition stringFieldEqualityCondition) int {
+	field := c.addConstant(StringValue(condition.field))
+	value := c.addConstant(StringValue(condition.value))
+	if condition.slot >= 0 {
+		desc := c.addRowFieldEqualOp(rowFieldEqualOp{
+			field: field,
+			value: value,
+			slot:  condition.slot,
+		})
+		return c.emit(instruction{op: opJumpIfRowStringFieldNotEqualK, a: condition.table, b: desc})
+	}
+	return c.emit(instruction{op: opJumpIfStringFieldNotEqualK, a: condition.table, b: field, c: value})
+}
+
+func (c *compiler) stringFieldEqualityCondition(expr comparisonExpression) (stringFieldEqualityCondition, bool) {
+	if expr.op != comparisonEqual || expr.right == nil {
+		return stringFieldEqualityCondition{}, false
+	}
+	table, field, ok := c.concatLocalStringFieldRef(expr.left)
+	if !ok {
+		return stringFieldEqualityCondition{}, false
+	}
+	value, ok := concatStringLiteral(*expr.right)
+	if !ok {
+		return stringFieldEqualityCondition{}, false
+	}
+	slot := -1
+	if slots, ok := c.localRowStringSlots[table.index]; ok {
+		if fieldSlot, ok := slots[field]; ok {
+			slot = fieldSlot
+		}
+	}
+	return stringFieldEqualityCondition{
+		table: table.index,
+		field: field,
+		value: value,
+		slot:  slot,
+	}, true
+}
+
+func (c *compiler) concatLocalStringFieldRef(expr concatExpression) (variableRef, string, bool) {
+	if len(expr.rest) != 0 || len(expr.first.rest) != 0 || len(expr.first.first.rest) != 0 {
+		return variableRef{}, "", false
+	}
+	term := termWithoutCastsAndGroups(expr.first.first.first)
+	if len(term.selectors) != 1 || term.selectors[0].field == "" || term.selectors[0].index != nil {
+		return variableRef{}, "", false
+	}
+	field := term.selectors[0].field
+	term.selectors = nil
+	ref, ok := c.termLocalRef(term)
+	return ref, field, ok
+}
+
+func concatStringLiteral(expr concatExpression) (string, bool) {
+	if len(expr.rest) != 0 || len(expr.first.rest) != 0 || len(expr.first.first.rest) != 0 {
+		return "", false
+	}
+	term := termWithoutCastsAndGroups(expr.first.first.first)
+	if !isNamedTerm(term) && term.lit != nil && len(term.selectors) == 0 {
+		value, ok := term.lit.String()
+		return value, ok
+	}
+	return "", false
+}
+
+func (c *compiler) compileStringFieldNumericJumpIfFalse(expr expression) (int, bool, error) {
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+		return 0, false, nil
+	}
+	comparison := expr.terms[0].terms[0]
+	if comparison.right == nil {
+		return 0, false, nil
+	}
+	table, field, ok := c.concatLocalStringFieldRef(comparison.left)
+	if !ok {
+		return 0, false, nil
+	}
+	right, ok := foldNumberConcat(*comparison.right)
+	if !ok {
+		return 0, false, nil
+	}
+	fieldConstant := c.addConstant(StringValue(field))
+	valueConstant := c.addConstant(NumberValue(right))
+	switch comparison.op {
+	case comparisonGreater:
+		jump := c.emit(instruction{op: opJumpIfStringFieldNotGreaterK, a: table.index, b: fieldConstant, c: valueConstant})
+		return jump, true, nil
+	case comparisonLessEqual:
+		jump := c.emit(instruction{op: opJumpIfStringFieldGreaterK, a: table.index, b: fieldConstant, c: valueConstant})
+		return jump, true, nil
+	default:
+		return 0, false, nil
+	}
+}
+
+func (c *compiler) compileStringFieldTruthyJumpIfFalse(expr expression) (int, bool, error) {
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+		return 0, false, nil
+	}
+	comparison := expr.terms[0].terms[0]
+	if comparison.op != "" || comparison.right != nil {
+		return 0, false, nil
+	}
+	table, field, ok := c.concatLocalStringFieldRef(comparison.left)
+	if !ok {
+		return 0, false, nil
+	}
+	fieldConstant := c.addConstant(StringValue(field))
+	slot := -1
+	if slots, ok := c.localRowStringSlots[table.index]; ok {
+		if fieldSlot, ok := slots[field]; ok {
+			slot = fieldSlot
+		}
+	}
+	jump := c.emit(instruction{op: opJumpIfStringFieldFalse, a: table.index, b: fieldConstant, c: slot})
+	return jump, true, nil
+}
+
+func (c *compiler) compileConditionLeftRegister(expr concatExpression) (int, func(), error) {
+	if ref, ok := c.concatLocalRef(expr); ok {
+		return ref.index, func() {}, nil
+	}
+	left := c.allocTemp()
+	if err := c.compileConcatExpressionTo(expr, left); err != nil {
+		c.releaseTemp(left)
+		return 0, nil, err
+	}
+	return left, func() { c.releaseTemp(left) }, nil
+}
+
+func (c *compiler) concatLocalRef(expr concatExpression) (variableRef, bool) {
+	if len(expr.rest) != 0 || len(expr.first.rest) != 0 || len(expr.first.first.rest) != 0 {
+		return variableRef{}, false
+	}
+	term := expr.first.first.first
+	if !isNamedTerm(term) {
+		return variableRef{}, false
+	}
+	if use, ok := c.bind.useAt(term.start, term.start+len(term.name)); ok {
+		if ref, ok := c.resolveSymbol(use.symbol); ok && ref.kind == variableLocal {
+			return ref, true
+		}
+	}
+	ref, ok := c.resolveVariable(term.name)
+	return ref, ok && ref.kind == variableLocal
+}
+
+func (c *compiler) expressionLocalRef(expr expression) (variableRef, bool) {
+	expr = optimizeExpression(expr, c.options.optimizations)
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+		return variableRef{}, false
+	}
+	comparison := expr.terms[0].terms[0]
+	if comparison.op != "" || comparison.right != nil {
+		return variableRef{}, false
+	}
+	return c.concatLocalRef(comparison.left)
+}
+
+func (c *compiler) compileBreak() error {
+	if len(c.loops) == 0 {
+		return fmt.Errorf("compile: break outside loop")
+	}
+
+	jump := c.emitJump()
+	currentLoop := len(c.loops) - 1
+	c.loops[currentLoop].breakJumps = append(c.loops[currentLoop].breakJumps, jump)
+	return nil
+}
+
+func (c *compiler) compileContinue() error {
+	if len(c.loops) == 0 {
+		return fmt.Errorf("compile: continue outside loop")
+	}
+
+	target := c.loops[len(c.loops)-1].continueTarget
+	jump := c.emit(instruction{op: opJump, b: target})
+	if target < 0 {
+		currentLoop := len(c.loops) - 1
+		c.loops[currentLoop].continueJumps = append(c.loops[currentLoop].continueJumps, jump)
+	}
+	return nil
+}
+
+func (c *compiler) compileWhile(stmt whileStatement) error {
+	loopShape := lowerWhileLoop(stmt)
+	if loopShape.kind != loweredLoopPreTest || loopShape.continueTarget != loweredLoopContinueCondition {
+		return fmt.Errorf("compile: invalid while loop lowering")
+	}
+	conditionStart := c.pc()
+
+	jumpIfFalse, ok, err := c.compileConditionJumpIfFalse(loopShape.condition)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		condition, err := c.compileExpression(loopShape.condition)
+		if err != nil {
+			return err
+		}
+		jumpIfFalse = c.emitJumpIfFalse(condition)
+		c.releaseTemp(condition)
+	}
+
+	outerLocals := copyLocals(c.locals)
+	c.loops = append(c.loops, loopContext{continueTarget: conditionStart})
+	if err := c.compileStatements(loopShape.body); err != nil {
+		return err
+	}
+	loop := c.loops[len(c.loops)-1]
+	c.loops = c.loops[:len(c.loops)-1]
+	c.locals = copyLocals(outerLocals)
+
+	c.emit(instruction{op: opJump, b: conditionStart})
+	c.patchJump(jumpIfFalse, c.pc())
+	for _, jump := range loop.breakJumps {
+		c.patchJump(jump, c.pc())
+	}
+	return nil
+}
+
+func (c *compiler) compileFor(stmt forStatement) error {
+	loopShape := lowerNumericForLoop(stmt)
+	if loopShape.continueTarget != loweredNumericForContinueIncrement {
+		return fmt.Errorf("compile: invalid numeric for loop lowering")
+	}
+	loopVar := c.allocReg()
+	limit := c.allocReg()
+	step := c.allocReg()
+	zero := c.allocReg()
+
+	if err := c.compileExpressionTo(loopShape.start, loopVar); err != nil {
+		return err
+	}
+	if err := c.compileExpressionTo(loopShape.limit, limit); err != nil {
+		return err
+	}
+	if !loopShape.defaultStep {
+		if err := c.compileExpressionTo(*loopShape.step, step); err != nil {
+			return err
+		}
+	} else {
+		c.emitLoadConst(step, NumberValue(1))
+	}
+
+	c.emitLoadConst(zero, NumberValue(0))
+	c.emit(instruction{op: opAdd, a: loopVar, b: loopVar, c: zero})
+	c.emit(instruction{op: opAdd, a: limit, b: limit, c: zero})
+	c.emit(instruction{op: opAdd, a: step, b: step, c: zero})
+
+	conditionStart := c.pc()
+	jumpExit := c.emit(instruction{op: opNumericForCheck, a: loopVar, b: limit, c: step})
+
+	outerLocals := copyLocals(c.locals)
+	c.locals[loopShape.name] = loopVar
+	c.loops = append(c.loops, loopContext{continueTarget: -1})
+	if err := c.compileStatements(loopShape.body); err != nil {
+		return err
+	}
+	loop := c.loops[len(c.loops)-1]
+	c.loops = c.loops[:len(c.loops)-1]
+	c.locals = copyLocals(outerLocals)
+
+	incrementStart := c.pc()
+	for _, jump := range loop.continueJumps {
+		c.patchJump(jump, incrementStart)
+	}
+	c.emit(instruction{op: opAdd, a: loopVar, b: loopVar, c: step})
+	c.emit(instruction{op: opJump, b: conditionStart})
+
+	exit := c.pc()
+	c.patchJumpD(jumpExit, exit)
+	for _, jump := range loop.breakJumps {
+		c.patchJump(jump, exit)
+	}
+	return nil
+}
+
+func (c *compiler) compileGenericFor(stmt genericForStatement) error {
+	loopShape := lowerGenericForLoop(stmt)
+	if loopShape.continueTarget != loweredGenericForContinueIterator {
+		return fmt.Errorf("compile: invalid generic for loop lowering")
+	}
+	if len(loopShape.names) == 0 {
+		return fmt.Errorf("compile: generic for has no names")
+	}
+
+	generator := c.allocReg()
+	state := c.allocReg()
+	control := c.allocReg()
+	targets := []int{generator, state, control}
+	if err := c.compileExpressionListTo(loopShape.values, targets); err != nil {
+		return err
+	}
+	if loopShape.prepareDirectIterator {
+		c.emit(instruction{op: opPrepareIter, a: generator, b: state, c: control})
+	}
+
+	resultStart := control
+	c.reserveRegistersThrough(resultStart + len(loopShape.names))
+	c.claimRegisterRange(resultStart, resultStart+len(loopShape.names))
+	callBase := c.allocReg()
+	c.reserveRegistersThrough(callBase + 3)
+	nilReg := c.allocReg()
+	c.compileNilTo(nilReg)
+	condition := c.allocReg()
+
+	loopStart := c.pc()
+	c.emit(instruction{op: opMove, a: callBase, b: generator})
+	c.emit(instruction{op: opMove, a: callBase + 1, b: state})
+	c.emit(instruction{op: opMove, a: callBase + 2, b: control})
+	c.emit(instruction{op: opCall, a: resultStart, b: callBase, c: 2, d: len(loopShape.names)})
+	c.emit(instruction{op: opMove, a: control, b: resultStart})
+	c.emit(instruction{op: opNotEqual, a: condition, b: resultStart, c: nilReg})
+	jumpExit := c.emitJumpIfFalse(condition)
+
+	outerLocals := copyLocals(c.locals)
+	outerStringSlots := copyLocalStringSlots(c.localStringSlots)
+	outerRowStringSlots := copyLocalStringSlots(c.localRowStringSlots)
+	for i, name := range loopShape.names {
+		register := resultStart + i
+		c.locals[name] = register
+		if i == 1 && len(loopShape.values) == 1 {
+			if ref, ok := c.expressionLocalRef(loopShape.values[0]); ok {
+				if slots, ok := c.localArrayElemSlots[ref.index]; ok {
+					c.localStringSlots[register] = slots
+					c.localRowStringSlots[register] = slots
+				}
+			}
+		}
+	}
+	c.loops = append(c.loops, loopContext{continueTarget: loopStart})
+	if err := c.compileStatements(loopShape.body); err != nil {
+		return err
+	}
+	loop := c.loops[len(c.loops)-1]
+	c.loops = c.loops[:len(c.loops)-1]
+	c.locals = copyLocals(outerLocals)
+	c.localStringSlots = copyLocalStringSlots(outerStringSlots)
+	c.localRowStringSlots = copyLocalStringSlots(outerRowStringSlots)
+
+	c.emit(instruction{op: opJump, b: loopStart})
+	exit := c.pc()
+	c.patchJump(jumpExit, exit)
+	for _, jump := range loop.breakJumps {
+		c.patchJump(jump, exit)
+	}
+	return nil
+}
+
+func (c *compiler) compileRepeat(stmt repeatStatement) error {
+	loopShape := lowerRepeatLoop(stmt)
+	if loopShape.kind != loweredLoopPostTest || loopShape.continueTarget != loweredLoopContinueCondition {
+		return fmt.Errorf("compile: invalid repeat loop lowering")
+	}
+	bodyStart := c.pc()
+
+	outerLocals := copyLocals(c.locals)
+	c.loops = append(c.loops, loopContext{continueTarget: -1})
+	if err := c.compileStatements(loopShape.body); err != nil {
+		return err
+	}
+	loop := c.loops[len(c.loops)-1]
+	c.loops = c.loops[:len(c.loops)-1]
+
+	conditionStart := c.pc()
+	for _, jump := range loop.continueJumps {
+		c.patchJump(jump, conditionStart)
+	}
+
+	condition, err := c.compileExpression(loopShape.condition)
+	if err != nil {
+		return err
+	}
+	c.locals = copyLocals(outerLocals)
+
+	c.emit(instruction{op: opJumpIfFalse, a: condition, b: bodyStart})
+	c.releaseTemp(condition)
+	exit := c.pc()
+	for _, jump := range loop.breakJumps {
+		c.patchJump(jump, exit)
+	}
+	return nil
+}
+
+func (c *compiler) compileBlock(stmt blockStatement) error {
+	return c.compileLoweredBlock(lowerBlock(stmt))
+}
+
+func (c *compiler) compileLoweredBlock(lowered loweredBlock) error {
+	var outerLocals map[string]int
+	if lowered.lexicalScope {
+		outerLocals = copyLocals(c.locals)
+	}
+	if err := c.compileStatements(lowered.body); err != nil {
+		return err
+	}
+	if lowered.lexicalScope {
+		c.locals = copyLocals(outerLocals)
+	}
+	return nil
+}
+
+func (c *compiler) compileTableTo(table tableExpression, target int) error {
+	lowered := lowerTable(table)
+	arrayCapacity, fieldCapacity := loweredTableCapacity(lowered)
+	c.emit(instruction{op: opNewTable, a: target, b: arrayCapacity, c: fieldCapacity})
+	for _, field := range lowered.fields {
+		value := c.allocTemp()
+		if err := c.compileExpressionTo(field.value, value); err != nil {
+			c.releaseTemp(value)
+			return err
+		}
+		switch field.kind {
+		case loweredTableFieldComputed:
+			key := c.allocTemp()
+			if err := c.compileExpressionTo(*field.key, key); err != nil {
+				c.releaseTemp(key)
+				c.releaseTemp(value)
+				return err
+			}
+			c.emit(instruction{op: opSetIndex, a: target, b: key, c: value})
+			c.releaseTemp(key)
+		case loweredTableFieldArray:
+			key := c.addConstant(NumberValue(float64(field.arrayIndex)))
+			c.emit(instruction{op: opSetField, a: target, b: key, c: value})
+		case loweredTableFieldNamed:
+			key := c.addConstant(StringValue(field.name))
+			c.emit(instruction{op: opSetStringField, a: target, b: key, c: value})
+		default:
+			c.releaseTemp(value)
+			return fmt.Errorf("compile: unknown lowered table field kind %d", field.kind)
+		}
+		c.releaseTemp(value)
+	}
+	return nil
+}
+
+func loweredTableCapacity(table loweredTable) (int, int) {
+	arrayCapacity := 0
+	fieldCapacity := 0
+	for _, field := range table.fields {
+		switch field.kind {
+		case loweredTableFieldArray:
+			if field.arrayIndex > arrayCapacity {
+				arrayCapacity = field.arrayIndex
+			}
+		case loweredTableFieldNamed, loweredTableFieldComputed:
+			fieldCapacity++
+		}
+	}
+	return arrayCapacity, fieldCapacity
+}
+
+func (c *compiler) compileNamedValueTo(name string, target int) error {
+	if ref, ok := c.resolveVariable(name); ok {
+		return c.compileVariableRefTo(ref, target)
+	}
+
+	constant := c.addConstant(StringValue(name))
+	c.emit(instruction{op: opLoadGlobal, a: target, b: constant})
+	return nil
+}
+
+func (c *compiler) compileNamedTermTo(term term, target int) error {
+	if use, ok := c.bind.useAt(term.start, term.start+len(term.name)); ok {
+		if ref, ok := c.resolveSymbol(use.symbol); ok {
+			return c.compileVariableRefTo(ref, target)
+		}
+	}
+	return c.compileNamedValueTo(term.name, target)
+}
+
+func (c *compiler) termLocalRef(term term) (variableRef, bool) {
+	if !isNamedTerm(term) {
+		return variableRef{}, false
+	}
+	if use, ok := c.bind.useAt(term.start, term.start+len(term.name)); ok {
+		if ref, ok := c.resolveSymbol(use.symbol); ok && ref.kind == variableLocal {
+			return ref, true
+		}
+	}
+	ref, ok := c.resolveVariable(term.name)
+	return ref, ok && ref.kind == variableLocal
+}
+
+func (c *compiler) compileAssignTargetBaseTo(target assignTarget, register int) error {
+	if use, ok := c.bind.useAt(target.start, target.end); ok {
+		if ref, ok := c.resolveSymbol(use.symbol); ok {
+			return c.compileVariableRefTo(ref, register)
+		}
+	}
+	return c.compileNamedValueTo(target.name, register)
+}
+
+func (c *compiler) resolveAssignTarget(target assignTarget) (variableRef, bool) {
+	if use, ok := c.bind.useAt(target.start, target.end); ok {
+		if ref, ok := c.resolveSymbol(use.symbol); ok {
+			return ref, true
+		}
+	}
+	return c.resolveVariable(target.name)
+}
+
+func (c *compiler) compileVariableRefTo(ref variableRef, target int) error {
+	switch ref.kind {
+	case variableLocal:
+		if target == ref.index {
+			return nil
+		}
+		c.emit(instruction{op: opMove, a: target, b: ref.index})
+	case variableUpvalue:
+		c.emit(instruction{op: opGetUpvalue, a: target, b: ref.index})
+	default:
+		return fmt.Errorf("compile: unknown variable kind")
+	}
+	return nil
+}
+
+func (c *compiler) resolveVariable(name string) (variableRef, bool) {
+	if register, ok := c.locals[name]; ok {
+		return variableRef{kind: variableLocal, index: register}, true
+	}
+	upvalue, ok := c.resolveUpvalue(name)
+	if !ok {
+		return variableRef{}, false
+	}
+	return variableRef{kind: variableUpvalue, index: upvalue}, true
+}
+
+func (c *compiler) resolveSymbol(symbolID int) (variableRef, bool) {
+	if register, ok := c.symbolRegisters[symbolID]; ok {
+		return variableRef{kind: variableLocal, index: register}, true
+	}
+	upvalue, ok := c.resolveSymbolUpvalue(symbolID)
+	if !ok {
+		return variableRef{}, false
+	}
+	return variableRef{kind: variableUpvalue, index: upvalue}, true
+}
+
+func (c *compiler) resolveSymbolUpvalue(symbolID int) (int, bool) {
+	if c.upvaluesByID != nil {
+		if upvalue, ok := c.upvaluesByID[symbolID]; ok {
+			return upvalue, true
+		}
+	}
+	if c.parent == nil {
+		return 0, false
+	}
+
+	if register, ok := c.parent.symbolRegisters[symbolID]; ok {
+		return c.addSymbolUpvalue(symbolID, upvalueDesc{local: true, index: register}), true
+	}
+	parentUpvalue, ok := c.parent.resolveSymbolUpvalue(symbolID)
+	if !ok {
+		return 0, false
+	}
+	return c.addSymbolUpvalue(symbolID, upvalueDesc{local: false, index: parentUpvalue}), true
+}
+
+func (c *compiler) resolveUpvalue(name string) (int, bool) {
+	if c.upvalues != nil {
+		if upvalue, ok := c.upvalues[name]; ok {
+			return upvalue, true
+		}
+	}
+	if c.parent == nil {
+		return 0, false
+	}
+
+	if register, ok := c.parent.locals[name]; ok {
+		return c.addUpvalue(name, upvalueDesc{local: true, index: register}), true
+	}
+	parentUpvalue, ok := c.parent.resolveUpvalue(name)
+	if !ok {
+		return 0, false
+	}
+	return c.addUpvalue(name, upvalueDesc{local: false, index: parentUpvalue}), true
+}
+
+func (c *compiler) addUpvalue(name string, desc upvalueDesc) int {
+	if c.upvalues == nil {
+		c.upvalues = make(map[string]int)
+	}
+	upvalue := len(c.upvalueDescs)
+	c.upvalues[name] = upvalue
+	c.upvalueDescs = append(c.upvalueDescs, desc)
+	return upvalue
+}
+
+func (c *compiler) addSymbolUpvalue(symbolID int, desc upvalueDesc) int {
+	if c.upvaluesByID == nil {
+		c.upvaluesByID = make(map[int]int)
+	}
+	upvalue := len(c.upvalueDescs)
+	c.upvaluesByID[symbolID] = upvalue
+	c.upvalueDescs = append(c.upvalueDescs, desc)
+	return upvalue
+}
+
+func (c *compiler) claimSymbol(name string, kind symbolKind) (boundSymbol, bool) {
+	if c.bindCursor == nil {
+		return boundSymbol{}, false
+	}
+	for *c.bindCursor < len(c.bind.symbols) {
+		symbol := c.bind.symbols[*c.bindCursor]
+		*c.bindCursor = *c.bindCursor + 1
+		if symbol.name == name && symbol.kind == kind {
+			return symbol, true
+		}
+	}
+	return boundSymbol{}, false
+}
+
+func (c *compiler) compileCallTo(call callExpression, target int) error {
+	return c.compileCallToResults(call, target, 1)
+}
+
+func (c *compiler) compileCallToResults(call callExpression, target int, resultCount int) error {
+	lowered := lowerCall(call)
+	return c.compileLoweredCallToResults(lowered, call.args, target, resultCount)
+}
+
+func (c *compiler) compileLoweredCallToResults(lowered loweredCall, args []expression, target int, resultCount int) error {
+	if c.callNeedsScratch(target, resultCount) {
+		scratch := c.nextReg
+		if err := c.compileLoweredCallToResultsDirect(lowered, args, scratch, resultCount); err != nil {
+			return err
+		}
+		for i := 0; i < resultCount; i++ {
+			c.emit(instruction{op: opMove, a: target + i, b: scratch + i})
+		}
+		c.claimRegisterRange(target, target+resultCount)
+		return nil
+	}
+	return c.compileLoweredCallToResultsDirect(lowered, args, target, resultCount)
+}
+
+func (c *compiler) callNeedsScratch(target int, resultCount int) bool {
+	if resultCount <= 0 {
+		return false
+	}
+	if c.registerIsLocal(target) {
+		return true
+	}
+	return target+1 < c.nextReg
+}
+
+func (c *compiler) registerIsLocal(register int) bool {
+	for _, local := range c.locals {
+		if local == register {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *compiler) compileLoweredCallToResultsDirect(lowered loweredCall, args []expression, target int, resultCount int) error {
+	if c.selectVarargCountCall(lowered, args, resultCount) {
+		return c.compileSelectVarargCountToResults(target, resultCount)
+	}
+	if intrinsic, ok := c.tableIntrinsicCall(lowered); ok {
+		return c.compileBaseIntrinsicCallToResults(intrinsic, lowered, args, target, resultCount)
+	}
+	if intrinsic, ok := c.coroutineIntrinsicCall(lowered); ok {
+		return c.compileBaseIntrinsicCallToResults(intrinsic, lowered, args, target, resultCount)
+	}
+	if intrinsic, ok := c.mathIntrinsicCall(lowered); ok {
+		return c.compileBaseIntrinsicCallToResults(intrinsic, lowered, args, target, resultCount)
+	}
+	if method, ok := c.methodOneResultCall(lowered, resultCount); ok {
+		return c.compileMethodOneResultCallToResults(method, lowered, args, target)
+	}
+	if call, ok := c.tableFieldKeyOneResultCall(lowered, resultCount); ok {
+		return c.compileTableFieldKeyOneResultCallToResults(call, lowered, args, target)
+	}
+	if local, ok := c.localOneResultCall(lowered, resultCount); ok {
+		return c.compileLocalOneResultCallToResults(local, lowered, args, target)
+	}
+	if upvalue, ok := c.selfUpvalueOneResultCall(lowered, resultCount); ok {
+		return c.compileSelfUpvalueOneResultCallToResults(upvalue, lowered, args, target)
+	}
+	if upvalue, ok := c.upvalueOneResultCall(lowered, resultCount); ok {
+		return c.compileUpvalueOneResultCallToResults(upvalue, lowered, args, target)
+	}
+	return c.compileLoweredCallToResultsGeneric(lowered, args, target, resultCount)
+}
+
+type methodOneResultCall struct {
+	receiver int
+	field    string
+}
+
+type tableFieldKeyOneResultCall struct {
+	table    int
+	keyBase  term
+	keyField string
+	keySlot  int
+}
+
+func (c *compiler) methodOneResultCall(lowered loweredCall, resultCount int) (methodOneResultCall, bool) {
+	if resultCount != 1 || lowered.receiver == nil {
+		return methodOneResultCall{}, false
+	}
+	target := lowered.target
+	if len(target.selectors) != 1 ||
+		target.selectors[0].field == "" ||
+		target.selectors[0].index != nil {
+		return methodOneResultCall{}, false
+	}
+	base := target
+	base.selectors = nil
+	receiver, ok := c.termLocalRef(*lowered.receiver)
+	if !ok {
+		return methodOneResultCall{}, false
+	}
+	targetBase, ok := c.termLocalRef(base)
+	if !ok || targetBase.index != receiver.index {
+		return methodOneResultCall{}, false
+	}
+	for _, item := range lowered.args.items {
+		if item.kind != loweredValueSingle {
+			return methodOneResultCall{}, false
+		}
+	}
+	return methodOneResultCall{
+		receiver: receiver.index,
+		field:    target.selectors[0].field,
+	}, true
+}
+
+func (c *compiler) compileMethodOneResultCallToResults(
+	method methodOneResultCall,
+	lowered loweredCall,
+	args []expression,
+	target int,
+) error {
+	span := len(args) + 2
+	c.reserveRegistersThrough(target + span)
+	for i, item := range lowered.args.items {
+		if err := c.compileExpressionTo(args[item.source], target+2+i); err != nil {
+			return err
+		}
+	}
+	c.claimRegister(target)
+	key := c.addConstant(StringValue(method.field))
+	c.emit(instruction{op: opCallMethodOne, a: target, b: method.receiver, c: key, d: len(args)})
+	return nil
+}
+
+func (c *compiler) tableFieldKeyOneResultCall(lowered loweredCall, resultCount int) (tableFieldKeyOneResultCall, bool) {
+	if !c.options.optimizations.enabled(optimizationBytecodePeephole) ||
+		resultCount != 1 ||
+		lowered.receiver != nil {
+		return tableFieldKeyOneResultCall{}, false
+	}
+	for _, item := range lowered.args.items {
+		if item.kind != loweredValueSingle {
+			return tableFieldKeyOneResultCall{}, false
+		}
+	}
+	target := lowered.target
+	if len(target.selectors) != 1 || target.selectors[0].index == nil || target.selectors[0].field != "" {
+		return tableFieldKeyOneResultCall{}, false
+	}
+	base := target
+	base.selectors = nil
+	table, ok := c.termLocalRef(base)
+	if !ok {
+		return tableFieldKeyOneResultCall{}, false
+	}
+	keyTerm, ok := expressionSingleTerm(*target.selectors[0].index)
+	if !ok || len(keyTerm.selectors) != 1 || keyTerm.selectors[0].field == "" || keyTerm.selectors[0].index != nil {
+		return tableFieldKeyOneResultCall{}, false
+	}
+	keyBase := keyTerm
+	keyBase.selectors = nil
+	keyBaseRef, ok := c.termLocalRef(keyBase)
+	if !ok {
+		return tableFieldKeyOneResultCall{}, false
+	}
+	keySlot := -1
+	if slots, ok := c.localStringSlots[keyBaseRef.index]; ok {
+		if slot, ok := slots[keyTerm.selectors[0].field]; ok {
+			keySlot = slot
+		}
+	}
+	return tableFieldKeyOneResultCall{
+		table:    table.index,
+		keyBase:  keyBase,
+		keyField: keyTerm.selectors[0].field,
+		keySlot:  keySlot,
+	}, true
+}
+
+func (c *compiler) compileTableFieldKeyOneResultCallToResults(
+	call tableFieldKeyOneResultCall,
+	lowered loweredCall,
+	args []expression,
+	target int,
+) error {
+	argCount := len(args)
+	keySource := target + argCount + 1
+	c.reserveRegistersThrough(keySource + 1)
+	for i, item := range lowered.args.items {
+		if err := c.compileExpressionTo(args[item.source], target+1+i); err != nil {
+			return err
+		}
+	}
+	if err := c.compileTermTo(call.keyBase, keySource); err != nil {
+		return err
+	}
+	c.claimRegister(target)
+	key := c.addConstant(StringValue(call.keyField))
+	c.emit(instruction{op: opCallTableFieldKeyOne, a: target, b: call.table, c: key, d: encodeTableFieldKeyCall(argCount, call.keySlot)})
+	return nil
+}
+
+func (c *compiler) selectVarargCountCall(lowered loweredCall, args []expression, resultCount int) bool {
+	if resultCount == 0 || lowered.receiver != nil || !c.variadic {
+		return false
+	}
+	if !c.isUnboundGlobalName(lowered.target, "select") {
+		return false
+	}
+	if len(args) != 2 || len(lowered.args.items) != 2 {
+		return false
+	}
+	if marker, ok := expressionStringLiteral(args[0]); !ok || marker != "#" {
+		return false
+	}
+	if _, ok := expressionSingleVararg(args[1]); !ok {
+		return false
+	}
+	return lowered.args.items[0].kind == loweredValueSingle &&
+		lowered.args.items[1].kind == loweredValueExpanded
+}
+
+func (c *compiler) compileSelectVarargCountToResults(target int, resultCount int) error {
+	c.reserveRegistersThrough(target + 1)
+	c.claimRegister(target)
+	c.emit(instruction{op: opSelectVarargCount, a: target, d: resultCount})
+	return nil
+}
+
+func (c *compiler) isUnboundGlobalName(term term, name string) bool {
+	if !isNamedTerm(term) || term.name != name {
+		return false
+	}
+	if use, ok := c.bind.useAt(term.start, term.start+len(term.name)); ok {
+		if _, resolved := c.resolveSymbol(use.symbol); resolved {
+			return false
+		}
+	}
+	if _, ok := c.resolveVariable(term.name); ok {
+		return false
+	}
+	return true
+}
+
+func expressionStringLiteral(expr expression) (string, bool) {
+	value, ok := expressionSingleTerm(expr)
+	if !ok || value.lit == nil {
+		return "", false
+	}
+	return value.lit.String()
+}
+
+func (c *compiler) upvalueOneResultCall(lowered loweredCall, resultCount int) (int, bool) {
+	if resultCount != 1 || lowered.receiver != nil {
+		return 0, false
+	}
+	target := lowered.target
+	if !isNamedTerm(target) || len(target.selectors) != 0 {
+		return 0, false
+	}
+	for _, item := range lowered.args.items {
+		if item.kind != loweredValueSingle {
+			return 0, false
+		}
+	}
+	if use, ok := c.bind.useAt(target.start, target.start+len(target.name)); ok {
+		ref, ok := c.resolveSymbol(use.symbol)
+		return ref.index, ok && ref.kind == variableUpvalue
+	}
+	ref, ok := c.resolveVariable(target.name)
+	return ref.index, ok && ref.kind == variableUpvalue
+}
+
+func (c *compiler) selfUpvalueOneResultCall(lowered loweredCall, resultCount int) (int, bool) {
+	if c.selfFunctionSymbol < 0 || resultCount != 1 || lowered.receiver != nil {
+		return 0, false
+	}
+	target := lowered.target
+	if !isNamedTerm(target) || len(target.selectors) != 0 {
+		return 0, false
+	}
+	for _, item := range lowered.args.items {
+		if item.kind != loweredValueSingle {
+			return 0, false
+		}
+	}
+	use, ok := c.bind.useAt(target.start, target.start+len(target.name))
+	if !ok || use.symbol != c.selfFunctionSymbol {
+		return 0, false
+	}
+	ref, ok := c.resolveSymbol(use.symbol)
+	return ref.index, ok && ref.kind == variableUpvalue
+}
+
+func (c *compiler) localOneResultCall(lowered loweredCall, resultCount int) (int, bool) {
+	if resultCount != 1 || lowered.receiver != nil {
+		return 0, false
+	}
+	target := lowered.target
+	if !isNamedTerm(target) || len(target.selectors) != 0 {
+		return 0, false
+	}
+	for _, item := range lowered.args.items {
+		if item.kind != loweredValueSingle {
+			return 0, false
+		}
+	}
+	if use, ok := c.bind.useAt(target.start, target.start+len(target.name)); ok {
+		ref, ok := c.resolveSymbol(use.symbol)
+		return ref.index, ok && ref.kind == variableLocal
+	}
+	ref, ok := c.resolveVariable(target.name)
+	return ref.index, ok && ref.kind == variableLocal
+}
+
+func (c *compiler) compileLocalOneResultCallToResults(local int, lowered loweredCall, args []expression, target int) error {
+	span := len(args)
+	if span <= 0 {
+		span = 1
+	}
+	c.reserveRegistersThrough(target + span)
+	for i, item := range lowered.args.items {
+		if err := c.compileExpressionTo(args[item.source], target+i); err != nil {
+			return err
+		}
+	}
+	c.claimRegister(target)
+	c.emit(instruction{op: opCallLocalOne, a: target, b: local, c: target, d: len(args)})
+	return nil
+}
+
+func (c *compiler) compileUpvalueOneResultCallToResults(upvalue int, lowered loweredCall, args []expression, target int) error {
+	span := len(args)
+	if span <= 0 {
+		span = 1
+	}
+	c.reserveRegistersThrough(target + span)
+	for i, item := range lowered.args.items {
+		if err := c.compileExpressionTo(args[item.source], target+i); err != nil {
+			return err
+		}
+	}
+	c.claimRegister(target)
+	c.emit(instruction{op: opCallUpvalueOne, a: target, b: upvalue, c: target, d: len(args)})
+	return nil
+}
+
+func (c *compiler) compileSelfUpvalueOneResultCallToResults(upvalue int, lowered loweredCall, args []expression, target int) error {
+	if source, constant, ok := c.selfCallSubtractConstantArg(args); ok {
+		c.reserveRegistersThrough(target + 1)
+		c.claimRegister(target)
+		c.emit(instruction{op: opCallUpvalueSelfKOne, a: target, b: upvalue, c: source, d: constant})
+		return nil
+	}
+	span := len(args)
+	if span <= 0 {
+		span = 1
+	}
+	c.reserveRegistersThrough(target + span)
+	for i, item := range lowered.args.items {
+		if err := c.compileExpressionTo(args[item.source], target+i); err != nil {
+			return err
+		}
+	}
+	c.claimRegister(target)
+	c.emit(instruction{op: opCallUpvalueSelfOne, a: target, b: upvalue, c: target, d: len(args)})
+	return nil
+}
+
+type selfUpvaluePairAddReturn struct {
+	upvalue   int
+	source    int
+	baseLess  int
+	firstSub  int
+	secondSub int
+}
+
+func (c *compiler) selfUpvaluePairAddReturn(expr expression) (selfUpvaluePairAddReturn, bool) {
+	if !c.options.optimizations.enabled(optimizationBytecodePeephole) ||
+		c.selfFunctionSymbol < 0 ||
+		!c.selfNumericPairAdd ||
+		len(expr.terms) != 1 ||
+		len(expr.terms[0].terms) != 1 {
+		return selfUpvaluePairAddReturn{}, false
+	}
+	comparison := expr.terms[0].terms[0]
+	if comparison.op != "" || comparison.right != nil || len(comparison.left.rest) != 0 {
+		return selfUpvaluePairAddReturn{}, false
+	}
+	additive := comparison.left.first
+	if len(additive.rest) != 1 || additive.rest[0].op != additiveAdd {
+		return selfUpvaluePairAddReturn{}, false
+	}
+	firstCall, ok := multiplicativeSingleCall(additive.first)
+	if !ok {
+		return selfUpvaluePairAddReturn{}, false
+	}
+	secondCall, ok := multiplicativeSingleCall(additive.rest[0].value)
+	if !ok {
+		return selfUpvaluePairAddReturn{}, false
+	}
+	first, ok := c.selfCallSubtractConstantCall(firstCall)
+	if !ok {
+		return selfUpvaluePairAddReturn{}, false
+	}
+	second, ok := c.selfCallSubtractConstantCall(secondCall)
+	if !ok ||
+		first.upvalue != second.upvalue ||
+		first.source != second.source {
+		return selfUpvaluePairAddReturn{}, false
+	}
+	return selfUpvaluePairAddReturn{
+		upvalue:   first.upvalue,
+		source:    first.source,
+		baseLess:  c.addConstant(NumberValue(c.selfNumericPairBase)),
+		firstSub:  first.constant,
+		secondSub: second.constant,
+	}, true
+}
+
+type selfCallSubtractConstantCall struct {
+	upvalue  int
+	source   int
+	constant int
+}
+
+func (c *compiler) selfCallSubtractConstantCall(call callExpression) (selfCallSubtractConstantCall, bool) {
+	if call.receiver != nil ||
+		len(call.args) != 1 ||
+		!isNamedTerm(call.target) ||
+		len(call.target.selectors) != 0 {
+		return selfCallSubtractConstantCall{}, false
+	}
+	use, ok := c.bind.useAt(call.target.start, call.target.start+len(call.target.name))
+	if !ok || use.symbol != c.selfFunctionSymbol {
+		return selfCallSubtractConstantCall{}, false
+	}
+	ref, ok := c.resolveSymbol(use.symbol)
+	if !ok || ref.kind != variableUpvalue {
+		return selfCallSubtractConstantCall{}, false
+	}
+	source, constant, ok := c.selfCallSubtractConstantArg(call.args)
+	if !ok {
+		return selfCallSubtractConstantCall{}, false
+	}
+	return selfCallSubtractConstantCall{
+		upvalue:  ref.index,
+		source:   source,
+		constant: constant,
+	}, true
+}
+
+func (c *compiler) selfCallSubtractConstantArg(args []expression) (int, int, bool) {
+	if len(args) != 1 {
+		return 0, 0, false
+	}
+	expr := args[0]
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+		return 0, 0, false
+	}
+	comparison := expr.terms[0].terms[0]
+	if comparison.op != "" || comparison.right != nil || len(comparison.left.rest) != 0 {
+		return 0, 0, false
+	}
+	additive := comparison.left.first
+	if len(additive.rest) != 1 || additive.rest[0].op != additiveSubtract {
+		return 0, 0, false
+	}
+	if len(additive.first.rest) != 0 {
+		return 0, 0, false
+	}
+	ref, ok := c.termLocalRef(termWithoutCastsAndGroups(additive.first.first))
+	if !ok {
+		return 0, 0, false
+	}
+	number, ok := foldNumberMultiplicative(additive.rest[0].value)
+	if !ok {
+		return 0, 0, false
+	}
+	return ref.index, c.addConstant(NumberValue(number)), true
+}
+
+func (c *compiler) tableIntrinsicCall(lowered loweredCall) (opcode, bool) {
+	if !c.options.optimizations.enabled(optimizationBytecodePeephole) ||
+		lowered.receiver != nil ||
+		!c.isUnboundBaseField(lowered.target, "table") {
+		return 0, false
+	}
+	field := lowered.target.selectors[0].field
+	switch field {
+	case "insert":
+		return opTableInsert, true
+	case "remove":
+		return opTableRemove, true
+	default:
+		return 0, false
+	}
+}
+
+func (c *compiler) coroutineIntrinsicCall(lowered loweredCall) (opcode, bool) {
+	if !c.options.optimizations.enabled(optimizationBytecodePeephole) ||
+		lowered.receiver != nil ||
+		!c.isUnboundBaseField(lowered.target, "coroutine") {
+		return 0, false
+	}
+	field := lowered.target.selectors[0].field
+	switch field {
+	case "resume":
+		return opCoroutineResume, true
+	default:
+		return 0, false
+	}
+}
+
+func (c *compiler) mathIntrinsicCall(lowered loweredCall) (opcode, bool) {
+	if !c.options.optimizations.enabled(optimizationBytecodePeephole) ||
+		lowered.receiver != nil ||
+		!c.isUnboundBaseField(lowered.target, "math") {
+		return 0, false
+	}
+	field := lowered.target.selectors[0].field
+	switch field {
+	case "min":
+		return opMathMin, true
+	default:
+		return 0, false
+	}
+}
+
+func selfNumericPairAddClosureBase(closure loweredClosure) (float64, bool) {
+	if len(closure.params) != 1 ||
+		closure.variadic ||
+		len(closure.body) != 2 ||
+		closure.body[0].ifStmt == nil ||
+		closure.body[1].ret == nil {
+		return 0, false
+	}
+	param := closure.params[0]
+	ifStmt := closure.body[0].ifStmt
+	if len(ifStmt.thenStatements) != 1 ||
+		ifStmt.thenStatements[0].ret == nil ||
+		len(ifStmt.elseStatements) != 0 {
+		return 0, false
+	}
+	base, ok := lessThanNumberCondition(ifStmt.condition, param)
+	if !ok {
+		return 0, false
+	}
+	if !singleNameReturn(*ifStmt.thenStatements[0].ret, param) {
+		return 0, false
+	}
+	return base, true
+}
+
+func lessThanNumberCondition(expr expression, name string) (float64, bool) {
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+		return 0, false
+	}
+	comparison := expr.terms[0].terms[0]
+	if comparison.op != comparisonLess || comparison.right == nil || len(comparison.left.rest) != 0 {
+		return 0, false
+	}
+	left := comparison.left.first
+	if len(left.rest) != 0 || len(left.first.rest) != 0 {
+		return 0, false
+	}
+	value := termWithoutCastsAndGroups(left.first.first)
+	if !isNamedTerm(value) || value.name != name || len(value.selectors) != 0 {
+		return 0, false
+	}
+	return foldNumberConcat(*comparison.right)
+}
+
+func singleNameReturn(stmt returnStatement, name string) bool {
+	if len(stmt.values) != 1 {
+		return false
+	}
+	value, ok := expressionSingleTerm(stmt.values[0])
+	return ok && isNamedTerm(value) && value.name == name && len(value.selectors) == 0
+}
+
+func (c *compiler) isUnboundBaseField(term term, name string) bool {
+	base := term
+	base.selectors = nil
+	if !isNamedTerm(base) || base.name != name ||
+		len(term.selectors) != 1 ||
+		term.selectors[0].field == "" ||
+		term.selectors[0].index != nil {
+		return false
+	}
+	if use, ok := c.bind.useAt(term.start, term.start+len(base.name)); ok {
+		if _, resolved := c.resolveSymbol(use.symbol); resolved {
+			return false
+		}
+	}
+	if _, ok := c.resolveVariable(base.name); ok {
+		return false
+	}
+	return true
+}
+
+func (c *compiler) compileBaseIntrinsicCallToResults(
+	op opcode,
+	lowered loweredCall,
+	args []expression,
+	target int,
+	resultCount int,
+) error {
+	for _, item := range lowered.args.items {
+		if item.kind != loweredValueSingle {
+			return c.compileLoweredCallToResultsGeneric(lowered, args, target, resultCount)
+		}
+	}
+
+	span := len(args)
+	if resultCount > span {
+		span = resultCount
+	}
+	if span <= 0 {
+		span = 1
+	}
+	c.reserveRegistersThrough(target + span)
+	for i, item := range lowered.args.items {
+		if err := c.compileExpressionTo(args[item.source], target+i); err != nil {
+			return err
+		}
+	}
+	if resultCount > 0 {
+		c.claimRegisterRange(target, target+resultCount)
+	} else {
+		c.claimRegister(target)
+	}
+	c.emit(instruction{op: op, a: target, b: len(args), d: resultCount})
+	return nil
+}
+
+func (c *compiler) compileLoweredCallToResultsGeneric(lowered loweredCall, args []expression, target int, resultCount int) error {
+	if err := c.compileCallTargetTo(lowered.target, target); err != nil {
+		return err
+	}
+
+	firstArg := target + 1
+	fixedArgCount := 0
+	if lowered.receiver != nil {
+		c.reserveRegistersThrough(target + 2 + len(args))
+		if err := c.compileCallTargetTo(*lowered.receiver, firstArg); err != nil {
+			return err
+		}
+		firstArg++
+		fixedArgCount += lowered.fixedArgCount
+	} else {
+		c.reserveRegistersThrough(target + 1 + len(args))
+	}
+
+	argCount := fixedArgCount
+	for _, item := range lowered.args.items {
+		argRegister := firstArg + item.source
+		switch item.kind {
+		case loweredValueExpanded:
+			openTarget := argRegister
+			c.reserveRegistersThrough(openTarget + 1)
+			if vararg, ok := expressionSingleVararg(args[item.source]); ok {
+				if err := c.compileVarargToResults(vararg, openTarget, item.resultCount); err != nil {
+					return err
+				}
+			} else if nestedCall, ok := expressionSingleCall(args[item.source]); ok {
+				if err := c.compileCallToResults(nestedCall, openTarget, item.resultCount); err != nil {
+					return err
+				}
+			} else {
+				return fmt.Errorf("compile: expanded call argument is not a call or vararg")
+			}
+			argCount = -(fixedArgCount + 1)
+		case loweredValueSingle:
+			if err := c.compileExpressionTo(args[item.source], argRegister); err != nil {
+				return err
+			}
+			fixedArgCount++
+			argCount = fixedArgCount
+		default:
+			return fmt.Errorf("compile: unknown lowered value kind %d", item.kind)
+		}
+	}
+	if resultCount > 0 {
+		c.claimRegisterRange(target, target+resultCount)
+	} else {
+		c.claimRegister(target)
+	}
+	op := opCall
+	if resultCount == 1 && argCount >= 0 {
+		op = opCallOne
+	}
+	c.emit(instruction{op: op, a: target, b: target, c: argCount, d: resultCount})
+	return nil
+}
+
+func (c *compiler) compileVarargToResults(_ term, target int, resultCount int) error {
+	if !c.variadic {
+		return fmt.Errorf("compile: vararg outside variadic function")
+	}
+	if resultCount > 0 {
+		c.reserveRegistersThrough(target + resultCount)
+		c.claimRegisterRange(target, target+resultCount)
+	} else {
+		c.reserveRegistersThrough(target + 1)
+		c.claimRegister(target)
+	}
+	c.emit(instruction{op: opVararg, a: target, b: resultCount})
+	return nil
+}
+
+func (c *compiler) allocReg() int {
+	register := c.nextReg
+	c.nextReg++
+	return register
+}
+
+func (c *compiler) allocTemp() int {
+	if len(c.freeTemps) == 0 {
+		return c.allocReg()
+	}
+	last := len(c.freeTemps) - 1
+	register := c.freeTemps[last]
+	c.freeTemps = c.freeTemps[:last]
+	return register
+}
+
+func (c *compiler) releaseTemp(register int) {
+	if register < 0 {
+		return
+	}
+	for _, existing := range c.freeTemps {
+		if existing == register {
+			return
+		}
+	}
+	c.freeTemps = append(c.freeTemps, register)
+}
+
+func (c *compiler) claimRegister(register int) {
+	for i, existing := range c.freeTemps {
+		if existing == register {
+			c.freeTemps = append(c.freeTemps[:i], c.freeTemps[i+1:]...)
+			return
+		}
+	}
+}
+
+func (c *compiler) claimRegisterRange(start int, end int) {
+	for register := start; register < end; register++ {
+		c.claimRegister(register)
+	}
+}
+
+func (c *compiler) reserveRegistersThrough(nextReg int) {
+	if c.nextReg < nextReg {
+		c.nextReg = nextReg
+	}
+}
+
+func copyLocals(locals map[string]int) map[string]int {
+	copied := make(map[string]int, len(locals))
+	for name, register := range locals {
+		copied[name] = register
+	}
+	return copied
+}
+
+func copyLocalStringSlots(slots map[int]map[string]int) map[int]map[string]int {
+	copied := make(map[int]map[string]int, len(slots))
+	for register, registerSlots := range slots {
+		slotCopy := make(map[string]int, len(registerSlots))
+		for field, slot := range registerSlots {
+			slotCopy[field] = slot
+		}
+		copied[register] = slotCopy
+	}
+	return copied
+}

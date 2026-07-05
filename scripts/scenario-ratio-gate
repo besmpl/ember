@@ -1,0 +1,62 @@
+#!/bin/sh
+set -eu
+
+max="${SCENARIO_RATIO_MAX:-2.0}"
+
+awk -v max="$max" '
+BEGIN {
+    cases[1] = "combat_tick"
+    cases[2] = "inventory_value"
+    cases[3] = "event_dispatch"
+
+    print "| Case | Ember ns/op avg | Luau ns/run avg | Ratio | Max | Status |"
+    print "| --- | ---: | ---: | ---: | ---: | --- |"
+}
+
+/^BenchmarkScenarioLuau\// {
+    split($1, path, "/")
+    name = path[2]
+    subbench = path[3]
+    sub(/-.*/, "", subbench)
+
+    for (i = 2; i <= NF; i++) {
+        if (subbench == "ember_run" && $(i + 1) == "ns/op") {
+            ember_sum[name] += $i
+            ember_count[name]++
+        }
+        if (subbench == "luau_cli_batch" && $(i + 1) == "ns/luau_run") {
+            luau_sum[name] += $i
+            luau_count[name]++
+        }
+    }
+}
+
+END {
+    failed = 0
+    missing = 0
+    for (i = 1; i <= 3; i++) {
+        name = cases[i]
+        if (ember_count[name] == 0 || luau_count[name] == 0) {
+            print "| " name " | missing | missing | missing | " max " | missing |"
+            missing = 1
+            continue
+        }
+
+        ember = ember_sum[name] / ember_count[name]
+        luau = luau_sum[name] / luau_count[name]
+        ratio = ember / luau
+        status = "pass"
+        if (ratio > max) {
+            status = "fail"
+            failed = 1
+        }
+        printf("| %s | %.0f | %.0f | %.2fx | %.2fx | %s |\n", name, ember, luau, ratio, max, status)
+    }
+    if (missing) {
+        exit 2
+    }
+    if (failed) {
+        exit 1
+    }
+}
+'

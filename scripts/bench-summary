@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+cd "$(dirname "$0")/.."
+
+benchtime="${BENCHTIME:-300ms}"
+count="${COUNT:-1}"
+pkg="${PKG:-.}"
+bench='^(BenchmarkTop10Luau|BenchmarkClassicLuau|BenchmarkScenarioLuau)/.*/ember_run$'
+
+go test -run '^$' -bench "$bench" -benchtime="$benchtime" -count="$count" -benchmem "$pkg" |
+awk '
+BEGIN {
+    print "| Suite | Case | ns/op | B/op | allocs/op |"
+    print "| --- | --- | ---: | ---: | ---: |"
+}
+/^Benchmark(Top10Luau|ClassicLuau|ScenarioLuau)\// && /\/ember_run-/ {
+    split($1, path, "/")
+    suite = path[1]
+    name = path[2]
+    ns = ""
+    bytes = ""
+    allocs = ""
+    for (i = 2; i <= NF; i++) {
+        if ($(i + 1) == "ns/op") {
+            ns = $i
+        }
+        if ($(i + 1) == "B/op") {
+            bytes = $i
+        }
+        if ($(i + 1) == "allocs/op") {
+            allocs = $i
+        }
+    }
+    print "| " suite " | " name " | " ns " | " bytes " | " allocs " |"
+}'

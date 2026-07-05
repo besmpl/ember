@@ -1,0 +1,204 @@
+package ember
+
+import "fmt"
+
+type rawSequence struct {
+	table *Table
+	label string
+}
+
+func newRawSequence(label string, table *Table) rawSequence {
+	return rawSequence{
+		table: table,
+		label: label,
+	}
+}
+
+func (s rawSequence) len() (int, error) {
+	length, err := s.table.rawLen()
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", s.label, err)
+	}
+	return length, nil
+}
+
+func (s rawSequence) get(index int) (Value, error) {
+	value, err := s.table.rawGet(NumberValue(float64(index)))
+	if err != nil {
+		return NilValue(), fmt.Errorf("%s: %w", s.label, err)
+	}
+	return value, nil
+}
+
+func (s rawSequence) set(index int, value Value) error {
+	if err := s.table.rawSet(NumberValue(float64(index)), value); err != nil {
+		return fmt.Errorf("%s: %w", s.label, err)
+	}
+	return nil
+}
+
+func (s rawSequence) values(start int, end int) ([]Value, error) {
+	if end < start {
+		return nil, nil
+	}
+	values := make([]Value, 0, end-start+1)
+	for index := start; index <= end; index++ {
+		value, err := s.get(index)
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func (s rawSequence) insert(position int, value Value) error {
+	length, err := s.len()
+	if err != nil {
+		return err
+	}
+	if position < 1 || position > length+1 {
+		return fmt.Errorf("%s: position %d out of range", s.label, position)
+	}
+	if s.table.canUseFastArraySequence(length) {
+		s.table.fastArrayInsert(position, value)
+		return nil
+	}
+	for index := length; index >= position; index-- {
+		value, err := s.get(index)
+		if err != nil {
+			return err
+		}
+		if err := s.set(index+1, value); err != nil {
+			return err
+		}
+	}
+	return s.set(position, value)
+}
+
+func (s rawSequence) remove(position int) (Value, error) {
+	length, err := s.len()
+	if err != nil {
+		return NilValue(), err
+	}
+	if length == 0 {
+		return NilValue(), nil
+	}
+	if position < 1 || position > length {
+		return NilValue(), nil
+	}
+	if s.table.canUseFastArraySequence(length) {
+		return s.table.fastArrayRemove(position), nil
+	}
+	removed, err := s.get(position)
+	if err != nil {
+		return NilValue(), err
+	}
+	for index := position; index < length; index++ {
+		value, err := s.get(index + 1)
+		if err != nil {
+			return NilValue(), err
+		}
+		if err := s.set(index, value); err != nil {
+			return NilValue(), err
+		}
+	}
+	if err := s.set(length, NilValue()); err != nil {
+		return NilValue(), err
+	}
+	return removed, nil
+}
+
+func (s rawSequence) clear() {
+	if s.table == nil {
+		return
+	}
+	s.table.array = nil
+	s.table.arrayHasNil = false
+	for i := range s.table.stringFields {
+		s.table.stringFields[i] = tableStringField{}
+	}
+	s.table.stringFields = s.table.stringFields[:0]
+	for key := range s.table.stringFieldMap {
+		delete(s.table.stringFieldMap, key)
+	}
+	for key := range s.table.fields {
+		delete(s.table.fields, key)
+	}
+}
+
+func (s rawSequence) writeValues(values []Value) error {
+	for index, value := range values {
+		if err := s.set(index+1, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (t *Table) canUseFastArraySequence(length int) bool {
+	return t.canUseFastArrayStorage() && length == len(t.array)
+}
+
+func (t *Table) canAppendFastArray() bool {
+	return t.canUseFastArrayStorage()
+}
+
+func (t *Table) canUseFastArrayStorage() bool {
+	return t != nil && !t.arrayHasNil && len(t.stringFields) == 0 && len(t.stringFieldMap) == 0 && len(t.fields) == 0
+}
+
+func (t *Table) fastArrayAppend(value Value) {
+	t.growFastArray(1)
+	t.array[len(t.array)-1] = value
+	if value.IsNil() {
+		t.arrayHasNil = true
+	}
+}
+
+func (t *Table) fastArrayInsert(position int, value Value) {
+	index := position - 1
+	t.growFastArray(1)
+	copy(t.array[index+1:], t.array[index:])
+	t.array[index] = value
+	if value.IsNil() {
+		t.arrayHasNil = true
+	}
+}
+
+func (t *Table) growFastArray(extra int) {
+	needed := len(t.array) + extra
+	if needed <= cap(t.array) {
+		t.array = t.array[:needed]
+		return
+	}
+	nextCap := cap(t.array) * 2
+	if nextCap < 96 {
+		nextCap = 96
+	}
+	if nextCap < needed {
+		nextCap = needed
+	}
+	grown := make([]Value, needed, nextCap)
+	copy(grown, t.array)
+	t.array = grown
+}
+
+func (t *Table) fastArrayRemove(position int) Value {
+	index := position - 1
+	removed := t.array[index]
+	if index == 0 {
+		t.array[0] = Value{}
+		t.array = t.array[1:]
+		return removed
+	}
+	if index == len(t.array)-1 {
+		t.array[index] = Value{}
+		t.array = t.array[:index]
+		return removed
+	}
+	copy(t.array[index:], t.array[index+1:])
+	t.array[len(t.array)-1] = Value{}
+	t.array = t.array[:len(t.array)-1]
+	return removed
+}

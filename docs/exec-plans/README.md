@@ -8,3 +8,15 @@ Keep plans short, concrete, and easy to retire after the slice lands.
 ## Active Plans
 
 - `compiler-seed.md`: first tiny source-to-bytecode compiler path.
+- `compiler-runtime-optimization.md`: ambitious parser, compiler, bytecode,
+  VM, runtime table, and typed-analysis optimization plan.
+- `fast-execution-artifact.md`: ambitious no-codegen performance plan for the
+  verified interpreter artifact.
+- `hearth-runtime-integration.md`: core Program/Runtime design for embedding
+  Ember in Hearth through a deep host adapter seam.
+- `internal-legacy-cleanup.md`: breaking-change cleanup plan for deleting
+  private legacy seams after Program/Runtime, lowering, VM, table, and typed
+  analysis modules have deepened.
+- `scenario-performance.md`: Scenario-first no-codegen performance recovery
+  plan for table, row, call, and direct-frame execution.
+- `type-system.md`: MVP Luau-shaped typed-analysis system in phased slices.

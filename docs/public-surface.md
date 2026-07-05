@@ -27,20 +27,232 @@ testable seam.
 
 - `Compile(source string) (*Proto, error)` compiles the currently supported
   source slice.
-- `Run(proto *Proto) ([]Value, error)` executes without host globals.
+- `NewAnalyzer(options ...AnalyzerOption) *Analyzer` creates Ember's typed
+  analyzer.
+- `WithGlobalTypes(globals map[string]TypeSummary) AnalyzerOption` adds
+  host-provided global type facts to analyzer checks. These facts affect typed
+  analysis only; runtime globals still enter through runtime host seams such as
+  `RunWithGlobals`.
+- `WithModuleSummaries(summaries map[string]ModuleSummary) AnalyzerOption` adds
+  trusted module summaries for single-source analyzer checks. Literal
+  `require(...)` local bindings can use a dependency's exported return value
+  fact and qualify exported type aliases without invoking runtime module
+  loading. Missing summaries and summaries whose dependency hashes are stale
+  produce typed diagnostics; missing exported type aliases report `unknown-type`
+  at the missing alias segment.
+- `(*Analyzer).Check(ctx context.Context, source Source) (*CheckResult, error)`
+  parses and analyzes source. It accepts explicit Luau-style `--!strict`,
+  `--!nonstrict`, and `--!nocheck` directives and returns a typed artifact
+  with source mode and diagnostics. The seeded semantic diagnostics cover simple builtin local
+  annotations including `any`, `unknown`, `never`, and runtime kind names
+  that are valid type identifiers,
+  nilable and union annotations made from those builtin types,
+  simple scalar and table type aliases, generic scalar/table aliases with
+  ordinary type parameters, assignments to scoped known locals, local function
+  return annotations, local function argument annotations, local variables
+  annotated with direct or aliased function types used as call targets,
+  directly assigned function expression bodies checked against local function type annotations,
+  standalone function expression parameter and return annotations used for body
+  checks and call return facts, missing explicit returns from functions with
+  annotated non-nil returns, concrete parenthesized multiple-return packs such
+  as `() -> (number, string)`, and conservative all-branch return coverage for
+  `if` statements,
+  typed variadic function arguments including simple generic `...: T` consistency, simple
+  inferred and explicit call-site instantiation for local generic function
+  parameters and returns, annotated table function-field call arguments,
+  method self-arguments, and returns, named fields in annotated table literals including
+  missing nilable fields, simple dot-field reads from annotated table locals,
+  including nilable field reads, direct and generic-alias
+  string-indexer bracket and dot-property reads and writes, plus bracket key
+  mismatches from annotated table locals, inferred named-field reads, known-empty inferred table literal
+  field and indexer assignment checks, table literal named-field checks
+  against string-indexer annotations, numeric indexers, and computed-key
+  indexers from local table literals, computed-key table literal indexer
+  and required-field checks, annotated table-to-table named-field and indexer assignment and
+  reassignment checks including function-call results, annotated function table
+  return checks, array-shorthand table type reads, writes, and literal element checks,
+  read-only table property/indexer write diagnostics and write-only table
+  property/indexer read diagnostics including write-only function-field call targets,
+  arithmetic and unary length operand mismatches, plus deterministic logical
+  `and`/`or` result facts, including simple control-flow condition expressions, numeric `for`
+  bounds and loop-variable typing, initial `ipairs`,
+  `pairs`, `next, table`, and direct table loop-variable typing from table
+  indexers and named table fields,
+  strict-mode unknown local/global names except known base globals,
+  strict-mode unknown type names in annotations, nonstrict suppression of
+  unknown-name uncertainty while preserving concrete annotation mismatches,
+  nocheck diagnostic suppression, truthy and falsey nilable-local
+  and nilable table-field refinement, nil equality and inequality refinement
+  for locals and table fields, initial string/boolean singleton equality
+  refinement for locals and table fields, while-body type-guard refinement,
+  repeat-until exit type-guard refinement, and true/false branch
+  `type(local-or-field) == "kind"` refinement for simple union locals and
+  table fields. Successful compatible plain-local and tracked table-field
+  assignments update the current flow fact for later reads in the same scope,
+  and compatible branch-local assignment facts for existing locals and tracked
+  table fields are joined after `if` statements. Analyzer host-global type
+  facts can suppress unknown-global diagnostics and check host callback
+  arguments, host callback returns, host table property and indexer reads,
+  host table access modifiers, and class-like table-valued metatable `__index`
+  facts. Analyzer
+  module summaries can type literal `require(...)` local bindings from
+  exported dependency return table and function facts, qualify exported
+  scalar/table aliases, and report missing or stale summary inputs plus missing
+  exported aliases. Parser or
+  cancellation failures are returned as Go errors; Luau type findings are
+  returned as diagnostics. Arithmetic operand mismatch diagnostics identify the
+  offending operand source range. Module return summaries track annotated
+  locals, plain local reassignment, table-field assignment, and branch-merged
+  local or table-field assignments.
+- `Check(source string) error` is the convenience typed-analysis entry point.
+  It requires an explicit check-mode directive and returns the first typed
+  diagnostic as an error.
+- `Run(proto *Proto) ([]Value, error)` executes with Ember's pure base globals
+  and without host globals.
 - `RunWithGlobals(proto *Proto, globals map[string]Value) ([]Value, error)`
-  executes with explicit host-provided globals.
+  executes with Ember's pure base globals plus explicit host-provided globals.
+  Host-provided globals override base globals with the same name.
+- Scripts can read and assign globals as expression values, call host global
+  functions, access fields or indexes on host global tables, and pass opaque
+  host userdata values through script code. Local and upvalue names take
+  precedence over globals. With `RunWithGlobals`, global assignments write back
+  to the provided globals map.
+- Seeded base globals are `type`, which returns Luau-style kind names for the
+  current value model, and `math`, which currently provides `abs`, `floor`,
+  `min`, `max`, and `pi`, plus `table`, which currently provides `pack`,
+  `unpack`, `insert`, `remove`, `concat`, `find`, `clear`, and `sort`, plus
+  `tonumber`, `tostring`, `setmetatable`, `getmetatable`, `next`, `pairs`,
+  `ipairs`, `rawget`, `rawset`, `rawlen`, `select`, and `unpack`. Script
+  functions and host callbacks both report as `"function"`.
+- Tables can have metatables. The seeded metatable behavior is table-valued or
+  function-valued `__index` fallback for missing table keys and table-valued or
+  function-valued `__newindex` routing for missing-key writes. `__metatable`
+  protects a metatable by making `getmetatable` return the protection value and
+  making later `setmetatable` calls fail. Function-valued `__len` handles the
+  length operator for tables, and function-valued `__iter` customizes generic
+  `for` over direct table values. Function-valued `__tostring` customizes
+  `tostring(table)` and must return a string. Function-valued `__call` lets a
+  table value be called and receives the table as its first argument. Numeric
+  operator metamethods `__add`, `__sub`, `__mul`, `__div`, `__idiv`, `__mod`,
+  `__pow`, and `__unm` customize table arithmetic, and `__concat` customizes
+  table concatenation. Relational metamethods `__lt` and `__le` customize table
+  comparisons and must return booleans. Equality metamethod `__eq` customizes
+  table equality. Other metamethods are not implemented yet.
+- `rawget` and `rawset` bypass `__index` and `__newindex` while keeping the
+  same table key validation and nil-deletion semantics.
+- `#` returns string byte length, calls function-valued table `__len` when
+  present, and otherwise returns the contiguous raw positive-integer table
+  prefix length. `rawlen` returns the raw string or table length and bypasses
+  `__len`.
+- Numeric arithmetic operators `+`, `-`, `*`, `/`, `//`, `%`, and `^` accept
+  number values or strings that parse as numbers. `//` floors the quotient. `^`
+  is right-associative and binds tighter than unary numeric `-`. When raw
+  numeric coercion is not possible, table operands can use the corresponding
+  numeric operator metamethod; unary `-` can use `__unm`. `+` does not
+  concatenate strings.
+- `..` concatenates strings and coerces number operands to strings. When raw
+  concatenation is not possible, table operands can use `__concat`. Other value
+  kinds currently return a runtime error.
+- Relational operators compare raw numbers or raw strings. When raw comparison
+  is not possible, table operands can use `__lt` for `<` and `>`, or `__le` for
+  `<=` and `>=`.
+- Equality operators compare raw values by default. Table operands can use
+  `__eq` for `==`, and `~=` returns the inverse of that result. Ember calls
+  `__eq` even when both operands are the same table.
+- `if`/`then`/`elseif`/`else` expressions select one branch using Luau
+  truthiness and only evaluate the selected branch.
+- `if` statements support `elseif` branches and Luau truthiness.
+- `do`/`end` blocks create a lexical scope for locals without creating a loop
+  context.
+- `repeat`/`until` loops run the body before testing the condition. Body locals
+  are visible to the `until` condition and do not leak after the loop.
+- Numeric `for` loops support optional steps, positive and negative step
+  direction, `break`, and `continue`. The loop variable is local to the loop
+  body.
+- Generic `for` loops support iterator expressions such as `pairs(table)`,
+  `ipairs(table)`, and `next, table`, plus direct table values using the
+  current raw table iteration order or a function-valued `__iter` metamethod.
+  Loop variables are scoped to the body. Explicit `pairs(table)` uses raw table
+  iteration. `ipairs(table)` walks positive integer keys from 1 and stops at
+  the first nil value.
+- Table literals support array fields, named fields, and computed-key fields
+  such as `{[key] = value}`.
+- Return statements can produce multiple `Value` results. A final returned
+  script or host call, such as `return 1, pair()`, expands that call's result
+  list. Local bindings and assignments adjust value lists across multiple
+  names or targets. Final call arguments expand result lists, so
+  `collect(1, pair())` receives all final results from `pair`; non-final call
+  arguments remain single-valued. Variadic script functions can receive and
+  expand `...`.
+- Local variable, function parameter, and function return type annotations,
+  generic function type parameters, erased type aliases, and erased casts such
+  as `local n: number = 1`, `local function id<T>(x: T): T`,
+  `type Stats = {hp: number}`, `typeof(game.Workspace)`, and `value :: number`
+  are accepted as syntax.
+  Supported type syntax includes qualified names, nilable types, unions,
+  intersections, table types, function types with optional argument names,
+  generic function types, generic type arguments, variadic type packs such as
+  `...T`, generic type packs such as `U...`, and Luau table type access
+  modifiers such as `read Name: string` and `write [number]: boolean`.
+  `typeof(...)` type queries parse their inner expression but do not evaluate
+  it at runtime. The parser retains annotations, aliases, and casts as an
+  internal type tree with source ranges for `Check`, but Ember does not
+  enforce those annotations at runtime.
+- `--` line comments and `--[[ ... ]]` multiline comments are accepted.
+  `--!strict`, `--!nonstrict`, and `--!nocheck` directives are recognized by
+  the parser; `Check` requires one of those explicit modes.
+- `select("#", ...)` returns the number of received values. `select(index, ...)`
+  returns the values from `index` through the end, with negative indexes
+  counted from the end.
+- `tonumber(value, base)` returns numbers unchanged, parses strings as decimal
+  numbers by default, parses integer strings in bases 2 through 36 when `base`
+  is provided, and returns nil for failed conversions. `tostring(value)`
+  converts current scalar values to strings, calls table `__tostring` when
+  present, and otherwise returns stable kind names for non-scalars in this
+  seed.
+- `table.pack(...)` stores varargs in a table and records the count in `n`.
+  `table.unpack(table, first, last)` and global `unpack` expand a raw numeric
+  range; pass `1, packed.n` when unpacking a table from `table.pack` that may
+  contain nil values.
+- `table.insert(table, value)` appends after the raw array prefix.
+  `table.insert(table, index, value)` shifts later raw array-prefix values up.
+  `table.remove(table, index)` returns the removed value and shifts later raw
+  array-prefix values down; without an index it removes the last raw prefix
+  value.
+- `table.concat(table, separator, first, last)` joins raw string values across
+  the requested raw numeric range. The separator defaults to `""`, `first`
+  defaults to `1`, and `last` defaults to the raw array-prefix length.
+- `table.find(table, value, init)` searches raw positive integer keys starting
+  at `init` or `1` and stops at the first nil. `table.clear(table)` removes all
+  raw entries while preserving the table object and metatable.
+- `table.sort(table, compare)` sorts the raw array prefix in place. Without a
+  comparator it uses normal `<` behavior, including `__lt` when needed. When
+  provided, `compare(left, right)` must return a boolean.
 - `Value` exposes kind-specific inspectors for nil, booleans, numbers,
-  strings, and tables.
+  strings, tables, and userdata. Script closure values created by local
+  function declarations or function expressions can be observed through `Kind`
+  when returned internally, but they are not host-constructible yet.
 - `NewTable() *Table` creates a host-visible Luau table.
 - `TableValue(*Table) Value` passes a table through scripts and host globals.
 - `Value.Table() (*Table, bool)` returns the backing table object.
+- `NewUserData(payload any) *UserData` creates an opaque Go-owned host object.
+  Scripts can pass userdata around, compare userdata by identity, call
+  `type(value)` and use userdata as table keys, but cannot inspect the payload.
+- `UserDataValue(*UserData) Value` passes userdata through scripts and host
+  globals.
+- `Value.UserData() (*UserData, bool)` returns the backing userdata object.
+- `(*UserData).Payload() any` returns the Go payload for host callbacks and
+  embedding adapters.
 - `(*Table).Get(Value) (Value, error)` and `(*Table).Set(Value, Value) error`
   provide table storage through the same key semantics the VM currently
-  supports: booleans, strings, numbers except NaN, and table identity keys.
-  Missing keys read as nil; setting nil deletes the key. Nil and NaN keys
-  return errors.
+  supports: booleans, strings, numbers except NaN, table identity keys, and
+  userdata identity keys. Missing keys read through table-valued `__index` when
+  present and otherwise read as nil; missing-key writes route through
+  table-valued `__newindex` when present. Setting nil deletes the key. Nil and
+  NaN keys return errors.
 - `HostFunc` and `HostFuncValue` let adapters expose Go callbacks to scripts.
+  When a script calls a host function with method syntax, such as
+  `api:add(1, 2)`, the receiver table is passed as the first argument.
 
 Do not expose parser, bytecode, register, or stack details unless a later slice
 proves callers need them.
