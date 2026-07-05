@@ -1638,7 +1638,7 @@ func (thread *vmThread) runDirectFrame(frame *vmFrame) (vmFrameResult, bool, err
 			continue
 
 		case opMathMin:
-			_, fast, err := mathIntrinsicCallee(thread.globals, "min", nativeFuncMathMin)
+			_, fast, err := mathIntrinsicCallee(thread.globals, "min")
 			if err != nil {
 				return vmFrameResult{}, true, err
 			}
@@ -3490,7 +3490,7 @@ func (thread *vmThread) runGenericFrame(frame *vmFrame) (vmFrameResult, error) {
 
 		case opTableInsert:
 			args := frame.scriptCallArgs(ins.a, ins.b)
-			callee, fast, err := tableIntrinsicCallee(globals, "insert", nativeFuncTableInsert)
+			callee, fast, err := tableIntrinsicCallee(globals, "insert")
 			if err != nil {
 				return vmFrameResult{}, err
 			}
@@ -3523,7 +3523,7 @@ func (thread *vmThread) runGenericFrame(frame *vmFrame) (vmFrameResult, error) {
 
 		case opTableRemove:
 			args := frame.scriptCallArgs(ins.a, ins.b)
-			callee, fast, err := tableIntrinsicCallee(globals, "remove", nativeFuncTableRemove)
+			callee, fast, err := tableIntrinsicCallee(globals, "remove")
 			if err != nil {
 				return vmFrameResult{}, err
 			}
@@ -3557,7 +3557,7 @@ func (thread *vmThread) runGenericFrame(frame *vmFrame) (vmFrameResult, error) {
 
 		case opCoroutineResume:
 			args := frame.scriptCallArgs(ins.a, ins.b)
-			callee, fast, err := coroutineIntrinsicCallee(globals, "resume", nativeFuncCoroutineResume)
+			callee, fast, err := coroutineIntrinsicCallee(globals, "resume")
 			if err != nil {
 				return vmFrameResult{}, err
 			}
@@ -3591,7 +3591,7 @@ func (thread *vmThread) runGenericFrame(frame *vmFrame) (vmFrameResult, error) {
 
 		case opMathMin:
 			args := frame.scriptCallArgs(ins.a, ins.b)
-			callee, fast, err := mathIntrinsicCallee(globals, "min", nativeFuncMathMin)
+			callee, fast, err := mathIntrinsicCallee(globals, "min")
 			if err != nil {
 				return vmFrameResult{}, err
 			}
@@ -5352,25 +5352,29 @@ func callRuntimeMetamethod(fn Value, globals *globalEnv, args []Value) ([]Value,
 	return callRuntimeMetamethodSeen(fn, globals, args, nil, false)
 }
 
-func tableIntrinsicCallee(globals *globalEnv, field string, nativeID nativeFuncID) (Value, bool, error) {
-	return baseFieldIntrinsicCallee(globals, "table", field, nativeID)
+func tableIntrinsicCallee(globals *globalEnv, field string) (Value, bool, error) {
+	return baseFieldIntrinsicCallee(globals, "table", field)
 }
 
-func coroutineIntrinsicCallee(globals *globalEnv, field string, nativeID nativeFuncID) (Value, bool, error) {
-	return baseFieldIntrinsicCallee(globals, "coroutine", field, nativeID)
+func coroutineIntrinsicCallee(globals *globalEnv, field string) (Value, bool, error) {
+	return baseFieldIntrinsicCallee(globals, "coroutine", field)
 }
 
-func mathIntrinsicCallee(globals *globalEnv, field string, nativeID nativeFuncID) (Value, bool, error) {
-	return baseFieldIntrinsicCallee(globals, "math", field, nativeID)
+func mathIntrinsicCallee(globals *globalEnv, field string) (Value, bool, error) {
+	return baseFieldIntrinsicCallee(globals, "math", field)
 }
 
-func baseFieldIntrinsicCallee(globals *globalEnv, globalName string, field string, nativeID nativeFuncID) (Value, bool, error) {
+func baseFieldIntrinsicCallee(globals *globalEnv, globalName string, field string) (Value, bool, error) {
+	intrinsic, ok := baseFieldIntrinsic(globalName, field)
+	if !ok {
+		return NilValue(), false, fmt.Errorf("run: unknown intrinsic %s.%s", globalName, field)
+	}
 	if globals == nil || globals.values == nil {
-		return Value{kind: HostFuncKind, nativeID: nativeID}, true, nil
+		return Value{kind: HostFuncKind, nativeID: intrinsic.nativeID}, true, nil
 	}
 	tableValue, ok := globals.values[globalName]
 	if !ok {
-		return Value{kind: HostFuncKind, nativeID: nativeID}, true, nil
+		return Value{kind: HostFuncKind, nativeID: intrinsic.nativeID}, true, nil
 	}
 	table, ok := tableValue.Table()
 	if !ok {
@@ -5380,7 +5384,7 @@ func baseFieldIntrinsicCallee(globals *globalEnv, globalName string, field strin
 	if err != nil {
 		return NilValue(), false, fmt.Errorf("run: get field failed: %w", err)
 	}
-	return callee, callee.nativeID == nativeID, nil
+	return callee, callee.nativeID == intrinsic.nativeID, nil
 }
 
 func callRuntimeMetamethodSeen(

@@ -2832,50 +2832,29 @@ func (c *compiler) selfCallSubtractConstantArg(args []expression) (int, int, boo
 }
 
 func (c *compiler) tableIntrinsicCall(lowered loweredCall) (opcode, bool) {
-	if !c.options.optimizations.enabled(optimizationBytecodePeephole) ||
-		lowered.receiver != nil ||
-		!c.isUnboundBaseField(lowered.target, "table") {
-		return 0, false
-	}
-	field := lowered.target.selectors[0].field
-	switch field {
-	case "insert":
-		return opTableInsert, true
-	case "remove":
-		return opTableRemove, true
-	default:
-		return 0, false
-	}
+	return c.baseFieldIntrinsicCall(lowered, "table")
 }
 
 func (c *compiler) coroutineIntrinsicCall(lowered loweredCall) (opcode, bool) {
-	if !c.options.optimizations.enabled(optimizationBytecodePeephole) ||
-		lowered.receiver != nil ||
-		!c.isUnboundBaseField(lowered.target, "coroutine") {
-		return 0, false
-	}
-	field := lowered.target.selectors[0].field
-	switch field {
-	case "resume":
-		return opCoroutineResume, true
-	default:
-		return 0, false
-	}
+	return c.baseFieldIntrinsicCall(lowered, "coroutine")
 }
 
 func (c *compiler) mathIntrinsicCall(lowered loweredCall) (opcode, bool) {
+	return c.baseFieldIntrinsicCall(lowered, "math")
+}
+
+func (c *compiler) baseFieldIntrinsicCall(lowered loweredCall, globalName string) (opcode, bool) {
 	if !c.options.optimizations.enabled(optimizationBytecodePeephole) ||
 		lowered.receiver != nil ||
-		!c.isUnboundBaseField(lowered.target, "math") {
+		!c.isUnboundBaseField(lowered.target, globalName) {
 		return 0, false
 	}
 	field := lowered.target.selectors[0].field
-	switch field {
-	case "min":
-		return opMathMin, true
-	default:
+	intrinsic, ok := baseFieldIntrinsic(globalName, field)
+	if !ok {
 		return 0, false
 	}
+	return intrinsic.op, true
 }
 
 func selfNumericPairAddClosureBase(closure loweredClosure) (float64, bool) {

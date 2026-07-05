@@ -2232,22 +2232,10 @@ func disassembleProtoFacts(proto *Proto) []string {
 }
 
 func nativeFuncName(nativeID nativeFuncID) string {
-	switch nativeID {
-	case nativeFuncMathMin:
-		return "MATH_MIN"
-	case nativeFuncArrayNext:
-		return "ARRAY_NEXT"
-	case nativeFuncRawLen:
-		return "RAW_LEN"
-	case nativeFuncTableInsert:
-		return "TABLE_INSERT"
-	case nativeFuncTableRemove:
-		return "TABLE_REMOVE"
-	case nativeFuncCoroutineResume:
-		return "COROUTINE_RESUME"
-	default:
-		return "UNKNOWN"
+	if name, ok := baseNativeFuncName(nativeID); ok {
+		return name
 	}
+	return "UNKNOWN"
 }
 
 func opcodeName(op opcode) string {

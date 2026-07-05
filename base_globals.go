@@ -9,9 +9,25 @@ type baseGlobalDefinition struct {
 	summary func() TypeSummary
 }
 
+type baseFieldIntrinsicDefinition struct {
+	globalName string
+	field      string
+	op         opcode
+	nativeID   nativeFuncID
+	nativeName string
+}
+
+type nativeFuncDefinition struct {
+	id   nativeFuncID
+	name string
+}
+
 var (
 	baseGlobalDefinitionsOnce  sync.Once
 	baseGlobalDefinitionsCache []baseGlobalDefinition
+	baseIntrinsicsOnce         sync.Once
+	baseFieldIntrinsicsCache   []baseFieldIntrinsicDefinition
+	nativeFuncDefinitionsCache []nativeFuncDefinition
 )
 
 func baseGlobalDefinitions() []baseGlobalDefinition {
@@ -40,6 +56,29 @@ func baseGlobalDefinitions() []baseGlobalDefinition {
 	return baseGlobalDefinitionsCache
 }
 
+func baseFieldIntrinsics() []baseFieldIntrinsicDefinition {
+	baseIntrinsicsOnce.Do(func() {
+		baseFieldIntrinsicsCache = []baseFieldIntrinsicDefinition{
+			{globalName: "table", field: "insert", op: opTableInsert, nativeID: nativeFuncTableInsert, nativeName: "TABLE_INSERT"},
+			{globalName: "table", field: "remove", op: opTableRemove, nativeID: nativeFuncTableRemove, nativeName: "TABLE_REMOVE"},
+			{globalName: "coroutine", field: "resume", op: opCoroutineResume, nativeID: nativeFuncCoroutineResume, nativeName: "COROUTINE_RESUME"},
+			{globalName: "math", field: "min", op: opMathMin, nativeID: nativeFuncMathMin, nativeName: "MATH_MIN"},
+		}
+		nativeFuncDefinitionsCache = []nativeFuncDefinition{
+			{id: nativeFuncSelect, name: "SELECT"},
+			{id: nativeFuncRawLen, name: "RAW_LEN"},
+			{id: nativeFuncArrayNext, name: "ARRAY_NEXT"},
+		}
+		for _, intrinsic := range baseFieldIntrinsicsCache {
+			nativeFuncDefinitionsCache = append(nativeFuncDefinitionsCache, nativeFuncDefinition{
+				id:   intrinsic.nativeID,
+				name: intrinsic.nativeName,
+			})
+		}
+	})
+	return baseFieldIntrinsicsCache
+}
+
 func baseGlobalDefinitionFor(name string) (baseGlobalDefinition, bool) {
 	for _, definition := range baseGlobalDefinitions() {
 		if definition.name == name {
@@ -47,6 +86,25 @@ func baseGlobalDefinitionFor(name string) (baseGlobalDefinition, bool) {
 		}
 	}
 	return baseGlobalDefinition{}, false
+}
+
+func baseFieldIntrinsic(globalName string, field string) (baseFieldIntrinsicDefinition, bool) {
+	for _, intrinsic := range baseFieldIntrinsics() {
+		if intrinsic.globalName == globalName && intrinsic.field == field {
+			return intrinsic, true
+		}
+	}
+	return baseFieldIntrinsicDefinition{}, false
+}
+
+func baseNativeFuncName(nativeID nativeFuncID) (string, bool) {
+	baseFieldIntrinsics()
+	for _, definition := range nativeFuncDefinitionsCache {
+		if definition.id == nativeID {
+			return definition.name, true
+		}
+	}
+	return "", false
 }
 
 func baseGlobalValue(name string) (Value, bool) {
