@@ -31,40 +31,15 @@ func (r *Runtime) runModuleWithContextGlobalsBudget(ctx context.Context, key mod
 		r.stack = r.stack[:len(r.stack)-1]
 	}()
 
-	env := runtimeGlobals(globals)
-	env.set("require", nativeFuncValue(func(_ *globalEnv, args []Value) ([]Value, error) {
-		if len(args) == 0 {
-			return nil, fmt.Errorf("require: missing module path")
-		}
-		request, ok := args[0].String()
-		if !ok {
-			return nil, fmt.Errorf("require: module path is %s, want string", args[0].Kind())
-		}
-		required, err := normalizeRequireKey(key, request)
-		if err != nil {
-			return nil, err
-		}
-		results, err := r.runModuleWithContextGlobalsBudget(ctx, required, globals, maxInstructions)
-		if err != nil {
-			return nil, err
-		}
-		if len(results) == 0 {
-			return []Value{NilValue()}, nil
-		}
-		return []Value{results[0]}, nil
-	}))
+	call := r.newRuntimeCallContext(ctx, key, globals, maxInstructions)
 
-	results, err := executeProto(ctx, proto, env, executeOptions{
+	results, err := executeProto(ctx, proto, call.envWithRequire(), executeOptions{
 		maxInstructions: maxInstructions,
 	})
 	if err != nil {
 		return nil, err
 	}
-	value := NilValue()
-	if len(results) > 0 {
-		value = results[0]
-	}
-	r.loaded[key] = value
+	r.loaded[key] = firstRuntimeResult(results)
 	return results, nil
 }
 

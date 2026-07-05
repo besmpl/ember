@@ -291,11 +291,8 @@ func (r *Runtime) RunHook(ctx context.Context, hook string, args ...Value) (Hook
 		if !callableValue(hookValue) {
 			return report, fmt.Errorf("runtime: hook %s.%s is %s, want function", entrypoint.name, hook, hookValue.Kind())
 		}
-		env := runtimeGlobals(hookGlobals)
-		env.set("require", nativeFuncValue(func(_ *globalEnv, requireArgs []Value) ([]Value, error) {
-			return r.requireFrom(ctx, entrypoint.key, hookGlobals, requireArgs)
-		}))
-		if _, err := callValueWithContextBudget(ctx, hookValue, env, args, r.maxInstructions); err != nil {
+		callContext := r.newRuntimeCallContext(ctx, entrypoint.key, hookGlobals, r.maxInstructions)
+		if _, err := callValueWithContextBudget(ctx, hookValue, callContext.envWithRequire(), args, r.maxInstructions); err != nil {
 			return report, fmt.Errorf("runtime: call hook %s.%s: %w", entrypoint.name, hook, err)
 		}
 		call.Called = true
@@ -330,34 +327,9 @@ func (r *Runtime) loadEntrypoint(ctx context.Context, entrypoint programEntrypoi
 	if err != nil {
 		return NilValue(), false, err
 	}
-	value := NilValue()
-	if len(results) > 0 {
-		value = results[0]
-	}
+	value := firstRuntimeResult(results)
 	r.entrypoints[entrypoint.key] = value
 	return value, true, nil
-}
-
-func (r *Runtime) requireFrom(ctx context.Context, from moduleKey, globals map[string]Value, args []Value) ([]Value, error) {
-	if len(args) == 0 {
-		return nil, fmt.Errorf("require: missing module path")
-	}
-	request, ok := args[0].String()
-	if !ok {
-		return nil, fmt.Errorf("require: module path is %s, want string", args[0].Kind())
-	}
-	required, err := normalizeRequireKey(from, request)
-	if err != nil {
-		return nil, err
-	}
-	results, err := r.runModuleWithContextGlobalsBudget(ctx, required, globals, r.maxInstructions)
-	if err != nil {
-		return nil, err
-	}
-	if len(results) == 0 {
-		return []Value{NilValue()}, nil
-	}
-	return []Value{results[0]}, nil
 }
 
 func (r *Runtime) hostGlobals(ctx context.Context, call HostCall) (map[string]Value, error) {
