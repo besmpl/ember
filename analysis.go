@@ -1268,10 +1268,22 @@ func selectedLocalType(annotation, value simpleType) simpleType {
 }
 
 type conditionRefinement struct {
-	name      string
-	field     string
+	place     refinablePlace
 	trueType  simpleType
 	falseType simpleType
+}
+
+type refinablePlace struct {
+	name  string
+	field string
+}
+
+func (p refinablePlace) valid() bool {
+	return p.name != ""
+}
+
+func (p refinablePlace) hasField() bool {
+	return p.field != ""
 }
 
 func (a *analysisState) trueConditionRefinements(expr expression) []conditionRefinement {
@@ -1282,7 +1294,7 @@ func (a *analysisState) trueConditionRefinements(expr expression) []conditionRef
 	for _, term := range expr.terms[0].terms {
 		single := expression{terms: []andExpression{{terms: []comparisonExpression{term}}}}
 		refinement := a.conditionRefinement(single)
-		if refinement.name == "" || refinement.trueType == simpleTypeUnknown {
+		if !refinement.place.valid() || refinement.trueType == simpleTypeUnknown {
 			continue
 		}
 		refinements = append(refinements, refinement)
@@ -1291,8 +1303,7 @@ func (a *analysisState) trueConditionRefinements(expr expression) []conditionRef
 }
 
 func (a *analysisState) orTrueConditionRefinements(expr expression) []conditionRefinement {
-	var name string
-	var field string
+	var place refinablePlace
 	typ := simpleTypeUnknown
 	for _, term := range expr.terms {
 		if len(term.terms) != 1 {
@@ -1300,48 +1311,43 @@ func (a *analysisState) orTrueConditionRefinements(expr expression) []conditionR
 		}
 		single := expression{terms: []andExpression{{terms: []comparisonExpression{term.terms[0]}}}}
 		refinement := a.conditionRefinement(single)
-		if refinement.name == "" || refinement.trueType == simpleTypeUnknown {
+		if !refinement.place.valid() || refinement.trueType == simpleTypeUnknown {
 			return nil
 		}
-		if name == "" {
-			name = refinement.name
-			field = refinement.field
-		} else if name != refinement.name || field != refinement.field {
+		if !place.valid() {
+			place = refinement.place
+		} else if place != refinement.place {
 			return nil
 		}
 		typ = unionSimpleTypes(typ, refinement.trueType)
 	}
-	if name == "" || typ == simpleTypeUnknown {
+	if !place.valid() || typ == simpleTypeUnknown {
 		return nil
 	}
 	return []conditionRefinement{{
-		name:     name,
-		field:    field,
+		place:    place,
 		trueType: typ,
 	}}
 }
 
 func (a *analysisState) applyTrueRefinements(refinements []conditionRefinement) {
 	for _, refinement := range refinements {
-		if refinement.name == "" || refinement.trueType == simpleTypeUnknown {
+		if !refinement.place.valid() || refinement.trueType == simpleTypeUnknown {
 			continue
 		}
-		a.applyRefinement(refinement.name, refinement.field, refinement.trueType)
+		a.applyRefinement(refinement.place, refinement.trueType)
 	}
 }
 
 func (a *analysisState) applyTrueRefinementsToExisting(refinements []conditionRefinement) {
 	for _, refinement := range refinements {
-		if refinement.name == "" || refinement.trueType == simpleTypeUnknown {
+		if !refinement.place.valid() || refinement.trueType == simpleTypeUnknown {
 			continue
 		}
-		if refinement.field == "" && !a.hasLocal(refinement.name) {
+		if !a.hasRefinablePlace(refinement.place) {
 			continue
 		}
-		if refinement.field != "" && !a.hasTableFact(refinement.name) {
-			continue
-		}
-		a.applyRefinement(refinement.name, refinement.field, refinement.trueType)
+		a.applyRefinement(refinement.place, refinement.trueType)
 	}
 }
 
@@ -1351,8 +1357,8 @@ func (a *analysisState) applyFalseConditionRefinements(expr expression) {
 	}
 	if len(expr.terms) == 1 {
 		refinement := a.conditionRefinement(expr)
-		if refinement.name != "" && refinement.falseType != simpleTypeUnknown {
-			a.applyRefinement(refinement.name, refinement.field, refinement.falseType)
+		if refinement.place.valid() && refinement.falseType != simpleTypeUnknown {
+			a.applyRefinement(refinement.place, refinement.falseType)
 		}
 		return
 	}
@@ -1362,19 +1368,33 @@ func (a *analysisState) applyFalseConditionRefinements(expr expression) {
 		}
 		single := expression{terms: []andExpression{{terms: []comparisonExpression{term.terms[0]}}}}
 		refinement := a.conditionRefinement(single)
-		if refinement.name == "" || refinement.falseType == simpleTypeUnknown {
+		if !refinement.place.valid() || refinement.falseType == simpleTypeUnknown {
 			return
 		}
-		a.applyRefinement(refinement.name, refinement.field, refinement.falseType)
+		a.applyRefinement(refinement.place, refinement.falseType)
 	}
 }
 
-func (a *analysisState) applyRefinement(name string, field string, typ simpleType) {
-	if field == "" {
-		a.defineLocal(name, typ)
+func (a *analysisState) applyRefinement(place refinablePlace, typ simpleType) {
+	if !place.hasField() {
+		a.defineLocal(place.name, typ)
 		return
 	}
-	a.defineTableField(name, field, typ)
+	a.defineTableField(place.name, place.field, typ)
+}
+
+func (a *analysisState) hasRefinablePlace(place refinablePlace) bool {
+	if !place.hasField() {
+		return a.hasLocal(place.name)
+	}
+	return a.hasTableFact(place.name)
+}
+
+func (a *analysisState) refinablePlaceType(place refinablePlace) simpleType {
+	if place.hasField() {
+		return a.lookupTableField(place.name, place.field)
+	}
+	return a.lookupLocal(place.name)
 }
 
 func (a *analysisState) conditionRefinement(expr expression) conditionRefinement {
@@ -1394,21 +1414,17 @@ func (a *analysisState) conditionRefinement(expr expression) conditionRefinement
 		}
 		return conditionRefinement{}
 	}
-	field := refinementField(value)
-	if field == "" && len(value.selectors) != 0 {
+	place, ok := refinablePlaceFromTerm(value)
+	if !ok {
 		return conditionRefinement{}
 	}
-	current := a.lookupLocal(value.name)
-	if field != "" {
-		current = a.lookupTableField(value.name, field)
-	}
+	current := a.refinablePlaceType(place)
 	narrowed := truthyType(current)
 	if narrowed == simpleTypeUnknown {
 		return conditionRefinement{}
 	}
 	return conditionRefinement{
-		name:      value.name,
-		field:     field,
+		place:     place,
 		trueType:  narrowed,
 		falseType: falseyType(current),
 	}
@@ -1446,7 +1462,7 @@ func (a *analysisState) negatedConditionRefinement(value term) conditionRefineme
 		expr = expressionFromTerm(value)
 	}
 	refinement := a.conditionRefinement(expr)
-	if refinement.name == "" {
+	if !refinement.place.valid() {
 		return conditionRefinement{}
 	}
 	refinement.trueType, refinement.falseType = refinement.falseType, refinement.trueType
@@ -1461,20 +1477,16 @@ func (a *analysisState) nilComparisonRefinement(expr expression) (conditionRefin
 	if comparison.right == nil || (comparison.op != comparisonEqual && comparison.op != comparisonNotEqual) {
 		return conditionRefinement{}, false
 	}
-	name, field, ok := nilComparisonPlace(comparison)
+	place, ok := nilComparisonPlace(comparison)
 	if !ok {
 		return conditionRefinement{}, false
 	}
-	current := a.lookupLocal(name)
-	if field != "" {
-		current = a.lookupTableField(name, field)
-	}
+	current := a.refinablePlaceType(place)
 	if !typeAllows(current, simpleTypeNil) {
 		return conditionRefinement{}, false
 	}
 	refinement := conditionRefinement{
-		name:      name,
-		field:     field,
+		place:     place,
 		trueType:  simpleTypeNil,
 		falseType: truthyType(current),
 	}
@@ -1484,17 +1496,17 @@ func (a *analysisState) nilComparisonRefinement(expr expression) (conditionRefin
 	return refinement, true
 }
 
-func nilComparisonPlace(comparison comparisonExpression) (string, string, bool) {
+func nilComparisonPlace(comparison comparisonExpression) (refinablePlace, bool) {
 	if comparison.right == nil {
-		return "", "", false
+		return refinablePlace{}, false
 	}
-	if name, field, ok := concatSinglePlace(comparison.left); ok && concatSingleNil(*comparison.right) {
-		return name, field, true
+	if place, ok := concatSinglePlace(comparison.left); ok && concatSingleNil(*comparison.right) {
+		return place, true
 	}
 	if concatSingleNil(comparison.left) {
 		return concatSinglePlace(*comparison.right)
 	}
-	return "", "", false
+	return refinablePlace{}, false
 }
 
 func (a *analysisState) singletonComparisonRefinement(expr expression) (conditionRefinement, bool) {
@@ -1505,20 +1517,16 @@ func (a *analysisState) singletonComparisonRefinement(expr expression) (conditio
 	if comparison.right == nil || (comparison.op != comparisonEqual && comparison.op != comparisonNotEqual) {
 		return conditionRefinement{}, false
 	}
-	name, field, typ, ok := singletonComparisonPlace(comparison)
+	place, typ, ok := singletonComparisonPlace(comparison)
 	if !ok {
 		return conditionRefinement{}, false
 	}
-	current := a.lookupLocal(name)
-	if field != "" {
-		current = a.lookupTableField(name, field)
-	}
+	current := a.refinablePlaceType(place)
 	if !typeAllows(current, typ) {
 		return conditionRefinement{}, false
 	}
 	refinement := conditionRefinement{
-		name:      name,
-		field:     field,
+		place:     place,
 		trueType:  typ,
 		falseType: simpleTypeUnknown,
 	}
@@ -1528,20 +1536,20 @@ func (a *analysisState) singletonComparisonRefinement(expr expression) (conditio
 	return refinement, true
 }
 
-func singletonComparisonPlace(comparison comparisonExpression) (string, string, simpleType, bool) {
+func singletonComparisonPlace(comparison comparisonExpression) (refinablePlace, simpleType, bool) {
 	if comparison.right == nil {
-		return "", "", simpleTypeUnknown, false
+		return refinablePlace{}, simpleTypeUnknown, false
 	}
-	if name, field, ok := concatSinglePlace(comparison.left); ok {
+	if place, ok := concatSinglePlace(comparison.left); ok {
 		if typ, ok := concatSingleSingletonType(*comparison.right); ok {
-			return name, field, typ, true
+			return place, typ, true
 		}
 	}
 	if typ, ok := concatSingleSingletonType(comparison.left); ok {
-		name, field, ok := concatSinglePlace(*comparison.right)
-		return name, field, typ, ok
+		place, ok := concatSinglePlace(*comparison.right)
+		return place, typ, ok
 	}
-	return "", "", simpleTypeUnknown, false
+	return refinablePlace{}, simpleTypeUnknown, false
 }
 
 func (a *analysisState) typeGuardRefinement(expr expression) (conditionRefinement, bool) {
@@ -1556,7 +1564,7 @@ func (a *analysisState) typeGuardRefinement(expr expression) (conditionRefinemen
 	if !ok {
 		return conditionRefinement{}, false
 	}
-	name, field, ok := typeCallPlace(leftCall)
+	place, ok := typeCallPlace(leftCall)
 	if !ok {
 		return conditionRefinement{}, false
 	}
@@ -1565,16 +1573,12 @@ func (a *analysisState) typeGuardRefinement(expr expression) (conditionRefinemen
 		return conditionRefinement{}, false
 	}
 	typ := simpleType(kind)
-	current := a.lookupLocal(name)
-	if field != "" {
-		current = a.lookupTableField(name, field)
-	}
+	current := a.refinablePlaceType(place)
 	if !typeAllows(current, typ) {
 		return conditionRefinement{}, false
 	}
 	refinement := conditionRefinement{
-		name:      name,
-		field:     field,
+		place:     place,
 		trueType:  typ,
 		falseType: typeWithout(current, typ),
 	}
@@ -1584,19 +1588,23 @@ func (a *analysisState) typeGuardRefinement(expr expression) (conditionRefinemen
 	return refinement, true
 }
 
-func concatSinglePlace(expr concatExpression) (string, string, bool) {
+func concatSinglePlace(expr concatExpression) (refinablePlace, bool) {
 	if len(expr.rest) != 0 || len(expr.first.rest) != 0 || len(expr.first.first.rest) != 0 {
-		return "", "", false
+		return refinablePlace{}, false
 	}
 	value := termWithoutCastsAndGroups(expr.first.first.first)
+	return refinablePlaceFromTerm(value)
+}
+
+func refinablePlaceFromTerm(value term) (refinablePlace, bool) {
 	if value.name == "" {
-		return "", "", false
+		return refinablePlace{}, false
 	}
 	field := refinementField(value)
 	if field == "" && len(value.selectors) != 0 {
-		return "", "", false
+		return refinablePlace{}, false
 	}
-	return value.name, field, true
+	return refinablePlace{name: value.name, field: field}, true
 }
 
 func concatSingleNil(expr concatExpression) bool {
@@ -1639,20 +1647,16 @@ func concatSingleCall(expr concatExpression) (callExpression, bool) {
 	return *value.call, true
 }
 
-func typeCallPlace(call callExpression) (string, string, bool) {
+func typeCallPlace(call callExpression) (refinablePlace, bool) {
 	target := termWithoutCastsAndGroups(call.target)
 	if target.name != "type" || len(call.args) != 1 {
-		return "", "", false
+		return refinablePlace{}, false
 	}
 	arg, ok := expressionSingleTerm(call.args[0])
 	if !ok || arg.name == "" {
-		return "", "", false
+		return refinablePlace{}, false
 	}
-	field := refinementField(arg)
-	if field == "" && len(arg.selectors) != 0 {
-		return "", "", false
-	}
-	return arg.name, field, true
+	return refinablePlaceFromTerm(arg)
 }
 
 func concatSingleString(expr concatExpression) (string, bool) {
