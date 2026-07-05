@@ -193,8 +193,7 @@ func peepholeBytecode(code []instruction) []instruction {
 
 func bytecodeHasControlTransfers(code []instruction) bool {
 	for _, ins := range code {
-		switch ins.op {
-		case opJump, opJumpIfFalse, opNumericForCheck, opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfStringFieldNotEqualK, opJumpIfRowStringFieldNotEqualK, opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK, opJumpIfStringFieldFalse:
+		if opcodeHasJumpTarget(ins.op) {
 			return true
 		}
 	}

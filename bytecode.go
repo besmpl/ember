@@ -666,26 +666,15 @@ func bytecodeIRBlockOrder(ir []bytecodeIRInstruction) []bytecodeIRBlock {
 }
 
 func bytecodeIRInstructionTransfersControl(ins bytecodeIRInstruction) bool {
-	switch ins.op {
-	case opJump, opJumpIfFalse, opNumericForCheck, opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfModKNotEqualK, opJumpIfStringFieldNotEqualK, opJumpIfRowStringFieldNotEqualK, opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK, opJumpIfStringFieldFalse, opReturnOne, opReturn:
-		return true
-	default:
-		return false
-	}
+	return opcodeTransfersControl(ins.op)
 }
 
 func bytecodeIRJumpTarget(ins bytecodeIRInstruction) (int, bool) {
-	switch ins.op {
-	case opJump, opJumpIfFalse:
+	switch opcodeJumpTarget(ins.op) {
+	case opcodeJumpTargetB:
 		target := ins.operands.b
 		return target.value, target.kind == bytecodeOperandJumpTarget
-	case opNumericForCheck:
-		target := ins.operands.d
-		return target.value, target.kind == bytecodeOperandJumpTarget
-	case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfModKNotEqualK:
-		target := ins.operands.d
-		return target.value, target.kind == bytecodeOperandJumpTarget
-	case opJumpIfStringFieldNotEqualK, opJumpIfRowStringFieldNotEqualK, opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK, opJumpIfStringFieldFalse:
+	case opcodeJumpTargetD:
 		target := ins.operands.d
 		return target.value, target.kind == bytecodeOperandJumpTarget
 	default:
@@ -759,14 +748,14 @@ func bytecodeIRBlockSuccessors(ir []bytecodeIRInstruction, blocks []bytecodeIRBl
 			continue
 		}
 		last := ir[block.end-1]
-		switch last.op {
-		case opJump:
+		switch opcodeControlFlow(last.op) {
+		case opcodeControlJump:
 			if target, ok := bytecodeIRJumpTarget(last); ok {
 				if successor, ok := blockByStart[target]; ok {
 					successors[block.id] = append(successors[block.id], successor)
 				}
 			}
-		case opJumpIfFalse, opNumericForCheck, opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfModKNotEqualK, opJumpIfStringFieldNotEqualK, opJumpIfRowStringFieldNotEqualK, opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK, opJumpIfStringFieldFalse:
+		case opcodeControlBranch:
 			if target, ok := bytecodeIRJumpTarget(last); ok {
 				if successor, ok := blockByStart[target]; ok {
 					successors[block.id] = append(successors[block.id], successor)
@@ -775,7 +764,7 @@ func bytecodeIRBlockSuccessors(ir []bytecodeIRInstruction, blocks []bytecodeIRBl
 			if successor, ok := blockByStart[block.end]; ok {
 				successors[block.id] = append(successors[block.id], successor)
 			}
-		case opReturnOne, opReturn:
+		case opcodeControlReturn:
 		default:
 			if successor, ok := blockByStart[block.end]; ok {
 				successors[block.id] = append(successors[block.id], successor)
@@ -1323,14 +1312,14 @@ func instructionWriteMask(ins instruction, registers int) uint64 {
 
 func instructionSuccessors(code []instruction, pc int) []int {
 	ins := code[pc]
-	switch ins.op {
-	case opJump:
-		return []int{ins.b}
-	case opJumpIfFalse:
-		return []int{pc + 1, ins.b}
-	case opNumericForCheck, opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfModKNotEqualK, opJumpIfStringFieldNotEqualK, opJumpIfRowStringFieldNotEqualK, opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK, opJumpIfStringFieldFalse:
-		return []int{pc + 1, ins.d}
-	case opReturnOne, opReturn:
+	switch opcodeControlFlow(ins.op) {
+	case opcodeControlJump:
+		target, _ := instructionJumpTarget(ins)
+		return []int{target}
+	case opcodeControlBranch:
+		target, _ := instructionJumpTarget(ins)
+		return []int{pc + 1, target}
+	case opcodeControlReturn:
 		return nil
 	default:
 		return []int{pc + 1}

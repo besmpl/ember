@@ -118,6 +118,20 @@ return value
 	}
 }
 
+func TestBytecodeControlTransferIncludesSpecializedModuloBranch(t *testing.T) {
+	code := []instruction{
+		{op: opJumpIfModKNotEqualK, d: 2},
+		{op: opReturnOne},
+	}
+
+	if !bytecodeHasControlTransfers(code) {
+		t.Fatal("bytecodeHasControlTransfers returned false for specialized modulo branch")
+	}
+	if got, want := instructionSuccessors(code, 0), []int{1, 2}; !equalIntSlices(got, want) {
+		t.Fatalf("specialized modulo branch successors are %#v, want %#v", got, want)
+	}
+}
+
 func parseSourceForOptimizationTest(t *testing.T, source string) sourceArtifact {
 	t.Helper()
 	artifact, err := parseSource(Source{Text: source})
