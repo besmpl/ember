@@ -50,8 +50,8 @@ func buildTypedArtifactFacts(prog program, diagnostics []Diagnostic) typedArtifa
 			})
 		}
 	}
-	values := moduleLocalValueSummaries(prog, store)
-	if value, ok := moduleReturnExport(prog, diagCodes, values); ok {
+	valueFlow := moduleLocalValueSummaries(prog, store)
+	if value, ok := moduleReturnExport(prog, diagCodes, valueFlow); ok {
 		exports = append(exports, value)
 	}
 	return typedArtifactFacts{
@@ -71,65 +71,73 @@ func applyAliasTypeParameters(summary *TypeSummary, item loweredTypeAlias) {
 	}
 }
 
-func moduleLocalValueSummaries(prog program, store *typeStore) map[string]TypeSummary {
-	values := baseGlobalValueSummaries()
-	applyStatementValueSummaries(prog.statements, store, values)
-	return values
+type moduleValueFlow struct {
+	values map[string]TypeSummary
 }
 
-func applyAssignmentValueSummaries(stmt assignStatement, values map[string]TypeSummary) {
+func moduleLocalValueSummaries(prog program, store *typeStore) moduleValueFlow {
+	flow := moduleValueFlow{values: baseGlobalValueSummaries()}
+	flow.applyStatements(prog.statements, store)
+	return flow
+}
+
+func (f moduleValueFlow) applyAssignment(stmt assignStatement) {
 	for i, target := range stmt.targets {
 		if i >= len(stmt.values) {
 			continue
 		}
 		if len(target.selectors) == 0 {
-			if _, ok := values[target.name]; ok {
-				values[target.name] = valueTypeSummary(stmt.values[i], values)
+			if _, ok := f.values[target.name]; ok {
+				f.values[target.name] = f.value(stmt.values[i])
 			}
 			continue
 		}
-		table, ok := values[target.name]
+		table, ok := f.values[target.name]
 		if !ok || table.Kind != TypeSummaryTable {
 			continue
 		}
-		if setTableSummaryPath(&table, target.selectors, valueTypeSummary(stmt.values[i], values)) {
-			values[target.name] = table
+		if setTableSummaryPath(&table, target.selectors, f.value(stmt.values[i])) {
+			f.values[target.name] = table
 		}
 	}
 }
 
-func applyIfValueSummaries(stmt ifStatement, store *typeStore, values map[string]TypeSummary) {
+func (f moduleValueFlow) applyIf(stmt ifStatement, store *typeStore) {
 	if len(stmt.thenStatements) == 0 {
 		return
 	}
-	thenValues := cloneTypeSummaryMap(values)
-	applyStatementValueSummaries(stmt.thenStatements, store, thenValues)
-	elseValues := cloneTypeSummaryMap(values)
+	thenFlow := f.clone()
+	thenFlow.applyStatements(stmt.thenStatements, store)
+	elseFlow := f.clone()
 	if len(stmt.elseStatements) != 0 {
-		applyStatementValueSummaries(stmt.elseStatements, store, elseValues)
+		elseFlow.applyStatements(stmt.elseStatements, store)
 	}
-	mergeAgreedValueSummaries(values, thenValues, elseValues)
+	f.mergeAgreed(thenFlow, elseFlow)
 }
 
-func applyStatementValueSummaries(statements []statement, store *typeStore, values map[string]TypeSummary) {
+func (f moduleValueFlow) applyStatements(statements []statement, store *typeStore) {
 	for _, stmt := range statements {
 		switch {
 		case stmt.local != nil:
 			for i, name := range stmt.local.names {
 				if i < len(stmt.local.annotations) && stmt.local.annotations[i] != nil {
-					values[name] = store.summary(store.lowerType(stmt.local.annotations[i]))
+					f.values[name] = store.summary(store.lowerType(stmt.local.annotations[i]))
 					continue
 				}
 				if i < len(stmt.local.values) {
-					values[name] = valueTypeSummary(stmt.local.values[i], values)
+					f.values[name] = f.value(stmt.local.values[i])
 				}
 			}
 		case stmt.assign != nil:
-			applyAssignmentValueSummaries(*stmt.assign, values)
+			f.applyAssignment(*stmt.assign)
 		case stmt.ifStmt != nil:
-			applyIfValueSummaries(*stmt.ifStmt, store, values)
+			f.applyIf(*stmt.ifStmt, store)
 		}
 	}
+}
+
+func (f moduleValueFlow) clone() moduleValueFlow {
+	return moduleValueFlow{values: cloneTypeSummaryMap(f.values)}
 }
 
 func cloneTypeSummaryMap(values map[string]TypeSummary) map[string]TypeSummary {
@@ -140,15 +148,15 @@ func cloneTypeSummaryMap(values map[string]TypeSummary) map[string]TypeSummary {
 	return clone
 }
 
-func mergeAgreedValueSummaries(values, left, right map[string]TypeSummary) {
-	for name, leftSummary := range left {
-		rightSummary, ok := right[name]
+func (f moduleValueFlow) mergeAgreed(left, right moduleValueFlow) {
+	for name, leftSummary := range left.values {
+		rightSummary, ok := right.values[name]
 		if !ok {
 			continue
 		}
 		merged, ok := mergeBranchTypeSummaries(leftSummary, rightSummary)
 		if ok {
-			values[name] = merged
+			f.values[name] = merged
 		}
 	}
 }
@@ -320,7 +328,7 @@ func cloneTypePackSummary(summary TypePackSummary) TypePackSummary {
 	return clone
 }
 
-func moduleReturnExport(prog program, diagCodes []string, values map[string]TypeSummary) (ModuleExport, bool) {
+func moduleReturnExport(prog program, diagCodes []string, flow moduleValueFlow) (ModuleExport, bool) {
 	for _, stmt := range prog.statements {
 		if stmt.ret == nil || len(stmt.ret.values) == 0 {
 			continue
@@ -328,28 +336,28 @@ func moduleReturnExport(prog program, diagCodes []string, values map[string]Type
 		return ModuleExport{
 			Name:      "return",
 			Kind:      ModuleExportValue,
-			Type:      valueTypeSummary(stmt.ret.values[0], values),
+			Type:      flow.value(stmt.ret.values[0]),
 			DiagCodes: diagCodes,
 		}, true
 	}
 	return ModuleExport{}, false
 }
 
-func valueTypeSummary(expr expression, values map[string]TypeSummary) TypeSummary {
+func (f moduleValueFlow) value(expr expression) TypeSummary {
 	value, ok := expressionSingleTerm(expr)
 	if !ok {
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
 	if value.name != "" {
 		if len(value.selectors) != 0 {
-			if summary, ok := values[value.name]; ok {
+			if summary, ok := f.values[value.name]; ok {
 				if field, ok := tableSummaryPath(summary, value.selectors); ok {
 					return field
 				}
 			}
 			return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 		}
-		if summary, ok := values[value.name]; ok {
+		if summary, ok := f.values[value.name]; ok {
 			return summary
 		}
 	}
@@ -357,37 +365,37 @@ func valueTypeSummary(expr expression, values map[string]TypeSummary) TypeSummar
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
 	if value.call != nil {
-		return callValueTypeSummary(*value.call, values)
+		return f.callValue(*value.call)
 	}
 	if value.table != nil {
-		return tableValueTypeSummary(*value.table, values)
+		return f.tableValue(*value.table)
 	}
 	return simpleTypeSummary(simpleTypeFromTerm(value))
 }
 
-func callValueTypeSummary(call callExpression, values map[string]TypeSummary) TypeSummary {
+func (f moduleValueFlow) callValue(call callExpression) TypeSummary {
 	if len(call.target.selectors) != 0 {
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
 	switch call.target.name {
 	case "setmetatable":
-		return setMetatableCallTypeSummary(call, values)
+		return f.setMetatableCallValue(call)
 	case "getmetatable":
-		return getMetatableCallTypeSummary(call, values)
+		return f.getMetatableCallValue(call)
 	default:
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
 }
 
-func setMetatableCallTypeSummary(call callExpression, values map[string]TypeSummary) TypeSummary {
+func (f moduleValueFlow) setMetatableCallValue(call callExpression) TypeSummary {
 	if len(call.args) < 2 {
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
-	table := valueTypeSummary(call.args[0], values)
+	table := f.value(call.args[0])
 	if table.Kind != TypeSummaryTable {
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
-	metatable := valueTypeSummary(call.args[1], values)
+	metatable := f.value(call.args[1])
 	if metatable.Kind != TypeSummaryTable {
 		return table
 	}
@@ -395,18 +403,18 @@ func setMetatableCallTypeSummary(call callExpression, values map[string]TypeSumm
 	return table
 }
 
-func getMetatableCallTypeSummary(call callExpression, values map[string]TypeSummary) TypeSummary {
+func (f moduleValueFlow) getMetatableCallValue(call callExpression) TypeSummary {
 	if len(call.args) == 0 {
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
-	table := valueTypeSummary(call.args[0], values)
+	table := f.value(call.args[0])
 	if table.Metatable == nil {
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
 	return *table.Metatable
 }
 
-func tableValueTypeSummary(table tableExpression, values map[string]TypeSummary) TypeSummary {
+func (f moduleValueFlow) tableValue(table tableExpression) TypeSummary {
 	summary := TypeSummary{Kind: TypeSummaryTable, Display: "table"}
 	for _, field := range table.fields {
 		if field.name == "" {
@@ -414,7 +422,7 @@ func tableValueTypeSummary(table tableExpression, values map[string]TypeSummary)
 		}
 		summary.Properties = append(summary.Properties, TablePropertySummary{
 			Name: field.name,
-			Type: valueTypeSummary(field.value, values),
+			Type: f.value(field.value),
 		})
 	}
 	return summary
