@@ -1498,6 +1498,226 @@ return {
 	assertFloat64s(t, records, []float64{2, 5})
 }
 
+func TestRuntimeCallbackRepeatedTableArgumentsReadFreshFields(t *testing.T) {
+	loader := &programTestLoader{
+		sources: map[string]string{
+			"logical:game/init": `
+return {
+	startup = function()
+		connect(function(input)
+			record(input.UserInputType.Name .. ":" .. input.KeyCode.Name)
+		end)
+	end,
+}
+`,
+		},
+	}
+	program, _, err := ember.LoadProgram(context.Background(), loader, ember.ProgramOptions{
+		Entrypoints: []ember.Entrypoint{{Name: "main", Module: ember.LogicalModule("game/init")}},
+		Parallelism: 1,
+	})
+	if err != nil {
+		t.Fatalf("LoadProgram returned error: %v", err)
+	}
+
+	var callback ember.Callback
+	var records []string
+	runtime, err := program.NewRuntime(ember.RuntimeOptions{
+		Host: ember.RuntimeHostFunc(func(_ context.Context, call ember.HostCall) (map[string]ember.Value, error) {
+			if call.Hook == "" {
+				return nil, nil
+			}
+			return map[string]ember.Value{
+				"connect": ember.ContextHostFuncValue(func(ctx context.Context, args []ember.Value) ([]ember.Value, error) {
+					captured, err := ember.CaptureCallback(ctx, args[0])
+					if err != nil {
+						return nil, err
+					}
+					callback = captured
+					return nil, nil
+				}),
+				"record": ember.HostFuncValue(func(args []ember.Value) ([]ember.Value, error) {
+					value, ok := args[0].String()
+					if !ok {
+						t.Fatalf("record received %s, want string", args[0].Kind())
+					}
+					records = append(records, value)
+					return nil, nil
+				}),
+			}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime returned error: %v", err)
+	}
+
+	if _, err := runtime.RunHook(context.Background(), "startup"); err != nil {
+		t.Fatalf("RunHook returned error: %v", err)
+	}
+
+	if _, err := callback.Call(context.Background(), callbackInputObject("Keyboard", "A")); err != nil {
+		t.Fatalf("first Callback.Call returned error: %v", err)
+	}
+	if _, err := callback.Call(context.Background(), callbackInputObject("MouseButton1", "Unknown")); err != nil {
+		t.Fatalf("second Callback.Call returned error: %v", err)
+	}
+	assertStrings(t, records, []string{"Keyboard:A", "MouseButton1:Unknown"})
+}
+
+func TestRuntimeCallbackRepeatedInputObjectsReadFreshFieldsThroughHelpers(t *testing.T) {
+	loader := &programTestLoader{
+		sources: map[string]string{
+			"logical:game/init": `
+local function vectorText(value)
+	return tostring(value.X) .. "," .. tostring(value.Y)
+end
+
+local function describe(input, processed)
+	return input.UserInputType.Name .. ":" ..
+		input.UserInputState.Name .. ":" ..
+		input.KeyCode.Name .. ":" ..
+		vectorText(input.Position) .. ":" ..
+		vectorText(input.Delta) .. ":" ..
+		tostring(processed)
+end
+
+local function push(key, value)
+	local old = stateGet(key, "")
+	if old ~= "" then
+		value = old .. "|" .. value
+	end
+	stateSet(key, value)
+end
+
+return {
+	startup = function()
+		connectBegan(function(input, processed)
+			push("began", describe(input, processed))
+		end)
+		connectChanged(function(input, processed)
+			push("changed", describe(input, processed))
+		end)
+	end,
+}
+`,
+		},
+	}
+	program, _, err := ember.LoadProgram(context.Background(), loader, ember.ProgramOptions{
+		Entrypoints: []ember.Entrypoint{{Name: "main", Module: ember.LogicalModule("game/init")}},
+		Parallelism: 1,
+	})
+	if err != nil {
+		t.Fatalf("LoadProgram returned error: %v", err)
+	}
+
+	var began ember.Callback
+	var changed ember.Callback
+	state := map[string]string{}
+	runtime, err := program.NewRuntime(ember.RuntimeOptions{
+		Host: ember.RuntimeHostFunc(func(_ context.Context, call ember.HostCall) (map[string]ember.Value, error) {
+			if call.Hook == "" {
+				return nil, nil
+			}
+			return map[string]ember.Value{
+				"connectBegan": ember.ContextHostFuncValue(func(ctx context.Context, args []ember.Value) ([]ember.Value, error) {
+					captured, err := ember.CaptureCallback(ctx, args[0])
+					if err != nil {
+						return nil, err
+					}
+					began = captured
+					return nil, nil
+				}),
+				"connectChanged": ember.ContextHostFuncValue(func(ctx context.Context, args []ember.Value) ([]ember.Value, error) {
+					captured, err := ember.CaptureCallback(ctx, args[0])
+					if err != nil {
+						return nil, err
+					}
+					changed = captured
+					return nil, nil
+				}),
+				"stateGet": ember.HostFuncValue(func(args []ember.Value) ([]ember.Value, error) {
+					key, ok := args[0].String()
+					if !ok {
+						t.Fatalf("stateGet key received %s, want string", args[0].Kind())
+					}
+					value, ok := state[key]
+					if !ok && len(args) > 1 {
+						return []ember.Value{args[1]}, nil
+					}
+					return []ember.Value{ember.StringValue(value)}, nil
+				}),
+				"stateSet": ember.HostFuncValue(func(args []ember.Value) ([]ember.Value, error) {
+					key, ok := args[0].String()
+					if !ok {
+						t.Fatalf("stateSet key received %s, want string", args[0].Kind())
+					}
+					value, ok := args[1].String()
+					if !ok {
+						t.Fatalf("stateSet value received %s, want string", args[1].Kind())
+					}
+					state[key] = value
+					return nil, nil
+				}),
+			}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime returned error: %v", err)
+	}
+
+	if _, err := runtime.RunHook(context.Background(), "startup"); err != nil {
+		t.Fatalf("RunHook returned error: %v", err)
+	}
+
+	if _, err := began.Call(context.Background(), callbackFullInputObject("Keyboard", "Begin", "A", 10, 20, 0, 0), ember.BoolValue(false)); err != nil {
+		t.Fatalf("first began Callback.Call returned error: %v", err)
+	}
+	if _, err := began.Call(context.Background(), callbackFullInputObject("MouseButton1", "Begin", "Unknown", 10, 20, 0, 0), ember.BoolValue(false)); err != nil {
+		t.Fatalf("second began Callback.Call returned error: %v", err)
+	}
+	if _, err := changed.Call(context.Background(), callbackFullInputObject("MouseMovement", "Change", "Unknown", 10, 20, 3, -2), ember.BoolValue(false)); err != nil {
+		t.Fatalf("first changed Callback.Call returned error: %v", err)
+	}
+	if _, err := changed.Call(context.Background(), callbackFullInputObject("MouseWheel", "Change", "Unknown", 10, 20, 0, 1), ember.BoolValue(false)); err != nil {
+		t.Fatalf("second changed Callback.Call returned error: %v", err)
+	}
+
+	assertStringMap(t, state, map[string]string{
+		"began":   "Keyboard:Begin:A:10,20:0,0:false|MouseButton1:Begin:Unknown:10,20:0,0:false",
+		"changed": "MouseMovement:Change:Unknown:10,20:3,-2:false|MouseWheel:Change:Unknown:10,20:0,1:false",
+	})
+}
+
+func callbackInputObject(inputType string, keyCode string) ember.Value {
+	input := ember.NewTable()
+	_ = input.Set(ember.StringValue("UserInputType"), callbackNamedTable(inputType))
+	_ = input.Set(ember.StringValue("KeyCode"), callbackNamedTable(keyCode))
+	return ember.TableValue(input)
+}
+
+func callbackFullInputObject(inputType string, inputState string, keyCode string, positionX float64, positionY float64, deltaX float64, deltaY float64) ember.Value {
+	input := ember.NewTable()
+	_ = input.Set(ember.StringValue("UserInputType"), callbackNamedTable(inputType))
+	_ = input.Set(ember.StringValue("UserInputState"), callbackNamedTable(inputState))
+	_ = input.Set(ember.StringValue("KeyCode"), callbackNamedTable(keyCode))
+	_ = input.Set(ember.StringValue("Position"), callbackVector2Table(positionX, positionY))
+	_ = input.Set(ember.StringValue("Delta"), callbackVector2Table(deltaX, deltaY))
+	return ember.TableValue(input)
+}
+
+func callbackNamedTable(name string) ember.Value {
+	table := ember.NewTable()
+	_ = table.Set(ember.StringValue("Name"), ember.StringValue(name))
+	return ember.TableValue(table)
+}
+
+func callbackVector2Table(x float64, y float64) ember.Value {
+	table := ember.NewTable()
+	_ = table.Set(ember.StringValue("X"), ember.NumberValue(x))
+	_ = table.Set(ember.StringValue("Y"), ember.NumberValue(y))
+	return ember.TableValue(table)
+}
+
 func TestRuntimeCallbackUsesCapturedModuleRequireContext(t *testing.T) {
 	loader := &programTestLoader{
 		sources: map[string]string{
@@ -1822,6 +2042,18 @@ func assertStrings(t *testing.T, got []string, want []string) {
 	for i := range got {
 		if got[i] != want[i] {
 			t.Fatalf("strings are %v, want %v", got, want)
+		}
+	}
+}
+
+func assertStringMap(t *testing.T, got map[string]string, want map[string]string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("string map is %v, want %v", got, want)
+	}
+	for key, wantValue := range want {
+		if got[key] != wantValue {
+			t.Fatalf("string map is %v, want %v", got, want)
 		}
 	}
 }

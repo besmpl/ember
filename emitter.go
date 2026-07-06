@@ -902,7 +902,260 @@ func (c *compiler) canCompileSingleLocalAssignmentInPlace(lowered loweredAssignm
 		return false
 	}
 	ref, ok := c.resolveAssignTarget(target)
-	return ok && ref.kind == variableLocal
+	if !ok || ref.kind != variableLocal {
+		return false
+	}
+	return expressionCanAssignToNameInPlace(lowered.sources[item.source], target.name)
+}
+
+func expressionCanAssignToNameInPlace(expr expression, name string) bool {
+	if !expressionReferencesName(expr, name) {
+		return true
+	}
+	if len(expr.terms) == 0 {
+		return true
+	}
+	if !andExpressionCanAssignToNameInPlace(expr.terms[0], name) {
+		return false
+	}
+	for _, term := range expr.terms[1:] {
+		if andExpressionReferencesName(term, name) {
+			return false
+		}
+	}
+	return true
+}
+
+func andExpressionCanAssignToNameInPlace(expr andExpression, name string) bool {
+	if !andExpressionReferencesName(expr, name) {
+		return true
+	}
+	if len(expr.terms) == 0 {
+		return true
+	}
+	if !comparisonExpressionCanAssignToNameInPlace(expr.terms[0], name) {
+		return false
+	}
+	for _, term := range expr.terms[1:] {
+		if comparisonExpressionReferencesName(term, name) {
+			return false
+		}
+	}
+	return true
+}
+
+func comparisonExpressionCanAssignToNameInPlace(expr comparisonExpression, name string) bool {
+	if !comparisonExpressionReferencesName(expr, name) {
+		return true
+	}
+	if !concatExpressionCanAssignToNameInPlace(expr.left, name) {
+		return false
+	}
+	return expr.right == nil || !concatExpressionReferencesName(*expr.right, name)
+}
+
+func concatExpressionCanAssignToNameInPlace(expr concatExpression, name string) bool {
+	if !concatExpressionReferencesName(expr, name) {
+		return true
+	}
+	if !additiveExpressionCanAssignToNameInPlace(expr.first, name) {
+		return false
+	}
+	for _, part := range expr.rest {
+		if additiveExpressionReferencesName(part, name) {
+			return false
+		}
+	}
+	return true
+}
+
+func additiveExpressionCanAssignToNameInPlace(expr additiveExpression, name string) bool {
+	if !additiveExpressionReferencesName(expr, name) {
+		return true
+	}
+	if !multiplicativeExpressionCanAssignToNameInPlace(expr.first, name) {
+		return false
+	}
+	for _, part := range expr.rest {
+		if multiplicativeExpressionReferencesName(part.value, name) {
+			return false
+		}
+	}
+	return true
+}
+
+func multiplicativeExpressionCanAssignToNameInPlace(expr multiplicativeExpression, name string) bool {
+	if !multiplicativeExpressionReferencesName(expr, name) {
+		return true
+	}
+	if !termCanAssignToNameInPlace(expr.first, name) {
+		return false
+	}
+	for _, part := range expr.rest {
+		if termReferencesName(part.value, name) {
+			return false
+		}
+	}
+	return true
+}
+
+func termCanAssignToNameInPlace(term term, name string) bool {
+	if !termReferencesName(term, name) {
+		return true
+	}
+	if term.name == name {
+		for _, selector := range term.selectors {
+			if selector.index != nil && expressionReferencesName(*selector.index, name) {
+				return false
+			}
+		}
+		return true
+	}
+	if term.unaryNot != nil {
+		return termCanAssignToNameInPlace(*term.unaryNot, name)
+	}
+	if term.unaryMinus != nil {
+		return termCanAssignToNameInPlace(*term.unaryMinus, name)
+	}
+	if term.unaryLen != nil {
+		return termCanAssignToNameInPlace(*term.unaryLen, name)
+	}
+	if term.power != nil {
+		return termCanAssignToNameInPlace(term.power.base, name) &&
+			!termReferencesName(term.power.exponent, name)
+	}
+	if term.group != nil {
+		return expressionCanAssignToNameInPlace(*term.group, name)
+	}
+	return false
+}
+
+func expressionReferencesName(expr expression, name string) bool {
+	for _, term := range expr.terms {
+		if andExpressionReferencesName(term, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func andExpressionReferencesName(expr andExpression, name string) bool {
+	for _, term := range expr.terms {
+		if comparisonExpressionReferencesName(term, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func comparisonExpressionReferencesName(expr comparisonExpression, name string) bool {
+	if concatExpressionReferencesName(expr.left, name) {
+		return true
+	}
+	return expr.right != nil && concatExpressionReferencesName(*expr.right, name)
+}
+
+func concatExpressionReferencesName(expr concatExpression, name string) bool {
+	if additiveExpressionReferencesName(expr.first, name) {
+		return true
+	}
+	for _, part := range expr.rest {
+		if additiveExpressionReferencesName(part, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func additiveExpressionReferencesName(expr additiveExpression, name string) bool {
+	if multiplicativeExpressionReferencesName(expr.first, name) {
+		return true
+	}
+	for _, part := range expr.rest {
+		if multiplicativeExpressionReferencesName(part.value, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func multiplicativeExpressionReferencesName(expr multiplicativeExpression, name string) bool {
+	if termReferencesName(expr.first, name) {
+		return true
+	}
+	for _, part := range expr.rest {
+		if termReferencesName(part.value, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func termReferencesName(term term, name string) bool {
+	if term.name == name {
+		return true
+	}
+	if term.table != nil && tableExpressionReferencesName(*term.table, name) {
+		return true
+	}
+	if term.ifExpr != nil &&
+		(expressionReferencesName(term.ifExpr.condition, name) ||
+			expressionReferencesName(term.ifExpr.thenValue, name) ||
+			expressionReferencesName(term.ifExpr.elseValue, name)) {
+		return true
+	}
+	if term.call != nil && callExpressionReferencesName(*term.call, name) {
+		return true
+	}
+	if term.unaryNot != nil && termReferencesName(*term.unaryNot, name) {
+		return true
+	}
+	if term.unaryMinus != nil && termReferencesName(*term.unaryMinus, name) {
+		return true
+	}
+	if term.unaryLen != nil && termReferencesName(*term.unaryLen, name) {
+		return true
+	}
+	if term.power != nil &&
+		(termReferencesName(term.power.base, name) || termReferencesName(term.power.exponent, name)) {
+		return true
+	}
+	if term.group != nil && expressionReferencesName(*term.group, name) {
+		return true
+	}
+	for _, selector := range term.selectors {
+		if selector.index != nil && expressionReferencesName(*selector.index, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func tableExpressionReferencesName(table tableExpression, name string) bool {
+	for _, field := range table.fields {
+		if field.key != nil && expressionReferencesName(*field.key, name) {
+			return true
+		}
+		if expressionReferencesName(field.value, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func callExpressionReferencesName(call callExpression, name string) bool {
+	if termReferencesName(call.target, name) {
+		return true
+	}
+	if call.receiver != nil && termReferencesName(*call.receiver, name) {
+		return true
+	}
+	for _, arg := range call.args {
+		if expressionReferencesName(arg, name) {
+			return true
+		}
+	}
+	return false
 }
 
 type addStringFieldAssignment struct {

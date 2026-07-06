@@ -3535,6 +3535,28 @@ return value
 	}
 }
 
+func TestCompileAndRunAssignmentRHSCanReadAssignedLocal(t *testing.T) {
+	proto, err := ember.Compile(`
+local function appendValue(old, value)
+	if old ~= "" then
+		value = old .. "|" .. value
+	end
+	return value
+end
+
+return appendValue("old", "new")
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	results, err := ember.Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	assertValueStrings(t, results, []string{"old|new"})
+}
+
 func TestCompileAndRunHostFunctionWithNoResults(t *testing.T) {
 	proto, err := ember.Compile("return noop()")
 	if err != nil {
