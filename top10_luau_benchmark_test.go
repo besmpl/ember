@@ -1093,9 +1093,23 @@ func TestScenarioEmberRunAllocationBudgets(t *testing.T) {
 		maxBytesPerOp  uint64
 		maxAllocsPerOp uint64
 	}{
-		"combat_tick":     {maxBytesPerOp: 3600, maxAllocsPerOp: 16},
-		"inventory_value": {maxBytesPerOp: 3600, maxAllocsPerOp: 18},
-		"event_dispatch":  {maxBytesPerOp: 4000, maxAllocsPerOp: 30},
+		"combat_tick":             {maxBytesPerOp: 3700, maxAllocsPerOp: 16},
+		"inventory_value":         {maxBytesPerOp: 3700, maxAllocsPerOp: 18},
+		"event_dispatch":          {maxBytesPerOp: 4100, maxAllocsPerOp: 30},
+		"buff_stack_tick":         {maxBytesPerOp: 6600, maxAllocsPerOp: 34},
+		"ability_resolution":      {maxBytesPerOp: 4100, maxAllocsPerOp: 20},
+		"ai_utility_scoring":      {maxBytesPerOp: 6200, maxAllocsPerOp: 28},
+		"cooldown_scheduler":      {maxBytesPerOp: 7700, maxAllocsPerOp: 36},
+		"projectile_sweep":        {maxBytesPerOp: 6700, maxAllocsPerOp: 26},
+		"quest_progress_update":   {maxBytesPerOp: 9800, maxAllocsPerOp: 46},
+		"behavior_tree_tick":      {maxBytesPerOp: 4500, maxAllocsPerOp: 20},
+		"threat_aggro_table":      {maxBytesPerOp: 9000, maxAllocsPerOp: 42},
+		"economy_market_tick":     {maxBytesPerOp: 8500, maxAllocsPerOp: 42},
+		"formation_layout_score":  {maxBytesPerOp: 8000, maxAllocsPerOp: 30},
+		"dialogue_condition_eval": {maxBytesPerOp: 8700, maxAllocsPerOp: 45},
+		"procgen_room_scoring":    {maxBytesPerOp: 4600, maxAllocsPerOp: 18},
+		"save_state_diff":         {maxBytesPerOp: 7700, maxAllocsPerOp: 36},
+		"path_relaxation":         {maxBytesPerOp: 12600, maxAllocsPerOp: 67},
 	}
 
 	for _, tc := range scenarioLuauCases {

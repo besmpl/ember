@@ -18,14 +18,14 @@ func baseSetMetatable(globals *globalEnv, args []Value) ([]Value, error) {
 	}
 
 	if len(args) < 2 || args[1].IsNil() {
-		table.metatable = nil
+		table.setMetatable(nil)
 		return []Value{TableValue(table)}, nil
 	}
 	metatable, ok := args[1].Table()
 	if !ok {
 		return nil, fmt.Errorf("setmetatable: argument #2 is %s, want table or nil", args[1].Kind())
 	}
-	table.metatable = metatable
+	table.setMetatable(metatable)
 	return []Value{TableValue(table)}, nil
 }
 

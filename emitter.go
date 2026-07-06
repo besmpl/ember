@@ -22,6 +22,7 @@ type compiler struct {
 	loops               []loopContext
 	nextReg             int
 	freeTemps           []int
+	suppressTagChains   bool
 	options             compilerOptions
 }
 
@@ -70,7 +71,40 @@ func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (
 	}
 
 	c.optimize(options.optimizations)
-	return c.finalizeProto(nil, c.nextReg, 0, false)
+	return c.finalizeCompiledProto(nil, 0, false)
+}
+
+func (c *compiler) finalizeCompiledProto(upvalues []upvalueDesc, params int, variadic bool) (*Proto, error) {
+	registers := compactedCompiledRegisterCount(c.assembledCode(), c.prototypes, c.nextReg, params)
+	return c.finalizeProto(upvalues, registers, params, variadic)
+}
+
+func compactedCompiledRegisterCount(code []instruction, children []*Proto, allocated int, params int) int {
+	limit := allocated
+	if limit < params {
+		limit = params
+	}
+	maxRegister := params - 1
+	for _, ins := range code {
+		for register := 0; register < limit; register++ {
+			if instructionReadsRegister(ins, register) || instructionWritesRegister(ins, register) {
+				if register > maxRegister {
+					maxRegister = register
+				}
+			}
+		}
+	}
+	for _, child := range children {
+		for _, desc := range child.upvalues {
+			if desc.local && desc.index > maxRegister {
+				maxRegister = desc.index
+			}
+		}
+	}
+	if maxRegister < 0 {
+		return 0
+	}
+	return maxRegister + 1
 }
 
 func (c *compiler) compileStatements(statements []statement) error {
@@ -154,6 +188,10 @@ func (c *compiler) compileLoweredLocal(lowered loweredLocal) error {
 				}
 				if slots, ok := expressionArrayElementNamedTableFieldSlots(lowered.sources[item.source]); ok {
 					c.localArrayElemSlots[targets[i]] = slots
+				}
+				if slots, ok := c.expressionIndexedLocalArrayElementSlots(lowered.sources[item.source]); ok {
+					c.localStringSlots[targets[i]] = slots
+					c.localRowStringSlots[targets[i]] = slots
 				}
 			}
 		}
@@ -336,7 +374,7 @@ func (c *compiler) compileFunctionProto(closure loweredClosure, selfFunctionSymb
 	}
 
 	fn.optimize(c.options.optimizations)
-	return fn.finalizeProto(fn.upvalueDescs, fn.nextReg, len(closure.params), closure.variadic)
+	return fn.finalizeCompiledProto(fn.upvalueDescs, len(closure.params), closure.variadic)
 }
 
 func (c *compiler) compileExpression(expr expression) (int, error) {
@@ -655,6 +693,16 @@ func (c *compiler) compileSelectorsTo(selectors []selector, target int) error {
 			selectors = selectors[2:]
 			continue
 		}
+		if len(selectors) >= 2 && selectors[0].field != "" && selectors[1].index != nil {
+			firstKey := c.addConstant(StringValue(selectors[0].field))
+			key := c.allocReg()
+			if err := c.compileExpressionTo(*selectors[1].index, key); err != nil {
+				return err
+			}
+			c.emit(instruction{op: opGetStringFieldIndex, a: target, b: target, c: firstKey, d: key})
+			selectors = selectors[2:]
+			continue
+		}
 
 		selector := selectors[0]
 		if selector.field != "" {
@@ -686,6 +734,15 @@ func (c *compiler) compileSelectorsFromBaseTo(base int, selectors []selector, ta
 		firstKey := c.addConstant(StringValue(first.field))
 		secondKey := c.addConstant(StringValue(selectors[1].field))
 		c.emit(instruction{op: opGetStringField2, a: target, b: base, c: firstKey, d: secondKey})
+		return c.compileSelectorsTo(selectors[2:], target)
+	}
+	if len(selectors) >= 2 && first.field != "" && selectors[1].index != nil {
+		firstKey := c.addConstant(StringValue(first.field))
+		key := c.allocReg()
+		if err := c.compileExpressionTo(*selectors[1].index, key); err != nil {
+			return err
+		}
+		c.emit(instruction{op: opGetStringFieldIndex, a: target, b: base, c: firstKey, d: key})
 		return c.compileSelectorsTo(selectors[2:], target)
 	}
 	if first.field != "" {
@@ -837,12 +894,14 @@ type addStringFieldAssignment struct {
 	table   int
 	field   string
 	operand expression
+	slot    int
 }
 
 type subStringFieldAssignment struct {
 	table   int
 	field   string
 	operand expression
+	slot    int
 }
 
 type subAddStringFieldAssignment struct {
@@ -893,10 +952,17 @@ func (c *compiler) addStringFieldAssignment(lowered loweredAssignment) (addStrin
 	if !ok {
 		return addStringFieldAssignment{}, false
 	}
+	slot := -1
+	if slots, ok := c.localStringSlots[ref.index]; ok {
+		if fieldSlot, ok := slots[target.selectors[0].field]; ok {
+			slot = fieldSlot
+		}
+	}
 	return addStringFieldAssignment{
 		table:   ref.index,
 		field:   target.selectors[0].field,
 		operand: operand,
+		slot:    slot,
 	}, true
 }
 
@@ -923,10 +989,17 @@ func (c *compiler) subStringFieldAssignment(lowered loweredAssignment) (subStrin
 	if !ok {
 		return subStringFieldAssignment{}, false
 	}
+	slot := -1
+	if slots, ok := c.localStringSlots[ref.index]; ok {
+		if fieldSlot, ok := slots[target.selectors[0].field]; ok {
+			slot = fieldSlot
+		}
+	}
 	return subStringFieldAssignment{
 		table:   ref.index,
 		field:   target.selectors[0].field,
 		operand: operand,
+		slot:    slot,
 	}, true
 }
 
@@ -1138,6 +1211,25 @@ func expressionArrayElementNamedTableFieldSlots(expr expression) (map[string]int
 	return shape, true
 }
 
+func (c *compiler) expressionIndexedLocalArrayElementSlots(expr expression) (map[string]int, bool) {
+	value, ok := expressionSingleTerm(expr)
+	if !ok || value.name == "" || len(value.selectors) != 1 {
+		return nil, false
+	}
+	selector := value.selectors[0]
+	if selector.field != "" || selector.index == nil {
+		return nil, false
+	}
+	base := value
+	base.selectors = nil
+	ref, ok := c.termLocalRef(base)
+	if !ok {
+		return nil, false
+	}
+	slots, ok := c.localArrayElemSlots[ref.index]
+	return slots, ok
+}
+
 func stringSlotMapsEqual(left map[string]int, right map[string]int) bool {
 	if len(left) != len(right) {
 		return false
@@ -1157,7 +1249,7 @@ func (c *compiler) compileAddStringFieldAssignment(addField addStringFieldAssign
 		return err
 	}
 	key := c.addConstant(StringValue(addField.field))
-	c.emit(instruction{op: opAddStringField, a: addField.table, b: key, c: operand})
+	c.emit(instruction{op: opAddStringField, a: addField.table, b: key, c: operand, d: addField.slot})
 	c.releaseTemp(operand)
 	return nil
 }
@@ -1169,7 +1261,7 @@ func (c *compiler) compileSubStringFieldAssignment(subField subStringFieldAssign
 		return err
 	}
 	key := c.addConstant(StringValue(subField.field))
-	c.emit(instruction{op: opSubStringField, a: subField.table, b: key, c: operand})
+	c.emit(instruction{op: opSubStringField, a: subField.table, b: key, c: operand, d: subField.slot})
 	c.releaseTemp(operand)
 	return nil
 }
@@ -1507,6 +1599,15 @@ func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value in
 			c.emit(instruction{op: opSetStringField2, a: ref.index, b: firstKey, c: secondKey, d: value})
 			return nil
 		}
+		if first.field != "" && second.index != nil {
+			firstKey := c.addConstant(StringValue(first.field))
+			key := c.allocReg()
+			if err := c.compileExpressionTo(*second.index, key); err != nil {
+				return err
+			}
+			c.emit(instruction{op: opSetStringFieldIndex, a: ref.index, b: firstKey, c: key, d: value})
+			return nil
+		}
 	}
 
 	table := c.allocReg()
@@ -1545,6 +1646,24 @@ func (c *compiler) compileIf(stmt ifStatement) error {
 }
 
 func (c *compiler) compileLoweredIf(branch loweredIfStatement) error {
+	if !c.suppressTagChains {
+		if ok, err := c.compileStringTagElseIfChain(branch); ok || err != nil {
+			return err
+		}
+	}
+	return c.compileLoweredIfDefault(branch)
+}
+
+func (c *compiler) compileLoweredIfSlowPath(branch loweredIfStatement) error {
+	previous := c.suppressTagChains
+	c.suppressTagChains = true
+	defer func() {
+		c.suppressTagChains = previous
+	}()
+	return c.compileLoweredIfDefault(branch)
+}
+
+func (c *compiler) compileLoweredIfDefault(branch loweredIfStatement) error {
 	jumpIfFalse, ok, err := c.compileConditionJumpIfFalse(branch.condition)
 	if err != nil {
 		return err
@@ -1578,6 +1697,153 @@ func (c *compiler) compileLoweredIf(branch loweredIfStatement) error {
 
 	c.patchJump(jumpEnd, c.pc())
 	return nil
+}
+
+type stringTagElseIfArm struct {
+	value  string
+	guards []comparisonExpression
+	body   []statement
+}
+
+type stringTagElseIfChain struct {
+	table    int
+	field    string
+	slot     int
+	arms     []stringTagElseIfArm
+	elseBody []statement
+}
+
+func (c *compiler) compileStringTagElseIfChain(branch loweredIfStatement) (bool, error) {
+	chain, ok := c.stringTagElseIfChain(branch)
+	if !ok {
+		return false, nil
+	}
+
+	outerLocals := copyLocals(c.locals)
+	metatableJump := c.emit(instruction{op: opJumpIfTableHasMetatable, a: chain.table})
+	tag := c.allocTemp()
+	field := c.addConstant(StringValue(chain.field))
+	if chain.slot >= 0 {
+		c.emit(instruction{op: opGetRowStringField, a: tag, b: chain.table, c: field, d: chain.slot})
+	} else {
+		c.emit(instruction{op: opGetStringField, a: tag, b: chain.table, c: field})
+	}
+
+	endJumps := make([]int, 0, len(chain.arms)+1)
+	for _, arm := range chain.arms {
+		value := c.addConstant(StringValue(arm.value))
+		nextArmJumps := []int{c.emit(instruction{op: opJumpIfNotEqualK, a: tag, b: value})}
+		if len(arm.guards) > 0 {
+			guardJump, ok, err := c.compileConditionJumpIfFalse(expression{
+				terms: []andExpression{{terms: arm.guards}},
+			})
+			if err != nil {
+				c.releaseTemp(tag)
+				return true, err
+			}
+			if !ok {
+				guardCondition, err := c.compileExpression(expression{
+					terms: []andExpression{{terms: arm.guards}},
+				})
+				if err != nil {
+					c.releaseTemp(tag)
+					return true, err
+				}
+				guardJump = c.emitJumpIfFalse(guardCondition)
+				c.releaseTemp(guardCondition)
+			}
+			nextArmJumps = append(nextArmJumps, guardJump)
+		}
+		if err := c.compileStatements(arm.body); err != nil {
+			c.releaseTemp(tag)
+			return true, err
+		}
+		c.locals = copyLocals(outerLocals)
+		endJumps = append(endJumps, c.emitJump())
+		nextArm := c.pc()
+		for _, jump := range nextArmJumps {
+			c.patchJump(jump, nextArm)
+		}
+	}
+	if len(chain.elseBody) > 0 {
+		if err := c.compileStatements(chain.elseBody); err != nil {
+			c.releaseTemp(tag)
+			return true, err
+		}
+		c.locals = copyLocals(outerLocals)
+	}
+	endJumps = append(endJumps, c.emitJump())
+
+	slowStart := c.pc()
+	c.patchJump(metatableJump, slowStart)
+	c.releaseTemp(tag)
+	if err := c.compileLoweredIfSlowPath(branch); err != nil {
+		return true, err
+	}
+	end := c.pc()
+	for _, jump := range endJumps {
+		c.patchJump(jump, end)
+	}
+	c.locals = copyLocals(outerLocals)
+	return true, nil
+}
+
+func (c *compiler) stringTagElseIfChain(branch loweredIfStatement) (stringTagElseIfChain, bool) {
+	first, firstGuards, ok := c.stringTagArmCondition(branch.condition)
+	if !ok {
+		return stringTagElseIfChain{}, false
+	}
+	chain := stringTagElseIfChain{
+		table: first.table,
+		field: first.field,
+		slot:  first.slot,
+		arms: []stringTagElseIfArm{{
+			value:  first.value,
+			guards: firstGuards,
+			body:   branch.thenBody,
+		}},
+	}
+	elseBody := branch.elseBody
+	for len(elseBody) == 1 && elseBody[0].ifStmt != nil {
+		nextBranch := lowerIfStatement(*elseBody[0].ifStmt)
+		condition, guards, ok := c.stringTagArmCondition(nextBranch.condition)
+		if !ok ||
+			condition.table != chain.table ||
+			condition.field != chain.field ||
+			condition.slot != chain.slot {
+			return stringTagElseIfChain{}, false
+		}
+		chain.arms = append(chain.arms, stringTagElseIfArm{
+			value:  condition.value,
+			guards: guards,
+			body:   nextBranch.thenBody,
+		})
+		elseBody = nextBranch.elseBody
+	}
+	if len(chain.arms) < 3 {
+		return stringTagElseIfChain{}, false
+	}
+	chain.elseBody = elseBody
+	return chain, true
+}
+
+func (c *compiler) stringTagArmCondition(expr expression) (stringFieldEqualityCondition, []comparisonExpression, bool) {
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) == 0 {
+		return stringFieldEqualityCondition{}, nil, false
+	}
+	condition, ok := c.stringFieldEqualityCondition(expr.terms[0].terms[0])
+	if !ok {
+		return stringFieldEqualityCondition{}, nil, false
+	}
+	guards := append([]comparisonExpression(nil), expr.terms[0].terms[1:]...)
+	return condition, guards, true
+}
+
+func (c *compiler) singleStringFieldEqualityCondition(expr expression) (stringFieldEqualityCondition, bool) {
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+		return stringFieldEqualityCondition{}, false
+	}
+	return c.stringFieldEqualityCondition(expr.terms[0].terms[0])
 }
 
 func (c *compiler) compileIfExpressionTo(expr ifExpression, target int) error {
@@ -1615,13 +1881,31 @@ func (c *compiler) compileConditionJumpIfFalse(expr expression) (int, bool, erro
 		return 0, false, nil
 	}
 	expr = optimizeExpression(expr, c.options.optimizations)
+	if jump, ok, err := c.compileRowStringFieldPairEqualityJumpIfFalse(expr); ok || err != nil {
+		return jump, ok, err
+	}
 	if jump, ok, err := c.compileStringFieldEqualityJumpIfFalse(expr); ok || err != nil {
 		return jump, ok, err
 	}
 	if jump, ok, err := c.compileStringFieldNumericJumpIfFalse(expr); ok || err != nil {
 		return jump, ok, err
 	}
+	if jump, ok, err := c.compileRowStringFieldPairNumericJumpIfFalse(expr); ok || err != nil {
+		return jump, ok, err
+	}
+	if jump, ok, err := c.compileRegisterStringFieldNumericJumpIfFalse(expr); ok || err != nil {
+		return jump, ok, err
+	}
 	if jump, ok, err := c.compileStringFieldTruthyJumpIfFalse(expr); ok || err != nil {
+		return jump, ok, err
+	}
+	if jump, ok, err := c.compileStringFieldNotJumpIfFalse(expr); ok || err != nil {
+		return jump, ok, err
+	}
+	if jump, ok, err := c.compileStringFieldNilJumpIfFalse(expr); ok || err != nil {
+		return jump, ok, err
+	}
+	if jump, ok, err := c.compileAndChainJumpIfFalse(expr); ok || err != nil {
 		return jump, ok, err
 	}
 	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
@@ -1633,7 +1917,7 @@ func (c *compiler) compileConditionJumpIfFalse(expr expression) (int, bool, erro
 	}
 	right, ok := foldNumberConcat(*comparison.right)
 	if !ok {
-		return 0, false, nil
+		return c.compileRegisterNumericJumpIfFalse(comparison)
 	}
 	if condition, ok := c.moduloConstantEqualityCondition(comparison, right); ok {
 		mod := c.addConstant(NumberValue(condition.mod))
@@ -1659,6 +1943,159 @@ func (c *compiler) compileConditionJumpIfFalse(expr expression) (int, bool, erro
 		releaseLeft()
 		return 0, false, nil
 	}
+}
+
+func (c *compiler) compileRegisterNumericJumpIfFalse(comparison comparisonExpression) (int, bool, error) {
+	if comparison.right == nil {
+		return 0, false, nil
+	}
+	var op opcode
+	switch comparison.op {
+	case comparisonLess:
+		op = opJumpIfNotLess
+	case comparisonGreater:
+		op = opJumpIfNotGreater
+	default:
+		return 0, false, nil
+	}
+	left, releaseLeft, err := c.compileConditionLeftRegister(comparison.left)
+	if err != nil {
+		return 0, false, err
+	}
+	right, releaseRight, err := c.compileConditionLeftRegister(*comparison.right)
+	if err != nil {
+		releaseLeft()
+		return 0, false, err
+	}
+	jump := c.emit(instruction{op: op, a: left, b: right})
+	releaseRight()
+	releaseLeft()
+	return jump, true, nil
+}
+
+type andChainBranchPlan struct {
+	op    opcode
+	a     int
+	b     int
+	field string
+	slot  int
+}
+
+func (c *compiler) compileAndChainJumpIfFalse(expr expression) (int, bool, error) {
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) < 2 {
+		return 0, false, nil
+	}
+	plans := make([]andChainBranchPlan, 0, len(expr.terms[0].terms))
+	for _, comparison := range expr.terms[0].terms {
+		plan, ok := c.andChainBranchPlan(comparison)
+		if !ok {
+			return 0, false, nil
+		}
+		plans = append(plans, plan)
+	}
+	falseJumps := make([]int, 0, len(plans))
+	for _, plan := range plans {
+		switch plan.op {
+		case opJumpIfStringFieldFalse, opJumpIfStringFieldTrue, opJumpIfStringFieldNil, opJumpIfStringFieldNotNil:
+			field := c.addConstant(StringValue(plan.field))
+			falseJumps = append(falseJumps, c.emit(instruction{
+				op: plan.op,
+				a:  plan.a,
+				b:  field,
+				c:  plan.slot,
+			}))
+		case opJumpIfNotLess, opJumpIfNotGreater:
+			falseJumps = append(falseJumps, c.emit(instruction{
+				op: plan.op,
+				a:  plan.a,
+				b:  plan.b,
+			}))
+		default:
+			return 0, false, nil
+		}
+	}
+	passJump := c.emitJump()
+	falseTarget := c.pc()
+	for _, jump := range falseJumps {
+		c.patchJump(jump, falseTarget)
+	}
+	exitJump := c.emitJump()
+	c.patchJump(passJump, c.pc())
+	return exitJump, true, nil
+}
+
+func (c *compiler) andChainBranchPlan(comparison comparisonExpression) (andChainBranchPlan, bool) {
+	if comparison.op == "" && comparison.right == nil {
+		if table, field, ok := c.concatLocalStringFieldRef(comparison.left); ok {
+			return andChainBranchPlan{
+				op:    opJumpIfStringFieldFalse,
+				a:     table.index,
+				field: field,
+				slot:  c.localRowStringFieldSlot(table.index, field),
+			}, true
+		}
+		if table, field, ok := c.concatUnaryNotLocalStringFieldRef(comparison.left); ok {
+			return andChainBranchPlan{
+				op:    opJumpIfStringFieldTrue,
+				a:     table.index,
+				field: field,
+				slot:  c.localRowStringFieldSlot(table.index, field),
+			}, true
+		}
+		return andChainBranchPlan{}, false
+	}
+	if comparison.right == nil {
+		return andChainBranchPlan{}, false
+	}
+	if table, field, ok := c.concatLocalStringFieldRef(comparison.left); ok && concatNilLiteral(*comparison.right) {
+		switch comparison.op {
+		case comparisonNotEqual:
+			return andChainBranchPlan{
+				op:    opJumpIfStringFieldNil,
+				a:     table.index,
+				field: field,
+				slot:  c.localRowStringFieldSlot(table.index, field),
+			}, true
+		case comparisonEqual:
+			return andChainBranchPlan{
+				op:    opJumpIfStringFieldNotNil,
+				a:     table.index,
+				field: field,
+				slot:  c.localRowStringFieldSlot(table.index, field),
+			}, true
+		}
+	}
+	var op opcode
+	switch comparison.op {
+	case comparisonLess:
+		op = opJumpIfNotLess
+	case comparisonGreater:
+		op = opJumpIfNotGreater
+	default:
+		return andChainBranchPlan{}, false
+	}
+	left, ok := c.concatLocalRef(comparison.left)
+	if !ok {
+		return andChainBranchPlan{}, false
+	}
+	right, ok := c.concatLocalRef(*comparison.right)
+	if !ok {
+		return andChainBranchPlan{}, false
+	}
+	return andChainBranchPlan{
+		op: op,
+		a:  left.index,
+		b:  right.index,
+	}, true
+}
+
+func (c *compiler) localRowStringFieldSlot(register int, field string) int {
+	if slots, ok := c.localRowStringSlots[register]; ok {
+		if slot, ok := slots[field]; ok {
+			return slot
+		}
+	}
+	return -1
 }
 
 type moduloConstantEqualityCondition struct {
@@ -1745,6 +2182,102 @@ func (c *compiler) emitStringFieldEqualityJump(condition stringFieldEqualityCond
 	return c.emit(instruction{op: opJumpIfStringFieldNotEqualK, a: condition.table, b: field, c: value})
 }
 
+type rowStringFieldPairEqualityCondition struct {
+	leftTable  int
+	rightTable int
+	leftField  string
+	rightField string
+	leftSlot   int
+	rightSlot  int
+	op         comparisonOperator
+}
+
+func (c *compiler) compileRowStringFieldPairEqualityJumpIfFalse(expr expression) (int, bool, error) {
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) == 0 {
+		return 0, false, nil
+	}
+	conditions := make([]rowStringFieldPairEqualityCondition, 0, len(expr.terms[0].terms))
+	for _, comparison := range expr.terms[0].terms {
+		condition, ok := c.rowStringFieldPairEqualityCondition(comparison)
+		if !ok {
+			return 0, false, nil
+		}
+		conditions = append(conditions, condition)
+	}
+	if len(conditions) == 1 {
+		return c.emitRowStringFieldPairEqualityJump(conditions[0]), true, nil
+	}
+	falseJumps := make([]int, 0, len(conditions))
+	for _, condition := range conditions {
+		falseJumps = append(falseJumps, c.emitRowStringFieldPairEqualityJump(condition))
+	}
+	passJump := c.emitJump()
+	falseTarget := c.pc()
+	for _, jump := range falseJumps {
+		c.patchJump(jump, falseTarget)
+	}
+	exitJump := c.emitJump()
+	c.patchJump(passJump, c.pc())
+	return exitJump, true, nil
+}
+
+func (c *compiler) emitRowStringFieldPairEqualityJump(condition rowStringFieldPairEqualityCondition) int {
+	desc := c.addRowFieldPairOp(rowFieldPairOp{
+		leftField:  c.addConstant(StringValue(condition.leftField)),
+		rightField: c.addConstant(StringValue(condition.rightField)),
+		leftSlot:   condition.leftSlot,
+		rightSlot:  condition.rightSlot,
+	})
+	op := opJumpIfRowStringFieldNotEqualField
+	if condition.op == comparisonNotEqual {
+		op = opJumpIfRowStringFieldEqualField
+	}
+	return c.emit(instruction{
+		op: op,
+		a:  condition.leftTable,
+		b:  desc,
+		c:  condition.rightTable,
+	})
+}
+
+func (c *compiler) rowStringFieldPairEqualityCondition(expr comparisonExpression) (rowStringFieldPairEqualityCondition, bool) {
+	if (expr.op != comparisonEqual && expr.op != comparisonNotEqual) || expr.right == nil {
+		return rowStringFieldPairEqualityCondition{}, false
+	}
+	leftTable, leftField, ok := c.concatLocalStringFieldRef(expr.left)
+	if !ok {
+		return rowStringFieldPairEqualityCondition{}, false
+	}
+	rightTable, rightField, ok := c.concatLocalStringFieldRef(*expr.right)
+	if !ok {
+		return rowStringFieldPairEqualityCondition{}, false
+	}
+	leftSlot := -1
+	if slots, ok := c.localRowStringSlots[leftTable.index]; ok {
+		if slot, ok := slots[leftField]; ok {
+			leftSlot = slot
+		}
+	}
+	rightSlot := -1
+	if slots, ok := c.localRowStringSlots[rightTable.index]; ok {
+		if slot, ok := slots[rightField]; ok {
+			rightSlot = slot
+		}
+	}
+	if leftSlot < 0 || rightSlot < 0 {
+		return rowStringFieldPairEqualityCondition{}, false
+	}
+	return rowStringFieldPairEqualityCondition{
+		leftTable:  leftTable.index,
+		rightTable: rightTable.index,
+		leftField:  leftField,
+		rightField: rightField,
+		leftSlot:   leftSlot,
+		rightSlot:  rightSlot,
+		op:         expr.op,
+	}, true
+}
+
 func (c *compiler) stringFieldEqualityCondition(expr comparisonExpression) (stringFieldEqualityCondition, bool) {
 	if expr.op != comparisonEqual || expr.right == nil {
 		return stringFieldEqualityCondition{}, false
@@ -1815,6 +2348,27 @@ func (c *compiler) compileStringFieldNumericJumpIfFalse(expr expression) (int, b
 	}
 	fieldConstant := c.addConstant(StringValue(field))
 	valueConstant := c.addConstant(NumberValue(right))
+	slot := -1
+	if slots, ok := c.localRowStringSlots[table.index]; ok {
+		if fieldSlot, ok := slots[field]; ok {
+			slot = fieldSlot
+		}
+	}
+	if slot >= 0 {
+		desc := c.addRowFieldEqualOp(rowFieldEqualOp{
+			field: fieldConstant,
+			value: valueConstant,
+			slot:  slot,
+		})
+		switch comparison.op {
+		case comparisonGreater:
+			jump := c.emit(instruction{op: opJumpIfRowStringFieldNotGreaterK, a: table.index, b: desc})
+			return jump, true, nil
+		case comparisonLessEqual:
+			jump := c.emit(instruction{op: opJumpIfRowStringFieldGreaterK, a: table.index, b: desc})
+			return jump, true, nil
+		}
+	}
 	switch comparison.op {
 	case comparisonGreater:
 		jump := c.emit(instruction{op: opJumpIfStringFieldNotGreaterK, a: table.index, b: fieldConstant, c: valueConstant})
@@ -1825,6 +2379,81 @@ func (c *compiler) compileStringFieldNumericJumpIfFalse(expr expression) (int, b
 	default:
 		return 0, false, nil
 	}
+}
+
+func (c *compiler) compileRegisterStringFieldNumericJumpIfFalse(expr expression) (int, bool, error) {
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+		return 0, false, nil
+	}
+	comparison := expr.terms[0].terms[0]
+	if comparison.op != comparisonLess || comparison.right == nil {
+		return 0, false, nil
+	}
+	table, field, ok := c.concatLocalStringFieldRef(*comparison.right)
+	if !ok {
+		return 0, false, nil
+	}
+	left, releaseLeft, err := c.compileConditionLeftRegister(comparison.left)
+	if err != nil {
+		return 0, false, err
+	}
+	fieldConstant := c.addConstant(StringValue(field))
+	slot := -1
+	if slots, ok := c.localRowStringSlots[table.index]; ok {
+		if fieldSlot, ok := slots[field]; ok {
+			slot = fieldSlot
+		}
+	}
+	var jump int
+	if slot >= 0 {
+		desc := c.addRowFieldRegisterOp(rowFieldRegisterOp{
+			field: fieldConstant,
+			slot:  slot,
+		})
+		jump = c.emit(instruction{op: opJumpIfRowStringFieldNotGreaterR, a: table.index, b: desc, c: left})
+	} else {
+		jump = c.emit(instruction{op: opJumpIfStringFieldNotGreaterR, a: table.index, b: fieldConstant, c: left})
+	}
+	releaseLeft()
+	return jump, true, nil
+}
+
+func (c *compiler) compileRowStringFieldPairNumericJumpIfFalse(expr expression) (int, bool, error) {
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+		return 0, false, nil
+	}
+	comparison := expr.terms[0].terms[0]
+	if comparison.op != comparisonLess || comparison.right == nil {
+		return 0, false, nil
+	}
+	leftTable, leftField, ok := c.concatLocalStringFieldRef(comparison.left)
+	if !ok {
+		return 0, false, nil
+	}
+	rightTable, rightField, ok := c.concatLocalStringFieldRef(*comparison.right)
+	if !ok || leftTable != rightTable {
+		return 0, false, nil
+	}
+	slots, ok := c.localRowStringSlots[leftTable.index]
+	if !ok {
+		return 0, false, nil
+	}
+	leftSlot, ok := slots[leftField]
+	if !ok {
+		return 0, false, nil
+	}
+	rightSlot, ok := slots[rightField]
+	if !ok {
+		return 0, false, nil
+	}
+	desc := c.addRowFieldPairOp(rowFieldPairOp{
+		leftField:  c.addConstant(StringValue(leftField)),
+		rightField: c.addConstant(StringValue(rightField)),
+		leftSlot:   leftSlot,
+		rightSlot:  rightSlot,
+	})
+	jump := c.emit(instruction{op: opJumpIfRowStringFieldNotLessField, a: leftTable.index, b: desc})
+	return jump, true, nil
 }
 
 func (c *compiler) compileStringFieldTruthyJumpIfFalse(expr expression) (int, bool, error) {
@@ -1848,6 +2477,86 @@ func (c *compiler) compileStringFieldTruthyJumpIfFalse(expr expression) (int, bo
 	}
 	jump := c.emit(instruction{op: opJumpIfStringFieldFalse, a: table.index, b: fieldConstant, c: slot})
 	return jump, true, nil
+}
+
+func (c *compiler) compileStringFieldNotJumpIfFalse(expr expression) (int, bool, error) {
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+		return 0, false, nil
+	}
+	comparison := expr.terms[0].terms[0]
+	if comparison.op != "" || comparison.right != nil {
+		return 0, false, nil
+	}
+	table, field, ok := c.concatUnaryNotLocalStringFieldRef(comparison.left)
+	if !ok {
+		return 0, false, nil
+	}
+	fieldConstant := c.addConstant(StringValue(field))
+	slot := -1
+	if slots, ok := c.localRowStringSlots[table.index]; ok {
+		if fieldSlot, ok := slots[field]; ok {
+			slot = fieldSlot
+		}
+	}
+	jump := c.emit(instruction{op: opJumpIfStringFieldTrue, a: table.index, b: fieldConstant, c: slot})
+	return jump, true, nil
+}
+
+func (c *compiler) concatUnaryNotLocalStringFieldRef(expr concatExpression) (variableRef, string, bool) {
+	if len(expr.rest) != 0 || len(expr.first.rest) != 0 || len(expr.first.first.rest) != 0 {
+		return variableRef{}, "", false
+	}
+	term := termWithoutCastsAndGroups(expr.first.first.first)
+	if term.unaryNot == nil || len(term.selectors) != 0 {
+		return variableRef{}, "", false
+	}
+	inner := termWithoutCastsAndGroups(*term.unaryNot)
+	if len(inner.selectors) != 1 || inner.selectors[0].field == "" || inner.selectors[0].index != nil {
+		return variableRef{}, "", false
+	}
+	field := inner.selectors[0].field
+	inner.selectors = nil
+	ref, ok := c.termLocalRef(inner)
+	return ref, field, ok
+}
+
+func (c *compiler) compileStringFieldNilJumpIfFalse(expr expression) (int, bool, error) {
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+		return 0, false, nil
+	}
+	comparison := expr.terms[0].terms[0]
+	if comparison.right == nil {
+		return 0, false, nil
+	}
+	table, field, ok := c.concatLocalStringFieldRef(comparison.left)
+	if !ok || !concatNilLiteral(*comparison.right) {
+		return 0, false, nil
+	}
+	fieldConstant := c.addConstant(StringValue(field))
+	slot := -1
+	if slots, ok := c.localRowStringSlots[table.index]; ok {
+		if fieldSlot, ok := slots[field]; ok {
+			slot = fieldSlot
+		}
+	}
+	switch comparison.op {
+	case comparisonNotEqual:
+		jump := c.emit(instruction{op: opJumpIfStringFieldNil, a: table.index, b: fieldConstant, c: slot})
+		return jump, true, nil
+	case comparisonEqual:
+		jump := c.emit(instruction{op: opJumpIfStringFieldNotNil, a: table.index, b: fieldConstant, c: slot})
+		return jump, true, nil
+	default:
+		return 0, false, nil
+	}
+}
+
+func concatNilLiteral(expr concatExpression) bool {
+	if len(expr.rest) != 0 || len(expr.first.rest) != 0 || len(expr.first.first.rest) != 0 {
+		return false
+	}
+	term := termWithoutCastsAndGroups(expr.first.first.first)
+	return !isNamedTerm(term) && term.lit != nil && term.lit.kind == NilKind && len(term.selectors) == 0
 }
 
 func (c *compiler) compileConditionLeftRegister(expr concatExpression) (int, func(), error) {
@@ -1961,7 +2670,6 @@ func (c *compiler) compileFor(stmt forStatement) error {
 	loopVar := c.allocReg()
 	limit := c.allocReg()
 	step := c.allocReg()
-	zero := c.allocReg()
 
 	if err := c.compileExpressionTo(loopShape.start, loopVar); err != nil {
 		return err
@@ -1977,10 +2685,10 @@ func (c *compiler) compileFor(stmt forStatement) error {
 		c.emitLoadConst(step, NumberValue(1))
 	}
 
-	c.emitLoadConst(zero, NumberValue(0))
-	c.emit(instruction{op: opAdd, a: loopVar, b: loopVar, c: zero})
-	c.emit(instruction{op: opAdd, a: limit, b: limit, c: zero})
-	c.emit(instruction{op: opAdd, a: step, b: step, c: zero})
+	zero := c.addConstant(NumberValue(0))
+	c.emit(instruction{op: opAddK, a: loopVar, b: loopVar, c: zero})
+	c.emit(instruction{op: opAddK, a: limit, b: limit, c: zero})
+	c.emit(instruction{op: opAddK, a: step, b: step, c: zero})
 
 	conditionStart := c.pc()
 	jumpExit := c.emit(instruction{op: opNumericForCheck, a: loopVar, b: limit, c: step})
@@ -2031,22 +2739,22 @@ func (c *compiler) compileGenericFor(stmt genericForStatement) error {
 	}
 
 	resultStart := control
+	c.reserveRegistersThrough(resultStart + 4)
 	c.reserveRegistersThrough(resultStart + len(loopShape.names))
 	c.claimRegisterRange(resultStart, resultStart+len(loopShape.names))
-	callBase := c.allocReg()
-	c.reserveRegistersThrough(callBase + 3)
-	nilReg := c.allocReg()
-	c.compileNilTo(nilReg)
-	condition := c.allocReg()
-
 	loopStart := c.pc()
-	c.emit(instruction{op: opMove, a: callBase, b: generator})
-	c.emit(instruction{op: opMove, a: callBase + 1, b: state})
-	c.emit(instruction{op: opMove, a: callBase + 2, b: control})
-	c.emit(instruction{op: opCall, a: resultStart, b: callBase, c: 2, d: len(loopShape.names)})
-	c.emit(instruction{op: opMove, a: control, b: resultStart})
-	c.emit(instruction{op: opNotEqual, a: condition, b: resultStart, c: nilReg})
-	jumpExit := c.emitJumpIfFalse(condition)
+	var jumpExit int
+	if len(loopShape.names) == 2 {
+		jumpExit = c.emit(instruction{op: opArrayNextJump2, a: resultStart, b: generator, c: state})
+	} else {
+		nilReg := c.allocReg()
+		c.compileNilTo(nilReg)
+		condition := c.allocReg()
+		c.emit(instruction{op: opArrayNext, a: resultStart, b: generator, c: state, d: len(loopShape.names)})
+		c.emit(instruction{op: opMove, a: control, b: resultStart})
+		c.emit(instruction{op: opNotEqual, a: condition, b: resultStart, c: nilReg})
+		jumpExit = c.emitJumpIfFalse(condition)
+	}
 
 	outerLocals := copyLocals(c.locals)
 	outerStringSlots := copyLocalStringSlots(c.localStringSlots)

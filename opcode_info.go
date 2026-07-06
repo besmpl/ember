@@ -18,25 +18,11 @@ const (
 )
 
 func opcodeControlFlow(op opcode) opcodeControlFlowKind {
-	switch op {
-	case opJump:
-		return opcodeControlJump
-	case opJumpIfFalse,
-		opNumericForCheck,
-		opJumpIfNotEqualK,
-		opJumpIfNotLessK,
-		opJumpIfModKNotEqualK,
-		opJumpIfStringFieldNotEqualK,
-		opJumpIfRowStringFieldNotEqualK,
-		opJumpIfStringFieldNotGreaterK,
-		opJumpIfStringFieldGreaterK,
-		opJumpIfStringFieldFalse:
-		return opcodeControlBranch
-	case opReturnOne, opReturn:
-		return opcodeControlReturn
-	default:
+	meta, ok := opcodeMetadata(op)
+	if !ok {
 		return opcodeControlNone
 	}
+	return meta.controlFlow
 }
 
 func opcodeTransfersControl(op opcode) bool {
@@ -44,26 +30,50 @@ func opcodeTransfersControl(op opcode) bool {
 }
 
 func opcodeJumpTarget(op opcode) opcodeJumpTargetSlot {
-	switch op {
-	case opJump, opJumpIfFalse:
-		return opcodeJumpTargetB
-	case opNumericForCheck,
-		opJumpIfNotEqualK,
-		opJumpIfNotLessK,
-		opJumpIfModKNotEqualK,
-		opJumpIfStringFieldNotEqualK,
-		opJumpIfRowStringFieldNotEqualK,
-		opJumpIfStringFieldNotGreaterK,
-		opJumpIfStringFieldGreaterK,
-		opJumpIfStringFieldFalse:
-		return opcodeJumpTargetD
-	default:
+	meta, ok := opcodeMetadata(op)
+	if !ok {
 		return opcodeJumpTargetNone
 	}
+	return meta.jumpTarget
 }
 
 func opcodeHasJumpTarget(op opcode) bool {
 	return opcodeJumpTarget(op) != opcodeJumpTargetNone
+}
+
+func opcodeMayCall(op opcode) bool {
+	meta, ok := opcodeMetadata(op)
+	return ok && meta.mayCall
+}
+
+func opcodeMayYield(op opcode) bool {
+	meta, ok := opcodeMetadata(op)
+	return ok && meta.mayYield
+}
+
+func opcodeReadsTable(op opcode) bool {
+	meta, ok := opcodeMetadata(op)
+	return ok && meta.readsTable
+}
+
+func opcodeWritesTable(op opcode) bool {
+	meta, ok := opcodeMetadata(op)
+	return ok && meta.writesTable
+}
+
+func opcodeReadsGlobal(op opcode) bool {
+	meta, ok := opcodeMetadata(op)
+	return ok && meta.readsGlobal
+}
+
+func opcodeWritesGlobal(op opcode) bool {
+	meta, ok := opcodeMetadata(op)
+	return ok && meta.writesGlobal
+}
+
+func opcodeAllocates(op opcode) bool {
+	meta, ok := opcodeMetadata(op)
+	return ok && meta.allocates
 }
 
 func instructionJumpTarget(ins instruction) (int, bool) {

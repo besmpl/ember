@@ -97,6 +97,15 @@ func baseFieldIntrinsic(globalName string, field string) (baseFieldIntrinsicDefi
 	return baseFieldIntrinsicDefinition{}, false
 }
 
+func baseFieldIntrinsicForOpcode(op opcode) (baseFieldIntrinsicDefinition, bool) {
+	for _, intrinsic := range baseFieldIntrinsics() {
+		if intrinsic.op == op {
+			return intrinsic, true
+		}
+	}
+	return baseFieldIntrinsicDefinition{}, false
+}
+
 func baseNativeFuncName(nativeID nativeFuncID) (string, bool) {
 	baseFieldIntrinsics()
 	for _, definition := range nativeFuncDefinitionsCache {
@@ -105,6 +114,29 @@ func baseNativeFuncName(nativeID nativeFuncID) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func nativeFuncByID(nativeID nativeFuncID) (nativeFunc, bool) {
+	switch nativeID {
+	case nativeFuncSelect:
+		return baseSelectNative, true
+	case nativeFuncTableInsert:
+		return baseTableInsertNative, true
+	case nativeFuncTableRemove:
+		return baseTableRemoveNative, true
+	case nativeFuncCoroutineStatus:
+		return baseCoroutineStatusNative, true
+	case nativeFuncCoroutineResume:
+		return baseCoroutineResume, true
+	case nativeFuncMathMin:
+		return baseMathMinNative, true
+	case nativeFuncRawLen:
+		return baseRawLenNative, true
+	case nativeFuncArrayNext:
+		return baseArrayNextNative, true
+	default:
+		return nil, false
+	}
 }
 
 func baseGlobalValue(name string) (Value, bool) {

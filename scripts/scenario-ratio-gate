@@ -1,13 +1,28 @@
 #!/bin/sh
 set -eu
 
-max="${SCENARIO_RATIO_MAX:-2.0}"
+max="${SCENARIO_RATIO_MAX:-1.3}"
 
 awk -v max="$max" '
 BEGIN {
     cases[1] = "combat_tick"
     cases[2] = "inventory_value"
     cases[3] = "event_dispatch"
+    cases[4] = "buff_stack_tick"
+    cases[5] = "ability_resolution"
+    cases[6] = "ai_utility_scoring"
+    cases[7] = "cooldown_scheduler"
+    cases[8] = "projectile_sweep"
+    cases[9] = "quest_progress_update"
+    cases[10] = "behavior_tree_tick"
+    cases[11] = "threat_aggro_table"
+    cases[12] = "economy_market_tick"
+    cases[13] = "formation_layout_score"
+    cases[14] = "dialogue_condition_eval"
+    cases[15] = "procgen_room_scoring"
+    cases[16] = "save_state_diff"
+    cases[17] = "path_relaxation"
+    case_count = 17
 
     print "| Case | Ember ns/op avg | Luau ns/run avg | Ratio | Max | Status |"
     print "| --- | ---: | ---: | ---: | ---: | --- |"
@@ -34,7 +49,7 @@ BEGIN {
 END {
     failed = 0
     missing = 0
-    for (i = 1; i <= 3; i++) {
+    for (i = 1; i <= case_count; i++) {
         name = cases[i]
         if (ember_count[name] == 0 || luau_count[name] == 0) {
             print "| " name " | missing | missing | missing | " max " | missing |"

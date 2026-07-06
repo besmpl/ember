@@ -17,6 +17,13 @@ Keep plans short, concrete, and easy to retire after the slice lands.
 - `internal-legacy-cleanup.md`: breaking-change cleanup plan for deleting
   private legacy seams after Program/Runtime, lowering, VM, table, and typed
   analysis modules have deepened.
-- `scenario-performance.md`: Scenario-first no-codegen performance recovery
-  plan for table, row, call, and direct-frame execution.
+- `scenario-general-performance.md`: blank-page Scenario performance plan
+  focused on general direct-frame, table, iteration, call, and numeric
+  mechanisms.
 - `type-system.md`: MVP Luau-shaped typed-analysis system in phased slices.
+
+## Historical Plans
+
+- `scenario-performance.md`: superseded by
+  `scenario-general-performance.md`; kept for benchmark-shaped artifact removal
+  history and prior Scenario ratio evidence.

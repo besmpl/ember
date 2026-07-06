@@ -1,9 +1,10 @@
 package ember
 
 type globalEnv struct {
-	values map[string]Value
-	host   map[string]Value
-	thread *vmThread
+	values  map[string]Value
+	host    map[string]Value
+	thread  *vmThread
+	version uint64
 }
 
 func runtimeGlobals(globals map[string]Value) *globalEnv {
@@ -15,6 +16,7 @@ func runtimeGlobals(globals map[string]Value) *globalEnv {
 		for name, value := range globals {
 			env.values[name] = value
 		}
+		env.version = 1
 	}
 	return env
 }
@@ -56,6 +58,7 @@ func (env *globalEnv) set(name string, value Value) {
 	}
 	env.ensureValues()
 	env.values[name] = value
+	env.version++
 	if env.host != nil {
 		env.host[name] = value
 	}

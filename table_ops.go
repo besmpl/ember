@@ -123,7 +123,7 @@ func (a tableAccess) protectedMetatable(table *Table) (Value, error) {
 }
 
 func (a tableAccess) callIndex(fn Value, table *Table, key Value) (Value, error) {
-	results, err := callRuntimeMetamethod(fn, a.globals, []Value{TableValue(table), key})
+	results, err := callRuntimeMetamethod2(fn, a.globals, TableValue(table), key)
 	if err != nil {
 		return NilValue(), err
 	}
@@ -131,6 +131,6 @@ func (a tableAccess) callIndex(fn Value, table *Table, key Value) (Value, error)
 }
 
 func (a tableAccess) callNewIndex(fn Value, table *Table, key Value, value Value) error {
-	_, err := callRuntimeMetamethod(fn, a.globals, []Value{TableValue(table), key, value})
+	_, err := callRuntimeMetamethod3(fn, a.globals, TableValue(table), key, value)
 	return err
 }

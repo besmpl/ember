@@ -641,6 +641,22 @@ return value
 	}
 }
 
+func TestCompileAndRunScriptMutationOverridesMathMinFastPath(t *testing.T) {
+	results := compileAndRunValues(t, `
+math.min = function(a, b)
+	return "mutated"
+end
+return math.min(4, 2)
+`)
+	if len(results) != 1 {
+		t.Fatalf("Run returned %d results, want 1", len(results))
+	}
+	got, ok := results[0].String()
+	if !ok || got != "mutated" {
+		t.Fatalf("Run result is %v (%t), want mutated", got, ok)
+	}
+}
+
 func TestCompileAndRunBaseMathPi(t *testing.T) {
 	got := compileAndRunNumber(t, "return math.pi")
 	if got < 3.14159 || got > 3.14160 {

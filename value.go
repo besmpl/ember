@@ -80,16 +80,20 @@ const (
 
 // Value is an Ember runtime value.
 type Value struct {
-	kind          ValueKind
-	bool          bool
-	number        float64
-	str           string
-	table         *Table
-	userdata      *UserData
-	function      *closure
+	kind     ValueKind
+	bool     bool
+	nativeID nativeFuncID
+	number   float64
+	str      string
+	table    *Table
+	userdata *UserData
+	function *closure
+	callable *hostCallable
+}
+
+type hostCallable struct {
 	hostFunc      HostFunc
 	native        nativeFunc
-	nativeID      nativeFuncID
 	yieldableHost yieldableHostFunc
 }
 
@@ -109,15 +113,22 @@ type UserData struct {
 
 // Table is a Luau table object.
 type Table struct {
-	array               []Value
-	arrayHasNil         bool
-	stringFields        []tableStringField
-	stringFieldMap      map[string]Value
-	fields              map[tableKey]Value
-	metatable           *Table
-	stringVersion       uint64
+	array          []Value
+	arrayHasNil    bool
+	stringFields   []tableStringField
+	stringFieldMap map[string]Value
+	fields         map[tableKey]Value
+	metatable      *Table
+	// Layout versions track key/storage changes; value versions track stored value
+	// changes for each independent table storage family.
+	stringVersion       uint32
+	stringValueVersion  uint32
+	arrayVersion        uint32
+	arrayValueVersion   uint32
+	genericVersion      uint32
+	genericValueVersion uint32
 	indexCacheMetatable *Table
-	indexCacheVersion   uint64
+	indexCacheVersion   uint32
 	indexCacheTable     *Table
 }
 
@@ -127,8 +138,132 @@ type tableStringField struct {
 }
 
 type tableStringFieldSlot struct {
-	index   int
-	version uint64
+	index int
+	token tableStringShapeToken
+}
+
+type rowStringFieldSlotRef struct {
+	index int
+}
+
+func rowStringFieldSlotRefFromIndex(index int) rowStringFieldSlotRef {
+	return rowStringFieldSlotRef{index: index}
+}
+
+func (ref rowStringFieldSlotRef) valid() bool {
+	return ref.index >= 0
+}
+
+type tableShapeToken struct {
+	stringLayout  uint32
+	stringValues  uint32
+	stringStorage uint8
+	arrayLayout   uint32
+	arrayValues   uint32
+	genericLayout uint32
+	genericValues uint32
+	metatable     *Table
+}
+
+type tableStringShapeToken struct {
+	metatable *Table
+	layout    uint32
+	values    uint32
+	storage   uint8
+}
+
+func (left tableStringShapeToken) sameLayout(right tableStringShapeToken) bool {
+	return left.layout == right.layout &&
+		left.storage == right.storage &&
+		left.metatable == right.metatable
+}
+
+func (left tableStringShapeToken) sameValues(right tableStringShapeToken) bool {
+	return left.values == right.values && left.sameLayout(right)
+}
+
+func (token tableStringShapeToken) matchesTableLayout(table *Table) bool {
+	if table == nil ||
+		token.layout != table.stringVersion ||
+		token.metatable != table.metatable {
+		return false
+	}
+	currentStorage := uint8(0)
+	if table.stringFieldMap != nil {
+		currentStorage = 1
+	}
+	return token.storage == currentStorage
+}
+
+func (token tableStringShapeToken) matchesTableValues(table *Table) bool {
+	return table != nil &&
+		token.values == table.stringValueVersion &&
+		token.matchesTableLayout(table)
+}
+
+func (left tableShapeToken) sameStringLayout(right tableShapeToken) bool {
+	return left.stringLayout == right.stringLayout &&
+		left.stringStorage == right.stringStorage &&
+		left.metatable == right.metatable
+}
+
+func (left tableShapeToken) sameStringValues(right tableShapeToken) bool {
+	return left.stringValues == right.stringValues && left.sameStringLayout(right)
+}
+
+func (left tableShapeToken) sameArrayLayout(right tableShapeToken) bool {
+	return left.arrayLayout == right.arrayLayout &&
+		left.metatable == right.metatable
+}
+
+func (left tableShapeToken) sameArrayValues(right tableShapeToken) bool {
+	return left.arrayValues == right.arrayValues && left.sameArrayLayout(right)
+}
+
+func (left tableShapeToken) sameGenericLayout(right tableShapeToken) bool {
+	return left.genericLayout == right.genericLayout &&
+		left.metatable == right.metatable
+}
+
+func (left tableShapeToken) sameGenericValues(right tableShapeToken) bool {
+	return left.genericValues == right.genericValues && left.sameGenericLayout(right)
+}
+
+func (left tableShapeToken) sameMetatable(right tableShapeToken) bool {
+	return left.metatable == right.metatable
+}
+
+func (t *Table) shapeToken() tableShapeToken {
+	if t == nil {
+		return tableShapeToken{}
+	}
+	stringToken := t.stringShapeToken()
+	return tableShapeToken{
+		stringLayout:  stringToken.layout,
+		stringValues:  stringToken.values,
+		stringStorage: stringToken.storage,
+		arrayLayout:   t.arrayVersion,
+		arrayValues:   t.arrayValueVersion,
+		genericLayout: t.genericVersion,
+		genericValues: t.genericValueVersion,
+		metatable:     t.metatable,
+	}
+}
+
+func (t *Table) stringShapeToken() tableStringShapeToken {
+	if t == nil {
+		return tableStringShapeToken{}
+	}
+	var storage uint8
+	if t.stringFieldMap != nil {
+		storage = 1
+	}
+	return tableStringShapeToken{
+		metatable: t.metatable,
+		layout:    t.stringVersion,
+		values:    t.stringValueVersion,
+		storage:   storage,
+	}
 }
 
 const maxInlineStringFields = 8
@@ -175,7 +310,7 @@ func StringValue(s string) Value {
 func HostFuncValue(fn HostFunc) Value {
 	return Value{
 		kind:     HostFuncKind,
-		hostFunc: fn,
+		callable: &hostCallable{hostFunc: fn},
 	}
 }
 
@@ -192,17 +327,23 @@ func nativeFuncValue(fn nativeFunc) Value {
 }
 
 func nativeFuncValueWithID(fn nativeFunc, id nativeFuncID) Value {
+	if id != nativeFuncUnknown {
+		return Value{
+			kind:     HostFuncKind,
+			nativeID: id,
+		}
+	}
 	return Value{
 		kind:     HostFuncKind,
-		native:   fn,
 		nativeID: id,
+		callable: &hostCallable{native: fn},
 	}
 }
 
 func yieldableHostFuncValue(fn yieldableHostFunc) Value {
 	return Value{
-		kind:          HostFuncKind,
-		yieldableHost: fn,
+		kind:     HostFuncKind,
+		callable: &hostCallable{yieldableHost: fn},
 	}
 }
 
@@ -327,11 +468,10 @@ func (t *Table) rawGet(key Value) (Value, error) {
 		return NilValue(), fmt.Errorf("table: nil table")
 	}
 	if index, ok := tableArrayIndexFromValue(key); ok && index <= len(t.array) {
-		value := t.array[index-1]
-		if value.IsNil() {
-			return NilValue(), nil
+		if value, ok := t.rawArrayValue(index); ok {
+			return value, nil
 		}
-		return value, nil
+		return NilValue(), nil
 	}
 	storedKey, ok := tableKeyFromValue(key)
 	if err := validateTableKey(key, ok); err != nil {
@@ -340,10 +480,7 @@ func (t *Table) rawGet(key Value) (Value, error) {
 	if storedKey.kind == StringKind {
 		return t.rawGetString(storedKey.str)
 	}
-	if t.fields == nil {
-		return NilValue(), nil
-	}
-	value, ok := t.fields[storedKey]
+	value, ok := t.rawGenericField(storedKey)
 	if !ok {
 		return NilValue(), nil
 	}
@@ -368,10 +505,7 @@ func (t *Table) rawGetKey(key tableKey) (Value, error) {
 	if key.kind == StringKind {
 		return t.rawGetString(key.str)
 	}
-	if t.fields == nil {
-		return NilValue(), nil
-	}
-	value, ok := t.fields[key]
+	value, ok := t.rawGenericField(key)
 	if !ok {
 		return NilValue(), nil
 	}
@@ -397,14 +531,7 @@ func (t *Table) rawSet(key Value, value Value) error {
 	if storedKey.kind == StringKind {
 		return t.rawSetString(storedKey.str, value)
 	}
-	if value.IsNil() {
-		delete(t.fields, storedKey)
-		return nil
-	}
-	if t.fields == nil {
-		t.fields = make(map[tableKey]Value)
-	}
-	t.fields[storedKey] = value
+	t.setRawGenericField(storedKey, value)
 	return nil
 }
 
@@ -423,43 +550,70 @@ func (t *Table) rawSetKey(storedKey tableKey, value Value) error {
 	if storedKey.kind == StringKind {
 		return t.rawSetString(storedKey.str, value)
 	}
+	t.setRawGenericField(storedKey, value)
+	return nil
+}
+
+func (t *Table) setRawGenericField(storedKey tableKey, value Value) {
 	if value.IsNil() {
-		delete(t.fields, storedKey)
-		return nil
+		t.deleteRawGenericField(storedKey)
+		return
 	}
 	if t.fields == nil {
 		t.fields = make(map[tableKey]Value)
 	}
+	if _, ok := t.fields[storedKey]; !ok {
+		t.genericVersion++
+	}
 	t.fields[storedKey] = value
-	return nil
+	t.genericValueVersion++
+}
+
+func (t *Table) deleteRawGenericField(storedKey tableKey) {
+	if t.fields == nil {
+		return
+	}
+	if _, ok := t.fields[storedKey]; !ok {
+		return
+	}
+	delete(t.fields, storedKey)
+	t.genericVersion++
+	t.genericValueVersion++
 }
 
 func (t *Table) rawSetArrayIndex(index int, value Value) error {
 	key := tableKey{kind: NumberKind, number: float64(index)}
 	if value.IsNil() {
 		if index <= len(t.array) {
-			t.array[index-1] = NilValue()
-			t.arrayHasNil = true
-			t.trimArray()
+			if !t.array[index-1].IsNil() {
+				t.array[index-1] = NilValue()
+				t.arrayHasNil = true
+				t.arrayVersion++
+				t.arrayValueVersion++
+				t.trimArray()
+			}
 		}
-		delete(t.fields, key)
+		t.deleteRawGenericField(key)
 		return nil
 	}
 	if index <= len(t.array) {
+		if t.array[index-1].IsNil() {
+			t.arrayVersion++
+		}
 		t.array[index-1] = value
-		delete(t.fields, key)
+		t.arrayValueVersion++
+		t.deleteRawGenericField(key)
 		return nil
 	}
 	if index == len(t.array)+1 {
 		t.array = append(t.array, value)
-		delete(t.fields, key)
+		t.arrayVersion++
+		t.arrayValueVersion++
+		t.deleteRawGenericField(key)
 		t.promoteContiguousArrayFields()
 		return nil
 	}
-	if t.fields == nil {
-		t.fields = make(map[tableKey]Value)
-	}
-	t.fields[key] = value
+	t.setRawGenericField(key, value)
 	return nil
 }
 
@@ -472,7 +626,9 @@ func (t *Table) promoteContiguousArrayFields() {
 			return
 		}
 		t.array = append(t.array, value)
-		delete(t.fields, key)
+		t.arrayVersion++
+		t.arrayValueVersion++
+		t.deleteRawGenericField(key)
 	}
 }
 
@@ -483,6 +639,16 @@ func (t *Table) trimArray() {
 	if t.arrayHasNil && !tableArrayHasNil(t.array) {
 		t.arrayHasNil = false
 	}
+}
+
+func (t *Table) setMetatable(metatable *Table) {
+	if t == nil || t.metatable == metatable {
+		return
+	}
+	t.metatable = metatable
+	t.indexCacheMetatable = nil
+	t.indexCacheVersion = 0
+	t.indexCacheTable = nil
 }
 
 func (t *Table) rawLen() (int, error) {
@@ -587,30 +753,89 @@ func (t *Table) rawStringField(key string) (Value, bool) {
 		value, ok := t.stringFieldMap[key]
 		return value, ok
 	}
-	for _, field := range t.stringFields {
-		if field.key == key {
-			return field.value, true
+	for i := range t.stringFields {
+		if t.stringFields[i].key == key {
+			return t.stringFields[i].value, true
 		}
 	}
 	return NilValue(), false
 }
 
+func (t *Table) rawArrayValue(index int) (Value, bool) {
+	if t == nil || index < 1 || index > len(t.array) {
+		return NilValue(), false
+	}
+	value := t.array[index-1]
+	if value.IsNil() {
+		return NilValue(), false
+	}
+	return value, true
+}
+
+func (t *Table) rawGenericField(key tableKey) (Value, bool) {
+	if t == nil || t.fields == nil {
+		return NilValue(), false
+	}
+	value, ok := t.fields[key]
+	if !ok || value.IsNil() {
+		return NilValue(), false
+	}
+	return value, true
+}
+
 func (t *Table) rawStringFieldSlot(key string) (tableStringFieldSlot, bool) {
-	if t == nil || t.stringFieldMap != nil {
+	if t == nil {
+		return tableStringFieldSlot{}, false
+	}
+	if t.stringFieldMap != nil {
+		if _, ok := t.stringFieldMap[key]; ok {
+			return tableStringFieldSlot{index: -1, token: t.stringShapeToken()}, true
+		}
 		return tableStringFieldSlot{}, false
 	}
 	for i := range t.stringFields {
 		if t.stringFields[i].key == key {
-			return tableStringFieldSlot{index: i, version: t.stringVersion}, true
+			return tableStringFieldSlot{index: i, token: t.stringShapeToken()}, true
 		}
 	}
 	return tableStringFieldSlot{}, false
 }
 
-func (t *Table) rawStringFieldAtSlot(slot tableStringFieldSlot, key string) (Value, bool) {
+func (t *Table) rawStringFieldAtIndex(index int, key string) (Value, bool) {
 	if t == nil ||
 		t.stringFieldMap != nil ||
-		slot.version != t.stringVersion ||
+		index < 0 ||
+		index >= len(t.stringFields) ||
+		t.stringFields[index].key != key {
+		return NilValue(), false
+	}
+	return t.stringFields[index].value, true
+}
+
+func (t *Table) rawRowStringField(ref rowStringFieldSlotRef, key string) (Value, bool) {
+	if ref.valid() {
+		if value, ok := t.rawStringFieldAtIndex(ref.index, key); ok {
+			return value, true
+		}
+	}
+	return t.rawStringField(key)
+}
+
+func (t *Table) rawStringFieldAtSlot(slot tableStringFieldSlot, key string) (Value, bool) {
+	if !slot.token.matchesTableLayout(t) {
+		return NilValue(), false
+	}
+	if t.stringFieldMap != nil {
+		if slot.token.storage != 1 {
+			return NilValue(), false
+		}
+		value, ok := t.stringFieldMap[key]
+		if !ok {
+			return NilValue(), false
+		}
+		return value, true
+	}
+	if slot.token.storage != 0 ||
 		slot.index < 0 ||
 		slot.index >= len(t.stringFields) ||
 		t.stringFields[slot.index].key != key {
@@ -619,18 +844,50 @@ func (t *Table) rawStringFieldAtSlot(slot tableStringFieldSlot, key string) (Val
 	return t.stringFields[slot.index].value, true
 }
 
-func (t *Table) setRawStringFieldAtSlot(slot tableStringFieldSlot, key string, value Value) bool {
+func (t *Table) setRawStringFieldAtIndex(index int, key string, value Value) bool {
 	if t == nil ||
 		value.IsNil() ||
 		t.stringFieldMap != nil ||
-		slot.version != t.stringVersion ||
+		index < 0 ||
+		index >= len(t.stringFields) ||
+		t.stringFields[index].key != key {
+		return false
+	}
+	t.stringFields[index].value = value
+	t.stringValueVersion++
+	return true
+}
+
+func (t *Table) setRawRowStringField(ref rowStringFieldSlotRef, key string, value Value) {
+	if ref.valid() && t.setRawStringFieldAtIndex(ref.index, key, value) {
+		return
+	}
+	t.setRawStringField(key, value)
+}
+
+func (t *Table) setRawStringFieldAtSlot(slot tableStringFieldSlot, key string, value Value) bool {
+	if value.IsNil() || !slot.token.matchesTableLayout(t) {
+		return false
+	}
+	if t.stringFieldMap != nil {
+		if slot.token.storage != 1 {
+			return false
+		}
+		if _, ok := t.stringFieldMap[key]; !ok {
+			return false
+		}
+		t.stringFieldMap[key] = value
+		t.stringValueVersion++
+		return true
+	}
+	if slot.token.storage != 0 ||
 		slot.index < 0 ||
 		slot.index >= len(t.stringFields) ||
 		t.stringFields[slot.index].key != key {
 		return false
 	}
 	t.stringFields[slot.index].value = value
-	t.stringVersion++
+	t.stringValueVersion++
 	return true
 }
 
@@ -640,20 +897,24 @@ func (t *Table) setRawStringField(key string, value Value) {
 		return
 	}
 	if t.stringFieldMap != nil {
+		if _, ok := t.stringFieldMap[key]; !ok {
+			t.stringVersion++
+		}
 		t.stringFieldMap[key] = value
-		t.stringVersion++
+		t.stringValueVersion++
 		return
 	}
 	for i := range t.stringFields {
 		if t.stringFields[i].key == key {
 			t.stringFields[i].value = value
-			t.stringVersion++
+			t.stringValueVersion++
 			return
 		}
 	}
 	if len(t.stringFields) < maxInlineStringFields {
 		t.stringFields = append(t.stringFields, tableStringField{key: key, value: value})
 		t.stringVersion++
+		t.stringValueVersion++
 		return
 	}
 	t.stringFieldMap = make(map[string]Value, len(t.stringFields)+1)
@@ -663,6 +924,7 @@ func (t *Table) setRawStringField(key string, value Value) {
 	t.stringFields = nil
 	t.stringFieldMap[key] = value
 	t.stringVersion++
+	t.stringValueVersion++
 }
 
 func (t *Table) deleteRawStringField(key string) {
@@ -670,6 +932,7 @@ func (t *Table) deleteRawStringField(key string) {
 		if _, ok := t.stringFieldMap[key]; ok {
 			delete(t.stringFieldMap, key)
 			t.stringVersion++
+			t.stringValueVersion++
 		}
 		return
 	}
@@ -682,6 +945,7 @@ func (t *Table) deleteRawStringField(key string) {
 		t.stringFields[last] = tableStringField{}
 		t.stringFields = t.stringFields[:last]
 		t.stringVersion++
+		t.stringValueVersion++
 		return
 	}
 }
@@ -692,7 +956,7 @@ func (t *Table) cachedIndexTable() (*Table, bool, error) {
 	}
 	metatable := t.metatable
 	if t.indexCacheMetatable == metatable &&
-		t.indexCacheVersion == metatable.stringVersion &&
+		t.indexCacheVersion == metatable.stringValueVersion &&
 		t.indexCacheTable != nil {
 		return t.indexCacheTable, true, nil
 	}
@@ -705,7 +969,7 @@ func (t *Table) cachedIndexTable() (*Table, bool, error) {
 		return nil, false, nil
 	}
 	t.indexCacheMetatable = metatable
-	t.indexCacheVersion = metatable.stringVersion
+	t.indexCacheVersion = metatable.stringValueVersion
 	t.indexCacheTable = indexTable
 	return indexTable, true, nil
 }
@@ -817,24 +1081,30 @@ func validateTableKey(key Value, ok bool) error {
 }
 
 func (v Value) hostFunction() (HostFunc, bool) {
-	if v.kind != HostFuncKind {
+	if v.kind != HostFuncKind || v.callable == nil || v.callable.hostFunc == nil {
 		return nil, false
 	}
-	return v.hostFunc, true
+	return v.callable.hostFunc, true
 }
 
 func (v Value) nativeFunction() (nativeFunc, bool) {
-	if v.kind != HostFuncKind || v.native == nil {
+	if v.kind != HostFuncKind {
 		return nil, false
 	}
-	return v.native, true
+	if v.nativeID != nativeFuncUnknown {
+		return nativeFuncByID(v.nativeID)
+	}
+	if v.callable == nil || v.callable.native == nil {
+		return nil, false
+	}
+	return v.callable.native, true
 }
 
 func (v Value) yieldableHostFunction() (yieldableHostFunc, bool) {
-	if v.kind != HostFuncKind || v.yieldableHost == nil {
+	if v.kind != HostFuncKind || v.callable == nil || v.callable.yieldableHost == nil {
 		return nil, false
 	}
-	return v.yieldableHost, true
+	return v.callable.yieldableHost, true
 }
 
 func (v Value) scriptFunction() (*closure, bool) {
