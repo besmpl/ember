@@ -4,26 +4,28 @@ import "fmt"
 
 type compiler struct {
 	bytecodeBuilder
-	bind                bindResult
-	bindCursor          *int
-	symbolRegisters     map[int]int
-	locals              map[string]int
-	localStringSlots    map[int]map[string]int
-	localRowStringSlots map[int]map[string]int
-	localArrayElemSlots map[int]map[string]int
-	parent              *compiler
-	selfFunctionSymbol  int
-	selfNumericPairAdd  bool
-	selfNumericPairBase float64
-	variadic            bool
-	upvalues            map[string]int
-	upvaluesByID        map[int]int
-	upvalueDescs        []upvalueDesc
-	loops               []loopContext
-	nextReg             int
-	freeTemps           []int
-	suppressTagChains   bool
-	options             compilerOptions
+	bind                     bindResult
+	bindCursor               *int
+	symbolRegisters          map[int]int
+	locals                   map[string]int
+	localStringSlots         map[int]map[string]int
+	localRowStringSlots      map[int]map[string]int
+	localArrayElemSlots      map[int]map[string]int
+	localFieldArrayElemSlots map[int]map[string]map[string]int
+	localArrayElemFieldSlots map[int]map[string]map[string]int
+	parent                   *compiler
+	selfFunctionSymbol       int
+	selfNumericPairAdd       bool
+	selfNumericPairBase      float64
+	variadic                 bool
+	upvalues                 map[string]int
+	upvaluesByID             map[int]int
+	upvalueDescs             []upvalueDesc
+	loops                    []loopContext
+	nextReg                  int
+	freeTemps                []int
+	suppressTagChains        bool
+	options                  compilerOptions
 }
 
 type variableKind int
@@ -51,15 +53,17 @@ func compileProgram(source sourceArtifact) (*Proto, error) {
 func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (*Proto, error) {
 	bindCursor := 0
 	c := compiler{
-		bind:                source.bind,
-		bindCursor:          &bindCursor,
-		symbolRegisters:     make(map[int]int),
-		locals:              make(map[string]int),
-		localStringSlots:    make(map[int]map[string]int),
-		localRowStringSlots: make(map[int]map[string]int),
-		localArrayElemSlots: make(map[int]map[string]int),
-		selfFunctionSymbol:  -1,
-		options:             options,
+		bind:                     source.bind,
+		bindCursor:               &bindCursor,
+		symbolRegisters:          make(map[int]int),
+		locals:                   make(map[string]int),
+		localStringSlots:         make(map[int]map[string]int),
+		localRowStringSlots:      make(map[int]map[string]int),
+		localArrayElemSlots:      make(map[int]map[string]int),
+		localFieldArrayElemSlots: make(map[int]map[string]map[string]int),
+		localArrayElemFieldSlots: make(map[int]map[string]map[string]int),
+		selfFunctionSymbol:       -1,
+		options:                  options,
 	}
 	c.sourceText = source.source.Text
 
@@ -189,9 +193,18 @@ func (c *compiler) compileLoweredLocal(lowered loweredLocal) error {
 				if slots, ok := expressionArrayElementNamedTableFieldSlots(lowered.sources[item.source]); ok {
 					c.localArrayElemSlots[targets[i]] = slots
 				}
+				if slots, ok := expressionArrayElementFieldArrayElementSlots(lowered.sources[item.source]); ok {
+					c.localArrayElemFieldSlots[targets[i]] = slots
+				}
 				if slots, ok := c.expressionIndexedLocalArrayElementSlots(lowered.sources[item.source]); ok {
 					c.localStringSlots[targets[i]] = slots
 					c.localRowStringSlots[targets[i]] = slots
+				}
+				if slots, ok := c.expressionIndexedLocalArrayElementFieldSlots(lowered.sources[item.source]); ok {
+					c.localFieldArrayElemSlots[targets[i]] = slots
+				}
+				if slots, ok := c.expressionLocalFieldArrayElementSlots(lowered.sources[item.source]); ok {
+					c.localArrayElemSlots[targets[i]] = slots
 				}
 			}
 		}
@@ -342,22 +355,24 @@ func (c *compiler) compileFunctionDeclaration(stmt functionDeclarationStatement)
 func (c *compiler) compileFunctionProto(closure loweredClosure, selfFunctionSymbol int) (*Proto, error) {
 	selfNumericPairBase, selfNumericPairAdd := selfNumericPairAddClosureBase(closure)
 	fn := compiler{
-		bind:                c.bind,
-		bindCursor:          c.bindCursor,
-		symbolRegisters:     make(map[int]int),
-		locals:              make(map[string]int),
-		localStringSlots:    make(map[int]map[string]int),
-		localRowStringSlots: make(map[int]map[string]int),
-		localArrayElemSlots: make(map[int]map[string]int),
-		parent:              c,
-		selfFunctionSymbol:  selfFunctionSymbol,
-		selfNumericPairAdd:  selfNumericPairAdd,
-		selfNumericPairBase: selfNumericPairBase,
-		variadic:            closure.variadic,
-		upvalues:            make(map[string]int),
-		upvaluesByID:        make(map[int]int),
-		nextReg:             len(closure.params),
-		options:             c.options,
+		bind:                     c.bind,
+		bindCursor:               c.bindCursor,
+		symbolRegisters:          make(map[int]int),
+		locals:                   make(map[string]int),
+		localStringSlots:         make(map[int]map[string]int),
+		localRowStringSlots:      make(map[int]map[string]int),
+		localArrayElemSlots:      make(map[int]map[string]int),
+		localFieldArrayElemSlots: make(map[int]map[string]map[string]int),
+		localArrayElemFieldSlots: make(map[int]map[string]map[string]int),
+		parent:                   c,
+		selfFunctionSymbol:       selfFunctionSymbol,
+		selfNumericPairAdd:       selfNumericPairAdd,
+		selfNumericPairBase:      selfNumericPairBase,
+		variadic:                 closure.variadic,
+		upvalues:                 make(map[string]int),
+		upvaluesByID:             make(map[int]int),
+		nextReg:                  len(closure.params),
+		options:                  c.options,
 	}
 	fn.sourceText = c.sourceText
 	for i, param := range closure.params {
@@ -1188,7 +1203,7 @@ func expressionArrayElementNamedTableFieldSlots(expr expression) (map[string]int
 	if term.table == nil || len(term.selectors) != 0 {
 		return nil, false
 	}
-	var shape map[string]int
+	shape := make(map[string]int)
 	for _, field := range term.table.fields {
 		if field.arrayIndex == 0 || field.name != "" || field.key != nil {
 			return nil, false
@@ -1197,18 +1212,70 @@ func expressionArrayElementNamedTableFieldSlots(expr expression) (map[string]int
 		if !ok {
 			return nil, false
 		}
-		if shape == nil {
-			shape = slots
-			continue
-		}
-		if !stringSlotMapsEqual(shape, slots) {
-			return nil, false
+		for name, slot := range slots {
+			if _, exists := shape[name]; !exists {
+				shape[name] = slot
+			}
 		}
 	}
 	if len(shape) == 0 {
 		return nil, false
 	}
 	return shape, true
+}
+
+func expressionArrayElementFieldArrayElementSlots(expr expression) (map[string]map[string]int, bool) {
+	multiplicative, ok := expressionSingleMultiplicative(expr)
+	if !ok {
+		return nil, false
+	}
+	term := termWithoutCastsAndGroups(multiplicative.first)
+	if term.table == nil || len(term.selectors) != 0 {
+		return nil, false
+	}
+	shape := make(map[string]map[string]int)
+	for _, field := range term.table.fields {
+		if field.arrayIndex == 0 || field.name != "" || field.key != nil {
+			return nil, false
+		}
+		rowFields, ok := expressionNamedTableFieldArrayElementSlots(field.value)
+		if !ok {
+			continue
+		}
+		for name, slots := range rowFields {
+			mergeStringSlotMap(shape, name, slots)
+		}
+	}
+	if len(shape) == 0 {
+		return nil, false
+	}
+	return shape, true
+}
+
+func expressionNamedTableFieldArrayElementSlots(expr expression) (map[string]map[string]int, bool) {
+	multiplicative, ok := expressionSingleMultiplicative(expr)
+	if !ok {
+		return nil, false
+	}
+	term := termWithoutCastsAndGroups(multiplicative.first)
+	if term.table == nil || len(term.selectors) != 0 {
+		return nil, false
+	}
+	slots := make(map[string]map[string]int)
+	for _, field := range term.table.fields {
+		if field.name == "" || field.key != nil || field.arrayIndex != 0 {
+			return nil, false
+		}
+		elemSlots, ok := expressionArrayElementNamedTableFieldSlots(field.value)
+		if !ok {
+			continue
+		}
+		slots[field.name] = elemSlots
+	}
+	if len(slots) == 0 {
+		return nil, false
+	}
+	return slots, true
 }
 
 func (c *compiler) expressionIndexedLocalArrayElementSlots(expr expression) (map[string]int, bool) {
@@ -1230,16 +1297,78 @@ func (c *compiler) expressionIndexedLocalArrayElementSlots(expr expression) (map
 	return slots, ok
 }
 
-func stringSlotMapsEqual(left map[string]int, right map[string]int) bool {
-	if len(left) != len(right) {
-		return false
+func (c *compiler) expressionIndexedLocalArrayElementFieldSlots(expr expression) (map[string]map[string]int, bool) {
+	value, ok := expressionSingleTerm(expr)
+	if !ok || value.name == "" || len(value.selectors) != 1 {
+		return nil, false
 	}
-	for key, value := range left {
-		if right[key] != value {
-			return false
+	selector := value.selectors[0]
+	if selector.field != "" || selector.index == nil {
+		return nil, false
+	}
+	base := value
+	base.selectors = nil
+	ref, ok := c.termLocalRef(base)
+	if !ok {
+		return nil, false
+	}
+	slots, ok := c.localArrayElemFieldSlots[ref.index]
+	return slots, ok
+}
+
+func (c *compiler) expressionLocalFieldArrayElementSlots(expr expression) (map[string]int, bool) {
+	value, ok := expressionSingleTerm(expr)
+	if !ok || value.name == "" || len(value.selectors) != 1 {
+		return nil, false
+	}
+	selector := value.selectors[0]
+	if selector.field == "" || selector.index != nil {
+		return nil, false
+	}
+	base := value
+	base.selectors = nil
+	ref, ok := c.termLocalRef(base)
+	if !ok {
+		return nil, false
+	}
+	fields, ok := c.localFieldArrayElemSlots[ref.index]
+	if !ok {
+		return nil, false
+	}
+	slots, ok := fields[selector.field]
+	return slots, ok
+}
+
+func (c *compiler) expressionArrayElementSlots(expr expression) (map[string]int, bool) {
+	if ref, ok := c.expressionLocalRef(expr); ok {
+		slots, ok := c.localArrayElemSlots[ref.index]
+		return slots, ok
+	}
+	if slots, ok := c.expressionLocalFieldArrayElementSlots(expr); ok {
+		return slots, true
+	}
+	return expressionArrayElementNamedTableFieldSlots(expr)
+}
+
+func (c *compiler) expressionArrayElementFieldSlots(expr expression) (map[string]map[string]int, bool) {
+	if ref, ok := c.expressionLocalRef(expr); ok {
+		slots, ok := c.localArrayElemFieldSlots[ref.index]
+		return slots, ok
+	}
+	return expressionArrayElementFieldArrayElementSlots(expr)
+}
+
+func mergeStringSlotMap(target map[string]map[string]int, name string, slots map[string]int) {
+	existing, ok := target[name]
+	if !ok {
+		existing = make(map[string]int, len(slots))
+		target[name] = existing
+	}
+	for field, slot := range slots {
+		if _, exists := existing[field]; !exists {
+			existing[field] = slot
 		}
 	}
-	return true
 }
 
 func (c *compiler) compileAddStringFieldAssignment(addField addStringFieldAssignment) error {
@@ -1793,12 +1922,16 @@ func (c *compiler) stringTagElseIfChain(branch loweredIfStatement) (stringTagEls
 	if !ok {
 		return stringTagElseIfChain{}, false
 	}
+	firstValue, ok := first.value.String()
+	if !ok {
+		return stringTagElseIfChain{}, false
+	}
 	chain := stringTagElseIfChain{
 		table: first.table,
 		field: first.field,
 		slot:  first.slot,
 		arms: []stringTagElseIfArm{{
-			value:  first.value,
+			value:  firstValue,
 			guards: firstGuards,
 			body:   branch.thenBody,
 		}},
@@ -1813,8 +1946,12 @@ func (c *compiler) stringTagElseIfChain(branch loweredIfStatement) (stringTagEls
 			condition.slot != chain.slot {
 			return stringTagElseIfChain{}, false
 		}
+		conditionValue, ok := condition.value.String()
+		if !ok {
+			return stringTagElseIfChain{}, false
+		}
 		chain.arms = append(chain.arms, stringTagElseIfArm{
-			value:  condition.value,
+			value:  conditionValue,
 			guards: guards,
 			body:   nextBranch.thenBody,
 		})
@@ -2130,7 +2267,7 @@ func (c *compiler) moduloConstantEqualityCondition(comparison comparisonExpressi
 type stringFieldEqualityCondition struct {
 	table int
 	field string
-	value string
+	value Value
 	slot  int
 }
 
@@ -2170,7 +2307,7 @@ func (c *compiler) compileStringFieldEqualityJumpIfFalse(expr expression) (int, 
 
 func (c *compiler) emitStringFieldEqualityJump(condition stringFieldEqualityCondition) int {
 	field := c.addConstant(StringValue(condition.field))
-	value := c.addConstant(StringValue(condition.value))
+	value := c.addConstant(condition.value)
 	if condition.slot >= 0 {
 		desc := c.addRowFieldEqualOp(rowFieldEqualOp{
 			field: field,
@@ -2286,7 +2423,7 @@ func (c *compiler) stringFieldEqualityCondition(expr comparisonExpression) (stri
 	if !ok {
 		return stringFieldEqualityCondition{}, false
 	}
-	value, ok := concatStringLiteral(*expr.right)
+	value, ok := concatNonNilLiteral(*expr.right)
 	if !ok {
 		return stringFieldEqualityCondition{}, false
 	}
@@ -2328,6 +2465,28 @@ func concatStringLiteral(expr concatExpression) (string, bool) {
 		return value, ok
 	}
 	return "", false
+}
+
+func concatNonNilLiteral(expr concatExpression) (Value, bool) {
+	if len(expr.rest) != 0 || len(expr.first.rest) != 0 || len(expr.first.first.rest) != 0 {
+		return NilValue(), false
+	}
+	term := termWithoutCastsAndGroups(expr.first.first.first)
+	if isNamedTerm(term) || len(term.selectors) != 0 {
+		return NilValue(), false
+	}
+	if term.number != nil {
+		return NumberValue(*term.number), true
+	}
+	if term.lit == nil || term.lit.kind == NilKind {
+		return NilValue(), false
+	}
+	switch term.lit.kind {
+	case BoolKind, NumberKind, StringKind:
+		return *term.lit, true
+	default:
+		return NilValue(), false
+	}
 }
 
 func (c *compiler) compileStringFieldNumericJumpIfFalse(expr expression) (int, bool, error) {
@@ -2759,15 +2918,17 @@ func (c *compiler) compileGenericFor(stmt genericForStatement) error {
 	outerLocals := copyLocals(c.locals)
 	outerStringSlots := copyLocalStringSlots(c.localStringSlots)
 	outerRowStringSlots := copyLocalStringSlots(c.localRowStringSlots)
+	outerFieldArrayElemSlots := copyLocalFieldArrayElemSlots(c.localFieldArrayElemSlots)
 	for i, name := range loopShape.names {
 		register := resultStart + i
 		c.locals[name] = register
 		if i == 1 && len(loopShape.values) == 1 {
-			if ref, ok := c.expressionLocalRef(loopShape.values[0]); ok {
-				if slots, ok := c.localArrayElemSlots[ref.index]; ok {
-					c.localStringSlots[register] = slots
-					c.localRowStringSlots[register] = slots
-				}
+			if slots, ok := c.expressionArrayElementSlots(loopShape.values[0]); ok {
+				c.localStringSlots[register] = slots
+				c.localRowStringSlots[register] = slots
+			}
+			if slots, ok := c.expressionArrayElementFieldSlots(loopShape.values[0]); ok {
+				c.localFieldArrayElemSlots[register] = slots
 			}
 		}
 	}
@@ -2780,6 +2941,7 @@ func (c *compiler) compileGenericFor(stmt genericForStatement) error {
 	c.locals = copyLocals(outerLocals)
 	c.localStringSlots = copyLocalStringSlots(outerStringSlots)
 	c.localRowStringSlots = copyLocalStringSlots(outerRowStringSlots)
+	c.localFieldArrayElemSlots = copyLocalFieldArrayElemSlots(outerFieldArrayElemSlots)
 
 	c.emit(instruction{op: opJump, b: loopStart})
 	exit := c.pc()
@@ -3812,6 +3974,22 @@ func copyLocalStringSlots(slots map[int]map[string]int) map[int]map[string]int {
 			slotCopy[field] = slot
 		}
 		copied[register] = slotCopy
+	}
+	return copied
+}
+
+func copyLocalFieldArrayElemSlots(slots map[int]map[string]map[string]int) map[int]map[string]map[string]int {
+	copied := make(map[int]map[string]map[string]int, len(slots))
+	for register, fieldSlots := range slots {
+		fieldCopy := make(map[string]map[string]int, len(fieldSlots))
+		for field, elemSlots := range fieldSlots {
+			elemCopy := make(map[string]int, len(elemSlots))
+			for elemField, slot := range elemSlots {
+				elemCopy[elemField] = slot
+			}
+			fieldCopy[field] = elemCopy
+		}
+		copied[register] = fieldCopy
 	}
 	return copied
 }

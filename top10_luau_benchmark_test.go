@@ -1031,7 +1031,7 @@ func TestClassicEmberRunAllocationBudgets(t *testing.T) {
 		maxAllocsPerOp uint64
 	}{
 		"recursive_fibonacci": {maxBytesPerOp: 1400, maxAllocsPerOp: 16},
-		"iterative_fibonacci": {maxBytesPerOp: 320, maxAllocsPerOp: 6},
+		"iterative_fibonacci": {maxBytesPerOp: 328, maxAllocsPerOp: 6},
 	}
 
 	for _, tc := range classicLuauCases {

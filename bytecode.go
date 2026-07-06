@@ -1519,6 +1519,8 @@ type Proto struct {
 	directBlockPlanPCs     []int
 	blockPlans             []blockPlanDesc
 	blockPlanPCs           []int
+	regionExecutionPlans   []regionExecutionPlanDesc
+	regionExecutionPlanPCs []int
 	verifiedPlans          []verifiedPlanDesc
 	verifiedPlanPCs        []int
 	verifiedPlanRejections []verifiedPlanRejectionDesc
@@ -1723,6 +1725,8 @@ const (
 	blockPlanKindRowFieldAddStore
 	blockPlanKindRowFieldBranchStore
 	blockPlanKindDynamicPathAddStore
+	blockPlanKindDynamicPathSub
+	blockPlanKindDynamicPathSubIDivK
 	blockPlanKindRowFieldAddFieldStore
 )
 
@@ -1734,17 +1738,31 @@ type blockPlanDesc struct {
 	fallbackPC  int
 	directBlock directBlockPlanDesc
 	dynamicPath dynamicPathAddStoreBlockDesc
+	dynamicSub  dynamicPathSubIDivKBlockDesc
 	rowField    rowFieldAddFieldStoreBlockDesc
 }
 
 type dynamicPathAddStoreBlockDesc struct {
-	base    int
-	field   int
-	key     int
-	delta   int
-	result  int
-	op      opcode
-	storePC int
+	base       int
+	field      int
+	key        int
+	delta      int
+	deltaBase  int
+	deltaField int
+	deltaSlot  int
+	result     int
+	op         opcode
+	storePC    int
+}
+
+type dynamicPathSubIDivKBlockDesc struct {
+	leftBase   int
+	rightBase  int
+	leftField  int
+	rightField int
+	key        int
+	divisor    int
+	result     int
 }
 
 type rowFieldAddFieldStoreBlockDesc struct {
@@ -1758,6 +1776,143 @@ type rowFieldAddFieldStoreBlockDesc struct {
 	constOp  opcode
 	op       opcode
 	storePC  int
+}
+
+type arrayRowLoopRegionDesc struct {
+	iterator         int
+	array            int
+	index            int
+	row              int
+	accumulator      int
+	prefixExitPC     int
+	actionBranch     arrayRowLoopActionBranchDesc
+	dynamicMap       arrayRowLoopDynamicMapUpdateDesc
+	indexedMapBranch arrayRowLoopIndexedMapBranchDesc
+	predicate        arrayRowLoopPredicateDesc
+	mutations        []arrayRowLoopFieldMutationDesc
+	fields           []arrayRowLoopFieldAddDesc
+}
+
+type arrayRowLoopPredicateDesc struct {
+	pc      int
+	op      opcode
+	field   int
+	value   int
+	slot    int
+	skipPC  int
+	enabled bool
+}
+
+type arrayRowLoopFieldAddDesc struct {
+	loadPC       int
+	addPC        int
+	loadRegister int
+	field        int
+	slot         int
+}
+
+type arrayRowLoopActionBranchDesc struct {
+	enabled     bool
+	actor       int
+	accumulator int
+	energyField int
+	energySlot  int
+	costField   int
+	costSlot    int
+	resetField  int
+	resetSlot   int
+	usesField   int
+	usesSlot    int
+	oneConstant int
+}
+
+type arrayRowLoopDynamicMapUpdateDesc struct {
+	enabled          bool
+	adjustedGain     bool
+	base             int
+	field            int
+	keyRegister      int
+	storeKeyRegister int
+	keyField         int
+	keySlot          int
+	deltaRegister    int
+	deltaOperand     int
+	deltaField       int
+	deltaSlot        int
+	extraResult      int
+	extraRegister    int
+	extraOp          opcode
+	extraConstant    int
+	branchField      int
+	branchSlot       int
+	multiplyKind     int
+	multiplyConstant int
+	divideKind       int
+	divideConstant   int
+	divideAdd        int
+	bonusBase        int
+	bonusField       int
+	bonusSlot        int
+	bonusConstant    int
+	result           int
+	op               opcode
+}
+
+type arrayRowLoopIndexedMapBranchDesc struct {
+	enabled         bool
+	base            int
+	accumulator     int
+	control         int
+	keyRegister     int
+	valueRegister   int
+	thenDelta       int
+	elseDelta       int
+	thenMapResult   int
+	elseMapResult   int
+	finalMapResult  int
+	keyField        int
+	keySlot         int
+	deltaField      int
+	deltaSlot       int
+	branchField     int
+	branchSlot      int
+	thenValue       int
+	leftMapField    int
+	mutableMapField int
+	finalMapField   int
+	divisor         int
+	lowerBound      int
+	thenModulo      int
+	elseModulo      int
+	finalModulo     int
+}
+
+type arrayRowLoopFieldMutationKind uint8
+
+const (
+	arrayRowLoopFieldMutationKindInvalid arrayRowLoopFieldMutationKind = iota
+	arrayRowLoopFieldMutationKindConstStore
+	arrayRowLoopFieldMutationKindComputedStore
+	arrayRowLoopFieldMutationKindClampLowerBound
+)
+
+type arrayRowLoopFieldMutationDesc struct {
+	kind           arrayRowLoopFieldMutationKind
+	loadPC         int
+	storePC        int
+	loadRegister   int
+	valueRegister  int
+	valueConstant  int
+	field          int
+	slot           int
+	constantOp     opcode
+	sourceRegister int
+	sourceBase     int
+	sourceField    int
+	sourceSlot     int
+	op             opcode
+	threshold      int
+	clamp          int
 }
 
 type verifiedPlanKind uint8
@@ -1866,6 +2021,8 @@ type executionArtifact struct {
 	directBlockPlanPCs     []int
 	blockPlans             []blockPlanDesc
 	blockPlanPCs           []int
+	regionExecutionPlans   []regionExecutionPlanDesc
+	regionExecutionPlanPCs []int
 	verifiedPlans          []verifiedPlanDesc
 	verifiedPlanPCs        []int
 	verifiedPlanRejections []verifiedPlanRejectionDesc
@@ -1940,6 +2097,7 @@ func buildExecutionArtifact(proto *Proto) executionArtifact {
 	reductionFacts := detectReductionFacts(proto)
 	directBlockPlans := detectDirectBlockPlans(proto, reductionFacts)
 	blockPlans := detectBlockPlans(proto, directBlockPlans, pathPlans)
+	regionExecutionPlans := detectRegionExecutionPlans(proto)
 	verifiedPlans, verifiedPlanRejections := detectVerifiedPlans(proto, directBlockPlans)
 	return executionArtifact{
 		constantKeys:           constantKeys,
@@ -1962,6 +2120,8 @@ func buildExecutionArtifact(proto *Proto) executionArtifact {
 		directBlockPlanPCs:     directBlockPlanPCs(len(proto.code), directBlockPlans),
 		blockPlans:             blockPlans,
 		blockPlanPCs:           blockPlanPCs(len(proto.code), blockPlans),
+		regionExecutionPlans:   regionExecutionPlans,
+		regionExecutionPlanPCs: regionExecutionPlanPCs(len(proto.code), regionExecutionPlans),
 		verifiedPlans:          verifiedPlans,
 		verifiedPlanPCs:        verifiedPlanPCs(len(proto.code), verifiedPlans),
 		verifiedPlanRejections: verifiedPlanRejections,
@@ -2004,6 +2164,8 @@ func (artifact executionArtifact) apply(proto *Proto) {
 	proto.directBlockPlanPCs = artifact.directBlockPlanPCs
 	proto.blockPlans = artifact.blockPlans
 	proto.blockPlanPCs = artifact.blockPlanPCs
+	proto.regionExecutionPlans = artifact.regionExecutionPlans
+	proto.regionExecutionPlanPCs = artifact.regionExecutionPlanPCs
 	proto.verifiedPlans = artifact.verifiedPlans
 	proto.verifiedPlanPCs = artifact.verifiedPlanPCs
 	proto.verifiedPlanRejections = artifact.verifiedPlanRejections
@@ -3219,20 +3381,39 @@ func rowFieldBranchStoreDirectBlockPlan(proto *Proto, pc int, ins instruction) (
 	if pc < 0 || pc+2 >= len(proto.code) || ins.d <= pc+2 || ins.d > len(proto.code) {
 		return directBlockPlanDesc{}, false
 	}
-	if ins.op != opJumpIfRowStringFieldNotGreaterK && ins.op != opJumpIfRowStringFieldGreaterK {
-		return directBlockPlanDesc{}, false
-	}
-	desc, ok := rowFieldEqualDesc(proto, ins.b)
-	if !ok || desc.slot < 0 {
-		return directBlockPlanDesc{}, false
-	}
 	first := proto.code[pc+1]
 	store := proto.code[pc+2]
-	candidate, ok := rowFieldBranchStoreBodyCandidate(proto, first, store, ins.a, desc.field, desc.slot)
-	if !ok {
+	field := -1
+	slot := -1
+	candidate := -1
+	switch ins.op {
+	case opJumpIfRowStringFieldNotGreaterK, opJumpIfRowStringFieldGreaterK:
+		desc, ok := rowFieldEqualDesc(proto, ins.b)
+		if !ok || desc.slot < 0 {
+			return directBlockPlanDesc{}, false
+		}
+		bodyCandidate, ok := rowFieldBranchStoreBodyCandidate(proto, first, store, ins.a, desc.field, desc.slot)
+		if !ok {
+			return directBlockPlanDesc{}, false
+		}
+		field = desc.field
+		slot = desc.slot
+		candidate = bodyCandidate
+	case opJumpIfRowStringFieldNotGreaterR:
+		desc, ok := rowFieldRegisterDesc(proto, ins.b)
+		if !ok || desc.slot < 0 {
+			return directBlockPlanDesc{}, false
+		}
+		if !rowFieldRegisterBranchStoreBodyMatches(proto, first, store, ins.a, desc.field, desc.slot, ins.c) {
+			return directBlockPlanDesc{}, false
+		}
+		field = desc.field
+		slot = desc.slot
+		candidate = ins.c
+	default:
 		return directBlockPlanDesc{}, false
 	}
-	if _, ok := stringConstantText(proto, desc.field); !ok {
+	if _, ok := stringConstantText(proto, field); !ok {
 		return directBlockPlanDesc{}, false
 	}
 	mutationCount := 2
@@ -3250,8 +3431,8 @@ func rowFieldBranchStoreDirectBlockPlan(proto *Proto, pc int, ins instruction) (
 		resumePC:      ins.d,
 		register:      ins.a,
 		candidate:     candidate,
-		field:         desc.field,
-		slot:          desc.slot,
+		field:         field,
+		slot:          slot,
 		mutationPC:    pc + 2,
 		mutationCount: mutationCount,
 	}, true
@@ -3269,6 +3450,12 @@ func rowFieldBranchStoreBodyCandidate(proto *Proto, first instruction, store ins
 		return -1, false
 	}
 	return first.b, true
+}
+
+func rowFieldRegisterBranchStoreBodyMatches(proto *Proto, first instruction, store instruction, table int, field int, slot int, source int) bool {
+	return first.op == opMove &&
+		first.b == source &&
+		rowFieldBranchStoreMutationMatches(proto, store, table, first.a, field, slot)
 }
 
 func rowFieldBranchStoreMutationMatches(proto *Proto, store instruction, table int, source int, field int, slot int) bool {
@@ -3323,6 +3510,8 @@ func detectBlockPlans(proto *Proto, directBlocks []directBlockPlanDesc, pathPlan
 		plans = append(plans, plan)
 	}
 	plans = append(plans, detectDynamicPathAddStoreBlockPlans(proto, pathPlans)...)
+	plans = append(plans, detectDynamicPathSubBlockPlans(proto, pathPlans)...)
+	plans = append(plans, detectDynamicPathSubIDivKBlockPlans(proto, pathPlans)...)
 	plans = append(plans, detectRowFieldAddFieldStoreBlockPlans(proto)...)
 	return plans
 }
@@ -3346,21 +3535,23 @@ func detectDynamicPathAddStoreBlockPlans(proto *Proto, pathPlans []pathPlanDesc)
 		arithmetic := code[pc+2]
 		storeKeyMove := code[pc+3]
 		store := code[pc+4]
-		if keyMove.op != opMove || keyMove.a != get.d ||
-			deltaMove.op != opMove ||
-			storeKeyMove.op != opMove ||
-			storeKeyMove.b != keyMove.b ||
-			store.op != opSetStringFieldIndex ||
+		if store.op != opSetStringFieldIndex ||
 			store.a != get.b ||
 			!sameStringConstant(proto, store.b, get.c) ||
-			store.c != storeKeyMove.a ||
 			store.d != get.a {
+			continue
+		}
+		if !dynamicPathAddStoreKeysMatch(proto, keyMove, get, storeKeyMove, store) {
+			continue
+		}
+		delta, deltaBase, deltaField, deltaSlot, ok := dynamicPathAddStoreDeltaSource(deltaMove, arithmetic)
+		if !ok {
 			continue
 		}
 		if arithmetic.op != opAdd && arithmetic.op != opSub {
 			continue
 		}
-		if arithmetic.a != get.a || arithmetic.b != get.a || arithmetic.c != deltaMove.a {
+		if arithmetic.a != get.a || arithmetic.b != get.a {
 			continue
 		}
 		if !pathPlanAllowsDynamicAccess(proto, pathPlans, pc+4, "write", get.b, get.c) {
@@ -3373,13 +3564,156 @@ func detectDynamicPathAddStoreBlockPlans(proto *Proto, pathPlans []pathPlanDesc)
 			resumePC:   pc + 5,
 			fallbackPC: pc,
 			dynamicPath: dynamicPathAddStoreBlockDesc{
-				base:    get.b,
-				field:   get.c,
-				key:     get.d,
-				delta:   deltaMove.b,
-				result:  get.a,
-				op:      arithmetic.op,
-				storePC: pc + 4,
+				base:       get.b,
+				field:      get.c,
+				key:        get.d,
+				delta:      delta,
+				deltaBase:  deltaBase,
+				deltaField: deltaField,
+				deltaSlot:  deltaSlot,
+				result:     get.a,
+				op:         arithmetic.op,
+				storePC:    pc + 4,
+			},
+		})
+	}
+	return plans
+}
+
+func dynamicPathAddStoreKeysMatch(proto *Proto, keyMove instruction, get instruction, storeKeyMove instruction, store instruction) bool {
+	if keyMove.op == opMove && keyMove.a == get.d &&
+		storeKeyMove.op == opMove &&
+		storeKeyMove.b == keyMove.b &&
+		store.c == storeKeyMove.a {
+		return true
+	}
+	if keyMove.op != opGetRowStringField || storeKeyMove.op != opGetRowStringField {
+		return false
+	}
+	return keyMove.a == get.d &&
+		store.c == storeKeyMove.a &&
+		keyMove.b == storeKeyMove.b &&
+		keyMove.d == storeKeyMove.d &&
+		sameStringConstant(proto, keyMove.c, storeKeyMove.c)
+}
+
+func dynamicPathAddStoreDeltaSource(load instruction, arithmetic instruction) (delta int, base int, field int, slot int, ok bool) {
+	if arithmetic.c != load.a {
+		return 0, 0, 0, 0, false
+	}
+	if load.op == opMove {
+		return load.b, -1, -1, -1, true
+	}
+	if load.op == opGetRowStringField {
+		return load.a, load.b, load.c, load.d, true
+	}
+	return 0, 0, 0, 0, false
+}
+
+func detectDynamicPathSubBlockPlans(proto *Proto, pathPlans []pathPlanDesc) []blockPlanDesc {
+	if proto == nil || len(pathPlans) == 0 {
+		return nil
+	}
+	var plans []blockPlanDesc
+	code := proto.code
+	for pc := 1; pc+3 < len(code); pc++ {
+		leftGet := code[pc]
+		if leftGet.op != opGetStringFieldIndex {
+			continue
+		}
+		if !pathPlanAllowsDynamicAccess(proto, pathPlans, pc, "read", leftGet.b, leftGet.c) {
+			continue
+		}
+		keyMove := code[pc-1]
+		rightKeyMove := code[pc+1]
+		rightGet := code[pc+2]
+		subtract := code[pc+3]
+		if keyMove.op != opMove ||
+			keyMove.a != leftGet.d ||
+			rightKeyMove.op != opMove ||
+			rightKeyMove.b != keyMove.b ||
+			rightGet.op != opGetStringFieldIndex ||
+			rightGet.d != rightKeyMove.a ||
+			subtract.op != opSub ||
+			subtract.a != leftGet.a ||
+			subtract.b != leftGet.a ||
+			subtract.c != rightGet.a {
+			continue
+		}
+		if !pathPlanAllowsDynamicAccess(proto, pathPlans, pc+2, "read", rightGet.b, rightGet.c) {
+			continue
+		}
+		plans = append(plans, blockPlanDesc{
+			pc:         pc,
+			kind:       blockPlanKindDynamicPathSub,
+			startPC:    pc,
+			resumePC:   pc + 4,
+			fallbackPC: pc,
+			dynamicSub: dynamicPathSubIDivKBlockDesc{
+				leftBase:   leftGet.b,
+				rightBase:  rightGet.b,
+				leftField:  leftGet.c,
+				rightField: rightGet.c,
+				key:        leftGet.d,
+				divisor:    -1,
+				result:     leftGet.a,
+			},
+		})
+	}
+	return plans
+}
+
+func detectDynamicPathSubIDivKBlockPlans(proto *Proto, pathPlans []pathPlanDesc) []blockPlanDesc {
+	if proto == nil || len(pathPlans) == 0 {
+		return nil
+	}
+	var plans []blockPlanDesc
+	code := proto.code
+	for pc := 1; pc+4 < len(code); pc++ {
+		leftGet := code[pc]
+		if leftGet.op != opGetStringFieldIndex {
+			continue
+		}
+		if !pathPlanAllowsDynamicAccess(proto, pathPlans, pc, "read", leftGet.b, leftGet.c) {
+			continue
+		}
+		keyMove := code[pc-1]
+		rightKeyMove := code[pc+1]
+		rightGet := code[pc+2]
+		divide := code[pc+3]
+		subtract := code[pc+4]
+		if keyMove.op != opMove ||
+			keyMove.a != leftGet.d ||
+			rightKeyMove.op != opMove ||
+			rightKeyMove.b != keyMove.b ||
+			rightGet.op != opGetStringFieldIndex ||
+			rightGet.d != rightKeyMove.a ||
+			divide.op != opIDivK ||
+			divide.a != rightGet.a ||
+			divide.b != rightGet.a ||
+			subtract.op != opSub ||
+			subtract.a != leftGet.a ||
+			subtract.b != leftGet.a ||
+			subtract.c != divide.a {
+			continue
+		}
+		if !pathPlanAllowsDynamicAccess(proto, pathPlans, pc+2, "read", rightGet.b, rightGet.c) {
+			continue
+		}
+		plans = append(plans, blockPlanDesc{
+			pc:         pc,
+			kind:       blockPlanKindDynamicPathSubIDivK,
+			startPC:    pc,
+			resumePC:   pc + 5,
+			fallbackPC: pc,
+			dynamicSub: dynamicPathSubIDivKBlockDesc{
+				leftBase:   leftGet.b,
+				rightBase:  rightGet.b,
+				leftField:  leftGet.c,
+				rightField: rightGet.c,
+				key:        leftGet.d,
+				divisor:    divide.c,
+				result:     leftGet.a,
 			},
 		})
 	}
@@ -3510,6 +3844,10 @@ func blockPlanKindName(kind blockPlanKind) string {
 		return "row_field_branch_store"
 	case blockPlanKindDynamicPathAddStore:
 		return "dynamic_path_add_store"
+	case blockPlanKindDynamicPathSub:
+		return "dynamic_path_sub"
+	case blockPlanKindDynamicPathSubIDivK:
+		return "dynamic_path_sub_idiv_k"
 	case blockPlanKindRowFieldAddFieldStore:
 		return "row_field_add_field_store"
 	default:
@@ -3650,6 +3988,1313 @@ func (proto *Proto) verifiedPlanAt(pc int) (verifiedPlanDesc, bool) {
 	return proto.verifiedPlans[index], true
 }
 
+func detectRegionExecutionPlans(proto *Proto) []regionExecutionPlanDesc {
+	if proto == nil || len(proto.code) == 0 {
+		return nil
+	}
+	var plans []regionExecutionPlanDesc
+	for pc, ins := range proto.code {
+		if ins.op != opArrayNextJump2 {
+			continue
+		}
+		plan, ok := detectArrayRowLoopExecutionPlan(proto, pc, ins)
+		if !ok {
+			plan, ok = detectArrayRowLoopActionBranchExecutionPlan(proto, pc, ins)
+		}
+		if !ok {
+			plan, ok = detectArrayRowLoopIndexedMapBranchExecutionPlan(proto, pc, ins)
+		}
+		if !ok {
+			plan, ok = detectArrayRowLoopDynamicMapUpdateExecutionPlan(proto, pc, ins)
+		}
+		if !ok {
+			plan, ok = detectArrayRowLoopPrefixExecutionPlan(proto, pc, ins)
+		}
+		if ok {
+			plans = append(plans, plan)
+		}
+	}
+	return plans
+}
+
+func detectArrayRowLoopExecutionPlan(proto *Proto, pc int, ins instruction) (regionExecutionPlanDesc, bool) {
+	if proto == nil ||
+		ins.d <= pc+1 ||
+		ins.d > len(proto.code) ||
+		!arrayRowLoopHasBackJump(proto.code, pc, ins.d) ||
+		arrayRowLoopHasNestedIterator(proto.code, pc+1, ins.d-1) ||
+		len(regionCallsOrIntrinsics(proto, pc, ins.d)) != 0 {
+		return regionExecutionPlanDesc{}, false
+	}
+	bodyEnd := ins.d - 1
+	loads := make(map[int]arrayRowLoopFieldAddDesc)
+	desc := arrayRowLoopRegionDesc{
+		iterator:    ins.b,
+		array:       ins.c,
+		index:       ins.a,
+		row:         ins.a + 1,
+		accumulator: -1,
+	}
+	for bodyPC := pc + 1; bodyPC < bodyEnd; bodyPC++ {
+		body := proto.code[bodyPC]
+		switch body.op {
+		case opJumpIfStringFieldFalse, opJumpIfStringFieldNil, opJumpIfStringFieldNotNil, opJumpIfStringFieldTrue,
+			opJumpIfRowStringFieldNotGreaterK, opJumpIfRowStringFieldGreaterK:
+			if body.d <= bodyPC || body.d > bodyEnd {
+				return regionExecutionPlanDesc{}, false
+			}
+			predicate, ok := arrayRowLoopPredicate(proto, desc.row, bodyPC, body, body.d)
+			if !ok || desc.predicate.enabled {
+				return regionExecutionPlanDesc{}, false
+			}
+			desc.predicate = predicate
+		case opGetRowStringField:
+			if bodyPC+4 < bodyEnd {
+				mutation, ok := arrayRowLoopComputedFieldMutation(proto, desc.row, bodyPC, proto.code)
+				if ok {
+					desc.mutations = append(desc.mutations, mutation)
+					bodyPC += 4
+					continue
+				}
+			}
+			if bodyPC+3 < bodyEnd {
+				mutation, ok := arrayRowLoopClampFieldMutation(proto, desc.row, bodyPC, proto.code)
+				if ok {
+					desc.mutations = append(desc.mutations, mutation)
+					bodyPC += 3
+					continue
+				}
+			}
+			if bodyPC+1 < bodyEnd {
+				predicate, ok := arrayRowLoopLoadedPredicate(proto, desc.row, bodyPC, body, proto.code[bodyPC+1], bodyEnd)
+				if ok {
+					if desc.predicate.enabled {
+						return regionExecutionPlanDesc{}, false
+					}
+					desc.predicate = predicate
+					bodyPC++
+					continue
+				}
+			}
+			if body.b != desc.row || body.c < 0 || body.c >= len(proto.constants) || body.d < 0 {
+				return regionExecutionPlanDesc{}, false
+			}
+			if proto.constants[body.c].kind != StringKind {
+				return regionExecutionPlanDesc{}, false
+			}
+			loads[body.a] = arrayRowLoopFieldAddDesc{
+				loadPC:       bodyPC,
+				loadRegister: body.a,
+				field:        body.c,
+				slot:         body.d,
+			}
+		case opLoadConst:
+			if bodyPC+1 >= bodyEnd {
+				return regionExecutionPlanDesc{}, false
+			}
+			mutation, ok := arrayRowLoopFieldMutation(proto, desc.row, bodyPC, body, proto.code[bodyPC+1])
+			if !ok {
+				return regionExecutionPlanDesc{}, false
+			}
+			desc.mutations = append(desc.mutations, mutation)
+			bodyPC++
+		case opAdd:
+			field, accumulator, ok := arrayRowLoopAddFieldOperand(loads, body)
+			if !ok {
+				return regionExecutionPlanDesc{}, false
+			}
+			if desc.accumulator < 0 {
+				desc.accumulator = accumulator
+			}
+			if desc.accumulator != accumulator || body.a != desc.accumulator {
+				return regionExecutionPlanDesc{}, false
+			}
+			field.addPC = bodyPC
+			desc.fields = append(desc.fields, field)
+			delete(loads, field.loadRegister)
+		case opJump:
+			if body.b == bodyPC+1 {
+				continue
+			}
+			if bodyPC != bodyEnd-1 || body.b != bodyEnd {
+				return regionExecutionPlanDesc{}, false
+			}
+		default:
+			return regionExecutionPlanDesc{}, false
+		}
+	}
+	if len(desc.fields) == 0 && len(desc.mutations) == 0 {
+		return regionExecutionPlanDesc{}, false
+	}
+	if len(desc.fields) != 0 && desc.accumulator < 0 {
+		return regionExecutionPlanDesc{}, false
+	}
+	return regionExecutionPlanDesc{
+		kind:       regionExecutionPlanKindArrayRowLoop,
+		entryPC:    pc,
+		exitPC:     ins.d,
+		fallbackPC: pc,
+		arrayLoop:  desc,
+	}, true
+}
+
+func detectArrayRowLoopDynamicMapUpdateExecutionPlan(proto *Proto, pc int, ins instruction) (regionExecutionPlanDesc, bool) {
+	if proto == nil ||
+		ins.d <= pc+1 ||
+		ins.d > len(proto.code) ||
+		!arrayRowLoopHasBackJump(proto.code, pc, ins.d) ||
+		arrayRowLoopHasNestedIterator(proto.code, pc+1, ins.d-1) ||
+		len(regionCallsOrIntrinsics(proto, pc, ins.d)) != 0 {
+		return regionExecutionPlanDesc{}, false
+	}
+	if plan, ok := detectArrayRowLoopAdjustedDynamicMapUpdateExecutionPlan(proto, pc, ins); ok {
+		return plan, true
+	}
+	bodyEnd := ins.d - 1
+	if pc+7 != bodyEnd {
+		return regionExecutionPlanDesc{}, false
+	}
+	row := ins.a + 1
+	keyLoad := proto.code[pc+1]
+	get := proto.code[pc+2]
+	deltaLoad := proto.code[pc+3]
+	arithmetic := proto.code[pc+4]
+	storeKeyLoad := proto.code[pc+5]
+	store := proto.code[pc+6]
+	if keyLoad.op != opGetRowStringField ||
+		keyLoad.b != row ||
+		keyLoad.c < 0 ||
+		keyLoad.c >= len(proto.constants) ||
+		proto.constants[keyLoad.c].kind != StringKind ||
+		keyLoad.d < 0 ||
+		get.op != opGetStringFieldIndex ||
+		get.d != keyLoad.a ||
+		get.c < 0 ||
+		get.c >= len(proto.constants) ||
+		proto.constants[get.c].kind != StringKind ||
+		deltaLoad.op != opGetRowStringField ||
+		deltaLoad.b != row ||
+		deltaLoad.c < 0 ||
+		deltaLoad.c >= len(proto.constants) ||
+		proto.constants[deltaLoad.c].kind != StringKind ||
+		deltaLoad.d < 0 ||
+		(arithmetic.op != opAdd && arithmetic.op != opSub) ||
+		arithmetic.a != get.a ||
+		arithmetic.b != get.a ||
+		arithmetic.c != deltaLoad.a ||
+		storeKeyLoad.op != opGetRowStringField ||
+		storeKeyLoad.b != row ||
+		storeKeyLoad.a != store.c ||
+		storeKeyLoad.d != keyLoad.d ||
+		!sameStringConstant(proto, storeKeyLoad.c, keyLoad.c) ||
+		store.op != opSetStringFieldIndex ||
+		store.a != get.b ||
+		store.d != get.a ||
+		!sameStringConstant(proto, store.b, get.c) {
+		return regionExecutionPlanDesc{}, false
+	}
+	return regionExecutionPlanDesc{
+		kind:       regionExecutionPlanKindArrayRowLoop,
+		entryPC:    pc,
+		exitPC:     ins.d,
+		fallbackPC: pc,
+		arrayLoop: arrayRowLoopRegionDesc{
+			iterator:    ins.b,
+			array:       ins.c,
+			index:       ins.a,
+			row:         row,
+			accumulator: -1,
+			dynamicMap: arrayRowLoopDynamicMapUpdateDesc{
+				enabled:          true,
+				base:             get.b,
+				field:            get.c,
+				keyRegister:      keyLoad.a,
+				storeKeyRegister: storeKeyLoad.a,
+				keyField:         keyLoad.c,
+				keySlot:          keyLoad.d,
+				deltaRegister:    deltaLoad.a,
+				deltaOperand:     deltaLoad.a,
+				deltaField:       deltaLoad.c,
+				deltaSlot:        deltaLoad.d,
+				result:           get.a,
+				op:               arithmetic.op,
+			},
+		},
+	}, true
+}
+
+func detectArrayRowLoopAdjustedDynamicMapUpdateExecutionPlan(proto *Proto, pc int, ins instruction) (regionExecutionPlanDesc, bool) {
+	bodyEnd := ins.d - 1
+	row := ins.a + 1
+	amountLoad := proto.code[pc+1]
+	extraFirst := proto.code[pc+2]
+	gainAddPC := pc + 3
+	extraResult := extraFirst.a
+	extraRegister := extraFirst.b
+	extraOp := extraFirst.op
+	extraConstant := extraFirst.c
+	if pc+21 == bodyEnd {
+		extraSecond := proto.code[pc+3]
+		if extraFirst.op != opMove ||
+			extraSecond.op != opModK ||
+			extraSecond.a != extraFirst.a ||
+			extraSecond.b != extraFirst.a ||
+			!arrayRowLoopNumberConstantOK(proto, extraSecond.c) {
+			return regionExecutionPlanDesc{}, false
+		}
+		gainAddPC = pc + 4
+		extraResult = extraSecond.a
+		extraRegister = extraFirst.b
+		extraOp = extraSecond.op
+		extraConstant = extraSecond.c
+	} else if pc+20 != bodyEnd {
+		return regionExecutionPlanDesc{}, false
+	}
+	gainAdd := proto.code[gainAddPC]
+	multiplyBranch := proto.code[gainAddPC+1]
+	multiply := proto.code[gainAddPC+2]
+	multiplyJump := proto.code[gainAddPC+3]
+	divideBranch := proto.code[gainAddPC+4]
+	divide := proto.code[gainAddPC+5]
+	divideAdd := proto.code[gainAddPC+6]
+	divideJump := proto.code[gainAddPC+7]
+	bonusBranch := proto.code[gainAddPC+8]
+	bonusAdd := proto.code[gainAddPC+9]
+	bonusJump := proto.code[gainAddPC+10]
+	keyLoad := proto.code[gainAddPC+11]
+	get := proto.code[gainAddPC+12]
+	deltaMove := proto.code[gainAddPC+13]
+	arithmetic := proto.code[gainAddPC+14]
+	storeKeyLoad := proto.code[gainAddPC+15]
+	store := proto.code[gainAddPC+16]
+	backJump := proto.code[bodyEnd]
+	multiplyKind, ok := rowFieldEqualDesc(proto, multiplyBranch.b)
+	if !ok {
+		return regionExecutionPlanDesc{}, false
+	}
+	divideKind, ok := rowFieldEqualDesc(proto, divideBranch.b)
+	if !ok {
+		return regionExecutionPlanDesc{}, false
+	}
+	if amountLoad.op != opGetRowStringField ||
+		amountLoad.b != row ||
+		amountLoad.c < 0 ||
+		amountLoad.c >= len(proto.constants) ||
+		proto.constants[amountLoad.c].kind != StringKind ||
+		amountLoad.d < 0 ||
+		!arrayRowLoopDynamicMapExtraLoadOK(proto, extraFirst) ||
+		gainAdd.op != opAdd ||
+		gainAdd.a != amountLoad.a ||
+		gainAdd.b != amountLoad.a ||
+		gainAdd.c != extraResult ||
+		multiplyBranch.op != opJumpIfRowStringFieldNotEqualK ||
+		multiplyBranch.a != row ||
+		multiplyBranch.d != gainAddPC+4 ||
+		multiplyKind.slot < 0 ||
+		multiplyKind.field < 0 ||
+		multiplyKind.field >= len(proto.constants) ||
+		proto.constants[multiplyKind.field].kind != StringKind ||
+		multiplyKind.value < 0 ||
+		multiplyKind.value >= len(proto.constants) ||
+		proto.constants[multiplyKind.value].kind != StringKind ||
+		multiply.op != opMulK ||
+		multiply.a != amountLoad.a ||
+		multiply.b != amountLoad.a ||
+		!arrayRowLoopNumberConstantOK(proto, multiply.c) ||
+		multiplyJump.op != opJump ||
+		multiplyJump.b != gainAddPC+8 ||
+		divideBranch.op != opJumpIfRowStringFieldNotEqualK ||
+		divideBranch.a != row ||
+		divideBranch.d != gainAddPC+8 ||
+		divideKind.slot != multiplyKind.slot ||
+		!sameStringConstant(proto, divideKind.field, multiplyKind.field) ||
+		divideKind.value < 0 ||
+		divideKind.value >= len(proto.constants) ||
+		proto.constants[divideKind.value].kind != StringKind ||
+		divide.op != opIDivK ||
+		divide.a != amountLoad.a ||
+		divide.b != amountLoad.a ||
+		!arrayRowLoopNumberConstantOK(proto, divide.c) ||
+		divideAdd.op != opAddK ||
+		divideAdd.a != amountLoad.a ||
+		divideAdd.b != amountLoad.a ||
+		!arrayRowLoopNumberConstantOK(proto, divideAdd.c) ||
+		divideJump.op != opJump ||
+		divideJump.b != gainAddPC+8 ||
+		bonusBranch.op != opJumpIfStringFieldFalse ||
+		bonusBranch.d != gainAddPC+11 ||
+		bonusBranch.b < 0 ||
+		bonusBranch.b >= len(proto.constants) ||
+		proto.constants[bonusBranch.b].kind != StringKind ||
+		bonusAdd.op != opAddK ||
+		bonusAdd.a != amountLoad.a ||
+		bonusAdd.b != amountLoad.a ||
+		!arrayRowLoopNumberConstantOK(proto, bonusAdd.c) ||
+		bonusJump.op != opJump ||
+		bonusJump.b != gainAddPC+11 ||
+		keyLoad.op != opGetRowStringField ||
+		keyLoad.b != row ||
+		keyLoad.c < 0 ||
+		keyLoad.c >= len(proto.constants) ||
+		proto.constants[keyLoad.c].kind != StringKind ||
+		keyLoad.d < 0 ||
+		get.op != opGetStringFieldIndex ||
+		get.d != keyLoad.a ||
+		get.c < 0 ||
+		get.c >= len(proto.constants) ||
+		proto.constants[get.c].kind != StringKind ||
+		deltaMove.op != opMove ||
+		deltaMove.b != amountLoad.a ||
+		arithmetic.op != opAdd && arithmetic.op != opSub ||
+		arithmetic.a != get.a ||
+		arithmetic.b != get.a ||
+		arithmetic.c != deltaMove.a ||
+		storeKeyLoad.op != opGetRowStringField ||
+		storeKeyLoad.b != row ||
+		storeKeyLoad.a != store.c ||
+		storeKeyLoad.d != keyLoad.d ||
+		!sameStringConstant(proto, storeKeyLoad.c, keyLoad.c) ||
+		store.op != opSetStringFieldIndex ||
+		store.a != get.b ||
+		store.d != get.a ||
+		!sameStringConstant(proto, store.b, get.c) ||
+		backJump.op != opJump ||
+		backJump.b != pc {
+		return regionExecutionPlanDesc{}, false
+	}
+	return regionExecutionPlanDesc{
+		kind:       regionExecutionPlanKindArrayRowLoop,
+		entryPC:    pc,
+		exitPC:     ins.d,
+		fallbackPC: pc,
+		arrayLoop: arrayRowLoopRegionDesc{
+			iterator:    ins.b,
+			array:       ins.c,
+			index:       ins.a,
+			row:         row,
+			accumulator: -1,
+			dynamicMap: arrayRowLoopDynamicMapUpdateDesc{
+				enabled:          true,
+				adjustedGain:     true,
+				base:             get.b,
+				field:            get.c,
+				keyRegister:      keyLoad.a,
+				storeKeyRegister: storeKeyLoad.a,
+				keyField:         keyLoad.c,
+				keySlot:          keyLoad.d,
+				deltaRegister:    amountLoad.a,
+				deltaOperand:     deltaMove.a,
+				deltaField:       amountLoad.c,
+				deltaSlot:        amountLoad.d,
+				extraResult:      extraResult,
+				extraRegister:    extraRegister,
+				extraOp:          extraOp,
+				extraConstant:    extraConstant,
+				branchField:      multiplyKind.field,
+				branchSlot:       multiplyKind.slot,
+				multiplyKind:     multiplyKind.value,
+				multiplyConstant: multiply.c,
+				divideKind:       divideKind.value,
+				divideConstant:   divide.c,
+				divideAdd:        divideAdd.c,
+				bonusBase:        bonusBranch.a,
+				bonusField:       bonusBranch.b,
+				bonusSlot:        bonusBranch.c,
+				bonusConstant:    bonusAdd.c,
+				result:           get.a,
+				op:               arithmetic.op,
+			},
+		},
+	}, true
+}
+
+func arrayRowLoopDynamicMapExtraLoadOK(proto *Proto, ins instruction) bool {
+	if ins.op == opMove {
+		return true
+	}
+	return ins.op == opModK && arrayRowLoopNumberConstantOK(proto, ins.c)
+}
+
+func detectArrayRowLoopIndexedMapBranchExecutionPlan(proto *Proto, pc int, ins instruction) (regionExecutionPlanDesc, bool) {
+	if proto == nil ||
+		ins.d <= pc+1 ||
+		ins.d > len(proto.code) ||
+		!arrayRowLoopHasBackJump(proto.code, pc, ins.d) ||
+		arrayRowLoopHasNestedIterator(proto.code, pc+1, ins.d-1) {
+		return regionExecutionPlanDesc{}, false
+	}
+	bodyEnd := ins.d - 1
+	if pc+54 != bodyEnd {
+		return regionExecutionPlanDesc{}, false
+	}
+	row := ins.a + 1
+	code := proto.code
+	keyLoad := code[pc+1]
+	leftKeyMove := code[pc+2]
+	leftMapGet := code[pc+3]
+	mutableInputKeyMove := code[pc+4]
+	mutableInputGet := code[pc+5]
+	mutableDivide := code[pc+6]
+	adjustmentSub := code[pc+7]
+	finalKeyMove := code[pc+8]
+	finalMapGet := code[pc+9]
+	adjustmentMove := code[pc+10]
+	valueAdd := code[pc+11]
+	lowerBoundBranch := code[pc+12]
+	lowerBoundLoad := code[pc+13]
+	lowerBoundJump := code[pc+14]
+	branchGuard := code[pc+15]
+	thenDelta := code[pc+16]
+	thenControlMove := code[pc+17]
+	thenControlMod := code[pc+18]
+	thenDeltaAdd := code[pc+19]
+	thenLimitKeyMove := code[pc+20]
+	thenLimitGet := code[pc+21]
+	thenDeltaClamp := code[pc+22]
+	thenMutableKeyMove := code[pc+23]
+	thenMutableGet := code[pc+24]
+	thenDeltaMove := code[pc+25]
+	thenMutableSub := code[pc+26]
+	thenStoreKeyMove := code[pc+27]
+	thenMutableStore := code[pc+28]
+	thenAccumulatorDeltaMove := code[pc+29]
+	thenAccumulatorValueMove := code[pc+30]
+	thenAccumulatorProduct := code[pc+31]
+	thenAccumulatorUpdate := code[pc+32]
+	thenJump := code[pc+33]
+	elseDelta := code[pc+34]
+	elseControlMove := code[pc+35]
+	elseControlMod := code[pc+36]
+	elseDeltaAdd := code[pc+37]
+	elseMutableKeyMove := code[pc+38]
+	elseMutableGet := code[pc+39]
+	elseDeltaMove := code[pc+40]
+	elseMutableAdd := code[pc+41]
+	elseStoreKeyMove := code[pc+42]
+	elseMutableStore := code[pc+43]
+	elseAccumulatorDeltaMove := code[pc+44]
+	elseAccumulatorValueMove := code[pc+45]
+	elseAccumulatorProduct := code[pc+46]
+	elseAccumulatorUpdate := code[pc+47]
+	finalValueMove := code[pc+48]
+	finalControlMove := code[pc+49]
+	finalControlMod := code[pc+50]
+	finalValueAdd := code[pc+51]
+	finalStoreKeyMove := code[pc+52]
+	finalStore := code[pc+53]
+	backJump := code[bodyEnd]
+	branch, ok := rowFieldEqualDesc(proto, branchGuard.b)
+	if !ok {
+		return regionExecutionPlanDesc{}, false
+	}
+	if keyLoad.op != opGetRowStringField ||
+		keyLoad.b != row ||
+		keyLoad.c < 0 ||
+		keyLoad.c >= len(proto.constants) ||
+		proto.constants[keyLoad.c].kind != StringKind ||
+		keyLoad.d < 0 ||
+		leftKeyMove.op != opMove ||
+		leftKeyMove.b != keyLoad.a ||
+		leftMapGet.op != opGetStringFieldIndex ||
+		leftMapGet.d != leftKeyMove.a ||
+		mutableInputKeyMove.op != opMove ||
+		mutableInputKeyMove.b != keyLoad.a ||
+		mutableInputGet.op != opGetStringFieldIndex ||
+		mutableInputGet.b != leftMapGet.b ||
+		mutableInputGet.d != mutableInputKeyMove.a ||
+		mutableDivide.op != opIDivK ||
+		mutableDivide.a != mutableInputGet.a ||
+		mutableDivide.b != mutableInputGet.a ||
+		!arrayRowLoopNumberConstantOK(proto, mutableDivide.c) ||
+		proto.constants[mutableDivide.c].number == 0 ||
+		adjustmentSub.op != opSub ||
+		adjustmentSub.a != leftMapGet.a ||
+		adjustmentSub.b != leftMapGet.a ||
+		adjustmentSub.c != mutableDivide.a ||
+		finalKeyMove.op != opMove ||
+		finalKeyMove.b != keyLoad.a ||
+		finalMapGet.op != opGetStringFieldIndex ||
+		finalMapGet.b != leftMapGet.b ||
+		finalMapGet.d != finalKeyMove.a ||
+		adjustmentMove.op != opMove ||
+		adjustmentMove.b != adjustmentSub.a ||
+		valueAdd.op != opAdd ||
+		valueAdd.a != finalMapGet.a ||
+		valueAdd.b != finalMapGet.a ||
+		valueAdd.c != adjustmentMove.a ||
+		lowerBoundBranch.op != opJumpIfNotLessK ||
+		lowerBoundBranch.a != finalMapGet.a ||
+		lowerBoundBranch.d != pc+15 ||
+		!arrayRowLoopNumberConstantOK(proto, lowerBoundBranch.b) ||
+		lowerBoundLoad.op != opLoadConst ||
+		lowerBoundLoad.a != finalMapGet.a ||
+		!arrayRowLoopNumberConstantOK(proto, lowerBoundLoad.b) ||
+		proto.constants[lowerBoundLoad.b].number != proto.constants[lowerBoundBranch.b].number ||
+		lowerBoundJump.op != opJump ||
+		lowerBoundJump.b != pc+15 ||
+		branchGuard.op != opJumpIfRowStringFieldNotEqualK ||
+		branchGuard.a != row ||
+		branchGuard.d != pc+34 ||
+		branch.field < 0 ||
+		branch.field >= len(proto.constants) ||
+		proto.constants[branch.field].kind != StringKind ||
+		branch.value < 0 ||
+		branch.value >= len(proto.constants) ||
+		proto.constants[branch.value].kind != StringKind ||
+		branch.slot < 0 {
+		return regionExecutionPlanDesc{}, false
+	}
+	if thenDelta.op != opGetRowStringField ||
+		thenDelta.b != row ||
+		thenDelta.c < 0 ||
+		thenDelta.c >= len(proto.constants) ||
+		proto.constants[thenDelta.c].kind != StringKind ||
+		thenDelta.d < 0 ||
+		thenControlMove.op != opMove ||
+		thenControlMod.op != opModK ||
+		thenControlMod.a != thenControlMove.a ||
+		thenControlMod.b != thenControlMove.a ||
+		!arrayRowLoopNumberConstantOK(proto, thenControlMod.c) ||
+		proto.constants[thenControlMod.c].number == 0 ||
+		thenDeltaAdd.op != opAdd ||
+		thenDeltaAdd.a != thenDelta.a ||
+		thenDeltaAdd.b != thenDelta.a ||
+		thenDeltaAdd.c != thenControlMod.a ||
+		thenLimitKeyMove.op != opMove ||
+		thenLimitKeyMove.b != keyLoad.a ||
+		thenLimitGet.op != opGetStringFieldIndex ||
+		thenLimitGet.b != leftMapGet.b ||
+		thenLimitGet.d != thenLimitKeyMove.a ||
+		thenLimitGet.a != thenDelta.a+1 ||
+		thenDeltaClamp.op != opMathMin ||
+		thenDeltaClamp.a != thenDelta.a ||
+		thenDeltaClamp.b != 2 ||
+		thenDeltaClamp.d != 1 ||
+		thenMutableKeyMove.op != opMove ||
+		thenMutableKeyMove.b != keyLoad.a ||
+		thenMutableGet.op != opGetStringFieldIndex ||
+		thenMutableGet.b != leftMapGet.b ||
+		thenMutableGet.d != thenMutableKeyMove.a ||
+		thenDeltaMove.op != opMove ||
+		thenDeltaMove.b != thenDelta.a ||
+		thenMutableSub.op != opSub ||
+		thenMutableSub.a != thenMutableGet.a ||
+		thenMutableSub.b != thenMutableGet.a ||
+		thenMutableSub.c != thenDeltaMove.a ||
+		thenStoreKeyMove.op != opMove ||
+		thenStoreKeyMove.b != keyLoad.a ||
+		thenMutableStore.op != opSetStringFieldIndex ||
+		thenMutableStore.a != leftMapGet.b ||
+		thenMutableStore.c != thenStoreKeyMove.a ||
+		thenMutableStore.d != thenMutableSub.a ||
+		thenAccumulatorDeltaMove.op != opMove ||
+		thenAccumulatorDeltaMove.b != thenDelta.a ||
+		thenAccumulatorValueMove.op != opMove ||
+		thenAccumulatorValueMove.b != finalMapGet.a ||
+		thenAccumulatorProduct.op != opMul ||
+		thenAccumulatorProduct.a != thenAccumulatorDeltaMove.a ||
+		thenAccumulatorProduct.b != thenAccumulatorDeltaMove.a ||
+		thenAccumulatorProduct.c != thenAccumulatorValueMove.a ||
+		thenAccumulatorUpdate.op != opSub ||
+		thenAccumulatorUpdate.a != thenAccumulatorUpdate.b ||
+		thenAccumulatorUpdate.c != thenAccumulatorProduct.a ||
+		thenJump.op != opJump ||
+		thenJump.b != pc+48 {
+		return regionExecutionPlanDesc{}, false
+	}
+	if elseDelta.op != opGetRowStringField ||
+		elseDelta.b != row ||
+		elseDelta.d != thenDelta.d ||
+		!sameStringConstant(proto, elseDelta.c, thenDelta.c) ||
+		elseControlMove.op != opMove ||
+		elseControlMove.b != thenControlMove.b ||
+		elseControlMod.op != opModK ||
+		elseControlMod.a != elseControlMove.a ||
+		elseControlMod.b != elseControlMove.a ||
+		!arrayRowLoopNumberConstantOK(proto, elseControlMod.c) ||
+		proto.constants[elseControlMod.c].number == 0 ||
+		elseDeltaAdd.op != opAdd ||
+		elseDeltaAdd.a != elseDelta.a ||
+		elseDeltaAdd.b != elseDelta.a ||
+		elseDeltaAdd.c != elseControlMod.a ||
+		elseMutableKeyMove.op != opMove ||
+		elseMutableKeyMove.b != keyLoad.a ||
+		elseMutableGet.op != opGetStringFieldIndex ||
+		elseMutableGet.b != leftMapGet.b ||
+		elseMutableGet.d != elseMutableKeyMove.a ||
+		elseDeltaMove.op != opMove ||
+		elseDeltaMove.b != elseDelta.a ||
+		elseMutableAdd.op != opAdd ||
+		elseMutableAdd.a != elseMutableGet.a ||
+		elseMutableAdd.b != elseMutableGet.a ||
+		elseMutableAdd.c != elseDeltaMove.a ||
+		elseStoreKeyMove.op != opMove ||
+		elseStoreKeyMove.b != keyLoad.a ||
+		elseMutableStore.op != opSetStringFieldIndex ||
+		elseMutableStore.a != leftMapGet.b ||
+		elseMutableStore.c != elseStoreKeyMove.a ||
+		elseMutableStore.d != elseMutableAdd.a ||
+		elseAccumulatorDeltaMove.op != opMove ||
+		elseAccumulatorDeltaMove.b != elseDelta.a ||
+		elseAccumulatorValueMove.op != opMove ||
+		elseAccumulatorValueMove.b != finalMapGet.a ||
+		elseAccumulatorProduct.op != opMul ||
+		elseAccumulatorProduct.a != elseAccumulatorDeltaMove.a ||
+		elseAccumulatorProduct.b != elseAccumulatorDeltaMove.a ||
+		elseAccumulatorProduct.c != elseAccumulatorValueMove.a ||
+		elseAccumulatorUpdate.op != opAdd ||
+		elseAccumulatorUpdate.a != thenAccumulatorUpdate.a ||
+		elseAccumulatorUpdate.b != thenAccumulatorUpdate.a ||
+		elseAccumulatorUpdate.c != elseAccumulatorProduct.a {
+		return regionExecutionPlanDesc{}, false
+	}
+	if finalValueMove.op != opMove ||
+		finalValueMove.b != finalMapGet.a ||
+		finalControlMove.op != opMove ||
+		finalControlMove.b != thenControlMove.b ||
+		finalControlMod.op != opModK ||
+		finalControlMod.a != finalControlMove.a ||
+		finalControlMod.b != finalControlMove.a ||
+		!arrayRowLoopNumberConstantOK(proto, finalControlMod.c) ||
+		proto.constants[finalControlMod.c].number == 0 ||
+		finalValueAdd.op != opAdd ||
+		finalValueAdd.a != finalValueMove.a ||
+		finalValueAdd.b != finalValueMove.a ||
+		finalValueAdd.c != finalControlMod.a ||
+		finalStoreKeyMove.op != opMove ||
+		finalStoreKeyMove.b != keyLoad.a ||
+		finalStore.op != opSetStringFieldIndex ||
+		finalStore.a != leftMapGet.b ||
+		finalStore.c != finalStoreKeyMove.a ||
+		finalStore.d != finalValueAdd.a ||
+		backJump.op != opJump ||
+		backJump.b != pc {
+		return regionExecutionPlanDesc{}, false
+	}
+	if leftMapGet.c < 0 ||
+		leftMapGet.c >= len(proto.constants) ||
+		proto.constants[leftMapGet.c].kind != StringKind ||
+		mutableInputGet.c < 0 ||
+		mutableInputGet.c >= len(proto.constants) ||
+		proto.constants[mutableInputGet.c].kind != StringKind ||
+		finalMapGet.c < 0 ||
+		finalMapGet.c >= len(proto.constants) ||
+		proto.constants[finalMapGet.c].kind != StringKind ||
+		!sameStringConstant(proto, thenLimitGet.c, mutableInputGet.c) ||
+		!sameStringConstant(proto, thenMutableGet.c, mutableInputGet.c) ||
+		!sameStringConstant(proto, thenMutableStore.b, mutableInputGet.c) ||
+		!sameStringConstant(proto, elseMutableGet.c, mutableInputGet.c) ||
+		!sameStringConstant(proto, elseMutableStore.b, mutableInputGet.c) ||
+		!sameStringConstant(proto, finalStore.b, finalMapGet.c) {
+		return regionExecutionPlanDesc{}, false
+	}
+	return regionExecutionPlanDesc{
+		kind:       regionExecutionPlanKindArrayRowLoop,
+		entryPC:    pc,
+		exitPC:     ins.d,
+		fallbackPC: pc,
+		arrayLoop: arrayRowLoopRegionDesc{
+			iterator:    ins.b,
+			array:       ins.c,
+			index:       ins.a,
+			row:         row,
+			accumulator: -1,
+			indexedMapBranch: arrayRowLoopIndexedMapBranchDesc{
+				enabled:         true,
+				base:            leftMapGet.b,
+				accumulator:     thenAccumulatorUpdate.a,
+				control:         thenControlMove.b,
+				keyRegister:     keyLoad.a,
+				valueRegister:   finalMapGet.a,
+				thenDelta:       thenDelta.a,
+				elseDelta:       elseDelta.a,
+				thenMapResult:   thenMutableGet.a,
+				elseMapResult:   elseMutableGet.a,
+				finalMapResult:  finalValueAdd.a,
+				keyField:        keyLoad.c,
+				keySlot:         keyLoad.d,
+				deltaField:      thenDelta.c,
+				deltaSlot:       thenDelta.d,
+				branchField:     branch.field,
+				branchSlot:      branch.slot,
+				thenValue:       branch.value,
+				leftMapField:    leftMapGet.c,
+				mutableMapField: mutableInputGet.c,
+				finalMapField:   finalMapGet.c,
+				divisor:         mutableDivide.c,
+				lowerBound:      lowerBoundBranch.b,
+				thenModulo:      thenControlMod.c,
+				elseModulo:      elseControlMod.c,
+				finalModulo:     finalControlMod.c,
+			},
+		},
+	}, true
+}
+
+func detectArrayRowLoopActionBranchExecutionPlan(proto *Proto, pc int, ins instruction) (regionExecutionPlanDesc, bool) {
+	prefix, ok := detectArrayRowLoopPrefixExecutionPlan(proto, pc, ins)
+	if !ok {
+		return regionExecutionPlanDesc{}, false
+	}
+	desc := prefix.arrayLoop
+	action, ok := arrayRowLoopActionBranch(proto, desc, desc.prefixExitPC, ins.d-1)
+	if !ok {
+		return regionExecutionPlanDesc{}, false
+	}
+	desc.actionBranch = action
+	desc.accumulator = action.accumulator
+	return regionExecutionPlanDesc{
+		kind:       regionExecutionPlanKindArrayRowLoop,
+		entryPC:    pc,
+		exitPC:     ins.d,
+		fallbackPC: pc,
+		arrayLoop:  desc,
+	}, true
+}
+
+func arrayRowLoopActionBranch(proto *Proto, desc arrayRowLoopRegionDesc, pc int, bodyEnd int) (arrayRowLoopActionBranchDesc, bool) {
+	if proto == nil ||
+		!desc.predicate.enabled ||
+		len(desc.mutations) != 2 ||
+		pc+27 >= len(proto.code) ||
+		bodyEnd <= pc ||
+		bodyEnd >= len(proto.code) {
+		return arrayRowLoopActionBranchDesc{}, false
+	}
+	predicate := desc.predicate
+	computed := desc.mutations[0]
+	clamp := desc.mutations[1]
+	if predicate.op != opJumpIfRowStringFieldNotGreaterK ||
+		!arrayRowLoopNumberConstantOK(proto, predicate.value) ||
+		proto.constants[predicate.value].number != 0 ||
+		computed.kind != arrayRowLoopFieldMutationKindComputedStore ||
+		clamp.kind != arrayRowLoopFieldMutationKindClampLowerBound ||
+		!sameStringConstant(proto, predicate.field, computed.field) ||
+		!sameStringConstant(proto, predicate.field, clamp.field) ||
+		predicate.slot != computed.slot ||
+		predicate.slot != clamp.slot ||
+		computed.constantOp != opSubK ||
+		computed.op != opSub ||
+		!arrayRowLoopNumberConstantOK(proto, computed.valueConstant) ||
+		proto.constants[computed.valueConstant].number != 1 ||
+		!arrayRowLoopNumberConstantOK(proto, clamp.threshold) ||
+		proto.constants[clamp.threshold].number != 0 ||
+		!arrayRowLoopNumberConstantOK(proto, clamp.clamp) ||
+		proto.constants[clamp.clamp].number != 0 {
+		return arrayRowLoopActionBranchDesc{}, false
+	}
+	cooldownLoad := proto.code[pc]
+	zeroLoad := proto.code[pc+1]
+	equal := proto.code[pc+2]
+	firstJump := proto.code[pc+3]
+	energyLoad := proto.code[pc+4]
+	costLoad := proto.code[pc+5]
+	greaterEqual := proto.code[pc+6]
+	secondJump := proto.code[pc+7]
+	elsePC := secondJump.b
+	if cooldownLoad.op != opGetRowStringField ||
+		cooldownLoad.b != desc.row ||
+		!sameStringConstant(proto, cooldownLoad.c, predicate.field) ||
+		cooldownLoad.d != predicate.slot ||
+		zeroLoad.op != opLoadConst ||
+		!arrayRowLoopNumberConstantOK(proto, zeroLoad.b) ||
+		proto.constants[zeroLoad.b].number != 0 ||
+		equal.op != opEqual ||
+		equal.a != cooldownLoad.a ||
+		equal.b != cooldownLoad.a ||
+		equal.c != zeroLoad.a ||
+		firstJump.op != opJumpIfFalse ||
+		firstJump.a != equal.a ||
+		firstJump.b != pc+7 ||
+		energyLoad.op != opGetRowStringField ||
+		energyLoad.b != computed.sourceBase ||
+		costLoad.op != opGetRowStringField ||
+		costLoad.b != desc.row ||
+		greaterEqual.op != opGreaterEqual ||
+		greaterEqual.a != equal.a ||
+		greaterEqual.b != energyLoad.a ||
+		greaterEqual.c != costLoad.a ||
+		secondJump.op != opJumpIfFalse ||
+		secondJump.a != greaterEqual.a ||
+		elsePC <= pc+8 ||
+		elsePC >= bodyEnd {
+		return arrayRowLoopActionBranchDesc{}, false
+	}
+	energySetLoad := proto.code[pc+8]
+	costSetLoad := proto.code[pc+9]
+	energySub := proto.code[pc+10]
+	energyStore := proto.code[pc+11]
+	oneLoad := proto.code[pc+12]
+	usesAdd := proto.code[pc+13]
+	resetLoad := proto.code[pc+14]
+	cooldownStore := proto.code[pc+15]
+	scoreEnergyLoad := proto.code[pc+16]
+	scoreEnergyAdd := proto.code[pc+17]
+	usesLoad := proto.code[pc+18]
+	costScoreLoad := proto.code[pc+19]
+	usesCostMul := proto.code[pc+20]
+	scoreUsesAdd := proto.code[pc+21]
+	thenJump := proto.code[pc+22]
+	if elsePC != pc+23 ||
+		energySetLoad.op != opGetRowStringField ||
+		energySetLoad.b != computed.sourceBase ||
+		!sameStringConstant(proto, energySetLoad.c, energyLoad.c) ||
+		energySetLoad.d != energyLoad.d ||
+		costSetLoad.op != opGetRowStringField ||
+		costSetLoad.b != desc.row ||
+		!sameStringConstant(proto, costSetLoad.c, costLoad.c) ||
+		costSetLoad.d != costLoad.d ||
+		energySub.op != opSub ||
+		energySub.a != energySetLoad.a ||
+		energySub.b != energySetLoad.a ||
+		energySub.c != costSetLoad.a ||
+		energyStore.op != opSetRowStringField ||
+		energyStore.a != computed.sourceBase ||
+		energyStore.c != energySub.a ||
+		energyStore.d != energyLoad.d ||
+		!sameStringConstant(proto, energyStore.b, energyLoad.c) ||
+		oneLoad.op != opLoadConst ||
+		!arrayRowLoopNumberConstantOK(proto, oneLoad.b) ||
+		proto.constants[oneLoad.b].number != 1 ||
+		usesAdd.op != opAddStringField ||
+		usesAdd.a != desc.row ||
+		usesAdd.c != oneLoad.a ||
+		resetLoad.op != opGetRowStringField ||
+		resetLoad.b != desc.row ||
+		cooldownStore.op != opSetRowStringField ||
+		cooldownStore.a != desc.row ||
+		cooldownStore.c != resetLoad.a ||
+		cooldownStore.d != predicate.slot ||
+		!sameStringConstant(proto, cooldownStore.b, predicate.field) ||
+		scoreEnergyLoad.op != opGetRowStringField ||
+		scoreEnergyLoad.b != computed.sourceBase ||
+		!sameStringConstant(proto, scoreEnergyLoad.c, energyLoad.c) ||
+		scoreEnergyLoad.d != energyLoad.d ||
+		scoreEnergyAdd.op != opAdd ||
+		scoreEnergyAdd.a != scoreEnergyAdd.b ||
+		scoreEnergyAdd.c != scoreEnergyLoad.a ||
+		usesLoad.op != opGetRowStringField ||
+		usesLoad.b != desc.row ||
+		costScoreLoad.op != opGetRowStringField ||
+		costScoreLoad.b != desc.row ||
+		!sameStringConstant(proto, costScoreLoad.c, costLoad.c) ||
+		costScoreLoad.d != costLoad.d ||
+		usesCostMul.op != opMul ||
+		usesCostMul.a != usesLoad.a ||
+		usesCostMul.b != usesLoad.a ||
+		usesCostMul.c != costScoreLoad.a ||
+		scoreUsesAdd.op != opAdd ||
+		scoreUsesAdd.a != scoreEnergyAdd.a ||
+		scoreUsesAdd.b != scoreEnergyAdd.a ||
+		scoreUsesAdd.c != usesCostMul.a ||
+		thenJump.op != opJump ||
+		thenJump.b != bodyEnd {
+		return arrayRowLoopActionBranchDesc{}, false
+	}
+	elseCooldownLoad := proto.code[elsePC]
+	elseCooldownAdd := proto.code[elsePC+1]
+	elseEnergyLoad := proto.code[elsePC+2]
+	elseEnergyAdd := proto.code[elsePC+3]
+	backJump := proto.code[bodyEnd]
+	if elsePC+4 != bodyEnd ||
+		elseCooldownLoad.op != opGetRowStringField ||
+		elseCooldownLoad.b != desc.row ||
+		!sameStringConstant(proto, elseCooldownLoad.c, predicate.field) ||
+		elseCooldownLoad.d != predicate.slot ||
+		elseCooldownAdd.op != opAdd ||
+		elseCooldownAdd.a != scoreEnergyAdd.a ||
+		elseCooldownAdd.b != scoreEnergyAdd.a ||
+		elseCooldownAdd.c != elseCooldownLoad.a ||
+		elseEnergyLoad.op != opGetRowStringField ||
+		elseEnergyLoad.b != computed.sourceBase ||
+		!sameStringConstant(proto, elseEnergyLoad.c, energyLoad.c) ||
+		elseEnergyLoad.d != energyLoad.d ||
+		elseEnergyAdd.op != opAdd ||
+		elseEnergyAdd.a != scoreEnergyAdd.a ||
+		elseEnergyAdd.b != scoreEnergyAdd.a ||
+		elseEnergyAdd.c != elseEnergyLoad.a ||
+		backJump.op != opJump {
+		return arrayRowLoopActionBranchDesc{}, false
+	}
+	if !sameStringConstant(proto, usesAdd.b, usesLoad.c) {
+		return arrayRowLoopActionBranchDesc{}, false
+	}
+	return arrayRowLoopActionBranchDesc{
+		enabled:     true,
+		actor:       computed.sourceBase,
+		accumulator: scoreEnergyAdd.a,
+		energyField: energyLoad.c,
+		energySlot:  energyLoad.d,
+		costField:   costLoad.c,
+		costSlot:    costLoad.d,
+		resetField:  resetLoad.c,
+		resetSlot:   resetLoad.d,
+		usesField:   usesLoad.c,
+		usesSlot:    usesLoad.d,
+		oneConstant: oneLoad.b,
+	}, true
+}
+
+func detectArrayRowLoopPrefixExecutionPlan(proto *Proto, pc int, ins instruction) (regionExecutionPlanDesc, bool) {
+	if proto == nil ||
+		ins.d <= pc+1 ||
+		ins.d > len(proto.code) ||
+		!arrayRowLoopHasBackJump(proto.code, pc, ins.d) {
+		return regionExecutionPlanDesc{}, false
+	}
+	bodyEnd := ins.d - 1
+	desc := arrayRowLoopRegionDesc{
+		iterator:     ins.b,
+		array:        ins.c,
+		index:        ins.a,
+		row:          ins.a + 1,
+		accumulator:  -1,
+		prefixExitPC: -1,
+	}
+	bodyPC := pc + 1
+	if bodyPC >= bodyEnd {
+		return regionExecutionPlanDesc{}, false
+	}
+	body := proto.code[bodyPC]
+	prefixLimit := bodyEnd
+	switch body.op {
+	case opJumpIfStringFieldFalse, opJumpIfStringFieldNil, opJumpIfStringFieldNotNil, opJumpIfStringFieldTrue,
+		opJumpIfRowStringFieldNotGreaterK, opJumpIfRowStringFieldGreaterK:
+		if body.d <= bodyPC || body.d >= bodyEnd {
+			return regionExecutionPlanDesc{}, false
+		}
+		predicate, ok := arrayRowLoopPredicate(proto, desc.row, bodyPC, body, body.d)
+		if !ok {
+			return regionExecutionPlanDesc{}, false
+		}
+		desc.predicate = predicate
+		prefixLimit = body.d
+		bodyPC++
+	case opGetRowStringField:
+		if bodyPC+1 < bodyEnd {
+			predicate, ok := arrayRowLoopLoadedPredicate(proto, desc.row, bodyPC, body, proto.code[bodyPC+1], proto.code[bodyPC+1].d)
+			if ok {
+				if predicate.skipPC <= bodyPC+1 || predicate.skipPC >= bodyEnd {
+					return regionExecutionPlanDesc{}, false
+				}
+				desc.predicate = predicate
+				prefixLimit = predicate.skipPC
+				bodyPC += 2
+			}
+		}
+	}
+	exitPC, mutations, ok := arrayRowLoopMutationPrefix(proto, desc.row, bodyPC, prefixLimit, desc.predicate.enabled)
+	if !ok || len(mutations) == 0 || exitPC <= pc+1 || exitPC >= bodyEnd {
+		return regionExecutionPlanDesc{}, false
+	}
+	if desc.predicate.enabled && desc.predicate.skipPC != exitPC {
+		return regionExecutionPlanDesc{}, false
+	}
+	if arrayRowLoopHasNestedIterator(proto.code, pc+1, exitPC) ||
+		arrayRowLoopHasNestedIterator(proto.code, exitPC, bodyEnd) ||
+		len(regionCallsOrIntrinsics(proto, pc, exitPC)) != 0 {
+		return regionExecutionPlanDesc{}, false
+	}
+	desc.prefixExitPC = exitPC
+	desc.mutations = mutations
+	return regionExecutionPlanDesc{
+		kind:       regionExecutionPlanKindArrayRowLoop,
+		entryPC:    pc,
+		exitPC:     ins.d,
+		fallbackPC: pc,
+		arrayLoop:  desc,
+	}, true
+}
+
+func arrayRowLoopMutationPrefix(proto *Proto, rowRegister int, pc int, limit int, conditional bool) (int, []arrayRowLoopFieldMutationDesc, bool) {
+	var mutations []arrayRowLoopFieldMutationDesc
+	for pc < limit {
+		ins := proto.code[pc]
+		switch ins.op {
+		case opGetRowStringField:
+			if pc+4 < limit {
+				mutation, ok := arrayRowLoopComputedFieldMutation(proto, rowRegister, pc, proto.code)
+				if ok {
+					mutations = append(mutations, mutation)
+					pc += 5
+					continue
+				}
+			}
+			if pc+3 < limit {
+				mutation, ok := arrayRowLoopClampFieldMutation(proto, rowRegister, pc, proto.code)
+				if ok {
+					mutations = append(mutations, mutation)
+					pc += 4
+					continue
+				}
+			}
+			if conditional {
+				return 0, nil, false
+			}
+			return pc, mutations, len(mutations) != 0
+		case opLoadConst:
+			if pc+1 >= limit {
+				return 0, nil, false
+			}
+			mutation, ok := arrayRowLoopFieldMutation(proto, rowRegister, pc, ins, proto.code[pc+1])
+			if !ok {
+				if conditional {
+					return 0, nil, false
+				}
+				return pc, mutations, len(mutations) != 0
+			}
+			mutations = append(mutations, mutation)
+			pc += 2
+		case opJump:
+			if ins.b == pc+1 {
+				pc++
+				continue
+			}
+			if ins.b == limit {
+				pc = limit
+				continue
+			}
+			return 0, nil, false
+		default:
+			if conditional {
+				return 0, nil, false
+			}
+			return pc, mutations, len(mutations) != 0
+		}
+	}
+	return pc, mutations, len(mutations) != 0
+}
+
+func arrayRowLoopFieldMutation(proto *Proto, rowRegister int, pc int, load instruction, store instruction) (arrayRowLoopFieldMutationDesc, bool) {
+	if load.b < 0 ||
+		load.b >= len(proto.constants) ||
+		proto.constants[load.b].kind != NumberKind ||
+		store.a != rowRegister ||
+		store.c != load.a ||
+		store.b < 0 ||
+		store.b >= len(proto.constants) ||
+		proto.constants[store.b].kind != StringKind ||
+		store.d < 0 {
+		return arrayRowLoopFieldMutationDesc{}, false
+	}
+	switch store.op {
+	case opAddStringField, opSubStringField:
+	default:
+		return arrayRowLoopFieldMutationDesc{}, false
+	}
+	return arrayRowLoopFieldMutationDesc{
+		kind:          arrayRowLoopFieldMutationKindConstStore,
+		loadPC:        pc,
+		storePC:       pc + 1,
+		loadRegister:  load.a,
+		valueRegister: load.a,
+		valueConstant: load.b,
+		field:         store.b,
+		slot:          store.d,
+		op:            store.op,
+	}, true
+}
+
+func arrayRowLoopComputedFieldMutation(proto *Proto, rowRegister int, pc int, code []instruction) (arrayRowLoopFieldMutationDesc, bool) {
+	if pc+4 >= len(code) {
+		return arrayRowLoopFieldMutationDesc{}, false
+	}
+	load := code[pc]
+	constArith := code[pc+1]
+	sourceLoad := code[pc+2]
+	arith := code[pc+3]
+	store := code[pc+4]
+	if load.op != opGetRowStringField ||
+		load.b != rowRegister ||
+		load.c < 0 ||
+		load.c >= len(proto.constants) ||
+		proto.constants[load.c].kind != StringKind ||
+		load.d < 0 ||
+		(constArith.op != opAddK && constArith.op != opSubK) ||
+		constArith.a != load.a ||
+		constArith.b != load.a ||
+		constArith.c < 0 ||
+		constArith.c >= len(proto.constants) ||
+		proto.constants[constArith.c].kind != NumberKind ||
+		sourceLoad.op != opGetRowStringField ||
+		sourceLoad.c < 0 ||
+		sourceLoad.c >= len(proto.constants) ||
+		proto.constants[sourceLoad.c].kind != StringKind ||
+		sourceLoad.d < 0 ||
+		(arith.op != opAdd && arith.op != opSub) ||
+		arith.a != load.a ||
+		arith.b != load.a ||
+		arith.c != sourceLoad.a ||
+		store.op != opSetRowStringField ||
+		store.a != rowRegister ||
+		store.c != load.a ||
+		store.d != load.d ||
+		!sameStringConstant(proto, store.b, load.c) {
+		return arrayRowLoopFieldMutationDesc{}, false
+	}
+	return arrayRowLoopFieldMutationDesc{
+		kind:           arrayRowLoopFieldMutationKindComputedStore,
+		loadPC:         pc,
+		storePC:        pc + 4,
+		loadRegister:   load.a,
+		valueRegister:  load.a,
+		valueConstant:  constArith.c,
+		field:          load.c,
+		slot:           load.d,
+		constantOp:     constArith.op,
+		sourceRegister: sourceLoad.a,
+		sourceBase:     sourceLoad.b,
+		sourceField:    sourceLoad.c,
+		sourceSlot:     sourceLoad.d,
+		op:             arith.op,
+	}, true
+}
+
+func arrayRowLoopClampFieldMutation(proto *Proto, rowRegister int, pc int, code []instruction) (arrayRowLoopFieldMutationDesc, bool) {
+	if pc+3 >= len(code) {
+		return arrayRowLoopFieldMutationDesc{}, false
+	}
+	load := code[pc]
+	branch := code[pc+1]
+	clampLoad := code[pc+2]
+	store := code[pc+3]
+	if load.op != opGetRowStringField ||
+		load.b != rowRegister ||
+		load.c < 0 ||
+		load.c >= len(proto.constants) ||
+		proto.constants[load.c].kind != StringKind ||
+		load.d < 0 ||
+		branch.op != opJumpIfNotLessK ||
+		branch.a != load.a ||
+		branch.b < 0 ||
+		branch.b >= len(proto.constants) ||
+		proto.constants[branch.b].kind != NumberKind ||
+		clampLoad.op != opLoadConst ||
+		clampLoad.b < 0 ||
+		clampLoad.b >= len(proto.constants) ||
+		proto.constants[clampLoad.b].kind != NumberKind ||
+		store.op != opSetRowStringField ||
+		store.a != rowRegister ||
+		store.c != clampLoad.a ||
+		store.d != load.d ||
+		!sameStringConstant(proto, store.b, load.c) ||
+		(branch.d != pc+4 && branch.d != pc+5) {
+		return arrayRowLoopFieldMutationDesc{}, false
+	}
+	return arrayRowLoopFieldMutationDesc{
+		kind:          arrayRowLoopFieldMutationKindClampLowerBound,
+		loadPC:        pc,
+		storePC:       pc + 3,
+		loadRegister:  load.a,
+		valueRegister: clampLoad.a,
+		field:         load.c,
+		slot:          load.d,
+		threshold:     branch.b,
+		clamp:         clampLoad.b,
+	}, true
+}
+
+func arrayRowLoopLoadedPredicate(proto *Proto, rowRegister int, pc int, load instruction, branch instruction, skipPC int) (arrayRowLoopPredicateDesc, bool) {
+	if load.b != rowRegister ||
+		load.c < 0 ||
+		load.c >= len(proto.constants) ||
+		load.d < 0 ||
+		proto.constants[load.c].kind != StringKind ||
+		branch.a != load.a ||
+		branch.d != skipPC {
+		return arrayRowLoopPredicateDesc{}, false
+	}
+	switch branch.op {
+	case opJumpIfNotLessK:
+		if branch.b < 0 || branch.b >= len(proto.constants) || proto.constants[branch.b].kind != NumberKind {
+			return arrayRowLoopPredicateDesc{}, false
+		}
+	default:
+		return arrayRowLoopPredicateDesc{}, false
+	}
+	return arrayRowLoopPredicateDesc{
+		pc:      pc + 1,
+		op:      branch.op,
+		field:   load.c,
+		value:   branch.b,
+		slot:    load.d,
+		skipPC:  skipPC,
+		enabled: true,
+	}, true
+}
+
+func arrayRowLoopPredicate(proto *Proto, rowRegister int, pc int, ins instruction, skipPC int) (arrayRowLoopPredicateDesc, bool) {
+	if ins.a != rowRegister || ins.d != skipPC {
+		return arrayRowLoopPredicateDesc{}, false
+	}
+	switch ins.op {
+	case opJumpIfStringFieldFalse, opJumpIfStringFieldNil, opJumpIfStringFieldNotNil, opJumpIfStringFieldTrue:
+		if ins.b < 0 ||
+			ins.b >= len(proto.constants) ||
+			proto.constants[ins.b].kind != StringKind ||
+			ins.c < 0 {
+			return arrayRowLoopPredicateDesc{}, false
+		}
+		return arrayRowLoopPredicateDesc{
+			pc:      pc,
+			op:      ins.op,
+			field:   ins.b,
+			value:   -1,
+			slot:    ins.c,
+			skipPC:  skipPC,
+			enabled: true,
+		}, true
+	}
+	desc, ok := rowFieldEqualDesc(proto, ins.b)
+	if !ok ||
+		desc.field < 0 ||
+		desc.field >= len(proto.constants) ||
+		proto.constants[desc.field].kind != StringKind ||
+		desc.value < 0 ||
+		desc.value >= len(proto.constants) ||
+		proto.constants[desc.value].kind != NumberKind ||
+		desc.slot < 0 {
+		return arrayRowLoopPredicateDesc{}, false
+	}
+	return arrayRowLoopPredicateDesc{
+		pc:      pc,
+		op:      ins.op,
+		field:   desc.field,
+		value:   desc.value,
+		slot:    desc.slot,
+		skipPC:  skipPC,
+		enabled: true,
+	}, true
+}
+
+func arrayRowLoopAddFieldOperand(loads map[int]arrayRowLoopFieldAddDesc, ins instruction) (arrayRowLoopFieldAddDesc, int, bool) {
+	left, leftField := loads[ins.b]
+	right, rightField := loads[ins.c]
+	if leftField == rightField {
+		return arrayRowLoopFieldAddDesc{}, 0, false
+	}
+	if leftField {
+		return left, ins.c, true
+	}
+	return right, ins.b, true
+}
+
+func regionExecutionPlanPCs(codeLen int, plans []regionExecutionPlanDesc) []int {
+	if codeLen <= 0 {
+		return nil
+	}
+	pcs := make([]int, codeLen)
+	for i := range pcs {
+		pcs[i] = -1
+	}
+	for index, plan := range plans {
+		if plan.entryPC >= 0 && plan.entryPC < len(pcs) {
+			pcs[plan.entryPC] = index
+		}
+	}
+	return pcs
+}
+
 type regionCoverageReport struct {
 	candidates       []regionCandidateDesc
 	retiredBytecodes uint64
@@ -3702,13 +5347,16 @@ func candidateRegions(proto *Proto, snapshot directFrameMechanismSnapshot) regio
 	report := regionCoverageReport{
 		retiredBytecodes: regionRetiredBytecodes(proto, snapshot),
 	}
+	coveredPCs := make([]bool, len(proto.code))
 	for _, plan := range proto.blockPlans {
 		candidate, ok := regionCandidateFromBlockPlan(proto, snapshot, plan)
 		if !ok {
 			continue
 		}
-		report.coveredBytecodes += candidate.retiredBytecodes
-		report.candidates = append(report.candidates, candidate)
+		addRegionCandidate(proto, snapshot, &report, coveredPCs, candidate)
+	}
+	for _, candidate := range detectArrayRowLoopRegionCandidates(proto, snapshot) {
+		addRegionCandidate(proto, snapshot, &report, coveredPCs, candidate)
 	}
 	sort.Slice(report.candidates, func(i, j int) bool {
 		if report.candidates[i].entryPC == report.candidates[j].entryPC {
@@ -3717,6 +5365,28 @@ func candidateRegions(proto *Proto, snapshot directFrameMechanismSnapshot) regio
 		return report.candidates[i].entryPC < report.candidates[j].entryPC
 	})
 	return report
+}
+
+func addRegionCandidate(proto *Proto, snapshot directFrameMechanismSnapshot, report *regionCoverageReport, coveredPCs []bool, candidate regionCandidateDesc) {
+	if candidate.retiredBytecodes == 0 {
+		candidate.retiredBytecodes = regionRetiredBytecodesInSpan(proto, snapshot, candidate.entryPC, candidate.exitPC)
+	}
+	report.candidates = append(report.candidates, candidate)
+	observed := regionHasObservedCounts(proto, snapshot)
+	for pc := candidate.entryPC; pc < candidate.exitPC && pc < len(coveredPCs); pc++ {
+		if pc < 0 || coveredPCs[pc] {
+			continue
+		}
+		count := snapshot.pcCount(proto, pc)
+		if count == 0 {
+			if observed {
+				continue
+			}
+			count = 1
+		}
+		report.coveredBytecodes += count
+		coveredPCs[pc] = true
+	}
 }
 
 func regionRetiredBytecodes(proto *Proto, snapshot directFrameMechanismSnapshot) uint64 {
@@ -3728,6 +5398,35 @@ func regionRetiredBytecodes(proto *Proto, snapshot directFrameMechanismSnapshot)
 		return uint64(len(proto.code))
 	}
 	return total
+}
+
+func regionHasObservedCounts(proto *Proto, snapshot directFrameMechanismSnapshot) bool {
+	if proto == nil {
+		return false
+	}
+	for pc := range proto.code {
+		if snapshot.pcCount(proto, pc) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func regionRetiredBytecodesInSpan(proto *Proto, snapshot directFrameMechanismSnapshot, startPC int, exitPC int) uint64 {
+	if proto == nil || startPC < 0 || exitPC <= startPC {
+		return 0
+	}
+	if exitPC > len(proto.code) {
+		exitPC = len(proto.code)
+	}
+	var total uint64
+	for pc := startPC; pc < exitPC; pc++ {
+		total += snapshot.pcCount(proto, pc)
+	}
+	if total != 0 {
+		return total
+	}
+	return uint64(exitPC - startPC)
 }
 
 func regionCandidateFromBlockPlan(proto *Proto, snapshot directFrameMechanismSnapshot, plan blockPlanDesc) (regionCandidateDesc, bool) {
@@ -3742,14 +5441,13 @@ func regionCandidateFromBlockPlan(proto *Proto, snapshot directFrameMechanismSna
 	if entries == 0 {
 		entries = 1
 	}
-	span := plan.resumePC - plan.startPC
 	candidate := regionCandidateDesc{
 		kind:              blockPlanKindName(plan.kind),
 		entryPC:           plan.startPC,
 		exitPC:            plan.resumePC,
 		fallbackPC:        plan.fallbackPC,
 		entries:           entries,
-		retiredBytecodes:  entries * uint64(span),
+		retiredBytecodes:  regionRetiredBytecodesInSpan(proto, snapshot, plan.startPC, plan.resumePC),
 		requiredGuards:    regionRequiredGuards(plan),
 		sideExitPCs:       regionSideExitPCs(plan),
 		repairRegisters:   regionRepairRegisters(proto, plan.startPC, plan.resumePC),
@@ -3758,6 +5456,119 @@ func regionCandidateFromBlockPlan(proto *Proto, snapshot directFrameMechanismSna
 	}
 	candidate.cost = estimateRegionCost(candidate)
 	return candidate, true
+}
+
+func detectArrayRowLoopRegionCandidates(proto *Proto, snapshot directFrameMechanismSnapshot) []regionCandidateDesc {
+	if proto == nil {
+		return nil
+	}
+	var candidates []regionCandidateDesc
+	for pc, ins := range proto.code {
+		if ins.op != opArrayNextJump2 ||
+			ins.d <= pc+1 ||
+			ins.d > len(proto.code) ||
+			!arrayRowLoopHasBackJump(proto.code, pc, ins.d) ||
+			arrayRowLoopHasNestedIterator(proto.code, pc+1, ins.d-1) {
+			continue
+		}
+		callsOrIntrinsics := regionCallsOrIntrinsics(proto, pc, ins.d)
+		if len(callsOrIntrinsics) != 0 {
+			continue
+		}
+		tableSlots := arrayRowLoopTableSlots(proto, pc+1, ins.d)
+		if len(tableSlots) == 0 {
+			continue
+		}
+		entries := snapshot.pcCount(proto, pc)
+		if entries == 0 {
+			entries = 1
+		}
+		candidate := regionCandidateDesc{
+			kind:              "array_row_loop",
+			entryPC:           pc,
+			exitPC:            ins.d,
+			fallbackPC:        pc,
+			entries:           entries,
+			retiredBytecodes:  regionRetiredBytecodesInSpan(proto, snapshot, pc, ins.d),
+			requiredGuards:    []string{"array iterator", "row tables", "row slots"},
+			sideExitPCs:       []int{pc},
+			repairRegisters:   regionRepairRegisters(proto, pc, ins.d),
+			tableSlots:        tableSlots,
+			callsOrIntrinsics: callsOrIntrinsics,
+		}
+		candidate.cost = estimateRegionCost(candidate)
+		candidates = append(candidates, candidate)
+	}
+	return candidates
+}
+
+func arrayRowLoopHasBackJump(code []instruction, entryPC int, exitPC int) bool {
+	backJumpPC := exitPC - 1
+	return backJumpPC >= 0 &&
+		backJumpPC < len(code) &&
+		code[backJumpPC].op == opJump &&
+		code[backJumpPC].b == entryPC
+}
+
+func arrayRowLoopHasNestedIterator(code []instruction, startPC int, exitPC int) bool {
+	for pc := startPC; pc < exitPC && pc < len(code); pc++ {
+		switch code[pc].op {
+		case opPrepareIter, opArrayNext, opArrayNextJump2, opNumericForCheck:
+			return true
+		}
+	}
+	return false
+}
+
+func arrayRowLoopTableSlots(proto *Proto, startPC int, exitPC int) []regionTableSlotDesc {
+	seen := make(map[regionTableSlotDesc]bool)
+	var slots []regionTableSlotDesc
+	add := func(base int, field int, slot int) {
+		if base < 0 || field < 0 || slot < 0 {
+			return
+		}
+		desc := regionTableSlotDesc{base: base, field: field, slot: slot}
+		if seen[desc] {
+			return
+		}
+		seen[desc] = true
+		slots = append(slots, desc)
+	}
+	for pc := startPC; pc < exitPC && pc < len(proto.code); pc++ {
+		ins := proto.code[pc]
+		switch ins.op {
+		case opGetRowStringField:
+			add(ins.b, ins.c, ins.d)
+		case opSetRowStringField, opAddStringField, opSubStringField:
+			add(ins.a, ins.b, ins.d)
+		case opSubAddStringField:
+			if desc, ok := rowFieldSubAddDesc(proto, ins.b); ok {
+				add(ins.a, desc.target, desc.targetSlot)
+				add(ins.a, desc.add, desc.addSlot)
+			}
+		case opJumpIfStringFieldFalse, opJumpIfStringFieldNil, opJumpIfStringFieldTrue, opJumpIfStringFieldNotNil:
+			add(ins.a, ins.b, ins.c)
+		case opJumpIfRowStringFieldNotEqualK, opJumpIfRowStringFieldNotGreaterK, opJumpIfRowStringFieldGreaterK:
+			if desc, ok := rowFieldEqualDesc(proto, ins.b); ok {
+				add(ins.a, desc.field, desc.slot)
+			}
+		case opJumpIfRowStringFieldNotGreaterR:
+			if desc, ok := rowFieldRegisterDesc(proto, ins.b); ok {
+				add(ins.a, desc.field, desc.slot)
+			}
+		case opJumpIfRowStringFieldNotEqualField, opJumpIfRowStringFieldEqualField:
+			if desc, ok := rowFieldPairDesc(proto, ins.b); ok {
+				add(ins.a, desc.leftField, desc.leftSlot)
+				add(ins.c, desc.rightField, desc.rightSlot)
+			}
+		case opJumpIfRowStringFieldNotLessField:
+			if desc, ok := rowFieldPairDesc(proto, ins.b); ok {
+				add(ins.a, desc.leftField, desc.leftSlot)
+				add(ins.a, desc.rightField, desc.rightSlot)
+			}
+		}
+	}
+	return slots
 }
 
 func regionRequiredGuards(plan blockPlanDesc) []string {
@@ -3772,6 +5583,10 @@ func regionRequiredGuards(plan blockPlanDesc) []string {
 		return []string{"base table", "row slot", "numeric predicate"}
 	case blockPlanKindDynamicPathAddStore:
 		return []string{"base table", "parent slot", "child table", "dynamic string key", "numeric operands"}
+	case blockPlanKindDynamicPathSub:
+		return []string{"base tables", "parent slots", "child tables", "dynamic string key", "numeric operands"}
+	case blockPlanKindDynamicPathSubIDivK:
+		return []string{"base table", "parent slots", "child tables", "dynamic string key", "numeric operands"}
 	case blockPlanKindRowFieldAddFieldStore:
 		return []string{"base table", "row slot", "add slot", "numeric fields"}
 	default:
@@ -3814,6 +5629,21 @@ func regionTableSlots(plan blockPlanDesc) []regionTableSlotDesc {
 			slot:  -1,
 		}, {
 			base:    plan.dynamicPath.base,
+			field:   -1,
+			slot:    -1,
+			dynamic: true,
+		}}
+	case blockPlanKindDynamicPathSub, blockPlanKindDynamicPathSubIDivK:
+		return []regionTableSlotDesc{{
+			base:  plan.dynamicSub.leftBase,
+			field: plan.dynamicSub.leftField,
+			slot:  -1,
+		}, {
+			base:  plan.dynamicSub.rightBase,
+			field: plan.dynamicSub.rightField,
+			slot:  -1,
+		}, {
+			base:    plan.dynamicSub.leftBase,
 			field:   -1,
 			slot:    -1,
 			dynamic: true,
@@ -4599,6 +6429,12 @@ func verifyProtoSeen(proto *Proto, seen map[*Proto]bool) error {
 	if want := blockPlanPCs(len(proto.code), proto.blockPlans); !equalIntSlices(proto.blockPlanPCs, want) {
 		return fmt.Errorf("block plan pc map %v does not match finalized plan %v", proto.blockPlanPCs, want)
 	}
+	if want := detectRegionExecutionPlans(proto); !equalRegionExecutionPlanDescs(proto.regionExecutionPlans, want) {
+		return fmt.Errorf("region execution plans %v do not match finalized plan %v", proto.regionExecutionPlans, want)
+	}
+	if want := regionExecutionPlanPCs(len(proto.code), proto.regionExecutionPlans); !equalIntSlices(proto.regionExecutionPlanPCs, want) {
+		return fmt.Errorf("region execution plan pc map %v does not match finalized plan %v", proto.regionExecutionPlanPCs, want)
+	}
 	wantVerifiedPlans, wantVerifiedPlanRejections := detectVerifiedPlans(proto, proto.directBlockPlans)
 	if !equalVerifiedPlanDescs(proto.verifiedPlans, wantVerifiedPlans) {
 		return fmt.Errorf("verified plans %v do not match finalized plan %v", proto.verifiedPlans, wantVerifiedPlans)
@@ -4849,6 +6685,57 @@ func equalDirectBlockPlanDescs(left []directBlockPlanDesc, right []directBlockPl
 }
 
 func equalBlockPlanDescs(left []blockPlanDesc, right []blockPlanDesc) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalRegionExecutionPlanDescs(left []regionExecutionPlanDesc, right []regionExecutionPlanDesc) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i].kind != right[i].kind ||
+			left[i].entryPC != right[i].entryPC ||
+			left[i].exitPC != right[i].exitPC ||
+			left[i].fallbackPC != right[i].fallbackPC ||
+			left[i].arrayLoop.iterator != right[i].arrayLoop.iterator ||
+			left[i].arrayLoop.array != right[i].arrayLoop.array ||
+			left[i].arrayLoop.index != right[i].arrayLoop.index ||
+			left[i].arrayLoop.row != right[i].arrayLoop.row ||
+			left[i].arrayLoop.accumulator != right[i].arrayLoop.accumulator ||
+			left[i].arrayLoop.prefixExitPC != right[i].arrayLoop.prefixExitPC ||
+			left[i].arrayLoop.actionBranch != right[i].arrayLoop.actionBranch ||
+			left[i].arrayLoop.dynamicMap != right[i].arrayLoop.dynamicMap ||
+			left[i].arrayLoop.indexedMapBranch != right[i].arrayLoop.indexedMapBranch ||
+			left[i].arrayLoop.predicate != right[i].arrayLoop.predicate ||
+			!equalArrayRowLoopFieldMutationDescs(left[i].arrayLoop.mutations, right[i].arrayLoop.mutations) ||
+			!equalArrayRowLoopFieldAddDescs(left[i].arrayLoop.fields, right[i].arrayLoop.fields) {
+			return false
+		}
+	}
+	return true
+}
+
+func equalArrayRowLoopFieldMutationDescs(left []arrayRowLoopFieldMutationDesc, right []arrayRowLoopFieldMutationDesc) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalArrayRowLoopFieldAddDescs(left []arrayRowLoopFieldAddDesc, right []arrayRowLoopFieldAddDesc) bool {
 	if len(left) != len(right) {
 		return false
 	}
@@ -5179,9 +7066,6 @@ func verifyInstruction(proto *Proto, pc int, ins instruction) error {
 			return err
 		}
 		if err := verifyConstant(proto, ins.c); err != nil {
-			return err
-		}
-		if err := verifyStringConstant(proto, ins.c); err != nil {
 			return err
 		}
 		return verifyJumpTarget(proto, ins.d)
@@ -5572,13 +7456,14 @@ func verifyRowFieldEqualOp(proto *Proto, index int) error {
 		return fmt.Errorf("row field equality descriptor %d out of range", index)
 	}
 	desc := proto.rowFieldEqualOps[index]
-	for _, constant := range []int{desc.field, desc.value} {
-		if err := verifyConstant(proto, constant); err != nil {
-			return err
-		}
-		if err := verifyStringConstant(proto, constant); err != nil {
-			return err
-		}
+	if err := verifyConstant(proto, desc.field); err != nil {
+		return err
+	}
+	if err := verifyStringConstant(proto, desc.field); err != nil {
+		return err
+	}
+	if err := verifyConstant(proto, desc.value); err != nil {
+		return err
 	}
 	if desc.slot < -1 {
 		return fmt.Errorf("row field equality descriptor %d has invalid slot %d", index, desc.slot)
@@ -5957,6 +7842,28 @@ func disassembleProtoFacts(proto *Proto) []string {
 				opcodeName(plan.dynamicPath.op),
 				plan.dynamicPath.storePC,
 			)
+		}
+		if plan.kind == blockPlanKindDynamicPathSub || plan.kind == blockPlanKindDynamicPathSubIDivK {
+			left := fmt.Sprintf("k%d", plan.dynamicSub.leftField)
+			if value, ok := stringConstantText(proto, plan.dynamicSub.leftField); ok {
+				left = value
+			}
+			right := fmt.Sprintf("k%d", plan.dynamicSub.rightField)
+			if value, ok := stringConstantText(proto, plan.dynamicSub.rightField); ok {
+				right = value
+			}
+			line += fmt.Sprintf(
+				" left_base r%d right_base r%d left %s right %s dynamic_key key r%d result r%d",
+				plan.dynamicSub.leftBase,
+				plan.dynamicSub.rightBase,
+				left,
+				right,
+				plan.dynamicSub.key,
+				plan.dynamicSub.result,
+			)
+			if plan.dynamicSub.divisor >= 0 {
+				line += " divisor " + disassembleConstant(proto, plan.dynamicSub.divisor)
+			}
 		}
 		if plan.kind == blockPlanKindRowFieldAddFieldStore {
 			field := fmt.Sprintf("k%d", plan.rowField.field)

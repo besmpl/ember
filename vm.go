@@ -63,10 +63,6 @@ type vmThread struct {
 	directFramePICCounts    *directFramePICCounts
 	directFramePCCounts     map[*Proto][]uint64
 	intrinsicGuards         *baseFieldIntrinsicGuardCache
-	runtimePaths            [8]runtimePathCacheEntry
-	runtimePathCount        uint8
-	runtimePathHits         uint64
-	runtimePathStores       uint64
 	directLeafRegisters     []Value
 	directLeafBusy          bool
 }
@@ -88,6 +84,9 @@ type directFramePICCounts struct {
 	directBlockResumes             uint64
 	directBlockFallbacks           uint64
 	directBlockSideExits           [directFrameSideExitReasonCount]uint64
+	regionEntries                  uint64
+	regionResumes                  uint64
+	regionFallbacks                uint64
 	pathCacheHits                  uint64
 	pathCacheMisses                uint64
 	pathCacheStale                 uint64
@@ -159,7 +158,11 @@ type runtimePathCacheHit struct {
 }
 
 func (thread *vmThread) runtimePathPlanCacheEnabled() bool {
-	return thread != nil
+	return thread != nil && (thread.directFramePICCounts != nil || thread.intrinsicGuards != nil)
+}
+
+func (thread *vmThread) intrinsicGuardCacheEnabled() bool {
+	return thread != nil && (thread.directFramePICCounts != nil || thread.intrinsicGuards != nil)
 }
 
 func (counts *directFramePICCounts) addHit(entryIndex int) {
@@ -259,6 +262,27 @@ func (counts *directFramePICCounts) addDirectBlockFallback(reason directFrameSid
 		return
 	}
 	counts.directBlockSideExits[reason]++
+}
+
+func (counts *directFramePICCounts) addRegionEntry() {
+	if counts == nil {
+		return
+	}
+	counts.regionEntries++
+}
+
+func (counts *directFramePICCounts) addRegionResume() {
+	if counts == nil {
+		return
+	}
+	counts.regionResumes++
+}
+
+func (counts *directFramePICCounts) addRegionFallback() {
+	if counts == nil {
+		return
+	}
+	counts.regionFallbacks++
 }
 
 func (counts *directFramePICCounts) directBlockSideExitCount(reason directFrameSideExitReason) uint64 {
@@ -361,6 +385,9 @@ func (counts *directFramePICCounts) totalMechanismActivity() uint64 {
 		counts.directBlockEntries +
 		counts.directBlockResumes +
 		counts.directBlockFallbacks +
+		counts.regionEntries +
+		counts.regionResumes +
+		counts.regionFallbacks +
 		counts.pathCacheHits +
 		counts.pathCacheMisses +
 		counts.pathCacheStale +
@@ -779,6 +806,1238 @@ func (exit directFrameSideExit) frameResult() (vmFrameResult, bool, error) {
 	default:
 		return vmFrameResult{}, true, fmt.Errorf("run: unknown direct-frame side exit %d", exit.kind)
 	}
+}
+
+type regionExecutionPlanKind uint8
+
+const (
+	regionExecutionPlanKindInvalid regionExecutionPlanKind = iota
+	regionExecutionPlanKindNoop
+	regionExecutionPlanKindArrayRowLoop
+)
+
+type regionExecutionPlanDesc struct {
+	kind       regionExecutionPlanKind
+	entryPC    int
+	exitPC     int
+	fallbackPC int
+	arrayLoop  arrayRowLoopRegionDesc
+}
+
+func (thread *vmThread) executeRegion(frame *vmFrame, plan regionExecutionPlanDesc) directFrameSideExit {
+	if thread != nil {
+		thread.directFramePICCounts.addRegionEntry()
+	}
+	exit := executeRegionPlan(frame, plan)
+	if exit.resumesDirectFrame() {
+		if thread != nil {
+			thread.directFramePICCounts.addRegionResume()
+		}
+		return exit
+	}
+	if thread != nil {
+		thread.directFramePICCounts.addRegionFallback()
+	}
+	return exit
+}
+
+func executeRegionPlan(frame *vmFrame, plan regionExecutionPlanDesc) directFrameSideExit {
+	if frame == nil ||
+		frame.proto == nil ||
+		plan.entryPC < 0 ||
+		plan.exitPC < plan.entryPC ||
+		plan.exitPC > len(frame.proto.code) ||
+		frame.pc != plan.entryPC {
+		if frame != nil {
+			frame.pc = plan.fallbackPC
+		}
+		return directFrameEnterGenericFrame()
+	}
+	switch plan.kind {
+	case regionExecutionPlanKindNoop:
+		frame.pc = plan.exitPC
+		return directFrameResume()
+	case regionExecutionPlanKindArrayRowLoop:
+		return executeArrayRowLoopRegion(frame, plan)
+	default:
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+}
+
+func executeArrayRowLoopRegion(frame *vmFrame, plan regionExecutionPlanDesc) directFrameSideExit {
+	proto := frame.proto
+	registers := frame.registers
+	desc := plan.arrayLoop
+	if desc.indexedMapBranch.enabled {
+		return executeArrayRowLoopIndexedMapBranchRegion(frame, plan)
+	}
+	if desc.dynamicMap.enabled {
+		return executeArrayRowLoopDynamicMapUpdateRegion(frame, plan)
+	}
+	if desc.actionBranch.enabled {
+		return executeArrayRowLoopActionBranchRegion(frame, plan)
+	}
+	if desc.prefixExitPC > 0 {
+		return executeArrayRowLoopPrefixRegion(frame, plan)
+	}
+	if proto == nil ||
+		plan.entryPC < 0 ||
+		plan.entryPC >= len(proto.code) ||
+		desc.index < 0 ||
+		desc.row < 0 ||
+		desc.iterator < 0 ||
+		desc.array < 0 ||
+		(len(desc.fields) != 0 && desc.accumulator < 0) ||
+		(len(desc.fields) == 0 && len(desc.mutations) == 0) {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	entry := proto.code[plan.entryPC]
+	if entry.op != opArrayNextJump2 ||
+		entry.a != desc.index ||
+		entry.b != desc.iterator ||
+		entry.c != desc.array ||
+		entry.d != plan.exitPC {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	callee := registers[desc.iterator]
+	if callee.nativeID != nativeFuncArrayNext {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	tableValue := registers[desc.array]
+	if tableValue.kind != TableKind || tableValue.table == nil {
+		return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: argument #1 is %s, want table", tableValue.Kind()))
+	}
+	controlValue := registers[desc.index]
+	index := 0
+	if !controlValue.IsNil() {
+		if controlValue.kind != NumberKind {
+			return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: index is %s, want number or nil", controlValue.Kind()))
+		}
+		index = int(controlValue.number)
+		if float64(index) != controlValue.number {
+			return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: index is %s, want integer", controlValue.Kind()))
+		}
+	}
+	total := 0.0
+	if desc.accumulator >= 0 {
+		accumulator := registers[desc.accumulator]
+		if accumulator.kind != NumberKind {
+			frame.pc = plan.fallbackPC
+			return directFrameEnterGenericFrame()
+		}
+		total = accumulator.number
+	}
+	table := tableValue.table
+	frame.openCallStart = -1
+	frame.openCallResults = nil
+	for {
+		next := index + 1
+		if next < 1 || next > len(table.array) {
+			registers[desc.index] = NilValue()
+			registers[desc.row] = NilValue()
+			if desc.accumulator >= 0 {
+				registers[desc.accumulator] = NumberValue(total)
+			}
+			frame.openCallStart = -1
+			frame.openCallResults = nil
+			frame.pc = plan.exitPC
+			return directFrameResume()
+		}
+		row := table.array[next-1]
+		runBody, ok := arrayRowLoopPredicateAllows(proto, row, desc.predicate)
+		if !ok {
+			if desc.accumulator >= 0 {
+				registers[desc.accumulator] = NumberValue(total)
+			}
+			frame.pc = plan.fallbackPC
+			return directFrameEnterGenericFrame()
+		}
+		if !runBody {
+			if desc.predicate.skipPC == plan.exitPC-1 {
+				index = next
+				registers[desc.index] = NumberValue(float64(index))
+				registers[desc.row] = row
+				continue
+			}
+		}
+		if runBody && !arrayRowLoopApplyMutations(proto, row, desc.row, desc.mutations, registers) {
+			if desc.accumulator >= 0 {
+				registers[desc.accumulator] = NumberValue(total)
+			}
+			frame.pc = plan.fallbackPC
+			return directFrameEnterGenericFrame()
+		}
+		delta, ok := arrayRowLoopNumericDelta(proto, row, desc.fields, registers)
+		if !ok {
+			if desc.accumulator >= 0 {
+				registers[desc.accumulator] = NumberValue(total)
+			}
+			frame.pc = plan.fallbackPC
+			return directFrameEnterGenericFrame()
+		}
+		index = next
+		total += delta
+		registers[desc.index] = NumberValue(float64(index))
+		registers[desc.row] = row
+		if desc.accumulator >= 0 {
+			registers[desc.accumulator] = NumberValue(total)
+		}
+	}
+}
+
+func executeArrayRowLoopIndexedMapBranchRegion(frame *vmFrame, plan regionExecutionPlanDesc) directFrameSideExit {
+	proto := frame.proto
+	registers := frame.registers
+	desc := plan.arrayLoop
+	order := desc.indexedMapBranch
+	if proto == nil ||
+		plan.entryPC < 0 ||
+		plan.entryPC >= len(proto.code) ||
+		!order.enabled ||
+		desc.index < 0 ||
+		desc.row < 0 ||
+		desc.iterator < 0 ||
+		desc.array < 0 ||
+		order.base < 0 ||
+		order.base >= len(registers) ||
+		order.accumulator < 0 ||
+		order.accumulator >= len(registers) ||
+		order.control < 0 ||
+		order.control >= len(registers) ||
+		order.keyRegister < 0 ||
+		order.keyRegister >= len(registers) ||
+		order.valueRegister < 0 ||
+		order.valueRegister >= len(registers) ||
+		order.thenDelta < 0 ||
+		order.thenDelta >= len(registers) ||
+		order.elseDelta < 0 ||
+		order.elseDelta >= len(registers) ||
+		order.thenMapResult < 0 ||
+		order.thenMapResult >= len(registers) ||
+		order.elseMapResult < 0 ||
+		order.elseMapResult >= len(registers) ||
+		order.finalMapResult < 0 ||
+		order.finalMapResult >= len(registers) {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	entry := proto.code[plan.entryPC]
+	if entry.op != opArrayNextJump2 ||
+		entry.a != desc.index ||
+		entry.b != desc.iterator ||
+		entry.c != desc.array ||
+		entry.d != plan.exitPC {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	callee := registers[desc.iterator]
+	if callee.nativeID != nativeFuncArrayNext {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	tableValue := registers[desc.array]
+	if tableValue.kind != TableKind || tableValue.table == nil {
+		return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: argument #1 is %s, want table", tableValue.Kind()))
+	}
+	controlValue := registers[desc.index]
+	index := 0
+	if !controlValue.IsNil() {
+		if controlValue.kind != NumberKind {
+			return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: index is %s, want number or nil", controlValue.Kind()))
+		}
+		index = int(controlValue.number)
+		if float64(index) != controlValue.number {
+			return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: index is %s, want integer", controlValue.Kind()))
+		}
+	}
+	accumulatorValue := registers[order.accumulator]
+	if accumulatorValue.kind != NumberKind || math.IsNaN(accumulatorValue.number) {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	accumulator := accumulatorValue.number
+	table := tableValue.table
+	frame.openCallStart = -1
+	frame.openCallResults = nil
+	for {
+		next := index + 1
+		if next < 1 || next > len(table.array) {
+			registers[desc.index] = NilValue()
+			registers[desc.row] = NilValue()
+			registers[order.accumulator] = NumberValue(accumulator)
+			frame.pc = plan.exitPC
+			return directFrameResume()
+		}
+		row := table.array[next-1]
+		nextAccumulator, ok := arrayRowLoopApplyIndexedMapBranch(proto, row, order, registers, accumulator)
+		if !ok {
+			registers[order.accumulator] = NumberValue(accumulator)
+			frame.pc = plan.fallbackPC
+			return directFrameEnterGenericFrame()
+		}
+		index = next
+		accumulator = nextAccumulator
+		registers[desc.index] = NumberValue(float64(index))
+		registers[desc.row] = row
+		registers[order.accumulator] = NumberValue(accumulator)
+	}
+}
+
+func arrayRowLoopApplyIndexedMapBranch(proto *Proto, row Value, order arrayRowLoopIndexedMapBranchDesc, registers []Value, accumulator float64) (float64, bool) {
+	baseValue := registers[order.base]
+	if baseValue.kind != TableKind || baseValue.table == nil || baseValue.table.metatable != nil {
+		return 0, false
+	}
+	control := registers[order.control]
+	if control.kind != NumberKind || math.IsNaN(control.number) || math.IsNaN(accumulator) {
+		return 0, false
+	}
+	key, ok := arrayRowLoopField(proto, row, order.keyField, order.keySlot)
+	if !ok || key.kind != StringKind {
+		return 0, false
+	}
+	delta, ok := arrayRowLoopNumberField(proto, row, order.deltaField, order.deltaSlot)
+	if !ok || math.IsNaN(delta.number) {
+		return 0, false
+	}
+	branch, ok := arrayRowLoopField(proto, row, order.branchField, order.branchSlot)
+	if !ok || branch.kind != StringKind {
+		return 0, false
+	}
+	divisor, ok := arrayRowLoopIndexedMapNumberConstant(proto, order.divisor)
+	if !ok || divisor == 0 {
+		return 0, false
+	}
+	lowerBound, ok := arrayRowLoopIndexedMapNumberConstant(proto, order.lowerBound)
+	if !ok {
+		return 0, false
+	}
+	thenModulo, ok := arrayRowLoopIndexedMapNumberConstant(proto, order.thenModulo)
+	if !ok || thenModulo == 0 {
+		return 0, false
+	}
+	elseModulo, ok := arrayRowLoopIndexedMapNumberConstant(proto, order.elseModulo)
+	if !ok || elseModulo == 0 {
+		return 0, false
+	}
+	finalModulo, ok := arrayRowLoopIndexedMapNumberConstant(proto, order.finalModulo)
+	if !ok || finalModulo == 0 {
+		return 0, false
+	}
+	_, left, ok := arrayRowLoopIndexedMapNumber(proto, baseValue.table, order.leftMapField, key.str)
+	if !ok {
+		return 0, false
+	}
+	mutableTable, mutable, ok := arrayRowLoopIndexedMapNumber(proto, baseValue.table, order.mutableMapField, key.str)
+	if !ok {
+		return 0, false
+	}
+	finalTable, baseValueNumber, ok := arrayRowLoopIndexedMapNumber(proto, baseValue.table, order.finalMapField, key.str)
+	if !ok {
+		return 0, false
+	}
+	value := baseValueNumber + left - math.Floor(mutable/divisor)
+	if value < lowerBound {
+		value = lowerBound
+	}
+	deltaValue := delta.number
+	nextMutable := mutable
+	nextAccumulator := accumulator
+	if order.thenValue < 0 || order.thenValue >= len(proto.constants) {
+		return 0, false
+	}
+	thenKind := proto.constants[order.thenValue]
+	if thenKind.kind != StringKind {
+		return 0, false
+	}
+	deltaRegister := order.elseDelta
+	mutableRegister := order.elseMapResult
+	if branch.str == thenKind.str {
+		deltaValue += arrayRowLoopIndexedMapModulo(control.number, thenModulo)
+		if mutable < deltaValue {
+			deltaValue = mutable
+		}
+		nextMutable = mutable - deltaValue
+		nextAccumulator = accumulator - deltaValue*value
+		deltaRegister = order.thenDelta
+		mutableRegister = order.thenMapResult
+	} else {
+		deltaValue += arrayRowLoopIndexedMapModulo(control.number, elseModulo)
+		nextMutable = mutable + deltaValue
+		nextAccumulator = accumulator + deltaValue*value
+	}
+	nextFinal := value + arrayRowLoopIndexedMapModulo(control.number, finalModulo)
+	if math.IsNaN(value) || math.IsNaN(deltaValue) || math.IsNaN(nextMutable) || math.IsNaN(nextAccumulator) || math.IsNaN(nextFinal) {
+		return 0, false
+	}
+	mutableTable.setRawStringField(key.str, NumberValue(nextMutable))
+	finalTable.setRawStringField(key.str, NumberValue(nextFinal))
+	registers[order.keyRegister] = key
+	registers[order.valueRegister] = NumberValue(value)
+	registers[deltaRegister] = NumberValue(deltaValue)
+	registers[mutableRegister] = NumberValue(nextMutable)
+	registers[order.finalMapResult] = NumberValue(nextFinal)
+	return nextAccumulator, true
+}
+
+func arrayRowLoopIndexedMapNumberConstant(proto *Proto, constant int) (float64, bool) {
+	if !arrayRowLoopNumberConstantOK(proto, constant) {
+		return 0, false
+	}
+	number := proto.constants[constant].number
+	if math.IsNaN(number) {
+		return 0, false
+	}
+	return number, true
+}
+
+func arrayRowLoopIndexedMapNumber(proto *Proto, base *Table, field int, key string) (*Table, float64, bool) {
+	if base == nil ||
+		field < 0 ||
+		field >= len(proto.constants) ||
+		proto.constants[field].kind != StringKind {
+		return nil, 0, false
+	}
+	childValue, ok := base.rawStringField(proto.constants[field].str)
+	if !ok || childValue.kind != TableKind || childValue.table == nil || childValue.table.metatable != nil {
+		return nil, 0, false
+	}
+	value, ok := childValue.table.rawStringField(key)
+	if !ok || value.kind != NumberKind || math.IsNaN(value.number) {
+		return nil, 0, false
+	}
+	return childValue.table, value.number, true
+}
+
+func arrayRowLoopIndexedMapModulo(left float64, right float64) float64 {
+	return left - math.Floor(left/right)*right
+}
+
+func executeArrayRowLoopDynamicMapUpdateRegion(frame *vmFrame, plan regionExecutionPlanDesc) directFrameSideExit {
+	proto := frame.proto
+	registers := frame.registers
+	desc := plan.arrayLoop
+	update := desc.dynamicMap
+	if proto == nil ||
+		plan.entryPC < 0 ||
+		plan.entryPC >= len(proto.code) ||
+		!update.enabled ||
+		desc.index < 0 ||
+		desc.row < 0 ||
+		desc.iterator < 0 ||
+		desc.array < 0 ||
+		update.base < 0 ||
+		update.base >= len(registers) ||
+		update.field < 0 ||
+		update.field >= len(proto.constants) ||
+		proto.constants[update.field].kind != StringKind ||
+		update.keyRegister < 0 ||
+		update.keyRegister >= len(registers) ||
+		update.storeKeyRegister < 0 ||
+		update.storeKeyRegister >= len(registers) ||
+		update.deltaRegister < 0 ||
+		update.deltaRegister >= len(registers) ||
+		update.deltaOperand < 0 ||
+		update.deltaOperand >= len(registers) ||
+		update.result < 0 ||
+		update.result >= len(registers) {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	entry := proto.code[plan.entryPC]
+	if entry.op != opArrayNextJump2 ||
+		entry.a != desc.index ||
+		entry.b != desc.iterator ||
+		entry.c != desc.array ||
+		entry.d != plan.exitPC {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	callee := registers[desc.iterator]
+	if callee.nativeID != nativeFuncArrayNext {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	tableValue := registers[desc.array]
+	if tableValue.kind != TableKind || tableValue.table == nil {
+		return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: argument #1 is %s, want table", tableValue.Kind()))
+	}
+	controlValue := registers[desc.index]
+	index := 0
+	if !controlValue.IsNil() {
+		if controlValue.kind != NumberKind {
+			return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: index is %s, want number or nil", controlValue.Kind()))
+		}
+		index = int(controlValue.number)
+		if float64(index) != controlValue.number {
+			return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: index is %s, want integer", controlValue.Kind()))
+		}
+	}
+	table := tableValue.table
+	frame.openCallStart = -1
+	frame.openCallResults = nil
+	for {
+		next := index + 1
+		if next < 1 || next > len(table.array) {
+			registers[desc.index] = NilValue()
+			registers[desc.row] = NilValue()
+			frame.pc = plan.exitPC
+			return directFrameResume()
+		}
+		row := table.array[next-1]
+		if !arrayRowLoopApplyDynamicMapUpdate(proto, row, update, registers) {
+			frame.pc = plan.fallbackPC
+			return directFrameEnterGenericFrame()
+		}
+		index = next
+		registers[desc.index] = NumberValue(float64(index))
+		registers[desc.row] = row
+	}
+}
+
+func arrayRowLoopApplyDynamicMapUpdate(proto *Proto, row Value, update arrayRowLoopDynamicMapUpdateDesc, registers []Value) bool {
+	base := registers[update.base]
+	if base.kind != TableKind || base.table == nil || base.table.metatable != nil {
+		return false
+	}
+	parent := base.table
+	key, ok := arrayRowLoopField(proto, row, update.keyField, update.keySlot)
+	if !ok || key.kind != StringKind {
+		return false
+	}
+	delta, ok := arrayRowLoopDynamicMapDelta(proto, row, update, registers)
+	if !ok {
+		return false
+	}
+	first, ok := parent.rawStringField(proto.constants[update.field].str)
+	if !ok || first.kind != TableKind || first.table == nil || first.table.metatable != nil {
+		return false
+	}
+	child := first.table
+	left, ok := child.rawStringField(key.str)
+	if !ok || left.kind != NumberKind || math.IsNaN(left.number) || math.IsNaN(delta.number) {
+		return false
+	}
+	next := left.number + delta.number
+	if update.op == opSub {
+		next = left.number - delta.number
+	} else if update.op != opAdd {
+		return false
+	}
+	value := NumberValue(next)
+	child.setRawStringField(key.str, value)
+	registers[update.keyRegister] = key
+	registers[update.storeKeyRegister] = key
+	registers[update.deltaRegister] = delta
+	registers[update.deltaOperand] = delta
+	registers[update.result] = value
+	return true
+}
+
+func arrayRowLoopDynamicMapDelta(proto *Proto, row Value, update arrayRowLoopDynamicMapUpdateDesc, registers []Value) (Value, bool) {
+	delta, ok := arrayRowLoopNumberField(proto, row, update.deltaField, update.deltaSlot)
+	if !ok || !update.adjustedGain {
+		return delta, ok
+	}
+	extra, ok := arrayRowLoopDynamicMapExtra(proto, update, registers)
+	if !ok {
+		return NilValue(), false
+	}
+	gain := delta.number + extra.number
+	branch, ok := arrayRowLoopField(proto, row, update.branchField, update.branchSlot)
+	if !ok || branch.kind != StringKind {
+		return NilValue(), false
+	}
+	if update.multiplyKind < 0 ||
+		update.multiplyKind >= len(proto.constants) ||
+		update.divideKind < 0 ||
+		update.divideKind >= len(proto.constants) ||
+		proto.constants[update.multiplyKind].kind != StringKind ||
+		proto.constants[update.divideKind].kind != StringKind ||
+		!arrayRowLoopNumberConstantOK(proto, update.multiplyConstant) ||
+		!arrayRowLoopNumberConstantOK(proto, update.divideConstant) ||
+		!arrayRowLoopNumberConstantOK(proto, update.divideAdd) ||
+		!arrayRowLoopNumberConstantOK(proto, update.bonusConstant) {
+		return NilValue(), false
+	}
+	switch branch.str {
+	case proto.constants[update.multiplyKind].str:
+		gain *= proto.constants[update.multiplyConstant].number
+	case proto.constants[update.divideKind].str:
+		gain = math.Floor(gain/proto.constants[update.divideConstant].number) + proto.constants[update.divideAdd].number
+	}
+	bonus, ok := arrayRowLoopDynamicMapBonusField(proto, update, registers)
+	if !ok {
+		return NilValue(), false
+	}
+	if bonus.truthy() {
+		gain += proto.constants[update.bonusConstant].number
+	}
+	if update.extraResult < 0 || update.extraResult >= len(registers) {
+		return NilValue(), false
+	}
+	registers[update.extraResult] = extra
+	return NumberValue(gain), true
+}
+
+func arrayRowLoopDynamicMapExtra(proto *Proto, update arrayRowLoopDynamicMapUpdateDesc, registers []Value) (Value, bool) {
+	if update.extraRegister < 0 || update.extraRegister >= len(registers) {
+		return NilValue(), false
+	}
+	source := registers[update.extraRegister]
+	if source.kind != NumberKind {
+		return NilValue(), false
+	}
+	switch update.extraOp {
+	case opMove:
+		return source, true
+	case opModK:
+		if !arrayRowLoopNumberConstantOK(proto, update.extraConstant) {
+			return NilValue(), false
+		}
+		right := proto.constants[update.extraConstant].number
+		return NumberValue(source.number - math.Floor(source.number/right)*right), true
+	default:
+		return NilValue(), false
+	}
+}
+
+func arrayRowLoopDynamicMapBonusField(proto *Proto, update arrayRowLoopDynamicMapUpdateDesc, registers []Value) (Value, bool) {
+	if update.bonusBase < 0 || update.bonusBase >= len(registers) {
+		return NilValue(), false
+	}
+	base := registers[update.bonusBase]
+	if update.bonusSlot >= 0 {
+		return arrayRowLoopField(proto, base, update.bonusField, update.bonusSlot)
+	}
+	if base.kind != TableKind || base.table == nil || base.table.metatable != nil {
+		return NilValue(), false
+	}
+	if update.bonusField < 0 ||
+		update.bonusField >= len(proto.constants) ||
+		proto.constants[update.bonusField].kind != StringKind {
+		return NilValue(), false
+	}
+	value, _ := base.table.rawStringField(proto.constants[update.bonusField].str)
+	return value, true
+}
+
+func executeArrayRowLoopActionBranchRegion(frame *vmFrame, plan regionExecutionPlanDesc) directFrameSideExit {
+	proto := frame.proto
+	registers := frame.registers
+	desc := plan.arrayLoop
+	action := desc.actionBranch
+	if proto == nil ||
+		plan.entryPC < 0 ||
+		plan.entryPC >= len(proto.code) ||
+		!action.enabled ||
+		desc.index < 0 ||
+		desc.row < 0 ||
+		desc.iterator < 0 ||
+		desc.array < 0 ||
+		desc.accumulator < 0 ||
+		len(desc.fields) != 0 ||
+		len(desc.mutations) != 2 {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	entry := proto.code[plan.entryPC]
+	if entry.op != opArrayNextJump2 ||
+		entry.a != desc.index ||
+		entry.b != desc.iterator ||
+		entry.c != desc.array ||
+		entry.d != plan.exitPC {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	callee := registers[desc.iterator]
+	if callee.nativeID != nativeFuncArrayNext {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	tableValue := registers[desc.array]
+	if tableValue.kind != TableKind || tableValue.table == nil {
+		return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: argument #1 is %s, want table", tableValue.Kind()))
+	}
+	controlValue := registers[desc.index]
+	index := 0
+	if !controlValue.IsNil() {
+		if controlValue.kind != NumberKind {
+			return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: index is %s, want number or nil", controlValue.Kind()))
+		}
+		index = int(controlValue.number)
+		if float64(index) != controlValue.number {
+			return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: index is %s, want integer", controlValue.Kind()))
+		}
+	}
+	accumulator := registers[desc.accumulator]
+	if accumulator.kind != NumberKind {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	total := accumulator.number
+	table := tableValue.table
+	frame.openCallStart = -1
+	frame.openCallResults = nil
+	for {
+		next := index + 1
+		if next < 1 || next > len(table.array) {
+			registers[desc.index] = NilValue()
+			registers[desc.row] = NilValue()
+			registers[desc.accumulator] = NumberValue(total)
+			frame.pc = plan.exitPC
+			return directFrameResume()
+		}
+		row := table.array[next-1]
+		nextTotal, ok := arrayRowLoopApplyActionBranch(proto, row, desc, action, registers, total)
+		if !ok {
+			registers[desc.accumulator] = NumberValue(total)
+			frame.pc = plan.fallbackPC
+			return directFrameEnterGenericFrame()
+		}
+		index = next
+		total = nextTotal
+		registers[desc.index] = NumberValue(float64(index))
+		registers[desc.row] = row
+		registers[desc.accumulator] = NumberValue(total)
+	}
+}
+
+func arrayRowLoopApplyActionBranch(proto *Proto, row Value, desc arrayRowLoopRegionDesc, action arrayRowLoopActionBranchDesc, registers []Value, total float64) (float64, bool) {
+	if row.kind != TableKind || row.table == nil || action.actor < 0 || action.actor >= len(registers) {
+		return 0, false
+	}
+	actor := registers[action.actor]
+	if actor.kind != TableKind || actor.table == nil {
+		return 0, false
+	}
+	rowTable := row.table
+	actorTable := actor.table
+	if rowTable.metatable != nil || rowTable.stringFieldMap != nil || actorTable.metatable != nil || actorTable.stringFieldMap != nil {
+		return 0, false
+	}
+	cooldownValue, ok := arrayRowLoopNumberField(proto, row, desc.predicate.field, desc.predicate.slot)
+	if !ok {
+		return 0, false
+	}
+	hasteValue, ok := arrayRowLoopNumberField(proto, actor, desc.mutations[0].sourceField, desc.mutations[0].sourceSlot)
+	if !ok {
+		return 0, false
+	}
+	energyValue, ok := arrayRowLoopNumberField(proto, actor, action.energyField, action.energySlot)
+	if !ok {
+		return 0, false
+	}
+	costValue, ok := arrayRowLoopNumberField(proto, row, action.costField, action.costSlot)
+	if !ok {
+		return 0, false
+	}
+	resetValue, ok := arrayRowLoopNumberField(proto, row, action.resetField, action.resetSlot)
+	if !ok {
+		return 0, false
+	}
+	usesValue, ok := arrayRowLoopNumberField(proto, row, action.usesField, action.usesSlot)
+	if !ok || !arrayRowLoopNumberConstantOK(proto, action.oneConstant) {
+		return 0, false
+	}
+	cooldown := cooldownValue.number
+	haste := hasteValue.number
+	energy := energyValue.number
+	cost := costValue.number
+	reset := resetValue.number
+	uses := usesValue.number
+	one := proto.constants[action.oneConstant].number
+	if math.IsNaN(cooldown) || math.IsNaN(haste) || math.IsNaN(energy) || math.IsNaN(cost) || math.IsNaN(reset) || math.IsNaN(uses) || math.IsNaN(one) {
+		return 0, false
+	}
+	nextCooldown := cooldown
+	if cooldown > proto.constants[desc.predicate.value].number {
+		nextCooldown = cooldown - proto.constants[desc.mutations[0].valueConstant].number - haste
+		if nextCooldown < proto.constants[desc.mutations[1].threshold].number {
+			nextCooldown = proto.constants[desc.mutations[1].clamp].number
+		}
+	}
+	nextEnergy := energy
+	nextUses := uses
+	if nextCooldown == 0 && energy >= cost {
+		nextEnergy = energy - cost
+		nextUses = uses + one
+		nextCooldown = reset
+		total += nextEnergy + nextUses*cost
+	} else {
+		total += nextCooldown + energy
+	}
+	if !arrayRowLoopSetNumberField(proto, rowTable, desc.predicate.field, desc.predicate.slot, nextCooldown) {
+		return 0, false
+	}
+	if nextEnergy != energy {
+		if !arrayRowLoopSetNumberField(proto, actorTable, action.energyField, action.energySlot, nextEnergy) {
+			return 0, false
+		}
+	}
+	if nextUses != uses {
+		if !arrayRowLoopSetNumberField(proto, rowTable, action.usesField, action.usesSlot, nextUses) {
+			return 0, false
+		}
+	}
+	return total, true
+}
+
+func arrayRowLoopSetNumberField(proto *Proto, table *Table, field int, slot int, value float64) bool {
+	if table == nil ||
+		field < 0 ||
+		field >= len(proto.constants) ||
+		proto.constants[field].kind != StringKind ||
+		slot < 0 ||
+		slot >= len(table.stringFields) ||
+		table.stringFields[slot].key != proto.constants[field].str {
+		return false
+	}
+	table.stringFields[slot].value = NumberValue(value)
+	table.stringValueVersion++
+	return true
+}
+
+func executeArrayRowLoopPrefixRegion(frame *vmFrame, plan regionExecutionPlanDesc) directFrameSideExit {
+	proto := frame.proto
+	registers := frame.registers
+	desc := plan.arrayLoop
+	if proto == nil ||
+		plan.entryPC < 0 ||
+		plan.entryPC >= len(proto.code) ||
+		desc.prefixExitPC <= plan.entryPC ||
+		desc.prefixExitPC >= plan.exitPC ||
+		desc.index < 0 ||
+		desc.row < 0 ||
+		desc.iterator < 0 ||
+		desc.array < 0 ||
+		desc.accumulator >= 0 ||
+		len(desc.fields) != 0 ||
+		len(desc.mutations) == 0 {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	entry := proto.code[plan.entryPC]
+	if entry.op != opArrayNextJump2 ||
+		entry.a != desc.index ||
+		entry.b != desc.iterator ||
+		entry.c != desc.array ||
+		entry.d != plan.exitPC {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	callee := registers[desc.iterator]
+	if callee.nativeID != nativeFuncArrayNext {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	tableValue := registers[desc.array]
+	if tableValue.kind != TableKind || tableValue.table == nil {
+		return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: argument #1 is %s, want table", tableValue.Kind()))
+	}
+	controlValue := registers[desc.index]
+	index := 0
+	if !controlValue.IsNil() {
+		if controlValue.kind != NumberKind {
+			return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: index is %s, want number or nil", controlValue.Kind()))
+		}
+		index = int(controlValue.number)
+		if float64(index) != controlValue.number {
+			return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: index is %s, want integer", controlValue.Kind()))
+		}
+	}
+	table := tableValue.table
+	next := index + 1
+	frame.openCallStart = -1
+	frame.openCallResults = nil
+	if next < 1 || next > len(table.array) {
+		registers[desc.index] = NilValue()
+		registers[desc.row] = NilValue()
+		frame.pc = plan.exitPC
+		return directFrameResume()
+	}
+	row := table.array[next-1]
+	runBody, ok := arrayRowLoopPredicateAllows(proto, row, desc.predicate)
+	if !ok {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	if runBody && !arrayRowLoopApplyMutations(proto, row, desc.row, desc.mutations, registers) {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	registers[desc.index] = NumberValue(float64(next))
+	registers[desc.row] = row
+	frame.pc = desc.prefixExitPC
+	return directFrameResume()
+}
+
+func arrayRowLoopPredicateAllows(proto *Proto, row Value, predicate arrayRowLoopPredicateDesc) (bool, bool) {
+	if !predicate.enabled {
+		return true, true
+	}
+	switch predicate.op {
+	case opJumpIfStringFieldFalse, opJumpIfStringFieldNil, opJumpIfStringFieldNotNil, opJumpIfStringFieldTrue:
+		value, ok := arrayRowLoopField(proto, row, predicate.field, predicate.slot)
+		if !ok {
+			return false, false
+		}
+		switch predicate.op {
+		case opJumpIfStringFieldFalse:
+			return value.truthy(), true
+		case opJumpIfStringFieldTrue:
+			return !value.truthy(), true
+		case opJumpIfStringFieldNil:
+			return !value.IsNil(), true
+		case opJumpIfStringFieldNotNil:
+			return value.IsNil(), true
+		}
+	}
+	value, ok := arrayRowLoopNumberField(proto, row, predicate.field, predicate.slot)
+	if !ok || predicate.value < 0 || predicate.value >= len(proto.constants) || proto.constants[predicate.value].kind != NumberKind {
+		return false, false
+	}
+	right := proto.constants[predicate.value].number
+	if math.IsNaN(value.number) || math.IsNaN(right) {
+		return false, false
+	}
+	greater := value.number > right
+	switch predicate.op {
+	case opJumpIfRowStringFieldNotGreaterK:
+		return greater, true
+	case opJumpIfRowStringFieldGreaterK:
+		return !greater, true
+	case opJumpIfNotLessK:
+		return value.number < right, true
+	default:
+		return false, false
+	}
+}
+
+func arrayRowLoopNumericDelta(proto *Proto, row Value, fields []arrayRowLoopFieldAddDesc, registers []Value) (float64, bool) {
+	var delta float64
+	for _, field := range fields {
+		value, ok := arrayRowLoopNumberField(proto, row, field.field, field.slot)
+		if !ok {
+			return 0, false
+		}
+		registers[field.loadRegister] = value
+		delta += value.number
+	}
+	return delta, true
+}
+
+func arrayRowLoopNumberField(proto *Proto, row Value, field int, slot int) (Value, bool) {
+	value, ok := arrayRowLoopField(proto, row, field, slot)
+	if !ok || value.kind != NumberKind {
+		return NilValue(), false
+	}
+	return value, true
+}
+
+func arrayRowLoopField(proto *Proto, row Value, field int, slot int) (Value, bool) {
+	if row.kind != TableKind || row.table == nil {
+		return NilValue(), false
+	}
+	table := row.table
+	if table.metatable != nil || table.stringFieldMap != nil {
+		return NilValue(), false
+	}
+	if field < 0 ||
+		field >= len(proto.constants) ||
+		proto.constants[field].kind != StringKind ||
+		slot < 0 ||
+		slot >= len(table.stringFields) {
+		return NilValue(), false
+	}
+	value := table.stringFields[slot]
+	if value.key != proto.constants[field].str {
+		return NilValue(), false
+	}
+	return value.value, true
+}
+
+type arrayRowLoopMutationApply struct {
+	field               int
+	slot                int
+	value               Value
+	register            int
+	registerValue       Value
+	secondRegister      int
+	secondRegisterValue Value
+	write               bool
+}
+
+func arrayRowLoopApplyMutations(proto *Proto, row Value, rowRegister int, mutations []arrayRowLoopFieldMutationDesc, registers []Value) bool {
+	if len(mutations) == 0 {
+		return true
+	}
+	if applied, ok := arrayRowLoopApplyComputedClampMutations(proto, row, rowRegister, mutations, registers); applied {
+		return ok
+	}
+	if row.kind != TableKind || row.table == nil {
+		return false
+	}
+	table := row.table
+	if table.metatable != nil || table.stringFieldMap != nil {
+		return false
+	}
+	var pending [8]arrayRowLoopMutationApply
+	pendingCount := 0
+	for _, mutation := range mutations {
+		if pendingCount >= len(pending) {
+			return false
+		}
+		apply, ok := arrayRowLoopEvaluateMutation(proto, row, rowRegister, mutation, registers, pending[:pendingCount])
+		if !ok {
+			return false
+		}
+		if apply.write || apply.register >= 0 || apply.secondRegister >= 0 {
+			pending[pendingCount] = apply
+			pendingCount++
+		}
+	}
+	for i := 0; i < pendingCount; i++ {
+		apply := pending[i]
+		if apply.write {
+			if apply.field < 0 ||
+				apply.field >= len(proto.constants) ||
+				proto.constants[apply.field].kind != StringKind ||
+				apply.slot < 0 ||
+				apply.slot >= len(table.stringFields) ||
+				table.stringFields[apply.slot].key != proto.constants[apply.field].str {
+				return false
+			}
+			table.stringFields[apply.slot].value = apply.value
+			table.stringValueVersion++
+		}
+		arrayRowLoopApplyMutationRegisters(registers, apply)
+	}
+	return true
+}
+
+func arrayRowLoopApplyComputedClampMutations(proto *Proto, row Value, rowRegister int, mutations []arrayRowLoopFieldMutationDesc, registers []Value) (bool, bool) {
+	if len(mutations) != 2 {
+		return false, false
+	}
+	computed := mutations[0]
+	clamp := mutations[1]
+	if computed.kind != arrayRowLoopFieldMutationKindComputedStore ||
+		clamp.kind != arrayRowLoopFieldMutationKindClampLowerBound ||
+		!sameStringConstant(proto, computed.field, clamp.field) ||
+		computed.slot != clamp.slot ||
+		!arrayRowLoopNumberConstantOK(proto, computed.valueConstant) ||
+		!arrayRowLoopNumberConstantOK(proto, clamp.threshold) ||
+		!arrayRowLoopNumberConstantOK(proto, clamp.clamp) ||
+		computed.valueRegister < 0 ||
+		computed.valueRegister >= len(registers) ||
+		computed.sourceRegister < 0 ||
+		computed.sourceRegister >= len(registers) ||
+		clamp.loadRegister < 0 ||
+		clamp.loadRegister >= len(registers) ||
+		clamp.valueRegister < 0 ||
+		clamp.valueRegister >= len(registers) {
+		return false, false
+	}
+	if row.kind != TableKind || row.table == nil {
+		return true, false
+	}
+	table := row.table
+	if table.metatable != nil ||
+		table.stringFieldMap != nil ||
+		computed.field < 0 ||
+		computed.field >= len(proto.constants) ||
+		proto.constants[computed.field].kind != StringKind ||
+		computed.slot < 0 ||
+		computed.slot >= len(table.stringFields) ||
+		table.stringFields[computed.slot].key != proto.constants[computed.field].str {
+		return true, false
+	}
+	left := table.stringFields[computed.slot].value
+	if left.kind != NumberKind {
+		return true, false
+	}
+	right, ok := arrayRowLoopMutationSourceNumber(proto, row, rowRegister, computed, registers, nil)
+	if !ok {
+		return true, false
+	}
+	next := left.number + proto.constants[computed.valueConstant].number
+	if computed.constantOp == opSubK {
+		next = left.number - proto.constants[computed.valueConstant].number
+	} else if computed.constantOp != opAddK {
+		return false, false
+	}
+	if computed.op == opAdd {
+		next += right.number
+	} else if computed.op == opSub {
+		next -= right.number
+	} else {
+		return false, false
+	}
+	threshold := proto.constants[clamp.threshold].number
+	if math.IsNaN(next) || math.IsNaN(threshold) {
+		return true, false
+	}
+	registers[computed.sourceRegister] = right
+	registers[computed.valueRegister] = NumberValue(next)
+	table.stringFields[computed.slot].value = NumberValue(next)
+	table.stringValueVersion++
+
+	registers[clamp.loadRegister] = NumberValue(next)
+	if next >= threshold {
+		return true, true
+	}
+	value := proto.constants[clamp.clamp]
+	registers[clamp.valueRegister] = value
+	table.stringFields[computed.slot].value = value
+	table.stringValueVersion++
+	return true, true
+}
+
+func arrayRowLoopApplyMutationRegisters(registers []Value, apply arrayRowLoopMutationApply) {
+	if apply.register >= 0 && apply.register < len(registers) {
+		registers[apply.register] = apply.registerValue
+	}
+	if apply.secondRegister >= 0 && apply.secondRegister < len(registers) {
+		registers[apply.secondRegister] = apply.secondRegisterValue
+	}
+}
+
+func arrayRowLoopEvaluateMutation(proto *Proto, row Value, rowRegister int, mutation arrayRowLoopFieldMutationDesc, registers []Value, pending []arrayRowLoopMutationApply) (arrayRowLoopMutationApply, bool) {
+	switch mutation.kind {
+	case arrayRowLoopFieldMutationKindConstStore:
+		left, ok := arrayRowLoopPendingNumberField(proto, row, mutation.field, mutation.slot, pending)
+		if !ok || !arrayRowLoopNumberConstantOK(proto, mutation.valueConstant) {
+			return arrayRowLoopMutationApply{}, false
+		}
+		right := proto.constants[mutation.valueConstant]
+		next := left.number + right.number
+		if mutation.op == opSubStringField {
+			next = left.number - right.number
+		} else if mutation.op != opAddStringField {
+			return arrayRowLoopMutationApply{}, false
+		}
+		if mutation.valueRegister < 0 || mutation.valueRegister >= len(registers) {
+			return arrayRowLoopMutationApply{}, false
+		}
+		return arrayRowLoopMutationApply{
+			field:          mutation.field,
+			slot:           mutation.slot,
+			value:          NumberValue(next),
+			register:       mutation.valueRegister,
+			registerValue:  right,
+			secondRegister: -1,
+			write:          true,
+		}, true
+	case arrayRowLoopFieldMutationKindComputedStore:
+		left, ok := arrayRowLoopPendingNumberField(proto, row, mutation.field, mutation.slot, pending)
+		if !ok || !arrayRowLoopNumberConstantOK(proto, mutation.valueConstant) {
+			return arrayRowLoopMutationApply{}, false
+		}
+		next := left.number + proto.constants[mutation.valueConstant].number
+		if mutation.constantOp == opSubK {
+			next = left.number - proto.constants[mutation.valueConstant].number
+		} else if mutation.constantOp != opAddK {
+			return arrayRowLoopMutationApply{}, false
+		}
+		right, ok := arrayRowLoopMutationSourceNumber(proto, row, rowRegister, mutation, registers, pending)
+		if !ok {
+			return arrayRowLoopMutationApply{}, false
+		}
+		if mutation.op == opAdd {
+			next += right.number
+		} else if mutation.op == opSub {
+			next -= right.number
+		} else {
+			return arrayRowLoopMutationApply{}, false
+		}
+		if mutation.valueRegister < 0 || mutation.valueRegister >= len(registers) {
+			return arrayRowLoopMutationApply{}, false
+		}
+		if mutation.sourceRegister < 0 || mutation.sourceRegister >= len(registers) {
+			return arrayRowLoopMutationApply{}, false
+		}
+		value := NumberValue(next)
+		return arrayRowLoopMutationApply{
+			field:               mutation.field,
+			slot:                mutation.slot,
+			value:               value,
+			register:            mutation.valueRegister,
+			registerValue:       value,
+			secondRegister:      mutation.sourceRegister,
+			secondRegisterValue: right,
+			write:               true,
+		}, true
+	case arrayRowLoopFieldMutationKindClampLowerBound:
+		left, ok := arrayRowLoopPendingNumberField(proto, row, mutation.field, mutation.slot, pending)
+		if !ok ||
+			!arrayRowLoopNumberConstantOK(proto, mutation.threshold) ||
+			!arrayRowLoopNumberConstantOK(proto, mutation.clamp) ||
+			math.IsNaN(left.number) ||
+			math.IsNaN(proto.constants[mutation.threshold].number) {
+			return arrayRowLoopMutationApply{}, false
+		}
+		if mutation.loadRegister < 0 || mutation.loadRegister >= len(registers) {
+			return arrayRowLoopMutationApply{}, false
+		}
+		if left.number >= proto.constants[mutation.threshold].number {
+			return arrayRowLoopMutationApply{
+				register:       mutation.loadRegister,
+				registerValue:  left,
+				secondRegister: -1,
+			}, true
+		}
+		if mutation.valueRegister < 0 || mutation.valueRegister >= len(registers) {
+			return arrayRowLoopMutationApply{}, false
+		}
+		value := proto.constants[mutation.clamp]
+		return arrayRowLoopMutationApply{
+			field:               mutation.field,
+			slot:                mutation.slot,
+			value:               value,
+			register:            mutation.loadRegister,
+			registerValue:       left,
+			secondRegister:      mutation.valueRegister,
+			secondRegisterValue: value,
+			write:               true,
+		}, true
+	default:
+		return arrayRowLoopMutationApply{}, false
+	}
+}
+
+func arrayRowLoopNumberConstantOK(proto *Proto, constant int) bool {
+	return proto != nil &&
+		constant >= 0 &&
+		constant < len(proto.constants) &&
+		proto.constants[constant].kind == NumberKind
+}
+
+func arrayRowLoopPendingNumberField(proto *Proto, row Value, field int, slot int, pending []arrayRowLoopMutationApply) (Value, bool) {
+	for i := len(pending) - 1; i >= 0; i-- {
+		apply := pending[i]
+		if apply.write && apply.slot == slot && sameStringConstant(proto, apply.field, field) {
+			if apply.value.kind != NumberKind {
+				return NilValue(), false
+			}
+			return apply.value, true
+		}
+	}
+	return arrayRowLoopNumberField(proto, row, field, slot)
+}
+
+func arrayRowLoopMutationSourceNumber(proto *Proto, row Value, rowRegister int, mutation arrayRowLoopFieldMutationDesc, registers []Value, pending []arrayRowLoopMutationApply) (Value, bool) {
+	if mutation.sourceBase < 0 || mutation.sourceBase >= len(registers) {
+		return NilValue(), false
+	}
+	if mutation.sourceBase == rowRegister {
+		return arrayRowLoopPendingNumberField(proto, row, mutation.sourceField, mutation.sourceSlot, pending)
+	}
+	return arrayRowLoopNumberField(proto, registers[mutation.sourceBase], mutation.sourceField, mutation.sourceSlot)
 }
 
 type vmYieldRequest struct {
@@ -2172,33 +3431,50 @@ func directFrameApplyRowFieldBranchStoreBlockPlan(frame *vmFrame, registers []Va
 	branch := proto.code[plan.startPC]
 	first := proto.code[plan.startPC+1]
 	store := proto.code[plan.startPC+2]
-	if (branch.op != opJumpIfRowStringFieldNotGreaterK && branch.op != opJumpIfRowStringFieldGreaterK) ||
-		branch.a != plan.register ||
-		plan.slot < 0 {
+	if branch.a != plan.register || plan.slot < 0 {
 		return directFrameEnterGenericFrame()
 	}
-	desc := proto.rowFieldEqualOps[branch.b]
-	if desc.field != plan.field ||
-		desc.slot != plan.slot ||
+	field := -1
+	slot := -1
+	var right Value
+	switch branch.op {
+	case opJumpIfRowStringFieldNotGreaterK, opJumpIfRowStringFieldGreaterK:
+		desc := proto.rowFieldEqualOps[branch.b]
+		if !proto.constantNumberOK[desc.value] {
+			return directFrameEnterGenericFrame()
+		}
+		field = desc.field
+		slot = desc.slot
+		right = NumberValue(proto.constantNumbers[desc.value])
+	case opJumpIfRowStringFieldNotGreaterR:
+		desc := proto.rowFieldRegisterOps[branch.b]
+		field = desc.field
+		slot = desc.slot
+		right = registers[branch.c]
+	default:
+		return directFrameEnterGenericFrame()
+	}
+	if field != plan.field ||
+		slot != plan.slot ||
 		!directFrameRowFieldBranchStoreBodyMatches(proto, first, store, plan) {
 		return directFrameEnterGenericFrame()
 	}
-	left, ok, err := directFrameRowStringField(registers[branch.a], proto.constantKeys[desc.field].str, desc.slot)
+	left, ok, err := directFrameRowStringField(registers[branch.a], proto.constantKeys[field].str, slot)
 	if err != nil {
 		return directFrameFail(fmt.Errorf("run: get field failed: %w", err))
 	}
-	if !ok || left.kind != NumberKind || !proto.constantNumberOK[desc.value] {
+	if !ok || left.kind != NumberKind || right.kind != NumberKind {
 		frame.pc = plan.startPC
 		return directFrameEnterGenericFrame()
 	}
-	right := proto.constantNumbers[desc.value]
-	if math.IsNaN(left.number) || math.IsNaN(right) {
+	if math.IsNaN(left.number) || math.IsNaN(right.number) {
 		frame.pc = plan.startPC
 		return directFrameEnterGenericFrame()
 	}
-	greater := left.number > right
+	greater := left.number > right.number
 	shouldJump := (branch.op == opJumpIfRowStringFieldNotGreaterK && !greater) ||
-		(branch.op == opJumpIfRowStringFieldGreaterK && greater)
+		(branch.op == opJumpIfRowStringFieldGreaterK && greater) ||
+		(branch.op == opJumpIfRowStringFieldNotGreaterR && !greater)
 	if shouldJump {
 		return directFrameResume()
 	}
@@ -2208,7 +3484,9 @@ func directFrameApplyRowFieldBranchStoreBlockPlan(frame *vmFrame, registers []Va
 	}
 	switch store.op {
 	case opSetRowStringField, opAddStringField, opSubStringField:
-		registers[first.a] = proto.constants[first.b]
+		if !directFrameApplyBranchStoreFirst(registers, proto, first) {
+			return directFrameEnterGenericFrame()
+		}
 		key := proto.constantKeys[store.b].str
 		if store.op == opSetRowStringField {
 			base.table.setRawRowStringField(rowStringFieldSlotRefFromIndex(plan.slot), key, registers[store.c])
@@ -2253,8 +3531,13 @@ func directFrameApplyRowFieldBranchStoreBlockPlan(frame *vmFrame, registers []Va
 func directFrameRowFieldBranchStoreBodyMatches(proto *Proto, first instruction, store instruction, plan directBlockPlanDesc) bool {
 	switch store.op {
 	case opSetRowStringField, opAddStringField, opSubStringField:
-		return first.op == opLoadConst &&
-			rowFieldBranchStoreMutationMatches(proto, store, plan.register, first.a, plan.field, plan.slot)
+		if !rowFieldBranchStoreMutationMatches(proto, store, plan.register, first.a, plan.field, plan.slot) {
+			return false
+		}
+		if first.op == opLoadConst {
+			return true
+		}
+		return first.op == opMove && first.b == plan.candidate
 	case opSubAddStringField:
 		if first.op != opMove || store.a != plan.register || store.c != first.a || first.b != plan.candidate {
 			return false
@@ -2264,6 +3547,56 @@ func directFrameRowFieldBranchStoreBodyMatches(proto *Proto, first instruction, 
 	default:
 		return false
 	}
+}
+
+func directFrameApplyBranchStoreFirst(registers []Value, proto *Proto, first instruction) bool {
+	switch first.op {
+	case opLoadConst:
+		registers[first.a] = proto.constants[first.b]
+		return true
+	case opMove:
+		registers[first.a] = registers[first.b]
+		return true
+	default:
+		return false
+	}
+}
+
+func directFrameApplyRowFieldRegisterBranchStoreArm(proto *Proto, registers []Value, pc int, branch instruction, desc rowFieldRegisterOp, table *Table, key string) (int, bool) {
+	if proto == nil ||
+		table == nil ||
+		table.metatable != nil ||
+		pc < 0 ||
+		pc+2 >= len(proto.code) {
+		return 0, false
+	}
+	first := proto.code[pc+1]
+	store := proto.code[pc+2]
+	if first.op != opMove ||
+		first.b != branch.c ||
+		store.op != opSetRowStringField ||
+		store.a != branch.a ||
+		store.c != first.a ||
+		store.d != desc.slot ||
+		!sameStringConstant(proto, store.b, desc.field) {
+		return 0, false
+	}
+	resumePC := pc + 3
+	if resumePC < branch.d {
+		if pc+4 != branch.d || pc+3 >= len(proto.code) {
+			return 0, false
+		}
+		jump := proto.code[pc+3]
+		if jump.op != opJump || jump.b != branch.d {
+			return 0, false
+		}
+		resumePC = branch.d
+	} else if resumePC != branch.d {
+		return 0, false
+	}
+	registers[first.a] = registers[first.b]
+	table.setRawRowStringField(rowStringFieldSlotRefFromIndex(desc.slot), key, registers[store.c])
+	return resumePC, true
 }
 
 func (thread *vmThread) executeVerifiedPlan(frame *vmFrame, plan verifiedPlanDesc) directFrameSideExit {
@@ -2422,6 +3755,20 @@ func directFrameApplyDynamicPathAddStoreBlockPlan(frame *vmFrame, registers []Va
 		return directFrameEnterGenericFrame()
 	}
 	delta := registers[desc.delta]
+	if desc.deltaField >= 0 {
+		if desc.deltaField >= len(proto.constantKeys) {
+			frame.pc = plan.fallbackPC
+			return directFrameEnterGenericFrame()
+		}
+		var ok bool
+		var err error
+		delta, ok, err = directFrameRowStringField(registers[desc.deltaBase], proto.constantKeys[desc.deltaField].str, desc.deltaSlot)
+		if err != nil || !ok {
+			frame.pc = plan.fallbackPC
+			return directFrameEnterGenericFrame()
+		}
+		registers[desc.delta] = delta
+	}
 	if left.kind != NumberKind || delta.kind != NumberKind {
 		frame.pc = plan.fallbackPC
 		return directFrameEnterGenericFrame()
@@ -2438,6 +3785,75 @@ func directFrameApplyDynamicPathAddStoreBlockPlan(frame *vmFrame, registers []Va
 	registers[desc.result] = value
 	frame.pc = plan.resumePC
 	return directFrameResume()
+}
+
+func directFrameApplyDynamicPathSubBlockPlan(frame *vmFrame, registers []Value, plan blockPlanDesc) directFrameSideExit {
+	proto := frame.proto
+	desc := plan.dynamicSub
+	if proto == nil ||
+		plan.startPC < 0 ||
+		plan.startPC >= len(proto.code) ||
+		plan.resumePC <= plan.startPC ||
+		desc.leftField < 0 ||
+		desc.leftField >= len(proto.constantKeys) ||
+		desc.rightField < 0 ||
+		desc.rightField >= len(proto.constantKeys) {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	if desc.divisor >= 0 && !proto.constantNumberOK[desc.divisor] {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	leftBase := registers[desc.leftBase]
+	rightBase := registers[desc.rightBase]
+	if leftBase.kind != TableKind || leftBase.table == nil || rightBase.kind != TableKind || rightBase.table == nil {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	leftTable := leftBase.table
+	rightTable := rightBase.table
+	if leftTable.metatable != nil || rightTable.metatable != nil {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	key := registers[desc.key]
+	if key.kind != StringKind {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	left, ok := directFrameDynamicPathNumber(leftTable, proto.constantKeys[desc.leftField].str, key.str)
+	if !ok {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	right, ok := directFrameDynamicPathNumber(rightTable, proto.constantKeys[desc.rightField].str, key.str)
+	if !ok {
+		frame.pc = plan.fallbackPC
+		return directFrameEnterGenericFrame()
+	}
+	if desc.divisor >= 0 {
+		right = math.Floor(right / proto.constantNumbers[desc.divisor])
+	}
+	registers[desc.result] = NumberValue(left - right)
+	frame.pc = plan.resumePC
+	return directFrameResume()
+}
+
+func directFrameDynamicPathNumber(table *Table, field string, key string) (float64, bool) {
+	first, ok := table.rawStringField(field)
+	if !ok || first.kind != TableKind || first.table == nil {
+		return 0, false
+	}
+	child := first.table
+	if child.metatable != nil {
+		return 0, false
+	}
+	value, ok := child.rawStringField(key)
+	if !ok || value.kind != NumberKind {
+		return 0, false
+	}
+	return value.number, true
 }
 
 func directFrameApplyAbsoluteDeltaBlockPlan(frame *vmFrame, registers []Value, plan directBlockPlanDesc) directFrameSideExit {
@@ -2498,6 +3914,9 @@ func (thread *vmThread) runDirectFrame(frame *vmFrame) directFrameSideExit {
 	blockPlans := proto.blockPlans
 	blockPlanPCs := proto.blockPlanPCs
 	hasBlockPlans := len(blockPlans) != 0 && len(blockPlanPCs) != 0
+	regionPlans := proto.regionExecutionPlans
+	regionPlanPCs := proto.regionExecutionPlanPCs
+	hasRegionPlans := len(regionPlans) != 0 && len(regionPlanPCs) != 0
 
 	for frame.pc < len(proto.code) {
 		ins := proto.code[frame.pc]
@@ -2843,6 +4262,13 @@ func (thread *vmThread) runDirectFrame(frame *vmFrame) directFrameSideExit {
 					plan := blockPlans[planIndex]
 					if plan.kind == blockPlanKindDynamicPathAddStore {
 						exit := directFrameApplyDynamicPathAddStoreBlockPlan(frame, registers, plan)
+						if exit.resumesDirectFrame() {
+							continue
+						}
+						return exit
+					}
+					if plan.kind == blockPlanKindDynamicPathSub || plan.kind == blockPlanKindDynamicPathSubIDivK {
+						exit := directFrameApplyDynamicPathSubBlockPlan(frame, registers, plan)
 						if exit.resumesDirectFrame() {
 							continue
 						}
@@ -3208,6 +4634,16 @@ func (thread *vmThread) runDirectFrame(frame *vmFrame) directFrameSideExit {
 			}
 
 		case opArrayNextJump2:
+			if hasRegionPlans && frame.pc < len(regionPlanPCs) {
+				planIndex := regionPlanPCs[frame.pc]
+				if planIndex >= 0 && planIndex < len(regionPlans) {
+					exit := thread.executeRegion(frame, regionPlans[planIndex])
+					if exit.resumesDirectFrame() {
+						continue
+					}
+					return exit
+				}
+			}
 			callee := registers[ins.b]
 			if callee.nativeID != nativeFuncArrayNext {
 				return directFrameEnterGenericFrame()
@@ -3761,6 +5197,10 @@ func (thread *vmThread) runDirectFrame(frame *vmFrame) directFrameSideExit {
 			}
 			if !(left.number > right.number) {
 				frame.pc = ins.d
+				continue
+			}
+			if resumePC, ok := directFrameApplyRowFieldRegisterBranchStoreArm(proto, registers, frame.pc, ins, desc, table, key); ok {
+				frame.pc = resumePC
 				continue
 			}
 
@@ -8301,7 +9741,9 @@ func baseFieldIntrinsicCallee(globals *globalEnv, globalName string, field strin
 		return guard.callee, true, nil
 	}
 	if globals == nil || globals.values == nil {
-		return Value{kind: HostFuncKind, nativeID: intrinsic.nativeID}, true, nil
+		callee := Value{kind: HostFuncKind, nativeID: intrinsic.nativeID}
+		thread.storeBaseFieldIntrinsicGuard(key, globals, nil, callee)
+		return callee, true, nil
 	}
 	tableValue, ok := globals.values[globalName]
 	if !ok {
@@ -8365,7 +9807,7 @@ func (thread *vmThread) baseFieldIntrinsicGuard(key baseFieldIntrinsicGuardKey, 
 }
 
 func (thread *vmThread) storeBaseFieldIntrinsicGuard(key baseFieldIntrinsicGuardKey, globals *globalEnv, table *Table, callee Value) {
-	if thread == nil || globals == nil {
+	if globals == nil || !thread.intrinsicGuardCacheEnabled() {
 		return
 	}
 	if thread.intrinsicGuards == nil {
@@ -8425,8 +9867,13 @@ func (thread *vmThread) getRuntimePathCacheHit(pc int, base *Table, firstKey str
 	if thread == nil {
 		return runtimePathCacheHit{}, false
 	}
-	for i := 0; i < int(thread.runtimePathCount); i++ {
-		entry := thread.runtimePaths[i]
+	if thread.intrinsicGuards == nil {
+		thread.directFramePICCounts.addPathCacheMiss()
+		return runtimePathCacheHit{}, false
+	}
+	cache := thread.intrinsicGuards
+	for i := 0; i < int(cache.pathCount); i++ {
+		entry := cache.paths[i]
 		if entry.dynamic || entry.pc != pc || entry.base != base || entry.firstKey != firstKey || entry.secondKey != secondKey {
 			continue
 		}
@@ -8440,7 +9887,7 @@ func (thread *vmThread) getRuntimePathCacheHit(pc int, base *Table, firstKey str
 			thread.directFramePICCounts.addPathCacheStale()
 			return runtimePathCacheHit{}, false
 		}
-		thread.runtimePathHits++
+		cache.pathHits++
 		thread.directFramePICCounts.addPathCacheHit()
 		return runtimePathCacheHit{
 			child:      entry.child,
@@ -8468,7 +9915,11 @@ func (thread *vmThread) storeRuntimePathCache(pc int, base *Table, firstKey stri
 	if thread == nil {
 		return
 	}
-	thread.runtimePathStores++
+	if thread.intrinsicGuards == nil {
+		thread.intrinsicGuards = &baseFieldIntrinsicGuardCache{}
+	}
+	cache := thread.intrinsicGuards
+	cache.pathStores++
 	thread.directFramePICCounts.addPathCacheStore()
 	entry := runtimePathCacheEntry{
 		pc:         pc,
@@ -8480,18 +9931,18 @@ func (thread *vmThread) storeRuntimePathCache(pc int, base *Table, firstKey stri
 		secondKey:  secondKey,
 		secondSlot: secondSlot,
 	}
-	for i := 0; i < int(thread.runtimePathCount); i++ {
-		if runtimePathCacheSamePath(thread.runtimePaths[i], entry) {
-			thread.runtimePaths[i] = entry
+	for i := 0; i < int(cache.pathCount); i++ {
+		if runtimePathCacheSamePath(cache.paths[i], entry) {
+			cache.paths[i] = entry
 			return
 		}
 	}
-	if int(thread.runtimePathCount) >= len(thread.runtimePaths) {
-		thread.runtimePaths[0] = entry
+	if int(cache.pathCount) >= len(cache.paths) {
+		cache.paths[0] = entry
 		return
 	}
-	thread.runtimePaths[thread.runtimePathCount] = entry
-	thread.runtimePathCount++
+	cache.paths[cache.pathCount] = entry
+	cache.pathCount++
 }
 
 func (thread *vmThread) storeRuntimePathCacheFromResolved(pc int, base *Table, firstKey string, child *Table, secondKey string) {
@@ -8518,8 +9969,13 @@ func (thread *vmThread) getRuntimeDynamicPathCache(pc int, base *Table, firstKey
 	if thread == nil {
 		return nil, false
 	}
-	for i := 0; i < int(thread.runtimePathCount); i++ {
-		entry := thread.runtimePaths[i]
+	if thread.intrinsicGuards == nil {
+		thread.directFramePICCounts.addPathCacheMiss()
+		return nil, false
+	}
+	cache := thread.intrinsicGuards
+	for i := 0; i < int(cache.pathCount); i++ {
+		entry := cache.paths[i]
 		if !entry.dynamic || entry.pc != pc || entry.base != base || entry.firstKey != firstKey {
 			continue
 		}
@@ -8528,7 +9984,7 @@ func (thread *vmThread) getRuntimeDynamicPathCache(pc int, base *Table, firstKey
 			thread.directFramePICCounts.addPathCacheStale()
 			return nil, false
 		}
-		thread.runtimePathHits++
+		cache.pathHits++
 		thread.directFramePICCounts.addPathCacheHit()
 		return entry.child, true
 	}
@@ -8540,7 +9996,11 @@ func (thread *vmThread) storeRuntimeDynamicPathCache(pc int, base *Table, firstK
 	if thread == nil {
 		return
 	}
-	thread.runtimePathStores++
+	if thread.intrinsicGuards == nil {
+		thread.intrinsicGuards = &baseFieldIntrinsicGuardCache{}
+	}
+	cache := thread.intrinsicGuards
+	cache.pathStores++
 	thread.directFramePICCounts.addPathCacheStore()
 	entry := runtimePathCacheEntry{
 		pc:        pc,
@@ -8550,18 +10010,18 @@ func (thread *vmThread) storeRuntimeDynamicPathCache(pc int, base *Table, firstK
 		firstSlot: firstSlot,
 		child:     child,
 	}
-	for i := 0; i < int(thread.runtimePathCount); i++ {
-		if runtimePathCacheSamePath(thread.runtimePaths[i], entry) {
-			thread.runtimePaths[i] = entry
+	for i := 0; i < int(cache.pathCount); i++ {
+		if runtimePathCacheSamePath(cache.paths[i], entry) {
+			cache.paths[i] = entry
 			return
 		}
 	}
-	if int(thread.runtimePathCount) >= len(thread.runtimePaths) {
-		thread.runtimePaths[0] = entry
+	if int(cache.pathCount) >= len(cache.paths) {
+		cache.paths[0] = entry
 		return
 	}
-	thread.runtimePaths[thread.runtimePathCount] = entry
-	thread.runtimePathCount++
+	cache.paths[cache.pathCount] = entry
+	cache.pathCount++
 }
 
 func (proto *Proto) pathFactAllowsStringField2(pc int, ins instruction) bool {
