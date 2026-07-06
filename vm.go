@@ -8425,13 +8425,8 @@ func (thread *vmThread) getRuntimePathCacheHit(pc int, base *Table, firstKey str
 	if thread == nil {
 		return runtimePathCacheHit{}, false
 	}
-	if thread.intrinsicGuards == nil {
-		thread.directFramePICCounts.addPathCacheMiss()
-		return runtimePathCacheHit{}, false
-	}
-	cache := thread.intrinsicGuards
-	for i := 0; i < int(cache.pathCount); i++ {
-		entry := cache.paths[i]
+	for i := 0; i < int(thread.runtimePathCount); i++ {
+		entry := thread.runtimePaths[i]
 		if entry.dynamic || entry.pc != pc || entry.base != base || entry.firstKey != firstKey || entry.secondKey != secondKey {
 			continue
 		}
@@ -8445,7 +8440,7 @@ func (thread *vmThread) getRuntimePathCacheHit(pc int, base *Table, firstKey str
 			thread.directFramePICCounts.addPathCacheStale()
 			return runtimePathCacheHit{}, false
 		}
-		cache.pathHits++
+		thread.runtimePathHits++
 		thread.directFramePICCounts.addPathCacheHit()
 		return runtimePathCacheHit{
 			child:      entry.child,
@@ -8473,11 +8468,7 @@ func (thread *vmThread) storeRuntimePathCache(pc int, base *Table, firstKey stri
 	if thread == nil {
 		return
 	}
-	if thread.intrinsicGuards == nil {
-		thread.intrinsicGuards = &baseFieldIntrinsicGuardCache{}
-	}
-	cache := thread.intrinsicGuards
-	cache.pathStores++
+	thread.runtimePathStores++
 	thread.directFramePICCounts.addPathCacheStore()
 	entry := runtimePathCacheEntry{
 		pc:         pc,
@@ -8489,18 +8480,18 @@ func (thread *vmThread) storeRuntimePathCache(pc int, base *Table, firstKey stri
 		secondKey:  secondKey,
 		secondSlot: secondSlot,
 	}
-	for i := 0; i < int(cache.pathCount); i++ {
-		if runtimePathCacheSamePath(cache.paths[i], entry) {
-			cache.paths[i] = entry
+	for i := 0; i < int(thread.runtimePathCount); i++ {
+		if runtimePathCacheSamePath(thread.runtimePaths[i], entry) {
+			thread.runtimePaths[i] = entry
 			return
 		}
 	}
-	if int(cache.pathCount) >= len(cache.paths) {
-		cache.paths[0] = entry
+	if int(thread.runtimePathCount) >= len(thread.runtimePaths) {
+		thread.runtimePaths[0] = entry
 		return
 	}
-	cache.paths[cache.pathCount] = entry
-	cache.pathCount++
+	thread.runtimePaths[thread.runtimePathCount] = entry
+	thread.runtimePathCount++
 }
 
 func (thread *vmThread) storeRuntimePathCacheFromResolved(pc int, base *Table, firstKey string, child *Table, secondKey string) {
@@ -8527,13 +8518,8 @@ func (thread *vmThread) getRuntimeDynamicPathCache(pc int, base *Table, firstKey
 	if thread == nil {
 		return nil, false
 	}
-	if thread.intrinsicGuards == nil {
-		thread.directFramePICCounts.addPathCacheMiss()
-		return nil, false
-	}
-	cache := thread.intrinsicGuards
-	for i := 0; i < int(cache.pathCount); i++ {
-		entry := cache.paths[i]
+	for i := 0; i < int(thread.runtimePathCount); i++ {
+		entry := thread.runtimePaths[i]
 		if !entry.dynamic || entry.pc != pc || entry.base != base || entry.firstKey != firstKey {
 			continue
 		}
@@ -8542,7 +8528,7 @@ func (thread *vmThread) getRuntimeDynamicPathCache(pc int, base *Table, firstKey
 			thread.directFramePICCounts.addPathCacheStale()
 			return nil, false
 		}
-		cache.pathHits++
+		thread.runtimePathHits++
 		thread.directFramePICCounts.addPathCacheHit()
 		return entry.child, true
 	}
@@ -8554,11 +8540,7 @@ func (thread *vmThread) storeRuntimeDynamicPathCache(pc int, base *Table, firstK
 	if thread == nil {
 		return
 	}
-	if thread.intrinsicGuards == nil {
-		thread.intrinsicGuards = &baseFieldIntrinsicGuardCache{}
-	}
-	cache := thread.intrinsicGuards
-	cache.pathStores++
+	thread.runtimePathStores++
 	thread.directFramePICCounts.addPathCacheStore()
 	entry := runtimePathCacheEntry{
 		pc:        pc,
@@ -8568,18 +8550,18 @@ func (thread *vmThread) storeRuntimeDynamicPathCache(pc int, base *Table, firstK
 		firstSlot: firstSlot,
 		child:     child,
 	}
-	for i := 0; i < int(cache.pathCount); i++ {
-		if runtimePathCacheSamePath(cache.paths[i], entry) {
-			cache.paths[i] = entry
+	for i := 0; i < int(thread.runtimePathCount); i++ {
+		if runtimePathCacheSamePath(thread.runtimePaths[i], entry) {
+			thread.runtimePaths[i] = entry
 			return
 		}
 	}
-	if int(cache.pathCount) >= len(cache.paths) {
-		cache.paths[0] = entry
+	if int(thread.runtimePathCount) >= len(thread.runtimePaths) {
+		thread.runtimePaths[0] = entry
 		return
 	}
-	cache.paths[cache.pathCount] = entry
-	cache.pathCount++
+	thread.runtimePaths[thread.runtimePathCount] = entry
+	thread.runtimePathCount++
 }
 
 func (proto *Proto) pathFactAllowsStringField2(pc int, ins instruction) bool {
