@@ -32,8 +32,9 @@ func (r *Runtime) runModuleWithContextGlobalsBudget(ctx context.Context, key mod
 	}()
 
 	call := r.newRuntimeCallContext(ctx, key, globals, maxInstructions)
+	callCtx := contextWithRuntimeCallContext(ctx, call)
 
-	results, err := executeProto(ctx, proto, call.envWithRequire(), executeOptions{
+	results, err := executeProto(callCtx, proto, call.envWithRequire(), executeOptions{
 		maxInstructions: maxInstructions,
 	})
 	if err != nil {

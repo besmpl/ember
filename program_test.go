@@ -1409,6 +1409,155 @@ return {}
 	}
 }
 
+func TestRuntimeCallbackCanBeStoredAndCalledAfterHook(t *testing.T) {
+	loader := &programTestLoader{
+		sources: map[string]string{
+			"logical:game/init": `
+local count = 0
+
+return {
+	startup = function()
+		connect(function(amount)
+			count = count + amount
+			record(count)
+			return count, "ok"
+		end)
+	end,
+}
+`,
+		},
+	}
+	program, _, err := ember.LoadProgram(context.Background(), loader, ember.ProgramOptions{
+		Entrypoints: []ember.Entrypoint{{Name: "main", Module: ember.LogicalModule("game/init")}},
+		Parallelism: 1,
+	})
+	if err != nil {
+		t.Fatalf("LoadProgram returned error: %v", err)
+	}
+
+	var callback ember.Callback
+	var records []float64
+	runtime, err := program.NewRuntime(ember.RuntimeOptions{
+		Host: ember.RuntimeHostFunc(func(_ context.Context, call ember.HostCall) (map[string]ember.Value, error) {
+			if call.Hook == "" {
+				return nil, nil
+			}
+			return map[string]ember.Value{
+				"connect": ember.ContextHostFuncValue(func(ctx context.Context, args []ember.Value) ([]ember.Value, error) {
+					if len(args) != 1 {
+						t.Fatalf("connect received %d args, want 1", len(args))
+					}
+					captured, err := ember.CaptureCallback(ctx, args[0])
+					if err != nil {
+						return nil, err
+					}
+					callback = captured
+					return nil, nil
+				}),
+				"record": ember.HostFuncValue(func(args []ember.Value) ([]ember.Value, error) {
+					if len(args) != 1 {
+						t.Fatalf("record received %d args, want 1", len(args))
+					}
+					value, ok := args[0].Number()
+					if !ok {
+						t.Fatalf("record received %s, want number", args[0].Kind())
+					}
+					records = append(records, value)
+					return nil, nil
+				}),
+			}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime returned error: %v", err)
+	}
+
+	if _, err := runtime.RunHook(context.Background(), "startup"); err != nil {
+		t.Fatalf("RunHook returned error: %v", err)
+	}
+
+	results, err := callback.Call(context.Background(), ember.NumberValue(2))
+	if err != nil {
+		t.Fatalf("Callback.Call returned error: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("Callback.Call returned %v, want number and string", results)
+	}
+	assertValueNumbers(t, results[:1], []float64{2})
+	assertValueStrings(t, results[1:], []string{"ok"})
+
+	results, err = callback.Call(context.Background(), ember.NumberValue(3))
+	if err != nil {
+		t.Fatalf("second Callback.Call returned error: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("second Callback.Call returned %v, want number and string", results)
+	}
+	assertValueNumbers(t, results[:1], []float64{5})
+	assertValueStrings(t, results[1:], []string{"ok"})
+	assertFloat64s(t, records, []float64{2, 5})
+}
+
+func TestRuntimeCallbackUsesCapturedModuleRequireContext(t *testing.T) {
+	loader := &programTestLoader{
+		sources: map[string]string{
+			"logical:game/init": `
+return {
+	startup = function()
+		connect(function()
+			local shared = require("./shared")
+			return shared.name
+		end)
+	end,
+}
+`,
+			"logical:game/shared": `
+return {
+	name = "shared module",
+}
+`,
+		},
+	}
+	program, _, err := ember.LoadProgram(context.Background(), loader, ember.ProgramOptions{
+		Entrypoints: []ember.Entrypoint{{Name: "main", Module: ember.LogicalModule("game/init")}},
+		Parallelism: 1,
+	})
+	if err != nil {
+		t.Fatalf("LoadProgram returned error: %v", err)
+	}
+
+	var callback ember.Callback
+	runtime, err := program.NewRuntime(ember.RuntimeOptions{
+		Host: ember.RuntimeHostFunc(func(_ context.Context, call ember.HostCall) (map[string]ember.Value, error) {
+			if call.Hook == "" {
+				return nil, nil
+			}
+			return map[string]ember.Value{
+				"connect": ember.ContextHostFuncValue(func(ctx context.Context, args []ember.Value) ([]ember.Value, error) {
+					captured, err := ember.CaptureCallback(ctx, args[0])
+					if err != nil {
+						return nil, err
+					}
+					callback = captured
+					return nil, nil
+				}),
+			}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime returned error: %v", err)
+	}
+
+	if _, err := runtime.RunHook(context.Background(), "startup"); err != nil {
+		t.Fatalf("RunHook returned error: %v", err)
+	}
+	results, err := callback.Call(context.Background())
+	if err != nil {
+		t.Fatalf("Callback.Call returned error: %v", err)
+	}
+	assertValueStrings(t, results, []string{"shared module"})
+}
+
 func TestRuntimeInstructionBudgetExhaustionDoesNotPoisonNextHook(t *testing.T) {
 	loader := &programTestLoader{
 		sources: map[string]string{
@@ -1673,6 +1822,44 @@ func assertStrings(t *testing.T, got []string, want []string) {
 	for i := range got {
 		if got[i] != want[i] {
 			t.Fatalf("strings are %v, want %v", got, want)
+		}
+	}
+}
+
+func assertValueNumbers(t *testing.T, got []ember.Value, want []float64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("number values are %v, want %v", got, want)
+	}
+	for i, item := range got {
+		number, ok := item.Number()
+		if !ok || number != want[i] {
+			t.Fatalf("number values are %v, want %v", got, want)
+		}
+	}
+}
+
+func assertValueStrings(t *testing.T, got []ember.Value, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("string values are %v, want %v", got, want)
+	}
+	for i, item := range got {
+		text, ok := item.String()
+		if !ok || text != want[i] {
+			t.Fatalf("string values are %v, want %v", got, want)
+		}
+	}
+}
+
+func assertFloat64s(t *testing.T, got []float64, want []float64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("float64s are %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("float64s are %v, want %v", got, want)
 		}
 	}
 }

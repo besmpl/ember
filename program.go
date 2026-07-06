@@ -292,7 +292,8 @@ func (r *Runtime) RunHook(ctx context.Context, hook string, args ...Value) (Hook
 			return report, fmt.Errorf("runtime: hook %s.%s is %s, want function", entrypoint.name, hook, hookValue.Kind())
 		}
 		callContext := r.newRuntimeCallContext(ctx, entrypoint.key, hookGlobals, r.maxInstructions)
-		if _, err := callValueWithContextBudget(ctx, hookValue, callContext.envWithRequire(), args, r.maxInstructions); err != nil {
+		callCtx := contextWithRuntimeCallContext(ctx, callContext)
+		if _, err := callValueWithContextBudget(callCtx, hookValue, callContext.envWithRequire(), args, r.maxInstructions); err != nil {
 			return report, fmt.Errorf("runtime: call hook %s.%s: %w", entrypoint.name, hook, err)
 		}
 		call.Called = true
