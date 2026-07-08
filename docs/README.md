@@ -1,23 +1,28 @@
 # Documentation Inventory
 
-Use the smallest relevant document set for the change you are making.
+Use the smallest durable document set for the change you are making.
+
+The docs directory is not a standing plan archive. Do not keep active plans,
+benchmark ledgers, speculative roadmaps, or dated strategy notes here by
+default. If a slice needs a written plan, keep it short, make ownership clear,
+and retire or delete it when the slice lands or is abandoned.
 
 ## Recommended Reading Paths
 
 | Goal | First docs | Notes |
 | --- | --- | --- |
-| Runtime design | `../README.md`, `principles.md`, `design.md` | Use before changing bytecode, values, VM state, errors, or package shape. |
+| First contact | `../README.md`, `principles.md` | Learn what Ember is and which constraints should survive new work. |
+| Runtime design | `../README.md`, `principles.md`, `design.md`, `public-surface.md` | Use before changing bytecode, values, VM state, errors, or package shape. |
 | Go implementation work | `golang-rules.md`, `checks.md`, nearby package docs | Keep tests focused and public interfaces small. |
-| Luau compatibility work | `compatibility.md`, `design.md`, `roadmap.md` | State which upstream behavior is being matched and how it is verified. |
+| Luau compatibility work | `compatibility.md`, `design.md` | State which upstream behavior is being matched and how it is verified. |
 | Hearth embedding work | `hearth-integration.md`, `public-surface.md` | Keep Hearth as an adapter above the runtime until the seam is proven. |
-| Larger slices | `exec-plans/README.md`, `exec-plans/_template.md` | Use for work that spans multiple packages or compatibility layers. |
+| Durable decisions | `adr/README.md`, relevant ADRs | Use when a decision should outlive the implementation slice that produced it. |
 
 ## Core Documents
 
 - `../README.md`: project purpose, scope, and first runtime direction.
 - `principles.md`: decision rules for a Go-native Luau-compatible runtime.
 - `design.md`: runtime model and early boundaries.
-- `roadmap.md`: staged implementation direction.
 - `compatibility.md`: how Ember claims and proves Luau compatibility.
 - `public-surface.md`: initial import and API surface rules.
 - `hearth-integration.md`: host boundary notes for Hearth.
@@ -28,7 +33,6 @@ Use the smallest relevant document set for the change you are making.
 
 ## Workflow Documents
 
-- `exec-plans/`: optional phased plans for larger vertical slices.
 - `adr/`: architecture decision records for compatibility, runtime, and public
   interface decisions.
 

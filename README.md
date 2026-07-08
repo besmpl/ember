@@ -79,13 +79,19 @@ Ember should be:
 
 ## Docs
 
-Start with the documentation inventory:
+Start with the small durable documentation set:
 
 - [docs/README.md](docs/README.md)
 - [docs/principles.md](docs/principles.md)
 - [docs/design.md](docs/design.md)
-- [docs/roadmap.md](docs/roadmap.md)
+- [docs/compatibility.md](docs/compatibility.md)
+- [docs/public-surface.md](docs/public-surface.md)
+- [docs/hearth-integration.md](docs/hearth-integration.md)
 - [docs/checks.md](docs/checks.md)
+
+Standing future-plan docs are intentionally not kept in the repository. When a
+slice needs coordination, write the smallest temporary plan that proves useful
+and retire or delete it when the slice lands or is abandoned.
 
 ## Checks
 

@@ -41,8 +41,9 @@ ports, large object graphs, or speculative interfaces.
 
 ## How To Use This Now
 
-Treat these principles as constraints for slices, not as an active queue. The
-current implementation order lives in `roadmap.md`.
+Treat these principles as constraints for slices, not as an active queue. Keep
+future-plan docs out of the durable documentation set unless a concrete slice
+needs coordination, and retire them when they stop shaping current work.
 
 When a future slice proposes public runtime surface, require concrete examples,
 tests, or compatibility pressure before adding it.
