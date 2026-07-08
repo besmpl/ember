@@ -1,0 +1,219 @@
+name: AI PR gate
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-pr-gate-${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  route:
+    name: Route PR state
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: read
+
+    steps:
+      - name: Route CI or Codex review
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName === "workflow_run") {
+              await routeWorkflowRun();
+              return;
+            }
+
+            if (context.eventName === "pull_request_review") {
+              await routeReview();
+            }
+
+            async function routeWorkflowRun() {
+              const run = context.payload.workflow_run;
+              if (!run || run.event !== "pull_request") {
+                return;
+              }
+
+              const pr = await findPullRequest(run);
+              if (!pr) {
+                core.info("Skipping: no pull request associated with CI run.");
+                return;
+              }
+
+              const routable = isRoutablePullRequest(pr);
+              if (!routable.ok) {
+                core.info(`Skipping PR #${pr.number}: ${routable.reason}`);
+                return;
+              }
+
+              if (run.conclusion !== "success") {
+                await addLabel(pr.number, "needs-ai-fix");
+                await removeLabel(pr.number, "ready-for-human");
+                await commentOnce(
+                  pr.number,
+                  `<!-- ci-failure:${run.head_sha} -->`,
+                  [
+                    `<!-- ci-failure:${run.head_sha} -->`,
+                    "### AI PR gate: needs fix",
+                    "",
+                    `CI finished with \`${run.conclusion || "unknown"}\` for \`${run.head_sha.slice(0, 7)}\`. Cursor should fix the branch and push again.`
+                  ].join("\n")
+                );
+                return;
+              }
+
+              await removeLabel(pr.number, "needs-ai-fix");
+              await removeLabel(pr.number, "ready-for-human");
+              await commentOnce(
+                pr.number,
+                `<!-- codex-review-request:${run.head_sha} -->`,
+                [
+                  `<!-- codex-review-request:${run.head_sha} -->`,
+                  "@codex review",
+                  "",
+                  "Please focus on blocking correctness, safety, test, and scope issues. If you find serious issues, leave review comments. If the PR is clean, say so in the review summary."
+                ].join("\n")
+              );
+            }
+
+            async function routeReview() {
+              const review = context.payload.review;
+              const pr = context.payload.pull_request;
+              if (!review || !pr || pr.state !== "open") {
+                return;
+              }
+
+              const actor = review.user?.login || "";
+              if (!/codex/i.test(actor)) {
+                return;
+              }
+
+              const comments = await github.paginate(github.rest.pulls.listReviewComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                per_page: 100
+              });
+              const reviewComments = comments.filter((comment) => {
+                return comment.pull_request_review_id === review.id && /codex/i.test(comment.user?.login || "");
+              });
+
+              const body = review.body || "";
+              const hasGoodSummary = /\b(no\s+(blocking\s+)?(issues|findings|problems)|looks good|ready for human)\b/i.test(body);
+              const hasBadSummary = /\b(P0|P1|blocking|must fix|needs fix|serious issue|regression|vulnerab)/i.test(body);
+              const needsFix = review.state === "changes_requested" || reviewComments.length > 0 || (hasBadSummary && !hasGoodSummary);
+
+              if (needsFix) {
+                await addLabel(pr.number, "needs-ai-fix");
+                await removeLabel(pr.number, "ready-for-human");
+                await commentOnce(
+                  pr.number,
+                  `<!-- codex-review-routed:${review.id}:fix -->`,
+                  [
+                    `<!-- codex-review-routed:${review.id}:fix -->`,
+                    "### AI PR gate: needs fix",
+                    "",
+                    "Codex review found issues. Cursor should address the review and push again."
+                  ].join("\n")
+                );
+                return;
+              }
+
+              await addLabel(pr.number, "ready-for-human");
+              await removeLabel(pr.number, "needs-ai-fix");
+              await commentOnce(
+                pr.number,
+                `<!-- codex-review-routed:${review.id}:ready -->`,
+                [
+                  `<!-- codex-review-routed:${review.id}:ready -->`,
+                  "### AI PR gate: ready for human",
+                  "",
+                  "CI passed and Codex review did not report blocking issues."
+                ].join("\n")
+              );
+            }
+
+            async function findPullRequest(run) {
+              const first = (run.pull_requests || [])[0];
+              const number = first?.number;
+              if (number) {
+                return getPullRequest(number);
+              }
+
+              const associated = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: run.head_sha
+              });
+              const match = associated.data[0];
+              return match ? getPullRequest(match.number) : null;
+            }
+
+            async function getPullRequest(number) {
+              const response = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: number
+              });
+              return response.data;
+            }
+
+            function isRoutablePullRequest(pr) {
+              const trusted = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+              if (pr.state !== "open") {
+                return { ok: false, reason: "PR is not open" };
+              }
+              if (!trusted.has(pr.author_association)) {
+                return { ok: false, reason: `untrusted author association ${pr.author_association}` };
+              }
+              if (!pr.head.repo || pr.head.repo.full_name !== pr.base.repo.full_name) {
+                return { ok: false, reason: "PR branch is not in this repository" };
+              }
+              return { ok: true };
+            }
+
+            async function addLabel(issueNumber, name) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                labels: [name]
+              });
+            }
+
+            async function removeLabel(issueNumber, name) {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                name
+              }).catch((error) => {
+                if (error.status !== 404) throw error;
+              });
+            }
+
+            async function commentOnce(issueNumber, marker, body) {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                per_page: 100
+              });
+              if (comments.some((comment) => (comment.body || "").includes(marker))) {
+                return;
+              }
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body
+              });
+            }
