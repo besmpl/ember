@@ -1,0 +1,186 @@
+name: AI brief gate
+
+on:
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-brief-gate-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  codex:
+    name: Codex brief decision
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      should_run: ${{ steps.context.outputs.should_run }}
+      issue_number: ${{ steps.context.outputs.issue_number }}
+      final_message: ${{ steps.codex.outputs.final-message }}
+    env:
+      HAS_OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY != '' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build brief context
+        id: context
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const issue = context.payload.issue;
+            const comment = context.payload.comment;
+            const trusted = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+            const labels = issue.labels.map((label) => label.name);
+            const body = comment.body || "";
+            const isIssue = !issue.pull_request;
+            const hasNeedsBrief = labels.includes("needs-brief");
+            const hasBriefMarker = /<!--\s*ai-brief\s*-->/i.test(body) || /\bAI Brief\b/i.test(body);
+            const trustedAuthor = trusted.has(comment.author_association);
+            const shouldRun = isIssue && hasNeedsBrief && hasBriefMarker && trustedAuthor;
+
+            core.setOutput("should_run", String(shouldRun));
+            core.setOutput("issue_number", String(issue.number));
+
+            if (!shouldRun) {
+              core.info(`Skipping: isIssue=${isIssue} hasNeedsBrief=${hasNeedsBrief} hasBriefMarker=${hasBriefMarker} trustedAuthor=${trustedAuthor}`);
+              return;
+            }
+
+            fs.mkdirSync(".github/ai-workflow", { recursive: true });
+            fs.writeFileSync(".github/ai-workflow/brief-context.json", JSON.stringify({
+              issue: {
+                number: issue.number,
+                title: issue.title,
+                body: issue.body || "",
+                labels,
+                author: issue.user.login,
+                author_association: issue.author_association,
+                url: issue.html_url
+              },
+              brief_comment: {
+                id: comment.id,
+                author: comment.user.login,
+                author_association: comment.author_association,
+                body,
+                url: comment.html_url
+              }
+            }, null, 2));
+
+      - name: Check OpenAI key
+        if: steps.context.outputs.should_run == 'true' && env.HAS_OPENAI_API_KEY != 'true'
+        run: |
+          echo "::error::Set repository secret OPENAI_API_KEY before using AI brief gate."
+          exit 1
+
+      - name: Run Codex
+        id: codex
+        if: steps.context.outputs.should_run == 'true'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .github/codex/prompts/brief-gate.md
+          output-file: codex-brief-decision.json
+          codex-args: '["--output-schema", ".github/codex/schemas/brief-decision.schema.json"]'
+          sandbox: read-only
+          safety-strategy: drop-sudo
+
+  apply:
+    name: Apply brief labels
+    runs-on: ubuntu-latest
+    needs: codex
+    if: needs.codex.outputs.should_run == 'true'
+    permissions:
+      issues: write
+
+    steps:
+      - name: Apply Codex decision
+        uses: actions/github-script@v7
+        env:
+          CODEX_FINAL_MESSAGE: ${{ needs.codex.outputs.final_message }}
+          ISSUE_NUMBER: ${{ needs.codex.outputs.issue_number }}
+        with:
+          script: |
+            const issue_number = Number(process.env.ISSUE_NUMBER);
+            const raw = (process.env.CODEX_FINAL_MESSAGE || "").trim();
+
+            function parseDecision(text) {
+              try {
+                return JSON.parse(text);
+              } catch (_) {
+                const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+                if (fenced) return JSON.parse(fenced[1]);
+                const object = text.match(/\{[\s\S]*\}/);
+                if (object) return JSON.parse(object[0]);
+                throw new Error("Codex did not return parseable JSON.");
+              }
+            }
+
+            const decision = parseDecision(raw);
+            const value = String(decision.decision || "").toUpperCase();
+            const reasons = Array.isArray(decision.reasons) ? decision.reasons : [];
+            const requested = Array.isArray(decision.requested_changes) ? decision.requested_changes : [];
+            const body = [
+              "<!-- codex-brief-decision -->",
+              `### Codex brief decision: ${value}`,
+              "",
+              decision.summary || "",
+              "",
+              reasons.length ? ["Reasons:", ...reasons.map((item) => `- ${item}`)].join("\n") : "",
+              requested.length ? ["Requested changes:", ...requested.map((item) => `- ${item}`)].join("\n") : ""
+            ].filter(Boolean).join("\n");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+              body
+            });
+
+            if (value === "APPROVE") {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number,
+                labels: ["ready-for-build"]
+              });
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number,
+                name: "needs-brief"
+              }).catch((error) => {
+                if (error.status !== 404) throw error;
+              });
+              return;
+            }
+
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+              name: "ready-for-build"
+            }).catch((error) => {
+              if (error.status !== 404) throw error;
+            });
+
+            if (value === "REJECT") {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number,
+                name: "needs-brief"
+              }).catch((error) => {
+                if (error.status !== 404) throw error;
+              });
+            }
+
