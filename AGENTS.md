@@ -18,6 +18,32 @@ complexity contained, and leave Ember easier to reason about than you found it.
 4. Read `docs/checks.md` before choosing verification commands.
 5. Read nearby package docs before editing that area.
 
+## Setup
+
+- Test: run focused `go test` commands first when practical, then
+  `scripts/check` before finishing code changes.
+- Build: run `go build ./...`.
+
+## Rules
+
+- Keep diffs small.
+- Do not refactor unrelated code.
+- Do not add dependencies without asking.
+- Open a PR, never merge.
+
+## Workflow
+
+For rough ideas:
+
+- First create a short implementation brief.
+- Do not code until the brief is approved.
+
+For implementation:
+
+- Implement only the approved phase or slice.
+- Run relevant tests.
+- Include changed files, tests run, risks, and out-of-scope notes in the PR.
+
 ## Project Direction
 
 Ember is a Go-native Luau-compatible scripting runtime for Hearth. It should be
