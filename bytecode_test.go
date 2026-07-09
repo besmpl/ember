@@ -8381,7 +8381,7 @@ func TestOptimizeBytecodeIRRemovesDeadPureTemporaries(t *testing.T) {
 	}
 }
 
-func TestOptimizeBytecodeIRRemovesDeadProvenNumericArithmetic(t *testing.T) {
+func TestOptimizeBytecodeIRKeepsDeadProvenNumericArithmeticConservatively(t *testing.T) {
 	var builder bytecodeBuilder
 	builder.emitLoadConst(1, NumberValue(2))
 	builder.emitLoadConst(2, NumberValue(3))
@@ -8392,6 +8392,9 @@ func TestOptimizeBytecodeIRRemovesDeadProvenNumericArithmetic(t *testing.T) {
 	builder.optimize(optimizationOptions{})
 	got := assembleBytecodeIR(builder.ir)
 	want := []instruction{
+		{op: opLoadConst, a: 1, b: 0},
+		{op: opLoadConst, a: 2, b: 1},
+		{op: opAdd, a: 3, b: 1, c: 2},
 		{op: opLoadConst, a: 4, b: 2},
 		{op: opReturnOne, a: 4},
 	}
@@ -8400,7 +8403,7 @@ func TestOptimizeBytecodeIRRemovesDeadProvenNumericArithmetic(t *testing.T) {
 	}
 }
 
-func TestOptimizeBytecodeIRRemovesDeadProvenInPlaceNumericArithmetic(t *testing.T) {
+func TestOptimizeBytecodeIRKeepsDeadProvenInPlaceNumericArithmeticConservatively(t *testing.T) {
 	var builder bytecodeBuilder
 	builder.emitLoadConst(1, NumberValue(2))
 	addend := builder.addConstant(NumberValue(3))
@@ -8412,6 +8415,9 @@ func TestOptimizeBytecodeIRRemovesDeadProvenInPlaceNumericArithmetic(t *testing.
 	builder.optimize(optimizationOptions{})
 	got := assembleBytecodeIR(builder.ir)
 	want := []instruction{
+		{op: opLoadConst, a: 1, b: 0},
+		{op: opAddK, a: 1, b: 1, c: addend},
+		{op: opNeg, a: 2, b: 1},
 		{op: opLoadConst, a: 3, b: 2},
 		{op: opReturnOne, a: 3},
 	}

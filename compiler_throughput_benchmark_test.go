@@ -18,16 +18,28 @@ func BenchmarkCompileMatrix(b *testing.B) {
 		name   string
 		source string
 	}{
-		{name: "tiny_arithmetic", source: "local x = 1\nlocal y = 2\nreturn (x + y) * 3 - 4 / 2"},
+		{name: "tiny_arithmetic", source: `local x = 1
+local y = 2
+return (x + y) * 3 - 4 / 2`},
 		{name: "straight_line/100", source: straightLineCompileBenchmarkSource(100)},
 		{name: "straight_line/1000", source: straightLineCompileBenchmarkSource(1000)},
 		{name: "straight_line/10000", source: straightLineCompileBenchmarkSource(10000)},
 		{name: "branch_dense_cfg", source: branchDenseCompileBenchmarkSource()},
 		{name: "constants/unique", source: constantsCompileBenchmarkSource(false)},
 		{name: "constants/repeated", source: constantsCompileBenchmarkSource(true)},
-		{name: "closures_upvalues", source: "local base = 4\nlocal function add(x)\n return base + x\nend\nreturn add(3)"},
-		{name: "varargs_multi_return", source: "local function collect(...)\n local a, b = ...\n return a, b, select(\"#\", ...)\nend\nreturn collect(1, 2, 3)"},
-		{name: "table_string_fields", source: "local value = {name = \"ember\", hp = 10}\nvalue.hp = value.hp + 5\nreturn value.name, value.hp"},
+		{name: "closures_upvalues", source: `local base = 4
+local function add(x)
+    return base + x
+end
+return add(3)`},
+		{name: "varargs_multi_return", source: `local function collect(...)
+    local a, b = ...
+    return a, b, select("#", ...)
+end
+return collect(1, 2, 3)`},
+		{name: "table_string_fields", source: `local value = {name = "ember", hp = 10}
+value.hp = value.hp + 5
+return value.name, value.hp`},
 	}
 	for _, tc := range top10LuauCases {
 		cases = append(cases, struct {
@@ -77,7 +89,7 @@ func straightLineCompileBenchmarkSource(lines int) string {
 		source.WriteString(strconv.Itoa(i % 7))
 		source.WriteByte('\n')
 	}
-	source.WriteString("return value")
+	source.WriteString("return value\n")
 	return source.String()
 }
 
@@ -87,7 +99,7 @@ func branchDenseCompileBenchmarkSource() string {
 	for i := 0; i < 256; i++ {
 		source.WriteString("if flag then\nvalue = value + 1\nelse\nvalue = value + 2\nend\n")
 	}
-	source.WriteString("return value")
+	source.WriteString("return value\n")
 	return source.String()
 }
 
@@ -103,7 +115,7 @@ func constantsCompileBenchmarkSource(repeated bool) string {
 		}
 		source.WriteByte('\n')
 	}
-	source.WriteString("return total")
+	source.WriteString("return total\n")
 	return source.String()
 }
 

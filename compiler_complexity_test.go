@@ -21,9 +21,9 @@ func TestCompilerComplexityBudgets(t *testing.T) {
 			name: "branch_dense",
 			source: `local x = 1
 if flag then
- x = x + 2
+    x = x + 2
 else
- x = x + 3
+    x = x + 3
 end
 return x`,
 			globals:               map[string]Value{"flag": BoolValue(false)},
@@ -36,8 +36,10 @@ return x`,
 		},
 		{
 			name: "closure_upvalue",
-			source: `local base=4
-local function add(x) return base+x end
+			source: `local base = 4
+local function add(x)
+    return base + x
+end
 return add(3)`,
 			want:                  []Value{NumberValue(7)},
 			maxInstructions:       9,
@@ -48,8 +50,11 @@ return add(3)`,
 		},
 		{
 			name: "vararg_multi_return",
-			source: `local function collect(...) local a,b=... return a,b,select("#",...) end
-return collect(1,2,3)`,
+			source: `local function collect(...)
+    local a, b = ...
+    return a, b, select("#", ...)
+end
+return collect(1, 2, 3)`,
 			want:                  []Value{NumberValue(1), NumberValue(2), NumberValue(3)},
 			maxInstructions:       11,
 			maxConstants:          3,
@@ -59,9 +64,9 @@ return collect(1,2,3)`,
 		},
 		{
 			name: "table_string_fields",
-			source: `local value={name="ember",hp=10}
-value.hp=value.hp+5
-return value.name,value.hp`,
+			source: `local value = {name = "ember", hp = 10}
+value.hp = value.hp + 5
+return value.name, value.hp`,
 			want:                  []Value{StringValue("ember"), NumberValue(15)},
 			maxInstructions:       10,
 			maxConstants:          6,
