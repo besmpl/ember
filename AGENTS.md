@@ -118,6 +118,23 @@ protecting the root package from speculative architecture.
 - Summarize long command output and preserve the exact command.
 - Keep final output compact: changed files, checks, risks, and next pressure.
 
+## Cursor Cloud specific instructions
+
+- This module pins `go 1.26` in `go.mod`. Go 1.26 is installed at
+  `/usr/local/go` and is first on `PATH`, so `go` resolves to 1.26 already.
+  The automatic `GOTOOLCHAIN` download of go1.26 does NOT work in this
+  environment, so rely on the pinned `/usr/local/go` toolchain rather than
+  letting an older `go` try to fetch it.
+- There are no external module dependencies (`go.mod` has only the module and
+  `go` directives), so dependency refresh is effectively a no-op.
+- Ember is a library, not an app or CLI; there is no server or binary to run.
+  Exercise it through the public `Compile` / `Run` / `RunWithGlobals` API
+  (see `docs/public-surface.md`). A minimal end-to-end smoke is:
+  `go build ./...`, then compile+run a script such as `return 1 + 2`.
+- Standard verification commands are already documented: `go build ./...`,
+  `scripts/check-fast`, and `scripts/check` (see `docs/checks.md`). The full
+  `scripts/check` suite takes ~25-30s.
+
 ## Tooling Rules
 
 - Use `rg` or `rg --files` for search.
