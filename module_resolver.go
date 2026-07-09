@@ -92,13 +92,11 @@ type moduleDiagnostic struct {
 }
 
 func buildModuleGraphWithStore(resolver moduleResolver, root moduleKey, store *sourceArtifactStore) (moduleGraph, error) {
-	snapshot := store.snapshot()
 	graph := moduleGraph{
 		Root:  root,
 		Nodes: make(map[moduleKey]moduleGraphNode),
 	}
 	if err := graph.visit(resolver, store, root, nil); err != nil {
-		store.restore(snapshot)
 		return moduleGraph{}, err
 	}
 	return graph, nil
