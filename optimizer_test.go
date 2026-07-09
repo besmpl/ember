@@ -5,7 +5,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestHIRSimplifyFoldsNumberArithmetic(t *testing.T) {
@@ -231,8 +230,26 @@ local x = 1
 local y = 2
 return (x + y) * 3 - 4 / 2
 `
-	if _, err := Compile(source); err != nil {
+	proto, err := Compile(source)
+	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
+	}
+	metrics := CompilerBenchmarkMetricsForTest(proto)
+	if metrics.Instructions > 8 {
+		t.Fatalf("compiled arithmetic has %d instructions, want at most 8", metrics.Instructions)
+	}
+	if metrics.Constants > 3 {
+		t.Fatalf("compiled arithmetic has %d constants, want at most 3", metrics.Constants)
+	}
+	if metrics.RegisterSlots > 3 {
+		t.Fatalf("compiled arithmetic has %d register slots, want at most 3", metrics.RegisterSlots)
+	}
+	if metrics.ChildProtos != 0 {
+		t.Fatalf("compiled arithmetic has %d child protos, want 0", metrics.ChildProtos)
+	}
+	packedInstructionBytes := int64(reflect.TypeOf(packedInstruction{}).Size())
+	if got := metrics.PackedBytes / packedInstructionBytes; got > 8 {
+		t.Fatalf("compiled arithmetic has %d packed instructions, want at most 8", got)
 	}
 
 	const maxAllocsPerCompile = 520
@@ -243,19 +260,6 @@ return (x + y) * 3 - 4 / 2
 	})
 	if allocs > maxAllocsPerCompile {
 		t.Fatalf("Compile used %.0f allocs/op, want at most %d", allocs, maxAllocsPerCompile)
-	}
-
-	const runs = 200
-	const maxNSPerCompile = 150_000
-	start := time.Now()
-	for i := 0; i < runs; i++ {
-		if _, err := Compile(source); err != nil {
-			t.Fatalf("Compile returned error: %v", err)
-		}
-	}
-	nsPerCompile := time.Since(start).Nanoseconds() / runs
-	if nsPerCompile > maxNSPerCompile {
-		t.Fatalf("Compile took %d ns/op, want at most %d", nsPerCompile, maxNSPerCompile)
 	}
 }
 

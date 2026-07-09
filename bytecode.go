@@ -95,14 +95,24 @@ type opcodeMetadataEntry struct {
 	controlFlow                  opcodeControlFlowKind
 	jumpTarget                   opcodeJumpTargetSlot
 	operands                     opcodeOperandShape
-	mayCall                      bool
-	mayYield                     bool
-	readsTable                   bool
-	writesTable                  bool
-	readsGlobal                  bool
-	writesGlobal                 bool
-	allocates                    bool
+	effects                      opcodeEffects
 	directFrameUnsupportedReason string
+}
+
+type opcodeEffects struct {
+	classified                  bool
+	invokesScriptOrHostCode     bool
+	mayYield                    bool
+	mayError                    bool
+	allocatesOrObservesIdentity bool
+	readsGlobals                bool
+	writesGlobals               bool
+	readsUpvalues               bool
+	writesUpvalues              bool
+	readsTables                 bool
+	writesTables                bool
+	readsUnknownHeap            bool
+	writesUnknownHeap           bool
 }
 
 type opcodeOperandShape struct {
@@ -116,6 +126,7 @@ var opcodeMetadataTable = func() [opcodeCount]opcodeMetadataEntry {
 	var table [opcodeCount]opcodeMetadataEntry
 	for op := opcode(0); op < opcodeCount; op++ {
 		table[op].name = opcodeName(op)
+		table[op].effects.classified = true
 	}
 	for _, op := range []opcode{
 		opLoadConst,
@@ -246,7 +257,76 @@ var opcodeMetadataTable = func() [opcodeCount]opcodeMetadataEntry {
 	for _, op := range []opcode{opReturnOne, opReturn} {
 		table[op].controlFlow = opcodeControlReturn
 	}
+	callbackMask := opcodeEffects{
+		classified:                  true,
+		invokesScriptOrHostCode:     true,
+		mayYield:                    true,
+		mayError:                    true,
+		allocatesOrObservesIdentity: true,
+		readsGlobals:                true,
+		writesGlobals:               true,
+		readsUpvalues:               true,
+		writesUpvalues:              true,
+		readsTables:                 true,
+		writesTables:                true,
+		readsUnknownHeap:            true,
+		writesUnknownHeap:           true,
+	}
 	for _, op := range []opcode{
+		opGetField,
+		opSetField,
+		opGetStringField,
+		opSetStringField,
+		opGetStringFieldIndex,
+		opSetStringFieldIndex,
+		opAddStringField,
+		opSubStringField,
+		opGetIndex,
+		opSetIndex,
+		opPrepareIter,
+		opArrayNext,
+		opArrayNextJump2,
+		opAdd,
+		opSub,
+		opMul,
+		opDiv,
+		opMod,
+		opIDiv,
+		opPow,
+		opNeg,
+		opAddK,
+		opSubK,
+		opMulK,
+		opDivK,
+		opModK,
+		opIDivK,
+		opLen,
+		opConcat,
+		opConcatChain,
+		opEqual,
+		opNotEqual,
+		opLess,
+		opLessEqual,
+		opGreater,
+		opGreaterEqual,
+		opJumpIfNotEqualK,
+		opJumpIfNotLessK,
+		opJumpIfNotGreaterK,
+		opJumpIfLessK,
+		opJumpIfGreaterK,
+		opJumpIfNotLess,
+		opJumpIfNotGreater,
+		opJumpIfLess,
+		opJumpIfGreater,
+		opJumpIfModKNotEqualK,
+		opJumpIfStringFieldNotEqualK,
+		opJumpIfStringFieldNotGreaterK,
+		opJumpIfStringFieldGreaterK,
+		opJumpIfStringFieldNotGreaterR,
+		opJumpIfStringFieldFalse,
+		opJumpIfStringFieldNil,
+		opJumpIfStringFieldTrue,
+		opJumpIfStringFieldNotNil,
 		opCoroutineResume,
 		opFastCall,
 		opCall,
@@ -255,11 +335,15 @@ var opcodeMetadataTable = func() [opcodeCount]opcodeMetadataEntry {
 		opCallUpvalueOne,
 		opCallMethodOne,
 	} {
-		table[op].mayCall = true
-		table[op].mayYield = true
+		table[op].effects = callbackMask
 	}
+	table[opLoadGlobal].effects.readsGlobals = true
+	table[opSetGlobal].effects.writesGlobals = true
+	for _, op := range []opcode{opGetUpvalue, opClosure} {
+		table[op].effects.readsUpvalues = true
+	}
+	table[opSetUpvalue].effects.writesUpvalues = true
 	for _, op := range []opcode{
-		opSetIndex,
 		opGetField,
 		opGetStringField,
 		opGetStringFieldIndex,
@@ -281,7 +365,7 @@ var opcodeMetadataTable = func() [opcodeCount]opcodeMetadataEntry {
 		opFastCall,
 		opCallMethodOne,
 	} {
-		table[op].readsTable = true
+		table[op].effects.readsTables = true
 	}
 	for _, op := range []opcode{
 		opSetField,
@@ -292,26 +376,16 @@ var opcodeMetadataTable = func() [opcodeCount]opcodeMetadataEntry {
 		opSetIndex,
 		opFastCall,
 	} {
-		table[op].writesTable = true
+		table[op].effects.writesTables = true
 	}
-	table[opLoadGlobal].readsGlobal = true
-	table[opFastCall].readsGlobal = true
-	table[opSetGlobal].writesGlobal = true
 	for _, op := range []opcode{
 		opNewTable,
 		opClosure,
 		opVararg,
-		opConcat,
-		opConcatChain,
-		opCoroutineResume,
-		opCall,
-		opCallOne,
-		opCallLocalOne,
-		opCallUpvalueOne,
-		opCallMethodOne,
 	} {
-		table[op].allocates = true
+		table[op].effects.allocatesOrObservesIdentity = true
 	}
+	table[opNumericForCheck].effects.mayError = true
 
 	unused := bytecodeOperandUnused
 	register := bytecodeOperandRegister
@@ -424,6 +498,9 @@ func validateOpcodeMetadataTable(table [opcodeCount]opcodeMetadataEntry) error {
 		if meta.name == "" {
 			return fmt.Errorf("%s metadata missing name", opcodeName(op))
 		}
+		if !meta.effects.classified {
+			return fmt.Errorf("%s effects are unclassified", opcodeName(op))
+		}
 		if meta.directFrame && meta.directFrameUnsupportedReason != "" {
 			return fmt.Errorf("%s direct-frame metadata has unsupported reason", opcodeName(op))
 		}
@@ -439,8 +516,8 @@ func validateOpcodeMetadataTable(table [opcodeCount]opcodeMetadataEntry) error {
 		if meta.controlFlow == opcodeControlReturn && meta.jumpTarget != opcodeJumpTargetNone {
 			return fmt.Errorf("%s return has jump target", opcodeName(op))
 		}
-		if meta.mayYield && !meta.mayCall {
-			return fmt.Errorf("%s may yield without call risk", opcodeName(op))
+		if meta.effects.mayYield && !meta.effects.invokesScriptOrHostCode {
+			return fmt.Errorf("%s may yield without invoking script or host code", opcodeName(op))
 		}
 		if !opcodeMetadataJumpTargetMatchesOperands(meta) {
 			return fmt.Errorf("%s jump target metadata does not match operand shape", opcodeName(op))

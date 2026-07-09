@@ -154,13 +154,17 @@ func instructionWritesOnlyDeadRegisters(writes []int, liveRegisters registerSet)
 }
 
 func instructionCanRemoveWhenResultDead(ins instruction, numberFacts registerSet, facts bytecodeIROptimizationFacts) bool {
-	if opcodeTransfersControl(ins.op) ||
-		opcodeMayCall(ins.op) ||
-		opcodeReadsTable(ins.op) ||
-		opcodeWritesTable(ins.op) ||
-		opcodeReadsGlobal(ins.op) ||
-		opcodeWritesGlobal(ins.op) ||
-		opcodeAllocates(ins.op) {
+	effect := opcodeEffect(ins.op)
+	if !effect.classified ||
+		opcodeTransfersControl(ins.op) ||
+		effect.invokesScriptOrHostCode ||
+		effect.mayYield ||
+		effect.mayError ||
+		effect.allocatesOrObservesIdentity ||
+		effect.readsGlobals || effect.writesGlobals ||
+		effect.readsUpvalues || effect.writesUpvalues ||
+		effect.readsTables || effect.writesTables ||
+		effect.readsUnknownHeap || effect.writesUnknownHeap {
 		return false
 	}
 	switch ins.op {
@@ -707,12 +711,15 @@ func loopHeaderLoadHasNoMetatableGuard(code []instruction, loopStart int, loopEn
 func loopHasInvariantHeaderLoadBarrier(code []instruction, loopStart int, loopEnd int, load instruction) bool {
 	for pc := loopStart + 1; pc < loopEnd; pc++ {
 		ins := code[pc]
-		if opcodeMayCall(ins.op) || opcodeMayYield(ins.op) ||
-			opcodeWritesTable(ins.op) || opcodeWritesGlobal(ins.op) ||
-			opcodeAllocates(ins.op) {
+		effect := opcodeEffect(ins.op)
+		if !effect.classified ||
+			effect.invokesScriptOrHostCode || effect.mayYield || effect.mayError ||
+			effect.allocatesOrObservesIdentity ||
+			effect.writesGlobals || effect.writesUpvalues || effect.writesTables ||
+			effect.readsUnknownHeap || effect.writesUnknownHeap {
 			return true
 		}
-		if opcodeReadsTable(ins.op) {
+		if effect.readsTables {
 			return true
 		}
 		if instructionWritesRegister(ins, load.a) || instructionWritesRegister(ins, load.b) {

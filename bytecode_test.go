@@ -8254,7 +8254,7 @@ func TestRegisterCoalescingPreservesBranchValues(t *testing.T) {
 	}
 }
 
-func TestOptimizerHoistsLoopInvariantFieldLoad(t *testing.T) {
+func TestOptimizerDoesNotHoistLoopInvariantFieldLoadAcrossMetamethodOperation(t *testing.T) {
 	var builder bytecodeBuilder
 	field := builder.addConstant(StringValue("hp"))
 	metaFallback := builder.emit(instruction{op: opJumpIfTableHasMetatable, a: 0})
@@ -8272,7 +8272,7 @@ func TestOptimizerHoistsLoopInvariantFieldLoad(t *testing.T) {
 		{op: opJumpIfTableHasMetatable, a: 0, d: 4},
 		{op: opGetStringField, a: 2, b: 0, c: field},
 		{op: opAdd, a: 3, b: 3, c: 2},
-		{op: opJump, b: 2},
+		{op: opJump, b: 1},
 		{op: opReturnOne, a: 3},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -9527,33 +9527,12 @@ func TestOpcodeMetadataCoversEveryOpcode(t *testing.T) {
 		if meta.operands == (opcodeOperandShape{}) {
 			t.Fatalf("opcode metadata operands for %s are empty", opcodeName(op))
 		}
-		if meta.mayCall != wantOpcodeMayCall(op) {
-			t.Fatalf("opcode metadata mayCall for %s is %t, want %t", opcodeName(op), meta.mayCall, wantOpcodeMayCall(op))
+		wantEffects := wantOpcodeEffects(op)
+		if meta.effects != wantEffects {
+			t.Fatalf("opcode metadata effects for %s are %#v, want %#v", opcodeName(op), meta.effects, wantEffects)
 		}
-		if meta.mayYield != wantOpcodeMayYield(op) {
-			t.Fatalf("opcode metadata mayYield for %s is %t, want %t", opcodeName(op), meta.mayYield, wantOpcodeMayYield(op))
-		}
-		if meta.mayYield && !meta.mayCall {
-			t.Fatalf("opcode metadata %s may yield without call risk", opcodeName(op))
-		}
-		if meta.readsTable != wantOpcodeReadsTable(op) {
-			t.Fatalf("opcode metadata readsTable for %s is %t, want %t", opcodeName(op), meta.readsTable, wantOpcodeReadsTable(op))
-		}
-		if meta.writesTable != wantOpcodeWritesTable(op) {
-			t.Fatalf("opcode metadata writesTable for %s is %t, want %t", opcodeName(op), meta.writesTable, wantOpcodeWritesTable(op))
-		}
-		wantReadsGlobal := op == opLoadGlobal || op == opFastCall
-		if meta.readsGlobal != wantReadsGlobal {
-			t.Fatalf("opcode metadata readsGlobal for %s is %t, want %t", opcodeName(op), meta.readsGlobal, wantReadsGlobal)
-		}
-		if meta.writesGlobal != (op == opSetGlobal) {
-			t.Fatalf("opcode metadata writesGlobal for %s is %t, want %t", opcodeName(op), meta.writesGlobal, op == opSetGlobal)
-		}
-		if meta.allocates != wantOpcodeAllocates(op) {
-			t.Fatalf("opcode metadata allocates for %s is %t, want %t", opcodeName(op), meta.allocates, wantOpcodeAllocates(op))
-		}
-		if meta.writesTable && meta.readsGlobal && op != opFastCall {
-			t.Fatalf("opcode metadata %s mixes table write and global read effects", opcodeName(op))
+		if meta.effects.mayYield && !meta.effects.invokesScriptOrHostCode {
+			t.Fatalf("opcode metadata %s may yield without invoking script or host code", opcodeName(op))
 		}
 		if meta.controlFlow == opcodeControlBranch && meta.jumpTarget == opcodeJumpTargetNone {
 			t.Fatalf("opcode metadata branch %s has no jump target", opcodeName(op))
@@ -9581,6 +9560,13 @@ func TestOpcodeMetadataValidationRejectsMalformedEntries(t *testing.T) {
 			want: "missing name",
 		},
 		{
+			name: "unclassified effects",
+			mutate: func(table *[opcodeCount]opcodeMetadataEntry) {
+				table[opAdd].effects.classified = false
+			},
+			want: "effects are unclassified",
+		},
+		{
 			name: "empty operands",
 			mutate: func(table *[opcodeCount]opcodeMetadataEntry) {
 				table[opAdd].operands = opcodeOperandShape{}
@@ -9595,11 +9581,11 @@ func TestOpcodeMetadataValidationRejectsMalformedEntries(t *testing.T) {
 			want: "control flow without jump target",
 		},
 		{
-			name: "yield without call",
+			name: "yield without invocation",
 			mutate: func(table *[opcodeCount]opcodeMetadataEntry) {
-				table[opCall].mayCall = false
+				table[opCall].effects.invokesScriptOrHostCode = false
 			},
-			want: "may yield without call risk",
+			want: "may yield without invoking script or host code",
 		},
 		{
 			name: "jump slot without operand",
@@ -9625,19 +9611,95 @@ func TestOpcodeMetadataValidationRejectsMalformedEntries(t *testing.T) {
 	}
 }
 
-func wantOpcodeReadsTable(op opcode) bool {
+func wantOpcodeEffects(op opcode) opcodeEffects {
+	effects := opcodeEffects{classified: op < opcodeCount}
+	if wantOpcodeCallbackMask(op) {
+		return opcodeEffects{
+			classified:                  true,
+			invokesScriptOrHostCode:     true,
+			mayYield:                    true,
+			mayError:                    true,
+			allocatesOrObservesIdentity: true,
+			readsGlobals:                true,
+			writesGlobals:               true,
+			readsUpvalues:               true,
+			writesUpvalues:              true,
+			readsTables:                 true,
+			writesTables:                true,
+			readsUnknownHeap:            true,
+			writesUnknownHeap:           true,
+		}
+	}
 	switch op {
-	case opSetIndex,
-		opGetField,
+	case opLoadGlobal:
+		effects.readsGlobals = true
+	case opSetGlobal:
+		effects.writesGlobals = true
+	case opGetUpvalue:
+		effects.readsUpvalues = true
+	case opSetUpvalue:
+		effects.writesUpvalues = true
+	case opJumpIfTableHasMetatable:
+		effects.readsTables = true
+	case opNewTable, opVararg:
+		effects.allocatesOrObservesIdentity = true
+	case opClosure:
+		effects.readsUpvalues = true
+		effects.allocatesOrObservesIdentity = true
+	case opNumericForCheck:
+		effects.mayError = true
+	}
+	return effects
+}
+
+func wantOpcodeCallbackMask(op opcode) bool {
+	switch op {
+	case opGetField,
+		opSetField,
 		opGetStringField,
+		opSetStringField,
 		opGetStringFieldIndex,
+		opSetStringFieldIndex,
 		opAddStringField,
 		opSubStringField,
 		opGetIndex,
+		opSetIndex,
 		opPrepareIter,
 		opArrayNext,
 		opArrayNextJump2,
-		opJumpIfTableHasMetatable,
+		opAdd,
+		opSub,
+		opMul,
+		opDiv,
+		opMod,
+		opIDiv,
+		opPow,
+		opNeg,
+		opAddK,
+		opSubK,
+		opMulK,
+		opDivK,
+		opModK,
+		opIDivK,
+		opLen,
+		opConcat,
+		opConcatChain,
+		opEqual,
+		opNotEqual,
+		opLess,
+		opLessEqual,
+		opGreater,
+		opGreaterEqual,
+		opJumpIfNotEqualK,
+		opJumpIfNotLessK,
+		opJumpIfNotGreaterK,
+		opJumpIfLessK,
+		opJumpIfGreaterK,
+		opJumpIfNotLess,
+		opJumpIfNotGreater,
+		opJumpIfLess,
+		opJumpIfGreater,
+		opJumpIfModKNotEqualK,
 		opJumpIfStringFieldNotEqualK,
 		opJumpIfStringFieldNotGreaterK,
 		opJumpIfStringFieldGreaterK,
@@ -9646,51 +9708,7 @@ func wantOpcodeReadsTable(op opcode) bool {
 		opJumpIfStringFieldNil,
 		opJumpIfStringFieldTrue,
 		opJumpIfStringFieldNotNil,
-		opFastCall,
-		opCallMethodOne:
-		return true
-	default:
-		return false
-	}
-}
-
-func wantOpcodeWritesTable(op opcode) bool {
-	switch op {
-	case opSetField,
-		opSetStringField,
-		opSetStringFieldIndex,
-		opAddStringField,
-		opSubStringField,
-		opSetIndex,
-		opFastCall:
-		return true
-	default:
-		return false
-	}
-}
-
-func wantOpcodeAllocates(op opcode) bool {
-	switch op {
-	case opNewTable,
-		opClosure,
-		opVararg,
-		opConcat,
-		opConcatChain,
 		opCoroutineResume,
-		opCall,
-		opCallOne,
-		opCallLocalOne,
-		opCallUpvalueOne,
-		opCallMethodOne:
-		return true
-	default:
-		return false
-	}
-}
-
-func wantOpcodeMayCall(op opcode) bool {
-	switch op {
-	case opCoroutineResume,
 		opFastCall,
 		opCall,
 		opCallOne,
@@ -9701,10 +9719,6 @@ func wantOpcodeMayCall(op opcode) bool {
 	default:
 		return false
 	}
-}
-
-func wantOpcodeMayYield(op opcode) bool {
-	return wantOpcodeMayCall(op)
 }
 
 func wantDirectFrameOpcodeSupported(op opcode) bool {
