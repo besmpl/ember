@@ -1,6 +1,9 @@
 package ember
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
 type compiler struct {
 	bytecodeBuilder
@@ -21,6 +24,8 @@ type compiler struct {
 	upvalues                 map[string]int
 	upvaluesByID             map[int]int
 	upvalueDescs             []upvalueDesc
+	assignedSymbols          map[int]bool
+	stringSymbols            map[string]int
 	loops                    []loopContext
 	nextReg                  int
 	freeTemps                []int
@@ -63,6 +68,8 @@ func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (
 		localFieldArrayElemSlots: make(map[int]map[string]map[string]int),
 		localArrayElemFieldSlots: make(map[int]map[string]map[string]int),
 		selfFunctionSymbol:       -1,
+		assignedSymbols:          assignedSymbolsInStatements(source.bind, source.program.statements),
+		stringSymbols:            make(map[string]int),
 		options:                  options,
 	}
 	c.sourceText = source.source.Text
@@ -79,8 +86,157 @@ func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (
 }
 
 func (c *compiler) finalizeCompiledProto(upvalues []upvalueDesc, params int, variadic bool) (*Proto, error) {
+	c.shrinkCompiledFrameRegisters(params, variadic)
 	registers := compactedCompiledRegisterCount(c.assembledCode(), c.prototypes, c.nextReg, params)
 	return c.finalizeProto(upvalues, registers, params, variadic)
+}
+
+func (c *compiler) shrinkCompiledFrameRegisters(params int, variadic bool) {
+	if c == nil ||
+		c.parent != nil ||
+		variadic ||
+		len(c.prototypes) != 0 ||
+		len(c.upvalueDescs) != 0 ||
+		c.selfFunctionSymbol >= 0 ||
+		!bytecodeIRFrameShrinkSafe(c.ir) {
+		return
+	}
+	remap, ok := bytecodeIRLivenessRegisterRemap(c.ir, params)
+	if !ok {
+		return
+	}
+	for i := range c.ir {
+		remapBytecodeIRRegisterOperands(&c.ir[i].operands, remap)
+	}
+}
+
+func bytecodeIRFrameShrinkSafe(ir []bytecodeIRInstruction) bool {
+	for _, ins := range assembleBytecodeIR(ir) {
+		switch ins.op {
+		case opLoadConst, opLoadGlobal, opSetGlobal, opMove,
+			opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow, opConcat,
+			opEqual, opNotEqual, opLess, opLessEqual, opGreater, opGreaterEqual,
+			opAddK, opSubK, opMulK, opDivK, opModK, opIDivK,
+			opNeg, opLen,
+			opReturnOne:
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+type registerLiveInterval struct {
+	register int
+	start    int
+	end      int
+	color    int
+}
+
+func bytecodeIRLivenessRegisterRemap(ir []bytecodeIRInstruction, params int) ([]int, bool) {
+	code := assembleBytecodeIR(ir)
+	intervalByRegister := make(map[int]*registerLiveInterval)
+	touch := func(register int, pc int) {
+		if register < 0 {
+			return
+		}
+		interval := intervalByRegister[register]
+		if interval == nil {
+			interval = &registerLiveInterval{register: register, start: pc, end: pc, color: register}
+			intervalByRegister[register] = interval
+			return
+		}
+		if pc < interval.start {
+			interval.start = pc
+		}
+		if pc > interval.end {
+			interval.end = pc
+		}
+	}
+	for register := 0; register < params; register++ {
+		touch(register, 0)
+	}
+	for pc, ins := range code {
+		for _, register := range registersMatching(ins, func(register int) bool {
+			return instructionReadsRegister(ins, register) || instructionWritesRegister(ins, register)
+		}) {
+			touch(register, pc)
+		}
+	}
+	if len(intervalByRegister) == 0 {
+		return nil, false
+	}
+	intervals := make([]*registerLiveInterval, 0, len(intervalByRegister))
+	maxRegister := -1
+	for _, interval := range intervalByRegister {
+		intervals = append(intervals, interval)
+		if interval.register > maxRegister {
+			maxRegister = interval.register
+		}
+	}
+	sort.Slice(intervals, func(i, j int) bool {
+		if intervals[i].start != intervals[j].start {
+			return intervals[i].start < intervals[j].start
+		}
+		return intervals[i].register < intervals[j].register
+	})
+
+	var active []*registerLiveInterval
+	for _, interval := range intervals {
+		if interval.register < params {
+			interval.color = interval.register
+			active = append(active, interval)
+			continue
+		}
+		active = liveIntervalsActiveAt(active, interval.start)
+		used := make(map[int]bool, len(active))
+		for _, existing := range active {
+			used[existing.color] = true
+		}
+		color := params
+		for used[color] {
+			color++
+		}
+		interval.color = color
+		active = append(active, interval)
+	}
+
+	remap := make([]int, maxRegister+1)
+	changed := false
+	for register := range remap {
+		remap[register] = register
+	}
+	for _, interval := range intervals {
+		remap[interval.register] = interval.color
+		if interval.register != interval.color {
+			changed = true
+		}
+	}
+	return remap, changed
+}
+
+func liveIntervalsActiveAt(active []*registerLiveInterval, pc int) []*registerLiveInterval {
+	kept := active[:0]
+	for _, interval := range active {
+		if interval.end >= pc {
+			kept = append(kept, interval)
+		}
+	}
+	return kept
+}
+
+func remapBytecodeIRRegisterOperands(operands *bytecodeOperands, remap []int) {
+	remapOperand := func(operand *bytecodeOperand) {
+		if operand.kind != bytecodeOperandRegister || operand.value < 0 || operand.value >= len(remap) {
+			return
+		}
+		operand.value = remap[operand.value]
+	}
+	remapOperand(&operands.a)
+	remapOperand(&operands.b)
+	remapOperand(&operands.c)
+	remapOperand(&operands.d)
 }
 
 func compactedCompiledRegisterCount(code []instruction, children []*Proto, allocated int, params int) int {
@@ -109,6 +265,25 @@ func compactedCompiledRegisterCount(code []instruction, children []*Proto, alloc
 		return 0
 	}
 	return maxRegister + 1
+}
+
+func (c *compiler) addConstant(value Value) int {
+	symbol := 0
+	if value.kind == StringKind && c.stringSymbols != nil {
+		symbol = c.stringSymbol(value.stringText())
+	}
+	index := c.bytecodeBuilder.addConstant(value)
+	c.bytecodeBuilder.setConstantStringSymbol(index, symbol)
+	return index
+}
+
+func (c *compiler) stringSymbol(value string) int {
+	if symbol, ok := c.stringSymbols[value]; ok {
+		return symbol
+	}
+	symbol := len(c.stringSymbols) + 1
+	c.stringSymbols[value] = symbol
+	return symbol
 }
 
 func (c *compiler) compileStatements(statements []statement) error {
@@ -227,18 +402,6 @@ func (c *compiler) compileLoweredReturn(lowered loweredReturn) error {
 
 	list := lowered.values
 	if len(list.items) == 1 && list.items[0].kind == loweredValueSingle {
-		if callAdd, ok := c.selfUpvaluePairAddReturn(lowered.sources[list.items[0].source]); ok {
-			target := c.allocReg()
-			c.reserveRegistersThrough(target + 1)
-			desc := c.addSelfCallAddOp(selfCallAddOp{
-				baseLess:  callAdd.baseLess,
-				firstSub:  callAdd.firstSub,
-				secondSub: callAdd.secondSub,
-			})
-			c.emit(instruction{op: opCallUpvalueSelfAddKOne, a: target, b: callAdd.upvalue, c: callAdd.source, d: desc})
-			c.emit(instruction{op: opReturnOne, a: target})
-			return nil
-		}
 		if ref, ok := c.expressionLocalRef(lowered.sources[list.items[0].source]); ok {
 			c.emit(instruction{op: opReturnOne, a: ref.index})
 			return nil
@@ -371,6 +534,8 @@ func (c *compiler) compileFunctionProto(closure loweredClosure, selfFunctionSymb
 		variadic:                 closure.variadic,
 		upvalues:                 make(map[string]int),
 		upvaluesByID:             make(map[int]int),
+		assignedSymbols:          assignedSymbolsInStatements(c.bind, closure.body),
+		stringSymbols:            c.stringSymbols,
 		nextReg:                  len(closure.params),
 		options:                  c.options,
 	}
@@ -490,6 +655,11 @@ func (c *compiler) compileComparisonExpressionTo(expr comparisonExpression, targ
 }
 
 func (c *compiler) compileConcatExpressionTo(expr concatExpression, target int) error {
+	operandCount := 1 + len(expr.rest)
+	if operandCount >= 3 && target+1 >= c.nextReg {
+		return c.compileConcatChainExpressionTo(expr, target, operandCount)
+	}
+
 	if err := c.compileAdditiveExpressionTo(expr.first, target); err != nil {
 		return err
 	}
@@ -504,6 +674,28 @@ func (c *compiler) compileConcatExpressionTo(expr concatExpression, target int) 
 		c.releaseTemp(right)
 	}
 
+	return nil
+}
+
+func (c *compiler) compileConcatChainExpressionTo(expr concatExpression, target int, operandCount int) error {
+	end := target + operandCount
+	c.reserveRegistersThrough(end)
+	c.claimRegisterRange(target, end)
+
+	if err := c.compileAdditiveExpressionTo(expr.first, target); err != nil {
+		return err
+	}
+	for index, part := range expr.rest {
+		register := target + index + 1
+		if err := c.compileAdditiveExpressionTo(part, register); err != nil {
+			return err
+		}
+	}
+
+	c.emit(instruction{op: opConcatChain, a: target, b: target, c: operandCount})
+	for register := target + 1; register < end; register++ {
+		c.releaseTemp(register)
+	}
 	return nil
 }
 
@@ -704,7 +896,8 @@ func (c *compiler) compileSelectorsTo(selectors []selector, target int) error {
 		if len(selectors) >= 2 && selectors[0].field != "" && selectors[1].field != "" {
 			firstKey := c.addConstant(StringValue(selectors[0].field))
 			secondKey := c.addConstant(StringValue(selectors[1].field))
-			c.emit(instruction{op: opGetStringField2, a: target, b: target, c: firstKey, d: secondKey})
+			c.emit(instruction{op: opGetStringField, a: target, b: target, c: firstKey})
+			c.emit(instruction{op: opGetStringField, a: target, b: target, c: secondKey})
 			selectors = selectors[2:]
 			continue
 		}
@@ -748,7 +941,8 @@ func (c *compiler) compileSelectorsFromBaseTo(base int, selectors []selector, ta
 	if len(selectors) >= 2 && first.field != "" && selectors[1].field != "" {
 		firstKey := c.addConstant(StringValue(first.field))
 		secondKey := c.addConstant(StringValue(selectors[1].field))
-		c.emit(instruction{op: opGetStringField2, a: target, b: base, c: firstKey, d: secondKey})
+		c.emit(instruction{op: opGetStringField, a: target, b: base, c: firstKey})
+		c.emit(instruction{op: opGetStringField, a: target, b: target, c: secondKey})
 		return c.compileSelectorsTo(selectors[2:], target)
 	}
 	if len(selectors) >= 2 && first.field != "" && selectors[1].index != nil {
@@ -762,12 +956,6 @@ func (c *compiler) compileSelectorsFromBaseTo(base int, selectors []selector, ta
 	}
 	if first.field != "" {
 		key := c.addConstant(StringValue(first.field))
-		if slots, ok := c.localStringSlots[base]; ok {
-			if slot, ok := slots[first.field]; ok {
-				c.emit(instruction{op: opGetRowStringField, a: target, b: base, c: key, d: slot})
-				return c.compileSelectorsTo(selectors[1:], target)
-			}
-		}
 		c.emit(instruction{op: opGetStringField, a: target, b: base, c: key})
 		return c.compileSelectorsTo(selectors[1:], target)
 	}
@@ -845,10 +1033,6 @@ func (c *compiler) compileLoweredAssignment(lowered loweredAssignment) error {
 		return fmt.Errorf("compile: assignment has no targets")
 	}
 
-	if addMod, ok := c.numericAddModAssignment(lowered); ok {
-		return c.compileNumericAddModAssignment(addMod)
-	}
-
 	if c.canCompileSingleLocalAssignmentInPlace(lowered) {
 		target := lowered.targets[0]
 		ref, _ := c.resolveAssignTarget(target)
@@ -861,13 +1045,6 @@ func (c *compiler) compileLoweredAssignment(lowered loweredAssignment) error {
 	if subField, ok := c.subStringFieldAssignment(lowered); ok {
 		return c.compileSubStringFieldAssignment(subField)
 	}
-	if subAddField, ok := c.subAddStringFieldAssignment(lowered); ok {
-		return c.compileSubAddStringFieldAssignment(subAddField)
-	}
-	if addSubField2, ok := c.addSubStringField2Assignment(lowered); ok {
-		return c.compileAddSubStringField2Assignment(addSubField2)
-	}
-
 	first := c.allocReg()
 	values := make([]int, len(lowered.targets))
 	for i := range values {
@@ -1172,31 +1349,6 @@ type subStringFieldAssignment struct {
 	slot    int
 }
 
-type subAddStringFieldAssignment struct {
-	table    int
-	target   string
-	subtract expression
-	add      string
-}
-
-type addSubStringField2Assignment struct {
-	base         int
-	targetFirst  string
-	targetSecond string
-	addFirst     string
-	addSecond    string
-	subFirst     string
-	subSecond    string
-}
-
-type numericAddModAssignment struct {
-	target int
-	source int
-	mul    float64
-	idiv   float64
-	mod    float64
-}
-
 func (c *compiler) addStringFieldAssignment(lowered loweredAssignment) (addStringFieldAssignment, bool) {
 	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
 		return addStringFieldAssignment{}, false
@@ -1271,37 +1423,6 @@ func (c *compiler) subStringFieldAssignment(lowered loweredAssignment) (subStrin
 	}, true
 }
 
-func (c *compiler) subAddStringFieldAssignment(lowered loweredAssignment) (subAddStringFieldAssignment, bool) {
-	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
-		return subAddStringFieldAssignment{}, false
-	}
-	if len(lowered.targets) != 1 || len(lowered.values.items) != 1 {
-		return subAddStringFieldAssignment{}, false
-	}
-	item := lowered.values.items[0]
-	if item.kind != loweredValueSingle {
-		return subAddStringFieldAssignment{}, false
-	}
-	target := lowered.targets[0]
-	if len(target.selectors) != 1 || target.selectors[0].field == "" {
-		return subAddStringFieldAssignment{}, false
-	}
-	ref, ok := c.resolveAssignTarget(target)
-	if !ok || ref.kind != variableLocal {
-		return subAddStringFieldAssignment{}, false
-	}
-	subtract, add, ok := fieldSubAddAssignmentOperands(lowered.sources[item.source], target)
-	if !ok {
-		return subAddStringFieldAssignment{}, false
-	}
-	return subAddStringFieldAssignment{
-		table:    ref.index,
-		target:   target.selectors[0].field,
-		subtract: subtract,
-		add:      add,
-	}, true
-}
-
 func fieldAddAssignmentOperand(expr expression, target assignTarget) (expression, bool) {
 	return fieldAddSubAssignmentOperand(expr, target, additiveAdd)
 }
@@ -1340,44 +1461,6 @@ func fieldAddSubAssignmentOperand(expr expression, target assignTarget, op addit
 			}},
 		}},
 	}, true
-}
-
-func fieldSubAddAssignmentOperands(expr expression, target assignTarget) (expression, string, bool) {
-	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
-		return expression{}, "", false
-	}
-	comparison := expr.terms[0].terms[0]
-	if comparison.op != "" || comparison.right != nil || len(comparison.left.rest) != 0 {
-		return expression{}, "", false
-	}
-	additive := comparison.left.first
-	if len(additive.rest) != 2 ||
-		additive.rest[0].op != additiveSubtract ||
-		additive.rest[1].op != additiveAdd {
-		return expression{}, "", false
-	}
-	if !multiplicativeMatchesAssignTarget(additive.first, target) {
-		return expression{}, "", false
-	}
-	subtract := additive.rest[0].value
-	if !multiplicativeIsSideEffectFreeSingleValue(subtract) {
-		return expression{}, "", false
-	}
-	addBase, addField, ok := multiplicativeLocalStringField(additive.rest[1].value)
-	if !ok || addBase != target.name {
-		return expression{}, "", false
-	}
-	return expression{
-		terms: []andExpression{{
-			terms: []comparisonExpression{{
-				left: concatExpression{
-					first: additiveExpression{
-						first: subtract,
-					},
-				},
-			}},
-		}},
-	}, addField, true
 }
 
 func multiplicativeMatchesAssignTarget(expr multiplicativeExpression, target assignTarget) bool {
@@ -1421,6 +1504,21 @@ func multiplicativeLocalStringField(expr multiplicativeExpression) (string, stri
 		return "", "", false
 	}
 	return value.name, field.field, true
+}
+
+func expressionSingleMultiplicative(expr expression) (multiplicativeExpression, bool) {
+	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+		return multiplicativeExpression{}, false
+	}
+	comparison := expr.terms[0].terms[0]
+	if comparison.op != "" || comparison.right != nil || len(comparison.left.rest) != 0 {
+		return multiplicativeExpression{}, false
+	}
+	additive := comparison.left.first
+	if len(additive.rest) != 0 {
+		return multiplicativeExpression{}, false
+	}
+	return additive.first, true
 }
 
 func expressionNamedTableFieldSlots(expr expression) (map[string]int, bool) {
@@ -1648,292 +1746,6 @@ func (c *compiler) compileSubStringFieldAssignment(subField subStringFieldAssign
 	return nil
 }
 
-func (c *compiler) compileSubAddStringFieldAssignment(subAddField subAddStringFieldAssignment) error {
-	subtract := c.allocTemp()
-	if err := c.compileExpressionTo(subAddField.subtract, subtract); err != nil {
-		c.releaseTemp(subtract)
-		return err
-	}
-	target := c.addConstant(StringValue(subAddField.target))
-	add := c.addConstant(StringValue(subAddField.add))
-	targetSlot := -1
-	addSlot := -1
-	if slots, ok := c.localStringSlots[subAddField.table]; ok {
-		if slot, ok := slots[subAddField.target]; ok {
-			targetSlot = slot
-		}
-		if slot, ok := slots[subAddField.add]; ok {
-			addSlot = slot
-		}
-	}
-	desc := c.addRowFieldSubAddOp(rowFieldSubAddOp{
-		target:     target,
-		add:        add,
-		targetSlot: targetSlot,
-		addSlot:    addSlot,
-	})
-	c.emit(instruction{op: opSubAddStringField, a: subAddField.table, b: desc, c: subtract})
-	c.releaseTemp(subtract)
-	return nil
-}
-
-func (c *compiler) numericAddModAssignment(lowered loweredAssignment) (numericAddModAssignment, bool) {
-	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
-		return numericAddModAssignment{}, false
-	}
-	if len(lowered.targets) != 1 || len(lowered.values.items) != 1 {
-		return numericAddModAssignment{}, false
-	}
-	item := lowered.values.items[0]
-	if item.kind != loweredValueSingle {
-		return numericAddModAssignment{}, false
-	}
-	target := lowered.targets[0]
-	if len(target.selectors) != 0 {
-		return numericAddModAssignment{}, false
-	}
-	ref, ok := c.resolveAssignTarget(target)
-	if !ok || ref.kind != variableLocal {
-		return numericAddModAssignment{}, false
-	}
-	source, mul, idiv, mod, ok := c.numericAddModSource(lowered.sources[item.source], target.name)
-	if !ok {
-		return numericAddModAssignment{}, false
-	}
-	return numericAddModAssignment{
-		target: ref.index,
-		source: source,
-		mul:    mul,
-		idiv:   idiv,
-		mod:    mod,
-	}, true
-}
-
-func (c *compiler) numericAddModSource(expr expression, targetName string) (int, float64, float64, float64, bool) {
-	expr = optimizeExpression(expr, c.options.optimizations)
-	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
-		return 0, 0, 0, 0, false
-	}
-	comparison := expr.terms[0].terms[0]
-	if comparison.op != "" || comparison.right != nil || len(comparison.left.rest) != 0 {
-		return 0, 0, 0, 0, false
-	}
-	additive := comparison.left.first
-	if len(additive.rest) != 1 || additive.rest[0].op != additiveAdd {
-		return 0, 0, 0, 0, false
-	}
-	targetRef, ok := c.multiplicativeLocalRef(additive.first)
-	if !ok || targetRef.kind != variableLocal {
-		return 0, 0, 0, 0, false
-	}
-	if targetRef.index != c.locals[targetName] {
-		return 0, 0, 0, 0, false
-	}
-	sourceRef, mul, idiv, mod, ok := c.numericModOperand(additive.rest[0].value)
-	if !ok || sourceRef.kind != variableLocal {
-		return 0, 0, 0, 0, false
-	}
-	return sourceRef.index, mul, idiv, mod, true
-}
-
-func (c *compiler) multiplicativeLocalRef(expr multiplicativeExpression) (variableRef, bool) {
-	if len(expr.rest) != 0 {
-		return variableRef{}, false
-	}
-	value := termWithoutCastsAndGroups(expr.first)
-	if !isNamedTerm(value) {
-		return variableRef{}, false
-	}
-	return c.termLocalRef(value)
-}
-
-func (c *compiler) numericModOperand(expr multiplicativeExpression) (variableRef, float64, float64, float64, bool) {
-	if len(expr.rest) == 0 {
-		value := termWithoutCasts(expr.first)
-		if value.group == nil || len(value.selectors) != 0 {
-			return variableRef{}, 0, 0, 0, false
-		}
-		grouped, ok := expressionSingleMultiplicative(*value.group)
-		if !ok {
-			return variableRef{}, 0, 0, 0, false
-		}
-		return c.numericModOperand(grouped)
-	}
-	if len(expr.rest) != 1 || expr.rest[0].op != multiplicativeModulo {
-		return variableRef{}, 0, 0, 0, false
-	}
-	mod, ok := foldNumberTerm(expr.rest[0].value)
-	if !ok {
-		return variableRef{}, 0, 0, 0, false
-	}
-	value := termWithoutCasts(expr.first)
-	if value.group == nil || len(value.selectors) != 0 {
-		return variableRef{}, 0, 0, 0, false
-	}
-	source, mul, idiv, ok := c.numericMulMinusIDiv(*value.group)
-	if !ok {
-		return variableRef{}, 0, 0, 0, false
-	}
-	return source, mul, idiv, mod, true
-}
-
-func expressionSingleMultiplicative(expr expression) (multiplicativeExpression, bool) {
-	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
-		return multiplicativeExpression{}, false
-	}
-	comparison := expr.terms[0].terms[0]
-	if comparison.op != "" || comparison.right != nil || len(comparison.left.rest) != 0 {
-		return multiplicativeExpression{}, false
-	}
-	additive := comparison.left.first
-	if len(additive.rest) != 0 {
-		return multiplicativeExpression{}, false
-	}
-	return additive.first, true
-}
-
-func (c *compiler) numericMulMinusIDiv(expr expression) (variableRef, float64, float64, bool) {
-	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
-		return variableRef{}, 0, 0, false
-	}
-	comparison := expr.terms[0].terms[0]
-	if comparison.op != "" || comparison.right != nil || len(comparison.left.rest) != 0 {
-		return variableRef{}, 0, 0, false
-	}
-	additive := comparison.left.first
-	if len(additive.rest) != 1 || additive.rest[0].op != additiveSubtract {
-		return variableRef{}, 0, 0, false
-	}
-	source, mul, ok := c.numericLocalK(additive.first, multiplicativeMultiply)
-	if !ok {
-		return variableRef{}, 0, 0, false
-	}
-	idivSource, idiv, ok := c.numericLocalK(additive.rest[0].value, multiplicativeFloorDiv)
-	if !ok || idivSource != source {
-		return variableRef{}, 0, 0, false
-	}
-	return source, mul, idiv, true
-}
-
-func (c *compiler) numericLocalK(expr multiplicativeExpression, op multiplicativeOperator) (variableRef, float64, bool) {
-	if len(expr.rest) != 1 || expr.rest[0].op != op {
-		return variableRef{}, 0, false
-	}
-	value := termWithoutCastsAndGroups(expr.first)
-	if !isNamedTerm(value) {
-		return variableRef{}, 0, false
-	}
-	ref, ok := c.termLocalRef(value)
-	if !ok || ref.kind != variableLocal {
-		return variableRef{}, 0, false
-	}
-	number, ok := foldNumberTerm(expr.rest[0].value)
-	if !ok {
-		return variableRef{}, 0, false
-	}
-	return ref, number, true
-}
-
-func (c *compiler) compileNumericAddModAssignment(addMod numericAddModAssignment) error {
-	desc := c.addNumericAddModOp(numericAddModOp{
-		mul:  c.addConstant(NumberValue(addMod.mul)),
-		idiv: c.addConstant(NumberValue(addMod.idiv)),
-		mod:  c.addConstant(NumberValue(addMod.mod)),
-	})
-	c.emit(instruction{op: opAddNumericModK, a: addMod.target, b: addMod.source, c: desc})
-	return nil
-}
-
-func (c *compiler) addSubStringField2Assignment(lowered loweredAssignment) (addSubStringField2Assignment, bool) {
-	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
-		return addSubStringField2Assignment{}, false
-	}
-	if len(lowered.targets) != 1 || len(lowered.values.items) != 1 {
-		return addSubStringField2Assignment{}, false
-	}
-	item := lowered.values.items[0]
-	if item.kind != loweredValueSingle {
-		return addSubStringField2Assignment{}, false
-	}
-	target := lowered.targets[0]
-	if len(target.selectors) != 2 || target.selectors[0].field == "" || target.selectors[1].field == "" {
-		return addSubStringField2Assignment{}, false
-	}
-	ref, ok := c.resolveAssignTarget(target)
-	if !ok || ref.kind != variableLocal {
-		return addSubStringField2Assignment{}, false
-	}
-	addFirst, addSecond, subFirst, subSecond, ok := field2AddSubAssignmentOperands(lowered.sources[item.source], target)
-	if !ok {
-		return addSubStringField2Assignment{}, false
-	}
-	return addSubStringField2Assignment{
-		base:         ref.index,
-		targetFirst:  target.selectors[0].field,
-		targetSecond: target.selectors[1].field,
-		addFirst:     addFirst,
-		addSecond:    addSecond,
-		subFirst:     subFirst,
-		subSecond:    subSecond,
-	}, true
-}
-
-func field2AddSubAssignmentOperands(expr expression, target assignTarget) (string, string, string, string, bool) {
-	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
-		return "", "", "", "", false
-	}
-	comparison := expr.terms[0].terms[0]
-	if comparison.op != "" || comparison.right != nil || len(comparison.left.rest) != 0 {
-		return "", "", "", "", false
-	}
-	additive := comparison.left.first
-	if len(additive.rest) != 2 || additive.rest[0].op != additiveAdd || additive.rest[1].op != additiveSubtract {
-		return "", "", "", "", false
-	}
-	base, first, second, ok := multiplicativeLocalStringField2(additive.first)
-	if !ok || base != target.name || first != target.selectors[0].field || second != target.selectors[1].field {
-		return "", "", "", "", false
-	}
-	addBase, addFirst, addSecond, ok := multiplicativeLocalStringField2(additive.rest[0].value)
-	if !ok || addBase != target.name {
-		return "", "", "", "", false
-	}
-	subBase, subFirst, subSecond, ok := multiplicativeLocalStringField2(additive.rest[1].value)
-	if !ok || subBase != target.name {
-		return "", "", "", "", false
-	}
-	return addFirst, addSecond, subFirst, subSecond, true
-}
-
-func multiplicativeLocalStringField2(expr multiplicativeExpression) (string, string, string, bool) {
-	if len(expr.rest) != 0 {
-		return "", "", "", false
-	}
-	value := termWithoutCastsAndGroups(expr.first)
-	if value.name == "" || len(value.selectors) != 2 {
-		return "", "", "", false
-	}
-	first := value.selectors[0]
-	second := value.selectors[1]
-	if first.field == "" || first.index != nil || second.field == "" || second.index != nil {
-		return "", "", "", false
-	}
-	return value.name, first.field, second.field, true
-}
-
-func (c *compiler) compileAddSubStringField2Assignment(addSubField addSubStringField2Assignment) error {
-	desc := c.addStringField2AddSubOp(stringField2AddSubOp{
-		targetFirst:  c.addConstant(StringValue(addSubField.targetFirst)),
-		targetSecond: c.addConstant(StringValue(addSubField.targetSecond)),
-		addFirst:     c.addConstant(StringValue(addSubField.addFirst)),
-		addSecond:    c.addConstant(StringValue(addSubField.addSecond)),
-		subFirst:     c.addConstant(StringValue(addSubField.subFirst)),
-		subSecond:    c.addConstant(StringValue(addSubField.subSecond)),
-	})
-	c.emit(instruction{op: opAddSubStringField2, a: addSubField.base, b: desc})
-	return nil
-}
-
 func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value int) error {
 	if len(target.selectors) == 0 {
 		ref, ok := c.resolveAssignTarget(target)
@@ -1955,12 +1767,6 @@ func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value in
 		last := target.selectors[0]
 		if last.field != "" {
 			key := c.addConstant(StringValue(last.field))
-			if slots, ok := c.localStringSlots[ref.index]; ok {
-				if slot, ok := slots[last.field]; ok {
-					c.emit(instruction{op: opSetRowStringField, a: ref.index, b: key, c: value, d: slot})
-					return nil
-				}
-			}
 			c.emit(instruction{op: opSetStringField, a: ref.index, b: key, c: value})
 			return nil
 		}
@@ -1978,7 +1784,10 @@ func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value in
 		if first.field != "" && second.field != "" {
 			firstKey := c.addConstant(StringValue(first.field))
 			secondKey := c.addConstant(StringValue(second.field))
-			c.emit(instruction{op: opSetStringField2, a: ref.index, b: firstKey, c: secondKey, d: value})
+			table := c.allocTemp()
+			c.emit(instruction{op: opGetStringField, a: table, b: ref.index, c: firstKey})
+			c.emit(instruction{op: opSetStringField, a: table, b: secondKey, c: value})
+			c.releaseTemp(table)
 			return nil
 		}
 		if first.field != "" && second.index != nil {
@@ -2005,12 +1814,6 @@ func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value in
 	last := target.selectors[len(target.selectors)-1]
 	if last.field != "" {
 		key := c.addConstant(StringValue(last.field))
-		if slots, ok := c.localStringSlots[table]; ok {
-			if slot, ok := slots[last.field]; ok {
-				c.emit(instruction{op: opSetRowStringField, a: table, b: key, c: value, d: slot})
-				return nil
-			}
-		}
 		c.emit(instruction{op: opSetStringField, a: table, b: key, c: value})
 		return nil
 	}
@@ -2105,11 +1908,7 @@ func (c *compiler) compileStringTagElseIfChain(branch loweredIfStatement) (bool,
 	metatableJump := c.emit(instruction{op: opJumpIfTableHasMetatable, a: chain.table})
 	tag := c.allocTemp()
 	field := c.addConstant(StringValue(chain.field))
-	if chain.slot >= 0 {
-		c.emit(instruction{op: opGetRowStringField, a: tag, b: chain.table, c: field, d: chain.slot})
-	} else {
-		c.emit(instruction{op: opGetStringField, a: tag, b: chain.table, c: field})
-	}
+	c.emit(instruction{op: opGetStringField, a: tag, b: chain.table, c: field})
 
 	endJumps := make([]int, 0, len(chain.arms)+1)
 	for _, arm := range chain.arms {
@@ -2329,6 +2128,18 @@ func (c *compiler) compileConditionJumpIfFalse(expr expression) (int, bool, erro
 		jump := c.emit(instruction{op: opJumpIfNotLessK, a: left, b: constant})
 		releaseLeft()
 		return jump, true, nil
+	case comparisonGreater:
+		jump := c.emit(instruction{op: opJumpIfNotGreaterK, a: left, b: constant})
+		releaseLeft()
+		return jump, true, nil
+	case comparisonLessEqual:
+		jump := c.emit(instruction{op: opJumpIfGreaterK, a: left, b: constant})
+		releaseLeft()
+		return jump, true, nil
+	case comparisonGreaterEqual:
+		jump := c.emit(instruction{op: opJumpIfLessK, a: left, b: constant})
+		releaseLeft()
+		return jump, true, nil
 	default:
 		releaseLeft()
 		return 0, false, nil
@@ -2345,6 +2156,10 @@ func (c *compiler) compileRegisterNumericJumpIfFalse(comparison comparisonExpres
 		op = opJumpIfNotLess
 	case comparisonGreater:
 		op = opJumpIfNotGreater
+	case comparisonLessEqual:
+		op = opJumpIfGreater
+	case comparisonGreaterEqual:
+		op = opJumpIfLess
 	default:
 		return 0, false, nil
 	}
@@ -2364,11 +2179,14 @@ func (c *compiler) compileRegisterNumericJumpIfFalse(comparison comparisonExpres
 }
 
 type andChainBranchPlan struct {
-	op    opcode
-	a     int
-	b     int
-	field string
-	slot  int
+	op         opcode
+	a          int
+	b          int
+	constant   float64
+	field      string
+	slot       int
+	rightField string
+	rightSlot  int
 }
 
 func (c *compiler) compileAndChainJumpIfFalse(expr expression) (int, bool, error) {
@@ -2394,11 +2212,31 @@ func (c *compiler) compileAndChainJumpIfFalse(expr expression) (int, bool, error
 				b:  field,
 				c:  plan.slot,
 			}))
-		case opJumpIfNotLess, opJumpIfNotGreater:
+		case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
+			if plan.field != "" {
+				falseJumps = append(falseJumps, c.emitAndChainFieldPairBranch(plan))
+			} else {
+				falseJumps = append(falseJumps, c.emit(instruction{
+					op: plan.op,
+					a:  plan.a,
+					b:  plan.b,
+				}))
+			}
+		case opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
+			constant := c.addConstant(NumberValue(plan.constant))
 			falseJumps = append(falseJumps, c.emit(instruction{
 				op: plan.op,
 				a:  plan.a,
-				b:  plan.b,
+				b:  constant,
+			}))
+		case opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK:
+			field := c.addConstant(StringValue(plan.field))
+			value := c.addConstant(NumberValue(plan.constant))
+			falseJumps = append(falseJumps, c.emit(instruction{
+				op: plan.op,
+				a:  plan.a,
+				b:  field,
+				c:  value,
 			}))
 		default:
 			return 0, false, nil
@@ -2455,12 +2293,22 @@ func (c *compiler) andChainBranchPlan(comparison comparisonExpression) (andChain
 			}, true
 		}
 	}
+	if plan, ok := c.andChainStringFieldNumericPlan(comparison); ok {
+		return plan, true
+	}
+	if plan, ok := c.andChainStringFieldPairNumericPlan(comparison); ok {
+		return plan, true
+	}
 	var op opcode
 	switch comparison.op {
 	case comparisonLess:
 		op = opJumpIfNotLess
 	case comparisonGreater:
 		op = opJumpIfNotGreater
+	case comparisonLessEqual:
+		op = opJumpIfGreater
+	case comparisonGreaterEqual:
+		op = opJumpIfLess
 	default:
 		return andChainBranchPlan{}, false
 	}
@@ -2468,19 +2316,126 @@ func (c *compiler) andChainBranchPlan(comparison comparisonExpression) (andChain
 	if !ok {
 		return andChainBranchPlan{}, false
 	}
-	right, ok := c.concatLocalRef(*comparison.right)
+	if right, ok := c.concatLocalRef(*comparison.right); ok {
+		return andChainBranchPlan{
+			op: op,
+			a:  left.index,
+			b:  right.index,
+		}, true
+	}
+	right, ok := foldNumberConcat(*comparison.right)
 	if !ok {
 		return andChainBranchPlan{}, false
 	}
+	switch comparison.op {
+	case comparisonLess:
+		op = opJumpIfNotLessK
+	case comparisonGreater:
+		op = opJumpIfNotGreaterK
+	case comparisonLessEqual:
+		op = opJumpIfGreaterK
+	case comparisonGreaterEqual:
+		op = opJumpIfLessK
+	default:
+		return andChainBranchPlan{}, false
+	}
 	return andChainBranchPlan{
-		op: op,
-		a:  left.index,
-		b:  right.index,
+		op:       op,
+		a:        left.index,
+		constant: right,
+	}, true
+}
+
+func (c *compiler) emitAndChainFieldPairBranch(plan andChainBranchPlan) int {
+	left := c.allocTemp()
+	c.emitLocalStringFieldLoad(left, plan.a, plan.field, plan.slot)
+	right := c.allocTemp()
+	c.emitLocalStringFieldLoad(right, plan.b, plan.rightField, plan.rightSlot)
+	jump := c.emit(instruction{op: plan.op, a: left, b: right})
+	c.releaseTemp(right)
+	c.releaseTemp(left)
+	return jump
+}
+
+func (c *compiler) emitLocalStringFieldLoad(target int, table int, field string, slot int) {
+	_ = slot
+	key := c.addConstant(StringValue(field))
+	c.emit(instruction{op: opGetStringField, a: target, b: table, c: key})
+}
+
+func (c *compiler) andChainStringFieldNumericPlan(comparison comparisonExpression) (andChainBranchPlan, bool) {
+	if comparison.right == nil {
+		return andChainBranchPlan{}, false
+	}
+	table, field, ok := c.concatLocalStringFieldRef(comparison.left)
+	if !ok {
+		return andChainBranchPlan{}, false
+	}
+	right, ok := foldNumberConcat(*comparison.right)
+	if !ok {
+		return andChainBranchPlan{}, false
+	}
+	var op opcode
+	switch comparison.op {
+	case comparisonGreater:
+		op = opJumpIfStringFieldNotGreaterK
+	case comparisonLessEqual:
+		op = opJumpIfStringFieldGreaterK
+	default:
+		return andChainBranchPlan{}, false
+	}
+	return andChainBranchPlan{
+		op:       op,
+		a:        table.index,
+		constant: right,
+		field:    field,
+		slot:     -1,
+	}, true
+}
+
+func (c *compiler) andChainStringFieldPairNumericPlan(comparison comparisonExpression) (andChainBranchPlan, bool) {
+	if comparison.right == nil {
+		return andChainBranchPlan{}, false
+	}
+	leftTable, leftField, ok := c.concatLocalStringFieldRef(comparison.left)
+	if !ok {
+		return andChainBranchPlan{}, false
+	}
+	rightTable, rightField, ok := c.concatLocalStringFieldRef(*comparison.right)
+	if !ok {
+		return andChainBranchPlan{}, false
+	}
+	var op opcode
+	switch comparison.op {
+	case comparisonLess:
+		op = opJumpIfNotLess
+	case comparisonGreater:
+		op = opJumpIfNotGreater
+	case comparisonLessEqual:
+		op = opJumpIfGreater
+	case comparisonGreaterEqual:
+		op = opJumpIfLess
+	default:
+		return andChainBranchPlan{}, false
+	}
+	return andChainBranchPlan{
+		op:         op,
+		a:          leftTable.index,
+		b:          rightTable.index,
+		field:      leftField,
+		slot:       c.localRowStringFieldSlot(leftTable.index, leftField),
+		rightField: rightField,
+		rightSlot:  c.localRowStringFieldSlot(rightTable.index, rightField),
 	}, true
 }
 
 func (c *compiler) localRowStringFieldSlot(register int, field string) int {
 	if slots, ok := c.localRowStringSlots[register]; ok {
+		if slot, ok := slots[field]; ok {
+			return slot
+		}
+	}
+	if slots, ok := c.localStringSlots[register]; ok {
 		if slot, ok := slots[field]; ok {
 			return slot
 		}
@@ -2561,14 +2516,6 @@ func (c *compiler) compileStringFieldEqualityJumpIfFalse(expr expression) (int, 
 func (c *compiler) emitStringFieldEqualityJump(condition stringFieldEqualityCondition) int {
 	field := c.addConstant(StringValue(condition.field))
 	value := c.addConstant(condition.value)
-	if condition.slot >= 0 {
-		desc := c.addRowFieldEqualOp(rowFieldEqualOp{
-			field: field,
-			value: value,
-			slot:  condition.slot,
-		})
-		return c.emit(instruction{op: opJumpIfRowStringFieldNotEqualK, a: condition.table, b: desc})
-	}
 	return c.emit(instruction{op: opJumpIfStringFieldNotEqualK, a: condition.table, b: field, c: value})
 }
 
@@ -2583,51 +2530,18 @@ type rowStringFieldPairEqualityCondition struct {
 }
 
 func (c *compiler) compileRowStringFieldPairEqualityJumpIfFalse(expr expression) (int, bool, error) {
-	if len(expr.terms) != 1 || len(expr.terms[0].terms) == 0 {
-		return 0, false, nil
-	}
-	conditions := make([]rowStringFieldPairEqualityCondition, 0, len(expr.terms[0].terms))
-	for _, comparison := range expr.terms[0].terms {
-		condition, ok := c.rowStringFieldPairEqualityCondition(comparison)
-		if !ok {
-			return 0, false, nil
-		}
-		conditions = append(conditions, condition)
-	}
-	if len(conditions) == 1 {
-		return c.emitRowStringFieldPairEqualityJump(conditions[0]), true, nil
-	}
-	falseJumps := make([]int, 0, len(conditions))
-	for _, condition := range conditions {
-		falseJumps = append(falseJumps, c.emitRowStringFieldPairEqualityJump(condition))
-	}
-	passJump := c.emitJump()
-	falseTarget := c.pc()
-	for _, jump := range falseJumps {
-		c.patchJump(jump, falseTarget)
-	}
-	exitJump := c.emitJump()
-	c.patchJump(passJump, c.pc())
-	return exitJump, true, nil
+	_ = expr
+	return 0, false, nil
+}
+
+func (c *compiler) compileRowStringFieldPairEqualityJumpIfFalseOld(expr expression) (int, bool, error) {
+	_ = expr
+	return 0, false, nil
 }
 
 func (c *compiler) emitRowStringFieldPairEqualityJump(condition rowStringFieldPairEqualityCondition) int {
-	desc := c.addRowFieldPairOp(rowFieldPairOp{
-		leftField:  c.addConstant(StringValue(condition.leftField)),
-		rightField: c.addConstant(StringValue(condition.rightField)),
-		leftSlot:   condition.leftSlot,
-		rightSlot:  condition.rightSlot,
-	})
-	op := opJumpIfRowStringFieldNotEqualField
-	if condition.op == comparisonNotEqual {
-		op = opJumpIfRowStringFieldEqualField
-	}
-	return c.emit(instruction{
-		op: op,
-		a:  condition.leftTable,
-		b:  desc,
-		c:  condition.rightTable,
-	})
+	_ = condition
+	return 0
 }
 
 func (c *compiler) rowStringFieldPairEqualityCondition(expr comparisonExpression) (rowStringFieldPairEqualityCondition, bool) {
@@ -2760,27 +2674,6 @@ func (c *compiler) compileStringFieldNumericJumpIfFalse(expr expression) (int, b
 	}
 	fieldConstant := c.addConstant(StringValue(field))
 	valueConstant := c.addConstant(NumberValue(right))
-	slot := -1
-	if slots, ok := c.localRowStringSlots[table.index]; ok {
-		if fieldSlot, ok := slots[field]; ok {
-			slot = fieldSlot
-		}
-	}
-	if slot >= 0 {
-		desc := c.addRowFieldEqualOp(rowFieldEqualOp{
-			field: fieldConstant,
-			value: valueConstant,
-			slot:  slot,
-		})
-		switch comparison.op {
-		case comparisonGreater:
-			jump := c.emit(instruction{op: opJumpIfRowStringFieldNotGreaterK, a: table.index, b: desc})
-			return jump, true, nil
-		case comparisonLessEqual:
-			jump := c.emit(instruction{op: opJumpIfRowStringFieldGreaterK, a: table.index, b: desc})
-			return jump, true, nil
-		}
-	}
 	switch comparison.op {
 	case comparisonGreater:
 		jump := c.emit(instruction{op: opJumpIfStringFieldNotGreaterK, a: table.index, b: fieldConstant, c: valueConstant})
@@ -2810,62 +2703,19 @@ func (c *compiler) compileRegisterStringFieldNumericJumpIfFalse(expr expression)
 		return 0, false, err
 	}
 	fieldConstant := c.addConstant(StringValue(field))
-	slot := -1
-	if slots, ok := c.localRowStringSlots[table.index]; ok {
-		if fieldSlot, ok := slots[field]; ok {
-			slot = fieldSlot
-		}
-	}
-	var jump int
-	if slot >= 0 {
-		desc := c.addRowFieldRegisterOp(rowFieldRegisterOp{
-			field: fieldConstant,
-			slot:  slot,
-		})
-		jump = c.emit(instruction{op: opJumpIfRowStringFieldNotGreaterR, a: table.index, b: desc, c: left})
-	} else {
-		jump = c.emit(instruction{op: opJumpIfStringFieldNotGreaterR, a: table.index, b: fieldConstant, c: left})
-	}
+	jump := c.emit(instruction{op: opJumpIfStringFieldNotGreaterR, a: table.index, b: fieldConstant, c: left})
 	releaseLeft()
 	return jump, true, nil
 }
 
 func (c *compiler) compileRowStringFieldPairNumericJumpIfFalse(expr expression) (int, bool, error) {
-	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
-		return 0, false, nil
-	}
-	comparison := expr.terms[0].terms[0]
-	if comparison.op != comparisonLess || comparison.right == nil {
-		return 0, false, nil
-	}
-	leftTable, leftField, ok := c.concatLocalStringFieldRef(comparison.left)
-	if !ok {
-		return 0, false, nil
-	}
-	rightTable, rightField, ok := c.concatLocalStringFieldRef(*comparison.right)
-	if !ok || leftTable != rightTable {
-		return 0, false, nil
-	}
-	slots, ok := c.localRowStringSlots[leftTable.index]
-	if !ok {
-		return 0, false, nil
-	}
-	leftSlot, ok := slots[leftField]
-	if !ok {
-		return 0, false, nil
-	}
-	rightSlot, ok := slots[rightField]
-	if !ok {
-		return 0, false, nil
-	}
-	desc := c.addRowFieldPairOp(rowFieldPairOp{
-		leftField:  c.addConstant(StringValue(leftField)),
-		rightField: c.addConstant(StringValue(rightField)),
-		leftSlot:   leftSlot,
-		rightSlot:  rightSlot,
-	})
-	jump := c.emit(instruction{op: opJumpIfRowStringFieldNotLessField, a: leftTable.index, b: desc})
-	return jump, true, nil
+	_ = expr
+	return 0, false, nil
+}
+
+func (c *compiler) compileRowStringFieldPairNumericJumpIfFalseOld(expr expression) (int, bool, error) {
+	_ = expr
+	return 0, false, nil
 }
 
 func (c *compiler) compileStringFieldTruthyJumpIfFalse(expr expression) (int, bool, error) {
@@ -3119,8 +2969,7 @@ func (c *compiler) compileFor(stmt forStatement) error {
 	for _, jump := range loop.continueJumps {
 		c.patchJump(jump, incrementStart)
 	}
-	c.emit(instruction{op: opAdd, a: loopVar, b: loopVar, c: step})
-	c.emit(instruction{op: opJump, b: conditionStart})
+	c.emit(instruction{op: opNumericForLoop, a: loopVar, b: step, d: conditionStart})
 
 	exit := c.pc()
 	c.patchJumpD(jumpExit, exit)
@@ -3407,7 +3256,7 @@ func (c *compiler) resolveSymbolUpvalue(symbolID int) (int, bool) {
 	}
 
 	if register, ok := c.parent.symbolRegisters[symbolID]; ok {
-		return c.addSymbolUpvalue(symbolID, upvalueDesc{local: true, index: register}), true
+		return c.addSymbolUpvalue(symbolID, upvalueDesc{local: true, index: register, copy: c.canCopyParentLocalUpvalue(symbolID)}), true
 	}
 	parentUpvalue, ok := c.parent.resolveSymbolUpvalue(symbolID)
 	if !ok {
@@ -3454,6 +3303,31 @@ func (c *compiler) addSymbolUpvalue(symbolID int, desc upvalueDesc) int {
 	c.upvaluesByID[symbolID] = upvalue
 	c.upvalueDescs = append(c.upvalueDescs, desc)
 	return upvalue
+}
+
+func (c *compiler) symbolAssigned(symbolID int) bool {
+	return c != nil && c.assignedSymbols != nil && c.assignedSymbols[symbolID]
+}
+
+func (c *compiler) canCopyParentLocalUpvalue(symbolID int) bool {
+	if c == nil || c.parent == nil {
+		return false
+	}
+	symbol, ok := c.bindSymbol(symbolID)
+	if !ok {
+		return false
+	}
+	if symbol.kind != symbolLocal && symbol.kind != symbolParameter {
+		return false
+	}
+	return !c.symbolAssigned(symbolID) && !c.parent.symbolAssigned(symbolID)
+}
+
+func (c *compiler) bindSymbol(symbolID int) (boundSymbol, bool) {
+	if c == nil || symbolID < 0 || symbolID >= len(c.bind.symbols) {
+		return boundSymbol{}, false
+	}
+	return c.bind.symbols[symbolID], true
 }
 
 func (c *compiler) claimSymbol(name string, kind symbolKind) (boundSymbol, bool) {
@@ -3517,6 +3391,9 @@ func (c *compiler) compileLoweredCallToResultsDirect(lowered loweredCall, args [
 	if c.selectVarargCountCall(lowered, args, resultCount) {
 		return c.compileSelectVarargCountToResults(target, resultCount)
 	}
+	if c.rawLenIntrinsicCall(lowered) {
+		return c.compileBaseIntrinsicCallToResults(nativeFuncRawLen, lowered, args, target, resultCount)
+	}
 	if intrinsic, ok := c.tableIntrinsicCall(lowered); ok {
 		return c.compileBaseIntrinsicCallToResults(intrinsic, lowered, args, target, resultCount)
 	}
@@ -3529,14 +3406,8 @@ func (c *compiler) compileLoweredCallToResultsDirect(lowered loweredCall, args [
 	if method, ok := c.methodOneResultCall(lowered, resultCount); ok {
 		return c.compileMethodOneResultCallToResults(method, lowered, args, target)
 	}
-	if call, ok := c.tableFieldKeyOneResultCall(lowered, resultCount); ok {
-		return c.compileTableFieldKeyOneResultCallToResults(call, lowered, args, target)
-	}
 	if local, ok := c.localOneResultCall(lowered, resultCount); ok {
 		return c.compileLocalOneResultCallToResults(local, lowered, args, target)
-	}
-	if upvalue, ok := c.selfUpvalueOneResultCall(lowered, resultCount); ok {
-		return c.compileSelfUpvalueOneResultCallToResults(upvalue, lowered, args, target)
 	}
 	if upvalue, ok := c.upvalueOneResultCall(lowered, resultCount); ok {
 		return c.compileUpvalueOneResultCallToResults(upvalue, lowered, args, target)
@@ -3637,18 +3508,21 @@ func (c *compiler) tableFieldKeyOneResultCall(lowered loweredCall, resultCount i
 	if !ok {
 		return tableFieldKeyOneResultCall{}, false
 	}
-	keySlot := -1
-	if slots, ok := c.localStringSlots[keyBaseRef.index]; ok {
-		if slot, ok := slots[keyTerm.selectors[0].field]; ok {
-			keySlot = slot
-		}
-	}
 	return tableFieldKeyOneResultCall{
 		table:    table.index,
 		keyBase:  keyBase,
 		keyField: keyTerm.selectors[0].field,
-		keySlot:  keySlot,
+		keySlot:  c.localStringFieldSlot(keyBaseRef.index, keyTerm.selectors[0].field),
 	}, true
+}
+
+func (c *compiler) localStringFieldSlot(register int, field string) int {
+	if slots, ok := c.localStringSlots[register]; ok {
+		if slot, ok := slots[field]; ok {
+			return slot
+		}
+	}
+	return -1
 }
 
 func (c *compiler) compileTableFieldKeyOneResultCallToResults(
@@ -3670,7 +3544,9 @@ func (c *compiler) compileTableFieldKeyOneResultCallToResults(
 	}
 	c.claimRegister(target)
 	key := c.addConstant(StringValue(call.keyField))
-	c.emit(instruction{op: opCallTableFieldKeyOne, a: target, b: call.table, c: key, d: encodeTableFieldKeyCall(argCount, call.keySlot)})
+	c.emit(instruction{op: opGetStringField, a: keySource, b: keySource, c: key})
+	c.emit(instruction{op: opGetIndex, a: target, b: call.table, c: keySource})
+	c.emit(instruction{op: opCallOne, a: target, b: target, c: argCount})
 	return nil
 }
 
@@ -3697,8 +3573,14 @@ func (c *compiler) selectVarargCountCall(lowered loweredCall, args []expression,
 func (c *compiler) compileSelectVarargCountToResults(target int, resultCount int) error {
 	c.reserveRegistersThrough(target + 1)
 	c.claimRegister(target)
-	c.emit(instruction{op: opSelectVarargCount, a: target, d: resultCount})
+	c.emit(instruction{op: opFastCall, a: target, b: int(nativeFuncSelect), c: 0, d: resultCount})
 	return nil
+}
+
+func (c *compiler) rawLenIntrinsicCall(lowered loweredCall) bool {
+	return c.options.optimizations.enabled(optimizationBytecodePeephole) &&
+		lowered.receiver == nil &&
+		c.isUnboundGlobalName(lowered.target, "rawlen")
 }
 
 func (c *compiler) isUnboundGlobalName(term term, name string) bool {
@@ -3823,7 +3705,9 @@ func (c *compiler) compileSelfUpvalueOneResultCallToResults(upvalue int, lowered
 	if source, constant, ok := c.selfCallSubtractConstantArg(args); ok {
 		c.reserveRegistersThrough(target + 1)
 		c.claimRegister(target)
-		c.emit(instruction{op: opCallUpvalueSelfKOne, a: target, b: upvalue, c: source, d: constant})
+		c.emit(instruction{op: opMove, a: target, b: source})
+		c.emit(instruction{op: opSubK, a: target, b: target, c: constant})
+		c.emit(instruction{op: opCallUpvalueOne, a: target, b: upvalue, c: target, d: 1})
 		return nil
 	}
 	span := len(args)
@@ -3837,7 +3721,7 @@ func (c *compiler) compileSelfUpvalueOneResultCallToResults(upvalue int, lowered
 		}
 	}
 	c.claimRegister(target)
-	c.emit(instruction{op: opCallUpvalueSelfOne, a: target, b: upvalue, c: target, d: len(args)})
+	c.emit(instruction{op: opCallUpvalueOne, a: target, b: upvalue, c: target, d: len(args)})
 	return nil
 }
 
@@ -3954,30 +3838,30 @@ func (c *compiler) selfCallSubtractConstantArg(args []expression) (int, int, boo
 	return ref.index, c.addConstant(NumberValue(number)), true
 }
 
-func (c *compiler) tableIntrinsicCall(lowered loweredCall) (opcode, bool) {
+func (c *compiler) tableIntrinsicCall(lowered loweredCall) (nativeFuncID, bool) {
 	return c.baseFieldIntrinsicCall(lowered, "table")
 }
 
-func (c *compiler) coroutineIntrinsicCall(lowered loweredCall) (opcode, bool) {
+func (c *compiler) coroutineIntrinsicCall(lowered loweredCall) (nativeFuncID, bool) {
 	return c.baseFieldIntrinsicCall(lowered, "coroutine")
 }
 
-func (c *compiler) mathIntrinsicCall(lowered loweredCall) (opcode, bool) {
+func (c *compiler) mathIntrinsicCall(lowered loweredCall) (nativeFuncID, bool) {
 	return c.baseFieldIntrinsicCall(lowered, "math")
 }
 
-func (c *compiler) baseFieldIntrinsicCall(lowered loweredCall, globalName string) (opcode, bool) {
+func (c *compiler) baseFieldIntrinsicCall(lowered loweredCall, globalName string) (nativeFuncID, bool) {
 	if !c.options.optimizations.enabled(optimizationBytecodePeephole) ||
 		lowered.receiver != nil ||
 		!c.isUnboundBaseField(lowered.target, globalName) {
-		return 0, false
+		return nativeFuncUnknown, false
 	}
 	field := lowered.target.selectors[0].field
 	intrinsic, ok := baseFieldIntrinsic(globalName, field)
 	if !ok {
-		return 0, false
+		return nativeFuncUnknown, false
 	}
-	return intrinsic.op, true
+	return intrinsic.nativeID, true
 }
 
 func selfNumericPairAddClosureBase(closure loweredClosure) (float64, bool) {
@@ -4053,7 +3937,7 @@ func (c *compiler) isUnboundBaseField(term term, name string) bool {
 }
 
 func (c *compiler) compileBaseIntrinsicCallToResults(
-	op opcode,
+	nativeID nativeFuncID,
 	lowered loweredCall,
 	args []expression,
 	target int,
@@ -4083,7 +3967,7 @@ func (c *compiler) compileBaseIntrinsicCallToResults(
 	} else {
 		c.claimRegister(target)
 	}
-	c.emit(instruction{op: op, a: target, b: len(args), d: resultCount})
+	c.emit(instruction{op: opFastCall, a: target, b: int(nativeID), c: len(args), d: resultCount})
 	return nil
 }
 
@@ -4217,6 +4101,179 @@ func copyLocals(locals map[string]int) map[string]int {
 		copied[name] = register
 	}
 	return copied
+}
+
+func assignedSymbolsInStatements(bind bindResult, statements []statement) map[int]bool {
+	assigned := make(map[int]bool)
+	collectAssignedSymbols(bind, statements, assigned)
+	if len(assigned) == 0 {
+		return nil
+	}
+	return assigned
+}
+
+func collectAssignedSymbols(bind bindResult, statements []statement, assigned map[int]bool) {
+	for _, stmt := range statements {
+		switch {
+		case stmt.local != nil:
+			for _, value := range stmt.local.values {
+				collectAssignedSymbolsInExpression(bind, value, assigned)
+			}
+		case stmt.assign != nil:
+			for _, target := range stmt.assign.targets {
+				collectAssignedSymbol(bind, target, assigned)
+			}
+			for _, value := range stmt.assign.values {
+				collectAssignedSymbolsInExpression(bind, value, assigned)
+			}
+		case stmt.call != nil:
+			collectAssignedSymbolsInTerm(bind, *stmt.call, assigned)
+		case stmt.funcDecl != nil:
+			collectAssignedSymbol(bind, stmt.funcDecl.target, assigned)
+			collectAssignedSymbols(bind, stmt.funcDecl.statements, assigned)
+		case stmt.localFunc != nil:
+			collectAssignedSymbols(bind, stmt.localFunc.statements, assigned)
+		case stmt.ifStmt != nil:
+			collectAssignedSymbolsInExpression(bind, stmt.ifStmt.condition, assigned)
+			collectAssignedSymbols(bind, stmt.ifStmt.thenStatements, assigned)
+			collectAssignedSymbols(bind, stmt.ifStmt.elseStatements, assigned)
+		case stmt.while != nil:
+			collectAssignedSymbolsInExpression(bind, stmt.while.condition, assigned)
+			collectAssignedSymbols(bind, stmt.while.statements, assigned)
+		case stmt.forLoop != nil:
+			collectAssignedSymbolsInExpression(bind, stmt.forLoop.start, assigned)
+			collectAssignedSymbolsInExpression(bind, stmt.forLoop.limit, assigned)
+			if stmt.forLoop.step != nil {
+				collectAssignedSymbolsInExpression(bind, *stmt.forLoop.step, assigned)
+			}
+			collectAssignedSymbols(bind, stmt.forLoop.statements, assigned)
+		case stmt.genericFor != nil:
+			for _, value := range stmt.genericFor.values {
+				collectAssignedSymbolsInExpression(bind, value, assigned)
+			}
+			collectAssignedSymbols(bind, stmt.genericFor.statements, assigned)
+		case stmt.repeat != nil:
+			collectAssignedSymbols(bind, stmt.repeat.statements, assigned)
+			collectAssignedSymbolsInExpression(bind, stmt.repeat.condition, assigned)
+		case stmt.block != nil:
+			collectAssignedSymbols(bind, stmt.block.statements, assigned)
+		case stmt.ret != nil:
+			for _, value := range stmt.ret.values {
+				collectAssignedSymbolsInExpression(bind, value, assigned)
+			}
+		}
+	}
+}
+
+func collectAssignedSymbol(bind bindResult, target assignTarget, assigned map[int]bool) {
+	if len(target.selectors) != 0 {
+		for _, selector := range target.selectors {
+			if selector.index != nil {
+				collectAssignedSymbolsInExpression(bind, *selector.index, assigned)
+			}
+		}
+		return
+	}
+	if use, ok := bind.useAt(target.start, target.end); ok {
+		assigned[use.symbol] = true
+	}
+}
+
+func collectAssignedSymbolsInExpression(bind bindResult, expr expression, assigned map[int]bool) {
+	for _, term := range expr.terms {
+		collectAssignedSymbolsInAndExpression(bind, term, assigned)
+	}
+}
+
+func collectAssignedSymbolsInAndExpression(bind bindResult, expr andExpression, assigned map[int]bool) {
+	for _, term := range expr.terms {
+		collectAssignedSymbolsInComparisonExpression(bind, term, assigned)
+	}
+}
+
+func collectAssignedSymbolsInComparisonExpression(bind bindResult, expr comparisonExpression, assigned map[int]bool) {
+	collectAssignedSymbolsInConcatExpression(bind, expr.left, assigned)
+	if expr.right != nil {
+		collectAssignedSymbolsInConcatExpression(bind, *expr.right, assigned)
+	}
+}
+
+func collectAssignedSymbolsInConcatExpression(bind bindResult, expr concatExpression, assigned map[int]bool) {
+	collectAssignedSymbolsInAdditiveExpression(bind, expr.first, assigned)
+	for _, part := range expr.rest {
+		collectAssignedSymbolsInAdditiveExpression(bind, part, assigned)
+	}
+}
+
+func collectAssignedSymbolsInAdditiveExpression(bind bindResult, expr additiveExpression, assigned map[int]bool) {
+	collectAssignedSymbolsInMultiplicativeExpression(bind, expr.first, assigned)
+	for _, part := range expr.rest {
+		collectAssignedSymbolsInMultiplicativeExpression(bind, part.value, assigned)
+	}
+}
+
+func collectAssignedSymbolsInMultiplicativeExpression(bind bindResult, expr multiplicativeExpression, assigned map[int]bool) {
+	collectAssignedSymbolsInTerm(bind, expr.first, assigned)
+	for _, part := range expr.rest {
+		collectAssignedSymbolsInTerm(bind, part.value, assigned)
+	}
+}
+
+func collectAssignedSymbolsInTerm(bind bindResult, term term, assigned map[int]bool) {
+	if term.table != nil {
+		collectAssignedSymbolsInTableExpression(bind, *term.table, assigned)
+	}
+	if term.function != nil {
+		collectAssignedSymbols(bind, term.function.statements, assigned)
+	}
+	if term.ifExpr != nil {
+		collectAssignedSymbolsInExpression(bind, term.ifExpr.condition, assigned)
+		collectAssignedSymbolsInExpression(bind, term.ifExpr.thenValue, assigned)
+		collectAssignedSymbolsInExpression(bind, term.ifExpr.elseValue, assigned)
+	}
+	if term.call != nil {
+		collectAssignedSymbolsInCallExpression(bind, *term.call, assigned)
+	}
+	if term.unaryNot != nil {
+		collectAssignedSymbolsInTerm(bind, *term.unaryNot, assigned)
+	}
+	if term.unaryMinus != nil {
+		collectAssignedSymbolsInTerm(bind, *term.unaryMinus, assigned)
+	}
+	if term.unaryLen != nil {
+		collectAssignedSymbolsInTerm(bind, *term.unaryLen, assigned)
+	}
+	if term.power != nil {
+		collectAssignedSymbolsInTerm(bind, term.power.base, assigned)
+		collectAssignedSymbolsInTerm(bind, term.power.exponent, assigned)
+	}
+	if term.group != nil {
+		collectAssignedSymbolsInExpression(bind, *term.group, assigned)
+	}
+	for _, selector := range term.selectors {
+		if selector.index != nil {
+			collectAssignedSymbolsInExpression(bind, *selector.index, assigned)
+		}
+	}
+}
+
+func collectAssignedSymbolsInTableExpression(bind bindResult, table tableExpression, assigned map[int]bool) {
+	for _, field := range table.fields {
+		if field.key != nil {
+			collectAssignedSymbolsInExpression(bind, *field.key, assigned)
+		}
+		collectAssignedSymbolsInExpression(bind, field.value, assigned)
+	}
+}
+
+func collectAssignedSymbolsInCallExpression(bind bindResult, call callExpression, assigned map[int]bool) {
+	collectAssignedSymbolsInTerm(bind, call.target, assigned)
+	if call.receiver != nil {
+		collectAssignedSymbolsInTerm(bind, *call.receiver, assigned)
+	}
+	for _, arg := range call.args {
+		collectAssignedSymbolsInExpression(bind, arg, assigned)
+	}
 }
 
 func copyLocalStringSlots(slots map[int]map[string]int) map[int]map[string]int {

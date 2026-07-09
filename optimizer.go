@@ -1,5 +1,7 @@
 package ember
 
+import "math"
+
 type optimizationCategory string
 
 const (
@@ -27,13 +29,6 @@ func (o optimizationOptions) enabled(category optimizationCategory) bool {
 	return !o.disabledCategories[category]
 }
 
-func optimizeBytecode(code []instruction, options optimizationOptions) []instruction {
-	if !options.enabled(optimizationBytecodePeephole) {
-		return append([]instruction(nil), code...)
-	}
-	return peepholeBytecode(code)
-}
-
 func optimizeBytecodeIR(ir []bytecodeIRInstruction, options optimizationOptions) []bytecodeIRInstruction {
 	return optimizeBytecodeIRWithConstants(ir, nil, options)
 }
@@ -43,8 +38,8 @@ func optimizeBytecodeIRWithConstants(ir []bytecodeIRInstruction, constants []Val
 }
 
 type bytecodeIROptimizationFacts struct {
-	constants        []Value
-	numericAddModOps []numericAddModOp
+	constants         []Value
+	capturedRegisters []bool
 }
 
 func optimizeBytecodeIRWithFacts(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts, options optimizationOptions) []bytecodeIRInstruction {
@@ -52,8 +47,14 @@ func optimizeBytecodeIRWithFacts(ir []bytecodeIRInstruction, facts bytecodeIROpt
 		return append([]bytecodeIRInstruction(nil), ir...)
 	}
 	optimized := append([]bytecodeIRInstruction(nil), ir...)
-	optimized = applyBytecodeIRRemovalSet(optimized, bytecodeIRPeepholeRemovalSet(optimized, assembleBytecodeIR(optimized)))
+	optimized = applyBytecodeIRRemovalSet(optimized, bytecodeIRPeepholeRemovalSet(optimized, assembleBytecodeIRRaw(optimized)))
+	optimized = simplifyBytecodeIRControlFlow(optimized, facts)
+	optimized = fuseBytecodeIRRowFieldArrayIndex(optimized)
+	optimized = propagateBytecodeIRSingleUseMoves(optimized)
+	optimized = coalesceBytecodeIRMoveProducers(optimized, facts.capturedRegisters)
+	optimized = hoistBytecodeIRLoopInvariantHeaderLoads(optimized)
 	optimized = applyBytecodeIRRemovalSet(optimized, bytecodeIRDeadCodeRemovalSet(optimized, facts))
+	optimized = simplifyBytecodeIRControlFlow(optimized, facts)
 	return optimized
 }
 
@@ -72,8 +73,12 @@ func applyBytecodeIRRemovalSet(ir []bytecodeIRInstruction, remove []bool) []byte
 	return optimized
 }
 
+func fuseBytecodeIRRowFieldArrayIndex(ir []bytecodeIRInstruction) []bytecodeIRInstruction {
+	return ir
+}
+
 func bytecodeIRDeadCodeRemovalSet(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts) []bool {
-	code := assembleBytecodeIR(ir)
+	code := assembleBytecodeIRRaw(ir)
 	remove := make([]bool, len(ir))
 	numberFacts := bytecodeIRNumberFactsBefore(code, facts, bytecodeIRBlockOrder(ir))
 	liveness := bytecodeIRLiveness(ir)
@@ -114,23 +119,19 @@ func instructionAllowsDeadCodeCleanupInBlock(ins instruction) bool {
 	switch ins.op {
 	case opLoadConst, opMove, opJumpIfFalse, opJump, opReturnOne, opReturn,
 		opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow, opNeg,
-		opAddK, opSubK, opMulK, opDivK, opModK, opIDivK, opAddNumericModK,
-		opTableInsert, opTableRemove, opCoroutineResume, opMathMin,
+		opAddK, opSubK, opMulK, opDivK, opModK, opIDivK,
+		opCoroutineResume, opFastCall,
 		opPrepareIter, opArrayNext, opArrayNextJump2,
-		opNumericForCheck, opJumpIfNotEqualK, opJumpIfNotLessK,
-		opJumpIfNotLess, opJumpIfNotGreater, opJumpIfModKNotEqualK,
+		opNumericForCheck, opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK,
+		opJumpIfLessK, opJumpIfGreaterK, opJumpIfNotLess, opJumpIfNotGreater,
+		opJumpIfLess, opJumpIfGreater, opJumpIfModKNotEqualK,
 		opJumpIfTableHasMetatable,
-		opJumpIfStringFieldNotEqualK, opJumpIfRowStringFieldNotEqualK,
-		opJumpIfRowStringFieldNotEqualField, opJumpIfRowStringFieldEqualField,
 		opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK,
-		opJumpIfRowStringFieldNotGreaterK, opJumpIfRowStringFieldGreaterK,
-		opJumpIfStringFieldNotGreaterR, opJumpIfRowStringFieldNotGreaterR,
-		opJumpIfRowStringFieldNotLessField,
 		opJumpIfStringFieldFalse, opJumpIfStringFieldNil,
 		opJumpIfStringFieldTrue, opJumpIfStringFieldNotNil,
 		opGetField, opSetField, opGetIndex, opSetIndex, opGetStringField, opSetStringField,
-		opGetRowStringField, opSetRowStringField, opGetStringField2, opSetStringField2,
-		opGetStringFieldIndex, opSetStringFieldIndex:
+		opGetStringFieldIndex, opSetStringFieldIndex,
+		opAddStringField, opSubStringField:
 		return true
 	case opCall:
 		return true
@@ -169,8 +170,6 @@ func instructionCanRemoveWhenResultDead(ins instruction, numberFacts registerSet
 		return numberFacts[ins.b] && numberFacts[ins.c]
 	case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
 		return numberFacts[ins.b] && constantIsNumber(facts, ins.c)
-	case opAddNumericModK:
-		return numberFacts[ins.a] && numberFacts[ins.b] && numericAddModConstantsAreNumbers(facts, ins.c)
 	case opNeg:
 		return numberFacts[ins.b]
 	default:
@@ -228,21 +227,11 @@ func instructionProducesNumber(ins instruction, numberFacts registerSet, facts b
 		return numberFacts[ins.b] && numberFacts[ins.c]
 	case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
 		return numberFacts[ins.b] && constantIsNumber(facts, ins.c)
-	case opAddNumericModK:
-		return numberFacts[ins.a] && numberFacts[ins.b] && numericAddModConstantsAreNumbers(facts, ins.c)
 	case opNeg:
 		return numberFacts[ins.b]
 	default:
 		return false
 	}
-}
-
-func numericAddModConstantsAreNumbers(facts bytecodeIROptimizationFacts, index int) bool {
-	if index < 0 || index >= len(facts.numericAddModOps) {
-		return false
-	}
-	desc := facts.numericAddModOps[index]
-	return constantIsNumber(facts, desc.mul) && constantIsNumber(facts, desc.idiv) && constantIsNumber(facts, desc.mod)
 }
 
 func constantIsNumber(facts bytecodeIROptimizationFacts, index int) bool {
@@ -268,6 +257,469 @@ func bytecodeIRPeepholeRemovalSet(ir []bytecodeIRInstruction, code []instruction
 		}
 	}
 	return remove
+}
+
+func simplifyBytecodeIRControlFlow(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts) []bytecodeIRInstruction {
+	if len(ir) == 0 {
+		return ir
+	}
+	if !bytecodeIRHasControlFlowSimplificationWork(ir) {
+		return ir
+	}
+	optimized := append([]bytecodeIRInstruction(nil), ir...)
+	for pass := 0; pass <= len(ir); pass++ {
+		changed := threadBytecodeIRJumpTargets(optimized)
+		if foldBytecodeIRConstantBranches(optimized, facts) {
+			changed = true
+		}
+		remove := bytecodeIRUnreachableRemovalSet(optimized)
+		if hasRemovedInstructions(remove) {
+			optimized = applyBytecodeIRRemovalSet(optimized, remove)
+			changed = true
+		}
+		remove = bytecodeIRJumpToNextInstructions(optimized)
+		if hasRemovedInstructions(remove) {
+			optimized = applyBytecodeIRRemovalSet(optimized, remove)
+			changed = true
+		}
+		if !changed {
+			return optimized
+		}
+	}
+	return optimized
+}
+
+func bytecodeIRHasControlFlowSimplificationWork(ir []bytecodeIRInstruction) bool {
+	for pc, ins := range ir {
+		switch opcodeControlFlow(ins.op) {
+		case opcodeControlJump, opcodeControlBranch:
+			return true
+		case opcodeControlReturn:
+			if pc+1 < len(ir) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func threadBytecodeIRJumpTargets(ir []bytecodeIRInstruction) bool {
+	changed := false
+	for pc := range ir {
+		target, ok := bytecodeIRJumpTarget(ir[pc])
+		if !ok {
+			continue
+		}
+		threaded, ok := bytecodeIRThreadedJumpTarget(ir, target)
+		if ok && threaded != target && setBytecodeIRJumpTarget(&ir[pc], threaded) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+func bytecodeIRThreadedJumpTarget(ir []bytecodeIRInstruction, target int) (int, bool) {
+	if target < 0 || target >= len(ir) {
+		return target, false
+	}
+	seen := make([]bool, len(ir))
+	for target >= 0 && target < len(ir) && ir[target].op == opJump {
+		if seen[target] {
+			return target, false
+		}
+		seen[target] = true
+		next, ok := bytecodeIRJumpTarget(ir[target])
+		if !ok || next < 0 || next >= len(ir) {
+			return target, false
+		}
+		target = next
+	}
+	return target, true
+}
+
+func foldBytecodeIRConstantBranches(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts) bool {
+	if len(facts.constants) == 0 || !bytecodeIRHasJumpIfFalse(ir) {
+		return false
+	}
+	constantFacts := bytecodeIRConstantFactsBefore(ir, facts)
+	changed := false
+	for pc, ins := range ir {
+		if ins.op != opJumpIfFalse {
+			continue
+		}
+		constant, ok := constantFacts[pc][ins.operands.a.value]
+		if !ok || constant < 0 || constant >= len(facts.constants) {
+			continue
+		}
+		target, ok := bytecodeIRJumpTarget(ins)
+		if !ok {
+			continue
+		}
+		if facts.constants[constant].truthy() {
+			target = pc + 1
+		}
+		ir[pc] = lowerInstructionToBytecodeIR(instruction{op: opJump, b: target}, ins.source)
+		changed = true
+	}
+	return changed
+}
+
+func bytecodeIRHasJumpIfFalse(ir []bytecodeIRInstruction) bool {
+	for _, ins := range ir {
+		if ins.op == opJumpIfFalse {
+			return true
+		}
+	}
+	return false
+}
+
+func bytecodeIRConstantFactsBefore(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts) []map[int]int {
+	code := assembleBytecodeIRRaw(ir)
+	factsBefore := make([]map[int]int, len(ir))
+	for _, block := range bytecodeIRBlockOrder(ir) {
+		registerConstants := make(map[int]int)
+		for pc := block.start; pc < block.end; pc++ {
+			factsBefore[pc] = copyRegisterConstants(registerConstants)
+			applyInstructionConstantFacts(registerConstants, code[pc], facts)
+		}
+	}
+	for pc := range factsBefore {
+		if factsBefore[pc] == nil {
+			factsBefore[pc] = make(map[int]int)
+		}
+	}
+	return factsBefore
+}
+
+func applyInstructionConstantFacts(registerConstants map[int]int, ins instruction, facts bytecodeIROptimizationFacts) {
+	if instructionClearsAllNumberFacts(ins) {
+		clear(registerConstants)
+		return
+	}
+	sourceConstant, sourceKnown := registerConstants[ins.b]
+	for _, register := range registersMatching(ins, func(register int) bool {
+		return instructionWritesRegister(ins, register)
+	}) {
+		delete(registerConstants, register)
+	}
+	if opcodeMayCall(ins.op) {
+		for register := range registerConstants {
+			if register >= 0 && register < len(facts.capturedRegisters) && facts.capturedRegisters[register] {
+				delete(registerConstants, register)
+			}
+		}
+	}
+	switch ins.op {
+	case opLoadConst:
+		registerConstants[ins.a] = ins.b
+	case opMove:
+		if sourceKnown {
+			registerConstants[ins.a] = sourceConstant
+		}
+	}
+}
+
+func copyRegisterConstants(registerConstants map[int]int) map[int]int {
+	copied := make(map[int]int, len(registerConstants))
+	for register, constant := range registerConstants {
+		copied[register] = constant
+	}
+	return copied
+}
+
+func bytecodeIRUnreachableRemovalSet(ir []bytecodeIRInstruction) []bool {
+	remove := make([]bool, len(ir))
+	if len(ir) == 0 {
+		return remove
+	}
+	code := assembleBytecodeIRRaw(ir)
+	reachable := make([]bool, len(ir))
+	work := []int{0}
+	for len(work) > 0 {
+		pc := work[len(work)-1]
+		work = work[:len(work)-1]
+		if pc < 0 || pc >= len(ir) || reachable[pc] {
+			continue
+		}
+		reachable[pc] = true
+		for _, successor := range instructionSuccessors(code, pc) {
+			if successor >= 0 && successor < len(ir) && !reachable[successor] {
+				work = append(work, successor)
+			}
+		}
+	}
+	for pc := range remove {
+		remove[pc] = !reachable[pc]
+	}
+	return remove
+}
+
+func setBytecodeIRJumpTarget(ins *bytecodeIRInstruction, target int) bool {
+	switch opcodeJumpTarget(ins.op) {
+	case opcodeJumpTargetB:
+		if ins.operands.b.kind != bytecodeOperandJumpTarget {
+			return false
+		}
+		ins.operands.b.value = target
+		return true
+	case opcodeJumpTargetD:
+		if ins.operands.d.kind != bytecodeOperandJumpTarget {
+			return false
+		}
+		ins.operands.d.value = target
+		return true
+	default:
+		return false
+	}
+}
+
+func propagateBytecodeIRSingleUseMoves(ir []bytecodeIRInstruction) []bytecodeIRInstruction {
+	if len(ir) == 0 {
+		return ir
+	}
+	optimized := append([]bytecodeIRInstruction(nil), ir...)
+	code := assembleBytecodeIRRaw(optimized)
+	remove := make([]bool, len(ir))
+	liveness := bytecodeIRLiveness(optimized)
+	for _, live := range liveness {
+		block := live.block
+		for pc := block.start; pc < block.end; pc++ {
+			move := code[pc]
+			if move.op != opMove || move.a == move.b {
+				continue
+			}
+			usePC, ok := singleUseMoveReadPC(code, pc+1, block.end, live.liveOut, move.a, move.b)
+			if !ok {
+				continue
+			}
+			rewritten, ok := replaceInstructionReadRegister(code[usePC], move.a, move.b)
+			if !ok {
+				continue
+			}
+			code[usePC] = rewritten
+			optimized[usePC] = lowerInstructionToBytecodeIR(rewritten, optimized[usePC].source)
+			remove[pc] = true
+		}
+	}
+	return applyBytecodeIRRemovalSet(optimized, remove)
+}
+
+func singleUseMoveReadPC(code []instruction, start int, end int, liveOut registerSet, target int, source int) (int, bool) {
+	usePC := -1
+	for pc := start; pc < end; pc++ {
+		ins := code[pc]
+		if usePC < 0 && instructionWritesRegister(ins, source) {
+			return -1, false
+		}
+		if instructionReadsRegister(ins, target) {
+			if usePC >= 0 {
+				return -1, false
+			}
+			usePC = pc
+		}
+		if instructionWritesRegister(ins, target) {
+			if usePC < 0 {
+				return -1, false
+			}
+			return usePC, true
+		}
+	}
+	if usePC < 0 || liveOut[target] {
+		return -1, false
+	}
+	return usePC, true
+}
+
+func replaceInstructionReadRegister(ins instruction, from int, to int) (instruction, bool) {
+	replace := func(slot *int) bool {
+		if *slot != from {
+			return false
+		}
+		*slot = to
+		return true
+	}
+	changed := false
+	switch ins.op {
+	case opJumpIfFalse, opReturnOne:
+		changed = replace(&ins.a)
+	case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow, opConcat,
+		opEqual, opNotEqual, opLess, opLessEqual, opGreater, opGreaterEqual:
+		if ins.a == ins.b || ins.a == ins.c {
+			return ins, false
+		}
+		changed = replace(&ins.b) || changed
+		changed = replace(&ins.c) || changed
+	case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
+		if ins.a == ins.b {
+			return ins, false
+		}
+		changed = replace(&ins.b)
+	case opReturn:
+		if ins.b < 0 {
+			return ins, false
+		}
+		if from >= ins.a && from < ins.a+ins.b {
+			return ins, false
+		}
+	default:
+		return ins, false
+	}
+	if !changed {
+		return ins, false
+	}
+	return ins, true
+}
+
+func coalesceBytecodeIRMoveProducers(ir []bytecodeIRInstruction, capturedRegisters []bool) []bytecodeIRInstruction {
+	if len(ir) < 2 {
+		return ir
+	}
+	optimized := append([]bytecodeIRInstruction(nil), ir...)
+	code := assembleBytecodeIRRaw(optimized)
+	remove := make([]bool, len(ir))
+	liveness := bytecodeIRLiveness(optimized)
+	for _, live := range liveness {
+		block := live.block
+		for pc := block.start + 1; pc < block.end; pc++ {
+			move := code[pc]
+			if move.op != opMove || move.a == move.b {
+				continue
+			}
+			if move.b >= 0 && move.b < len(capturedRegisters) && capturedRegisters[move.b] {
+				continue
+			}
+			if !registerDeadAfterMoveInBlock(code, pc, block.end, live.liveOut, move.b) {
+				continue
+			}
+			producerPC := pc - 1
+			producer := code[producerPC]
+			if instructionReadsRegister(producer, move.a) || instructionWritesRegister(producer, move.a) {
+				continue
+			}
+			rewritten, ok := replaceInstructionWrittenRegister(producer, move.b, move.a)
+			if !ok {
+				continue
+			}
+			code[producerPC] = rewritten
+			optimized[producerPC] = lowerInstructionToBytecodeIR(rewritten, optimized[producerPC].source)
+			remove[pc] = true
+		}
+	}
+	return applyBytecodeIRRemovalSet(optimized, remove)
+}
+
+func registerDeadAfterMoveInBlock(code []instruction, movePC int, blockEnd int, liveOut registerSet, register int) bool {
+	if killed, known := registerKilledBeforeRead(code[movePC+1:blockEnd], register); known {
+		return killed
+	}
+	return !liveOut[register]
+}
+
+func replaceInstructionWrittenRegister(ins instruction, from int, to int) (instruction, bool) {
+	if from == to {
+		return ins, false
+	}
+	if !singleResultProducerCanRetarget(ins) || ins.a != from {
+		return ins, false
+	}
+	if instructionReadsRegister(ins, to) {
+		return ins, false
+	}
+	ins.a = to
+	return ins, true
+}
+
+func singleResultProducerCanRetarget(ins instruction) bool {
+	switch ins.op {
+	case opLoadConst, opLoadGlobal, opMove,
+		opNewTable, opClosure, opGetUpvalue,
+		opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow, opConcat,
+		opEqual, opNotEqual, opLess, opLessEqual, opGreater, opGreaterEqual,
+		opAddK, opSubK, opMulK, opDivK, opModK, opIDivK,
+		opNeg, opLen:
+		return true
+	default:
+		return false
+	}
+}
+
+func hoistBytecodeIRLoopInvariantHeaderLoads(ir []bytecodeIRInstruction) []bytecodeIRInstruction {
+	if len(ir) < 3 {
+		return ir
+	}
+	optimized := append([]bytecodeIRInstruction(nil), ir...)
+	code := assembleBytecodeIRRaw(optimized)
+	for loopEnd, backedge := range code {
+		loopStart, ok := loopLocalPathBackedgeTarget(backedge, loopEnd)
+		if !ok || loopStart < 1 || loopStart+1 >= loopEnd {
+			continue
+		}
+		load := code[loopStart]
+		if load.op != opGetStringField {
+			continue
+		}
+		if !loopHeaderLoadHasNoMetatableGuard(code, loopStart, loopEnd, load.b) {
+			continue
+		}
+		if loopHasInvariantHeaderLoadBarrier(code, loopStart, loopEnd, load) {
+			continue
+		}
+		rewritten := backedge
+		switch backedge.op {
+		case opJump:
+			rewritten.b = loopStart + 1
+		case opNumericForLoop:
+			rewritten.d = loopStart + 1
+		default:
+			continue
+		}
+		code[loopEnd] = rewritten
+		optimized[loopEnd] = lowerInstructionToBytecodeIR(rewritten, optimized[loopEnd].source)
+	}
+	return optimized
+}
+
+func loopLocalPathBackedgeTarget(ins instruction, loopEnd int) (int, bool) {
+	var target int
+	switch ins.op {
+	case opJump:
+		target = ins.b
+	case opNumericForLoop:
+		target = ins.d
+	default:
+		return 0, false
+	}
+	return target, target >= 0 && target < loopEnd
+}
+
+func loopHeaderLoadHasNoMetatableGuard(code []instruction, loopStart int, loopEnd int, base int) bool {
+	if loopStart <= 0 {
+		return false
+	}
+	guard := code[loopStart-1]
+	if guard.op != opJumpIfTableHasMetatable || guard.a != base {
+		return false
+	}
+	target, ok := instructionJumpTarget(guard)
+	return ok && target > loopEnd
+}
+
+func loopHasInvariantHeaderLoadBarrier(code []instruction, loopStart int, loopEnd int, load instruction) bool {
+	for pc := loopStart + 1; pc < loopEnd; pc++ {
+		ins := code[pc]
+		if opcodeMayCall(ins.op) || opcodeMayYield(ins.op) ||
+			opcodeWritesTable(ins.op) || opcodeWritesGlobal(ins.op) ||
+			opcodeAllocates(ins.op) {
+			return true
+		}
+		if opcodeReadsTable(ins.op) {
+			return true
+		}
+		if instructionWritesRegister(ins, load.a) || instructionWritesRegister(ins, load.b) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasRemovedInstructions(remove []bool) bool {
@@ -343,13 +795,26 @@ func optimizeExpression(expr expression, options optimizationOptions) expression
 	if !options.enabled(optimizationHIRSimplify) {
 		return expr
 	}
-	if number, ok := foldNumberExpression(expr); ok {
-		return numberLiteralExpression(number)
+	if value, ok := foldConstantExpression(expr); ok {
+		return valueLiteralExpression(value)
 	}
 	return expr
 }
 
 func numberLiteralExpression(number float64) expression {
+	return valueLiteralExpression(NumberValue(number))
+}
+
+func valueLiteralExpression(value Value) expression {
+	literal := term{}
+	switch value.kind {
+	case NumberKind:
+		number := value.number
+		literal.number = &number
+	default:
+		value := value
+		literal.lit = &value
+	}
 	return expression{
 		terms: []andExpression{
 			{
@@ -358,7 +823,7 @@ func numberLiteralExpression(number float64) expression {
 						left: concatExpression{
 							first: additiveExpression{
 								first: multiplicativeExpression{
-									first: term{number: &number},
+									first: literal,
 								},
 							},
 						},
@@ -367,6 +832,205 @@ func numberLiteralExpression(number float64) expression {
 			},
 		},
 	}
+}
+
+func foldConstantExpression(expr expression) (Value, bool) {
+	if len(expr.terms) != 1 {
+		return NilValue(), false
+	}
+	and := expr.terms[0]
+	if len(and.terms) != 1 {
+		return NilValue(), false
+	}
+	comparison := and.terms[0]
+	if comparison.op != "" || comparison.right != nil {
+		return NilValue(), false
+	}
+	return foldConstantConcat(comparison.left)
+}
+
+func foldConstantConcat(expr concatExpression) (Value, bool) {
+	value, ok := foldConstantAdditive(expr.first)
+	if !ok {
+		return NilValue(), false
+	}
+	if len(expr.rest) == 0 {
+		return value, true
+	}
+	for _, part := range expr.rest {
+		right, ok := foldConstantAdditive(part)
+		if !ok {
+			return NilValue(), false
+		}
+		text, err := valuesConcat(value, right)
+		if err != nil {
+			return NilValue(), false
+		}
+		value = StringValue(text)
+	}
+	return value, true
+}
+
+func foldConstantAdditive(expr additiveExpression) (Value, bool) {
+	value, ok := foldConstantMultiplicative(expr.first)
+	if !ok {
+		return NilValue(), false
+	}
+	if len(expr.rest) == 0 {
+		return value, true
+	}
+	left, ok := numericOperandValue(value)
+	if !ok {
+		return NilValue(), false
+	}
+	for _, part := range expr.rest {
+		rightValue, ok := foldConstantMultiplicative(part.value)
+		if !ok {
+			return NilValue(), false
+		}
+		right, ok := numericOperandValue(rightValue)
+		if !ok {
+			return NilValue(), false
+		}
+		switch part.op {
+		case additiveAdd:
+			left += right
+		case additiveSubtract:
+			left -= right
+		default:
+			return NilValue(), false
+		}
+	}
+	return NumberValue(left), true
+}
+
+func foldConstantMultiplicative(expr multiplicativeExpression) (Value, bool) {
+	value, ok := foldConstantTerm(expr.first)
+	if !ok {
+		return NilValue(), false
+	}
+	if len(expr.rest) == 0 {
+		return value, true
+	}
+	left, ok := numericOperandValue(value)
+	if !ok {
+		return NilValue(), false
+	}
+	for _, part := range expr.rest {
+		rightValue, ok := foldConstantTerm(part.value)
+		if !ok {
+			return NilValue(), false
+		}
+		right, ok := numericOperandValue(rightValue)
+		if !ok {
+			return NilValue(), false
+		}
+		switch part.op {
+		case multiplicativeMultiply:
+			left *= right
+		case multiplicativeDivide:
+			left /= right
+		case multiplicativeModulo:
+			left = left - math.Floor(left/right)*right
+		case multiplicativeFloorDiv:
+			left = math.Floor(left / right)
+		default:
+			return NilValue(), false
+		}
+	}
+	return NumberValue(left), true
+}
+
+func foldConstantTerm(expr term) (Value, bool) {
+	if len(expr.selectors) != 0 {
+		return NilValue(), false
+	}
+	if expr.power != nil {
+		base, ok := foldConstantTerm(expr.power.base)
+		if !ok {
+			return NilValue(), false
+		}
+		exponent, ok := foldConstantTerm(expr.power.exponent)
+		if !ok {
+			return NilValue(), false
+		}
+		baseNumber, baseOK := numericOperandValue(base)
+		exponentNumber, exponentOK := numericOperandValue(exponent)
+		if !baseOK || !exponentOK {
+			return NilValue(), false
+		}
+		return NumberValue(math.Pow(baseNumber, exponentNumber)), true
+	}
+	if expr.number != nil {
+		return NumberValue(*expr.number), true
+	}
+	if expr.lit != nil {
+		return *expr.lit, true
+	}
+	if expr.unaryNot != nil {
+		value, ok := foldConstantTerm(*expr.unaryNot)
+		if !ok {
+			return NilValue(), false
+		}
+		return BoolValue(!value.truthy()), true
+	}
+	if expr.unaryMinus != nil {
+		value, ok := foldConstantTerm(*expr.unaryMinus)
+		if !ok {
+			return NilValue(), false
+		}
+		number, ok := numericOperandValue(value)
+		if !ok {
+			return NilValue(), false
+		}
+		return NumberValue(-number), true
+	}
+	if expr.unaryLen != nil {
+		return foldConstantLength(*expr.unaryLen)
+	}
+	if expr.group != nil {
+		return foldConstantExpression(*expr.group)
+	}
+	return NilValue(), false
+}
+
+func foldConstantLength(expr term) (Value, bool) {
+	if len(expr.selectors) != 0 {
+		return NilValue(), false
+	}
+	if expr.lit != nil && expr.lit.kind == StringKind {
+		return NumberValue(float64(len(expr.lit.stringText()))), true
+	}
+	if expr.table != nil {
+		length, ok := foldConstantTableLength(*expr.table)
+		if ok {
+			return NumberValue(float64(length)), true
+		}
+	}
+	if expr.group != nil {
+		value, ok := foldConstantExpression(*expr.group)
+		if ok && value.kind == StringKind {
+			return NumberValue(float64(len(value.stringText()))), true
+		}
+	}
+	return NilValue(), false
+}
+
+func foldConstantTableLength(table tableExpression) (int, bool) {
+	lowered := lowerTable(table)
+	if len(lowered.fields) == 0 {
+		return 0, true
+	}
+	for index, field := range lowered.fields {
+		if field.kind != loweredTableFieldArray || field.arrayIndex != index+1 {
+			return 0, false
+		}
+		value, ok := foldConstantExpression(field.value)
+		if !ok || value.kind == NilKind {
+			return 0, false
+		}
+	}
+	return len(lowered.fields), true
 }
 
 func foldNumberExpression(expr expression) (float64, bool) {
@@ -428,6 +1092,10 @@ func foldNumberMultiplicative(expr multiplicativeExpression) (float64, bool) {
 			value *= right
 		case multiplicativeDivide:
 			value /= right
+		case multiplicativeModulo:
+			value = value - math.Floor(value/right)*right
+		case multiplicativeFloorDiv:
+			value = math.Floor(value / right)
 		default:
 			return 0, false
 		}
@@ -438,6 +1106,17 @@ func foldNumberMultiplicative(expr multiplicativeExpression) (float64, bool) {
 func foldNumberTerm(expr term) (float64, bool) {
 	if len(expr.selectors) != 0 {
 		return 0, false
+	}
+	if expr.power != nil {
+		base, ok := foldNumberTerm(expr.power.base)
+		if !ok {
+			return 0, false
+		}
+		exponent, ok := foldNumberTerm(expr.power.exponent)
+		if !ok {
+			return 0, false
+		}
+		return math.Pow(base, exponent), true
 	}
 	if expr.number != nil {
 		return *expr.number, true
@@ -450,47 +1129,6 @@ func foldNumberTerm(expr term) (float64, bool) {
 		return foldNumberExpression(*expr.group)
 	}
 	return 0, false
-}
-
-func peepholeBytecode(code []instruction) []instruction {
-	if bytecodeHasControlTransfers(code) {
-		return append([]instruction(nil), code...)
-	}
-
-	optimized := make([]instruction, 0, len(code))
-	for i := 0; i < len(code); i++ {
-		ins := code[i]
-		if ins.op == opMove && ins.a == ins.b {
-			continue
-		}
-		if i+1 < len(code) && isDeadMoveRoundTrip(code, i) {
-			i++
-			continue
-		}
-		optimized = append(optimized, ins)
-	}
-	return optimized
-}
-
-func bytecodeHasControlTransfers(code []instruction) bool {
-	for _, ins := range code {
-		if opcodeHasJumpTarget(ins.op) {
-			return true
-		}
-	}
-	return false
-}
-
-func isDeadMoveRoundTrip(code []instruction, first int) bool {
-	left := code[first]
-	right := code[first+1]
-	if left.op != opMove || right.op != opMove {
-		return false
-	}
-	if left.a != right.b || left.b != right.a || left.a == left.b {
-		return false
-	}
-	return registerDeadAfter(code[first+2:], left.a)
 }
 
 func registerDeadAfter(code []instruction, register int) bool {
@@ -511,20 +1149,16 @@ func instructionReadsRegister(ins instruction, register int) bool {
 		return ins.b == register
 	case opSetGlobal:
 		return ins.b == register
-	case opSetField, opSetStringField, opSetRowStringField:
+	case opSetField, opSetStringField:
 		return ins.a == register || ins.c == register
-	case opSetStringField2:
-		return ins.a == register || ins.d == register
+	case opGetField, opGetStringField:
+		return ins.b == register
 	case opSetStringFieldIndex:
 		return ins.a == register || ins.c == register || ins.d == register
-	case opGetField, opGetStringField, opGetRowStringField, opGetStringField2:
-		return ins.b == register
 	case opGetStringFieldIndex:
 		return ins.b == register || ins.d == register
-	case opAddStringField, opSubStringField, opSubAddStringField:
+	case opAddStringField, opSubStringField:
 		return ins.a == register || ins.c == register
-	case opAddSubStringField2:
-		return ins.a == register
 	case opSetIndex:
 		return ins.a == register || ins.b == register || ins.c == register
 	case opGetIndex:
@@ -540,31 +1174,30 @@ func instructionReadsRegister(ins instruction, register int) bool {
 	case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow, opConcat,
 		opEqual, opNotEqual, opLess, opLessEqual, opGreater, opGreaterEqual:
 		return ins.b == register || ins.c == register
+	case opConcatChain:
+		return register >= ins.b && register < ins.b+ins.c
 	case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
 		return ins.b == register
-	case opAddNumericModK:
-		return ins.a == register || ins.b == register
 	case opNumericForCheck:
 		return ins.a == register || ins.b == register || ins.c == register
-	case opJumpIfNotLess, opJumpIfNotGreater:
+	case opNumericForLoop:
 		return ins.a == register || ins.b == register
-	case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfModKNotEqualK,
+	case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
+		return ins.a == register || ins.b == register
+	case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK,
+		opJumpIfModKNotEqualK,
 		opJumpIfTableHasMetatable,
-		opJumpIfStringFieldNotEqualK, opJumpIfRowStringFieldNotEqualK,
-		opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK,
-		opJumpIfRowStringFieldNotGreaterK, opJumpIfRowStringFieldGreaterK,
+		opJumpIfStringFieldNotEqualK, opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK,
 		opJumpIfStringFieldFalse, opJumpIfStringFieldNil, opJumpIfStringFieldTrue, opJumpIfStringFieldNotNil:
 		return ins.a == register
-	case opJumpIfRowStringFieldNotEqualField, opJumpIfRowStringFieldEqualField:
+	case opJumpIfStringFieldNotGreaterR:
 		return ins.a == register || ins.c == register
-	case opJumpIfStringFieldNotGreaterR, opJumpIfRowStringFieldNotGreaterR:
-		return ins.a == register || ins.c == register
-	case opJumpIfRowStringFieldNotLessField:
-		return ins.a == register
 	case opNeg, opLen:
 		return ins.b == register
-	case opTableInsert, opTableRemove, opCoroutineResume, opMathMin:
+	case opCoroutineResume:
 		return register >= ins.a && register <= ins.a+ins.b
+	case opFastCall:
+		return register >= ins.a && register < ins.a+ins.c
 	case opCall, opCallOne:
 		if ins.b == register {
 			return true
@@ -580,10 +1213,6 @@ func instructionReadsRegister(ins instruction, register int) bool {
 		return register >= ins.c && register < ins.c+ins.d
 	case opCallMethodOne:
 		return ins.b == register || (register >= ins.a+2 && register <= ins.a+1+ins.d)
-	case opCallTableFieldKeyOne:
-		argCount := tableFieldKeyCallArgCount(ins.d)
-		return ins.b == register ||
-			(register >= ins.a+1 && register <= ins.a+argCount+1)
 	case opJumpIfFalse:
 		return ins.a == register
 	case opReturnOne:
@@ -601,16 +1230,17 @@ func instructionReadsRegister(ins instruction, register int) bool {
 
 func instructionWritesRegister(ins instruction, register int) bool {
 	switch ins.op {
-	case opLoadConst, opLoadGlobal, opMove, opNewTable, opGetField, opGetStringField,
-		opGetStringField2, opGetStringFieldIndex, opGetIndex,
+	case opLoadConst, opLoadGlobal, opMove, opNewTable, opGetField, opGetStringField, opGetStringFieldIndex,
 		opClosure, opGetUpvalue, opVararg, opAdd, opSub, opMul, opDiv, opMod,
-		opIDiv, opPow, opNeg, opLen, opConcat, opEqual, opNotEqual, opLess,
+		opIDiv, opPow, opNeg, opLen, opConcat, opConcatChain, opEqual, opNotEqual, opLess,
 		opLessEqual, opGreater, opGreaterEqual, opAddK, opSubK, opMulK,
-		opDivK, opModK, opIDivK, opAddNumericModK, opCoroutineResume, opMathMin, opSelectVarargCount:
+		opDivK, opModK, opIDivK, opCoroutineResume, opFastCall:
 		if ins.op == opVararg && ins.b > 0 {
 			return register >= ins.a && register < ins.a+ins.b
 		}
 		return ins.a == register
+	case opNumericForLoop:
+		return register == ins.a
 	case opPrepareIter:
 		return ins.a == register || ins.b == register || ins.c == register
 	case opArrayNext:
@@ -630,8 +1260,6 @@ func instructionWritesRegister(ins instruction, register int) bool {
 		return register == ins.a
 	case opCallMethodOne:
 		return register == ins.a || register == ins.a+1
-	case opCallTableFieldKeyOne:
-		return register == ins.a
 	default:
 		return false
 	}

@@ -35,10 +35,10 @@ func baseGlobalDefinitions() []baseGlobalDefinition {
 		baseGlobalDefinitionsCache = []baseGlobalDefinition{
 			{name: "type", value: func() Value { return HostFuncValue(baseType) }, summary: baseTypeSummary},
 			{name: "tonumber", value: func() Value { return HostFuncValue(baseToNumber) }},
-			{name: "tostring", value: func() Value { return nativeFuncValue(baseToString) }},
+			{name: "tostring", value: func() Value { return nativeFuncValueWithID(baseToString, nativeFuncToString) }},
 			{name: "setmetatable", value: func() Value { return nativeFuncValue(baseSetMetatable) }},
 			{name: "getmetatable", value: func() Value { return nativeFuncValue(baseGetMetatable) }},
-			{name: "next", value: func() Value { return HostFuncValue(baseNext) }},
+			{name: "next", value: func() Value { return nativeFuncValueWithID(baseNextNative, nativeFuncNext) }},
 			{name: "pairs", value: func() Value { return HostFuncValue(basePairs) }},
 			{name: "ipairs", value: func() Value { return HostFuncValue(baseIPairs) }},
 			{name: "rawget", value: func() Value { return HostFuncValue(baseRawGet) }},
@@ -59,15 +59,18 @@ func baseGlobalDefinitions() []baseGlobalDefinition {
 func baseFieldIntrinsics() []baseFieldIntrinsicDefinition {
 	baseIntrinsicsOnce.Do(func() {
 		baseFieldIntrinsicsCache = []baseFieldIntrinsicDefinition{
-			{globalName: "table", field: "insert", op: opTableInsert, nativeID: nativeFuncTableInsert, nativeName: "TABLE_INSERT"},
-			{globalName: "table", field: "remove", op: opTableRemove, nativeID: nativeFuncTableRemove, nativeName: "TABLE_REMOVE"},
+			{globalName: "table", field: "insert", op: opFastCall, nativeID: nativeFuncTableInsert, nativeName: "TABLE_INSERT"},
+			{globalName: "table", field: "remove", op: opFastCall, nativeID: nativeFuncTableRemove, nativeName: "TABLE_REMOVE"},
 			{globalName: "coroutine", field: "resume", op: opCoroutineResume, nativeID: nativeFuncCoroutineResume, nativeName: "COROUTINE_RESUME"},
-			{globalName: "math", field: "min", op: opMathMin, nativeID: nativeFuncMathMin, nativeName: "MATH_MIN"},
+			{globalName: "math", field: "min", op: opFastCall, nativeID: nativeFuncMathMin, nativeName: "MATH_MIN"},
 		}
 		nativeFuncDefinitionsCache = []nativeFuncDefinition{
 			{id: nativeFuncSelect, name: "SELECT"},
 			{id: nativeFuncRawLen, name: "RAW_LEN"},
+			{id: nativeFuncToString, name: "TOSTRING"},
+			{id: nativeFuncNext, name: "NEXT"},
 			{id: nativeFuncArrayNext, name: "ARRAY_NEXT"},
+			{id: nativeFuncTableNext, name: "TABLE_NEXT"},
 		}
 		for _, intrinsic := range baseFieldIntrinsicsCache {
 			nativeFuncDefinitionsCache = append(nativeFuncDefinitionsCache, nativeFuncDefinition{
@@ -132,8 +135,14 @@ func nativeFuncByID(nativeID nativeFuncID) (nativeFunc, bool) {
 		return baseMathMinNative, true
 	case nativeFuncRawLen:
 		return baseRawLenNative, true
+	case nativeFuncToString:
+		return baseToString, true
+	case nativeFuncNext:
+		return baseNextNative, true
 	case nativeFuncArrayNext:
 		return baseArrayNextNative, true
+	case nativeFuncTableNext:
+		return baseTableNextNative, true
 	default:
 		return nil, false
 	}

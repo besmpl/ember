@@ -52,11 +52,19 @@ func baseToString(globals *globalEnv, args []Value) ([]Value, error) {
 	if len(args) > 0 {
 		value = args[0]
 	}
-	text, err := stringValue(value, globals)
+	result, err := baseToStringValue(globals, value)
 	if err != nil {
 		return nil, err
 	}
-	return []Value{StringValue(text)}, nil
+	return []Value{result}, nil
+}
+
+func baseToStringValue(globals *globalEnv, value Value) (Value, error) {
+	text, err := stringValue(value, globals)
+	if err != nil {
+		return NilValue(), err
+	}
+	return stringValueInGlobalEnv(globals, text), nil
 }
 
 func stringValue(value Value, globals *globalEnv) (string, error) {
@@ -65,11 +73,11 @@ func stringValue(value Value, globals *globalEnv) (string, error) {
 		return "", err
 	}
 	if ok {
-		results, err := callValue(metamethod, globals, []Value{value})
+		results, err := callRuntimeMetamethodWindow1(metamethod, globals, value)
 		if err != nil {
 			return "", err
 		}
-		result := adjustedResultAt(results, 0)
+		result := results.at(0)
 		text, ok := result.String()
 		if !ok {
 			return "", fmt.Errorf("__tostring returned %s, want string", result.Kind())
@@ -90,7 +98,7 @@ func valueToString(value Value) string {
 		return "false"
 	}
 	if number, ok := value.Number(); ok {
-		return strconv.FormatFloat(number, 'g', -1, 64)
+		return formatLuauNumber(number)
 	}
 	if text, ok := value.String(); ok {
 		return text

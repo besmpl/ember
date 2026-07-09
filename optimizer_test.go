@@ -2,8 +2,10 @@ package ember
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHIRSimplifyFoldsNumberArithmetic(t *testing.T) {
@@ -99,9 +101,9 @@ return value
 	}
 }
 
-func TestBytecodePeepholeSkipsControlFlow(t *testing.T) {
+func TestBytecodePeepholeRemovesJumpToNextAfterControlFlowRemap(t *testing.T) {
 	artifact := parseSourceForOptimizationTest(t, `
-local value = 1
+local value = input
 if value then
 	value = value
 end
@@ -113,20 +115,187 @@ return value
 		t.Fatalf("compileProgram returned error: %v", err)
 	}
 	disassembly := disassembleProto(proto)
-	if !disassemblyHasInstruction(disassembly, "JUMP_IF_FALSE") || !disassemblyHasInstruction(disassembly, "JUMP") {
-		t.Fatalf("control-flow bytecode should keep branch structure until jump targets can be rewritten: %#v", disassembly)
+	if !disassemblyHasInstruction(disassembly, "JUMP_IF_FALSE") {
+		t.Fatalf("control-flow bytecode should keep the conditional branch: %#v", disassembly)
+	}
+	if disassemblyHasInstruction(disassembly, "JUMP") {
+		t.Fatalf("control-flow bytecode kept a jump-to-next instruction after remapping: %#v", disassembly)
 	}
 }
 
-func TestBytecodeControlTransferIncludesSpecializedModuloBranch(t *testing.T) {
+func TestOptimizerThreadsJumpChains(t *testing.T) {
+	var builder bytecodeBuilder
+	jumpElse := builder.emitJumpIfFalse(0)
+	builder.emit(instruction{op: opReturnOne, a: 1})
+	jumpChain := builder.emitJump()
+	builder.emitLoadConst(9, NumberValue(99))
+	elseStart := builder.pc()
+	builder.patchJump(jumpElse, jumpChain)
+	builder.patchJump(jumpChain, elseStart)
+	builder.emit(instruction{op: opReturnOne, a: 2})
+
+	optimized := optimizeBytecodeIR(builder.ir, optimizationOptions{})
+	got := assembleBytecodeIRRaw(optimized)
+	want := []instruction{
+		{op: opJumpIfFalse, a: 0, b: 2},
+		{op: opReturnOne, a: 1},
+		{op: opReturnOne, a: 2},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("optimized raw bytecode = %#v, want %#v", got, want)
+	}
+}
+
+func TestOptimizerRemovesConstantBranches(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		condition Value
+		want      []instruction
+	}{
+		{
+			name:      "true",
+			condition: BoolValue(true),
+			want: []instruction{
+				{op: opLoadConst, a: 1, b: 1},
+				{op: opReturnOne, a: 1},
+			},
+		},
+		{
+			name:      "false",
+			condition: BoolValue(false),
+			want: []instruction{
+				{op: opLoadConst, a: 2, b: 2},
+				{op: opReturnOne, a: 2},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var builder bytecodeBuilder
+			builder.emitLoadConst(0, tc.condition)
+			jumpElse := builder.emitJumpIfFalse(0)
+			builder.emitLoadConst(1, NumberValue(1))
+			builder.emit(instruction{op: opReturnOne, a: 1})
+			elseStart := builder.pc()
+			builder.patchJump(jumpElse, elseStart)
+			builder.emitLoadConst(2, NumberValue(2))
+			builder.emit(instruction{op: opReturnOne, a: 2})
+
+			optimized := optimizeBytecodeIRWithConstants(builder.ir, builder.constants, optimizationOptions{})
+			got := assembleBytecodeIR(optimized)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("optimized bytecode = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompilerFoldsConstantExpressionsWithoutChangingErrors(t *testing.T) {
+	proto, err := Compile(`
+return (2 + 3 * 4) % 5, "hp=" .. 10 .. "/" .. (5 + 10), #"ember", #{1, 2, 3}, 2 ^ 3, 7 // 2
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(results) != 6 {
+		t.Fatalf("Run returned %d results, want 6: %#v", len(results), results)
+	}
+	for index, want := range []float64{4, 5, 3, 8, 3} {
+		resultIndex := index
+		if index > 0 {
+			resultIndex = index + 1
+		}
+		got, ok := results[resultIndex].Number()
+		if !ok || got != want {
+			t.Fatalf("result %d is %#v, want number %v", resultIndex, results[resultIndex], want)
+		}
+	}
+	if got, ok := results[1].String(); !ok || got != "hp=10/15" {
+		t.Fatalf("result 1 is %#v, want string hp=10/15", results[1])
+	}
+	disassembly := disassembleProto(proto)
+	if disassemblyHasAnyInstruction(disassembly, "ADD", "MUL", "MOD", "IDIV", "POW", "CONCAT", "CONCAT_CHAIN", "LEN") {
+		t.Fatalf("constant expression bytecode kept foldable instructions: %#v", disassembly)
+	}
+
+	assertOptimizedRunErrorMatchesDisabledHIR(t, `return "x" + 1`)
+	assertOptimizedRunErrorMatchesDisabledHIR(t, `return "item=" .. {name = "ember"}`)
+}
+
+func TestCompileArithmeticCostBudget(t *testing.T) {
+	const source = `
+local x = 1
+local y = 2
+return (x + y) * 3 - 4 / 2
+`
+	if _, err := Compile(source); err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	const maxAllocsPerCompile = 520
+	allocs := testing.AllocsPerRun(100, func() {
+		if _, err := Compile(source); err != nil {
+			t.Fatalf("Compile returned error: %v", err)
+		}
+	})
+	if allocs > maxAllocsPerCompile {
+		t.Fatalf("Compile used %.0f allocs/op, want at most %d", allocs, maxAllocsPerCompile)
+	}
+
+	const runs = 200
+	const maxNSPerCompile = 150_000
+	start := time.Now()
+	for i := 0; i < runs; i++ {
+		if _, err := Compile(source); err != nil {
+			t.Fatalf("Compile returned error: %v", err)
+		}
+	}
+	nsPerCompile := time.Since(start).Nanoseconds() / runs
+	if nsPerCompile > maxNSPerCompile {
+		t.Fatalf("Compile took %d ns/op, want at most %d", nsPerCompile, maxNSPerCompile)
+	}
+}
+
+func assertOptimizedRunErrorMatchesDisabledHIR(t *testing.T, source string) {
+	t.Helper()
+	optimized, err := Compile(source)
+	if err != nil {
+		t.Fatalf("optimized Compile returned error: %v", err)
+	}
+	_, optimizedErr := Run(optimized)
+	if optimizedErr == nil {
+		t.Fatal("optimized Run succeeded, want error")
+	}
+
+	artifact := parseSourceForOptimizationTest(t, source)
+	disabled, err := compileProgramWithOptions(artifact, compilerOptions{
+		optimizations: optimizationOptions{
+			disabledCategories: map[optimizationCategory]bool{
+				optimizationHIRSimplify: true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("disabled Compile returned error: %v", err)
+	}
+	_, disabledErr := Run(disabled)
+	if disabledErr == nil {
+		t.Fatal("disabled Run succeeded, want error")
+	}
+	if optimizedErr.Error() != disabledErr.Error() {
+		t.Fatalf("optimized Run error is %q, want disabled error %q", optimizedErr, disabledErr)
+	}
+}
+
+func TestInstructionSuccessorsIncludeSpecializedModuloBranch(t *testing.T) {
 	code := []instruction{
 		{op: opJumpIfModKNotEqualK, d: 2},
 		{op: opReturnOne},
 	}
 
-	if !bytecodeHasControlTransfers(code) {
-		t.Fatal("bytecodeHasControlTransfers returned false for specialized modulo branch")
-	}
 	if got, want := instructionSuccessors(code, 0), []int{1, 2}; !equalIntSlices(got, want) {
 		t.Fatalf("specialized modulo branch successors are %#v, want %#v", got, want)
 	}

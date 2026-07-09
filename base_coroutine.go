@@ -151,7 +151,7 @@ func resumeCoroutine(coroutine *vmCoroutine, globals *globalEnv, args []Value) (
 		coroutine.suspended = vmSuspendedFrames{}
 		return coroutine.thread.continueSuspended(args)
 	}
-	return coroutine.thread.run(coroutine.root.proto, args, coroutine.root.upvalues)
+	return coroutine.thread.runWithUpvalues(coroutine.root.proto, args, coroutine.root.upvalues, coroutine.root.upvalueValues, coroutine.root.upvalueValueOK)
 }
 
 func baseCoroutineYield(globals *globalEnv, args []Value) ([]Value, error) {

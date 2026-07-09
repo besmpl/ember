@@ -22,7 +22,15 @@ BEGIN {
     cases[15] = "procgen_room_scoring"
     cases[16] = "save_state_diff"
     cases[17] = "path_relaxation"
-    case_count = 17
+    cases[18] = "component_churn"
+    cases[19] = "prototype_fallback"
+    cases[20] = "signal_bus_callbacks"
+    cases[21] = "state_machine_transitions"
+    cases[22] = "sparse_grid_neighbors"
+    cases[23] = "dirty_metatable_writes"
+    cases[24] = "array_hole_compaction"
+    cases[25] = "command_vararg_router"
+    case_count = 25
 
     print "| Case | Ember ns/op avg | Luau ns/run avg | Ratio | Max | Status |"
     print "| --- | ---: | ---: | ---: | ---: | --- |"

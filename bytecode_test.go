@@ -6,6 +6,7 @@ import (
 	goparser "go/parser"
 	"go/token"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -29,6 +30,434 @@ func TestDisassembleProtoNamesInstructions(t *testing.T) {
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("disassembleProto() = %#v, want %#v", got, want)
+	}
+}
+
+func TestInstructionSizeBudget(t *testing.T) {
+	if got, want := reflect.TypeOf(packedInstruction{}).Size(), uintptr(16); got > want {
+		t.Fatalf("instruction size is %d bytes, want at most %d", got, want)
+	}
+}
+
+func TestPackedInstructionRoundTripsAllOpcodes(t *testing.T) {
+	for op := opcode(0); op < opcodeCount; op++ {
+		ins := instruction{op: op, a: 1, b: 2, c: 3, d: 4}
+		packed, err := packInstruction(ins)
+		if err != nil {
+			t.Fatalf("packInstruction(%s) returned error: %v", opcodeName(op), err)
+		}
+		if got := packed.unpack(); got != ins {
+			t.Fatalf("packed %s round trip = %#v, want %#v", opcodeName(op), got, ins)
+		}
+	}
+}
+
+func TestFinalizeProtoRejectsPackedInstructionOperandOverflow(t *testing.T) {
+	proto := newProto(
+		[]Value{NumberValue(1)},
+		[]instruction{
+			{op: opLoadConst, a: 32768, b: 0},
+			{op: opReturnOne, a: 0},
+		},
+		nil,
+		nil,
+		1,
+		0,
+		false,
+	)
+	if proto.verifyErr == nil {
+		t.Fatal("newProto accepted an instruction operand outside the packed int16 range")
+	}
+	if got := proto.verifyErr.Error(); !strings.Contains(got, "instruction 0 LOAD_CONST") || !strings.Contains(got, "operand a value 32768 out of int16 range") {
+		t.Fatalf("packed operand overflow error is %q", got)
+	}
+}
+
+func TestOpcodeCountBudget(t *testing.T) {
+	if got, want := int(opcodeCount), 78; got > want {
+		t.Fatalf("opcode count is %d, want at most %d", got, want)
+	}
+}
+
+func TestProtoSideTableBudget(t *testing.T) {
+	fields := []string{
+		"numericForLoops",
+		"intrinsicOps",
+		"constantKindFacts",
+		"registerKindFacts",
+		"numericOperandFacts",
+		"numericOperandFactPCs",
+		"slotKindFacts",
+		"entryNilRegisters",
+	}
+	protoType := reflect.TypeOf(Proto{})
+	for _, field := range fields {
+		if _, ok := protoType.FieldByName(field); !ok {
+			t.Fatalf("Proto side-table budget references missing field %q", field)
+		}
+	}
+	if got, want := len(fields), 8; got > want {
+		t.Fatalf("Proto side-table count is %d, want at most %d", got, want)
+	}
+}
+
+func TestValueSizeBudgetSafeLayout(t *testing.T) {
+	if got, want := reflect.TypeOf(Value{}).Size(), uintptr(24); got > want {
+		t.Fatalf("Value size is %d bytes, want at most %d", got, want)
+	}
+}
+
+func TestValueRoundTripsAllKinds(t *testing.T) {
+	table := NewTable()
+	userdata := NewUserData("payload")
+	proto := newProto(nil, []instruction{{op: opReturn}}, nil, nil, 0, 0, false)
+	closureValue := functionValue(proto, nil)
+	hostFn := func(args []Value) ([]Value, error) { return args, nil }
+	nativeValue := nativeFuncValueWithID(baseRawLenNative, nativeFuncRawLen)
+
+	if !NilValue().IsNil() {
+		t.Fatal("NilValue did not round-trip nil kind")
+	}
+	if got, ok := BoolValue(true).Bool(); !ok || !got {
+		t.Fatalf("BoolValue round trip = %v, %t; want true, true", got, ok)
+	}
+	if got, ok := NumberValue(12.5).Number(); !ok || got != 12.5 {
+		t.Fatalf("NumberValue round trip = %v, %t; want 12.5, true", got, ok)
+	}
+	if got, ok := StringValue("ember").String(); !ok || got != "ember" {
+		t.Fatalf("StringValue round trip = %q, %t; want ember, true", got, ok)
+	}
+	if got, ok := TableValue(table).Table(); !ok || got != table {
+		t.Fatalf("TableValue round trip = %p, %t; want %p, true", got, ok, table)
+	}
+	if got, ok := UserDataValue(userdata).UserData(); !ok || got != userdata {
+		t.Fatalf("UserDataValue round trip = %p, %t; want %p, true", got, ok, userdata)
+	}
+	if got, ok := closureValue.scriptFunction(); !ok || got == nil || got.proto != proto {
+		t.Fatalf("functionValue round trip = %#v, %t; want closure for proto", got, ok)
+	}
+	if got, ok := HostFuncValue(hostFn).hostFunction(); !ok || got == nil {
+		t.Fatalf("HostFuncValue round trip = %v, %t; want host function", got, ok)
+	}
+	if got, ok := nativeValue.nativeFunction(); !ok || got == nil {
+		t.Fatalf("nativeFuncValueWithID round trip = %v, %t; want native function", got, ok)
+	}
+}
+
+func TestStringValuesCompareAndHashAcrossBoxingBoundaries(t *testing.T) {
+	left := StringValue("ember")
+	right := StringValue(strings.Join([]string{"em", "ber"}, ""))
+	if !valuesEqual(left, right) {
+		t.Fatalf("boxed strings with equal text did not compare equal: %#v %#v", left, right)
+	}
+	leftKey, leftOK := tableKeyFromValue(left)
+	rightKey, rightOK := tableKeyFromValue(right)
+	if !leftOK || !rightOK {
+		t.Fatalf("tableKeyFromValue ok = %t, %t; want true, true", leftOK, rightOK)
+	}
+	if leftKey != rightKey {
+		t.Fatalf("table keys from separately boxed strings differ: %#v != %#v", leftKey, rightKey)
+	}
+	table := NewTable()
+	if err := table.Set(left, NumberValue(7)); err != nil {
+		t.Fatalf("table.Set returned error: %v", err)
+	}
+	got, err := table.Get(right)
+	if err != nil {
+		t.Fatalf("table.Get returned error: %v", err)
+	}
+	if number, ok := got.Number(); !ok || number != 7 {
+		t.Fatalf("table lookup across string boxes = %v (%t), want 7", got, ok)
+	}
+}
+
+func TestValueConstructorsDoNotAllocateForScalars(t *testing.T) {
+	var sink Value
+	allocs := testing.AllocsPerRun(1000, func() {
+		sink = NilValue()
+		sink = BoolValue(true)
+		sink = NumberValue(1)
+		sink = nativeFuncValueWithID(baseRawLenNative, nativeFuncRawLen)
+	})
+	if allocs != 0 {
+		t.Fatalf("scalar value constructors allocated %.2f times, want 0", allocs)
+	}
+	_ = sink
+}
+
+func TestRunMinimalScriptAllocationBudget(t *testing.T) {
+	proto, err := Compile(`return 1`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if results, err := Run(proto); err != nil {
+		t.Fatalf("warm Run returned error: %v", err)
+	} else if got, ok := results[0].Number(); !ok || got != 1 {
+		t.Fatalf("warm Run result is %v (%t), want number 1", results[0], ok)
+	}
+
+	allocs := testing.AllocsPerRun(1000, func() {
+		results, err := Run(proto)
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+		got, ok := results[0].Number()
+		if !ok || got != 1 {
+			t.Fatalf("Run result is %v (%t), want number 1", results[0], ok)
+		}
+	})
+	if allocs > 1 {
+		t.Fatalf("minimal Run allocated %.0f times, want only the public result slice allocation", allocs)
+	}
+}
+
+func TestRunWithGlobalsDoesNotCopyHostMapPerRun(t *testing.T) {
+	proto, err := Compile(`return target`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	globals := make(map[string]Value, 512)
+	for i := 0; i < 512; i++ {
+		globals[fmt.Sprintf("unused_%03d", i)] = NumberValue(float64(i))
+	}
+	globals["target"] = NumberValue(42)
+
+	bytes := measuredRunWithGlobalsAllocBytes(t, proto, globals, 42, 40)
+	if bytes > 8192 {
+		t.Fatalf("RunWithGlobals allocated %d bytes per run with a large host map, want no per-run host map copy", bytes)
+	}
+}
+
+func TestGlobalReadsDoNotAllocateOrRehashPerAccess(t *testing.T) {
+	proto, err := Compile(`
+local total = 0
+for i = 1, 80 do
+	total = total + score
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, map[string]Value{
+		"score": NumberValue(3),
+	})
+	if err != nil {
+		t.Fatalf("RunWithGlobals returned error: %v", err)
+	}
+	if got, ok := results[0].Number(); !ok || got != 240 {
+		t.Fatalf("RunWithGlobals result is %v (%t), want 240", results[0], ok)
+	}
+	if got := snapshot.opcodeCounts.count(opLoadGlobal); got < 80 {
+		t.Fatalf("LOAD_GLOBAL executed %d times, want repeated global reads in the loop", got)
+	}
+	if got := snapshot.picCounts.globalSlotMisses; got != 1 {
+		t.Fatalf("global slot misses = %d, want one name resolution", got)
+	}
+	if got := snapshot.picCounts.globalSlotHits; got < 79 {
+		t.Fatalf("global slot hits = %d, want repeated reads to use the resolved slot", got)
+	}
+}
+
+func TestConcatChainAllocatesOnceForRawOperands(t *testing.T) {
+	proto, err := Compile(`
+local left = "hp"
+local current = 25
+local max = 100
+return left .. ":" .. current .. "/" .. max
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if joined := strings.Join(disassembleProto(proto), "\n"); !strings.Contains(joined, "CONCAT_CHAIN") {
+		t.Fatalf("compiled concat program is missing CONCAT_CHAIN:\n%s", joined)
+	}
+	if results, err := Run(proto); err != nil {
+		t.Fatalf("warm Run returned error: %v", err)
+	} else if got, ok := results[0].String(); !ok || got != "hp:25/100" {
+		t.Fatalf("warm Run result is %v (%t), want hp:25/100", results[0], ok)
+	}
+
+	allocs := testing.AllocsPerRun(1000, func() {
+		results, err := Run(proto)
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+		if got, ok := results[0].String(); !ok || got != "hp:25/100" {
+			t.Fatalf("Run result is %v (%t), want hp:25/100", results[0], ok)
+		}
+	})
+	if allocs > 2 {
+		t.Fatalf("raw concat chain allocated %.0f times per run, want result slice plus one final string allocation", allocs)
+	}
+}
+
+func TestTostringSmallIntegerDoesNotAllocate(t *testing.T) {
+	globals := runtimeGlobals(nil)
+	thread := newVMThread(globals)
+	restore := thread.activate()
+	defer restore()
+
+	if result, err := baseToStringValue(globals, NumberValue(25)); err != nil {
+		t.Fatalf("warm baseToStringValue returned error: %v", err)
+	} else if got, ok := result.String(); !ok || got != "25" {
+		t.Fatalf("warm baseToStringValue result is %v (%t), want 25", result, ok)
+	}
+
+	allocs := testing.AllocsPerRun(1000, func() {
+		result, err := baseToStringValue(globals, NumberValue(25))
+		if err != nil {
+			t.Fatalf("baseToStringValue returned error: %v", err)
+		}
+		if got, ok := result.String(); !ok || got != "25" {
+			t.Fatalf("baseToStringValue result is %v (%t), want 25", result, ok)
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("tostring small integer allocated %.0f times, want static formatting and warmed string intern", allocs)
+	}
+}
+
+func TestLoopTableLiteralAllocationBudget(t *testing.T) {
+	proto, err := Compile(`
+local total = 0
+for i = 1, 80 do
+	local values = {i, i + 1, hp = i + 2, mp = i + 3}
+	total = total + values[1] + values[2] + values.hp + values.mp
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if joined := strings.Join(disassembleProto(proto), "\n"); !strings.Contains(joined, "NEW_TABLE") {
+		t.Fatalf("compiled loop literal program is missing NEW_TABLE:\n%s", joined)
+	}
+
+	thread := newVMThread(runtimeGlobals(nil))
+	restore := thread.activate()
+	defer restore()
+	if results, err := thread.runScript(proto, nil, nil); err != nil {
+		t.Fatalf("warm thread.runScript returned error: %v", err)
+	} else if got, ok := results[0].Number(); !ok || got != 13440 {
+		t.Fatalf("warm result is %v (%t), want 13440", results[0], ok)
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		results, err := thread.runScript(proto, nil, nil)
+		if err != nil {
+			t.Fatalf("thread.runScript returned error: %v", err)
+		}
+		if got, ok := results[0].Number(); !ok || got != 13440 {
+			t.Fatalf("thread.runScript result is %v (%t), want 13440", results[0], ok)
+		}
+	})
+	if allocs > 90 {
+		t.Fatalf("loop table literals allocated %.0f times per run, want one table allocation per iteration plus run-boundary allocations", allocs)
+	}
+}
+
+func measuredRunWithGlobalsAllocBytes(t *testing.T, proto *Proto, globals map[string]Value, want float64, runs int) uint64 {
+	t.Helper()
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < runs; i++ {
+		results, err := RunWithGlobals(proto, globals)
+		if err != nil {
+			t.Fatalf("RunWithGlobals returned error: %v", err)
+		}
+		got, ok := results[0].Number()
+		if !ok || got != want {
+			t.Fatalf("RunWithGlobals result is %v (%t), want number %v", results[0], ok, want)
+		}
+	}
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	return (after.TotalAlloc - before.TotalAlloc) / uint64(runs)
+}
+
+func TestValueUnsafeLayoutSizeBudget(t *testing.T) {
+	if got, want := reflect.TypeOf(Value{}).Size(), uintptr(24); got > want {
+		t.Fatalf("unsafe Value size is %d bytes, want at most %d", got, want)
+	}
+}
+
+func TestTableHeaderSizeBudget(t *testing.T) {
+	if got, want := reflect.TypeOf(Table{}).Size(), uintptr(128); got > want {
+		t.Fatalf("Table size is %d bytes, want at most %d", got, want)
+	}
+}
+
+func TestTableGenericKeyLookupDoesNotAllocate(t *testing.T) {
+	table := NewTable()
+	key := BoolValue(true)
+	if err := table.rawSet(key, NumberValue(42)); err != nil {
+		t.Fatalf("rawSet returned error: %v", err)
+	}
+
+	var sink Value
+	allocs := testing.AllocsPerRun(1000, func() {
+		value, err := table.rawGet(key)
+		if err != nil {
+			t.Fatalf("rawGet returned error: %v", err)
+		}
+		sink = value
+	})
+	if allocs != 0 {
+		t.Fatalf("generic key lookup allocated %.2f times, want 0", allocs)
+	}
+	if got, ok := sink.Number(); !ok || got != 42 {
+		t.Fatalf("generic key lookup result = %v (%t), want 42", got, ok)
+	}
+}
+
+func TestValueUnsafeAccessorsRoundTripAllKinds(t *testing.T) {
+	TestValueRoundTripsAllKinds(t)
+}
+
+func TestValueUnsafeLayoutMatchesSafeSemantics(t *testing.T) {
+	table := NewTable()
+	userdata := NewUserData("payload")
+	proto := newProto(nil, []instruction{{op: opReturn}}, nil, nil, 0, 0, false)
+	closureValue := functionValue(proto, nil)
+	hostValue := HostFuncValue(func(args []Value) ([]Value, error) { return args, nil })
+
+	if got, ok := TableValue(table).Table(); !ok || got != table {
+		t.Fatalf("unsafe table accessor = %p, %t; want %p, true", got, ok, table)
+	}
+	if got, ok := UserDataValue(userdata).UserData(); !ok || got != userdata {
+		t.Fatalf("unsafe userdata accessor = %p, %t; want %p, true", got, ok, userdata)
+	}
+	if got, ok := closureValue.scriptFunction(); !ok || got == nil || got.proto != proto {
+		t.Fatalf("unsafe closure accessor = %#v, %t; want closure for proto", got, ok)
+	}
+	if got, ok := hostValue.hostFunction(); !ok || got == nil {
+		t.Fatalf("unsafe host accessor = %v, %t; want host function", got, ok)
+	}
+}
+
+func TestSmallTableStringFieldsUseInlineStorage(t *testing.T) {
+	var sink *Table
+	allocs := testing.AllocsPerRun(1000, func() {
+		table := newTableWithCapacity(0, 0)
+		table.setRawStringField("a", NumberValue(1))
+		table.setRawStringField("b", NumberValue(2))
+		sink = table
+	})
+	if allocs > 1 {
+		t.Fatalf("small table with inline string fields allocated %.2f times, want only table allocation", allocs)
+	}
+	if sink == nil {
+		t.Fatal("sink table is nil")
+	}
+	if sink.hasStringOverflow() {
+		t.Fatal("small table used string field map, want inline string fields")
+	}
+	const wantInlineStringFieldCapacity = 2
+	if got := cap(sink.stringFields); got != wantInlineStringFieldCapacity {
+		t.Fatalf("small table inline string field capacity = %d, want %d", got, wantInlineStringFieldCapacity)
 	}
 }
 
@@ -59,7 +488,6 @@ func TestExecutionArtifactFinalizerRebuildsDerivedProtoFacts(t *testing.T) {
 	proto.numericForLoops = []numericForLoopDesc{{checkPC: 99}}
 	proto.intrinsicOps = []intrinsicOpDesc{{pc: 99}}
 	proto.capturedLocals = []bool{true}
-	proto.directRegisters = false
 	proto.directFrameDispatch = false
 	proto.entryNilRegisters = []int{99}
 	proto.verifyErr = fmt.Errorf("stale")
@@ -85,8 +513,8 @@ func TestExecutionArtifactFinalizerRebuildsDerivedProtoFacts(t *testing.T) {
 	if len(proto.capturedLocals) != 0 {
 		t.Fatalf("capturedLocals = %#v, want rebuilt empty facts", proto.capturedLocals)
 	}
-	if !proto.directRegisters || !proto.directFrameDispatch {
-		t.Fatalf("direct facts = registers %t dispatch %t, want true true", proto.directRegisters, proto.directFrameDispatch)
+	if !proto.directFrameDispatch {
+		t.Fatal("directFrameDispatch = false, want rebuilt true fact")
 	}
 	if len(proto.entryNilRegisters) != 0 {
 		t.Fatalf("entryNilRegisters = %#v, want rebuilt empty facts", proto.entryNilRegisters)
@@ -193,34 +621,6 @@ func TestBytecodeFinalizerRejectsInvalidStringFieldTruthyBranchConstant(t *testi
 	}
 }
 
-func TestBytecodeFinalizerRejectsInvalidRowStringFieldReadSlot(t *testing.T) {
-	var builder bytecodeBuilder
-	field := builder.addConstant(StringValue("kind"))
-	builder.emit(instruction{op: opGetRowStringField, a: 0, b: 1, c: field, d: -1})
-
-	_, err := builder.finalizeProto(nil, 2, 0, false)
-	if err == nil {
-		t.Fatal("finalizeProto succeeded, want invalid row string field slot error")
-	}
-	if !strings.Contains(err.Error(), "negative row string field slot") {
-		t.Fatalf("finalizeProto error is %q, want row slot detail", err)
-	}
-}
-
-func TestBytecodeFinalizerRejectsInvalidRowStringFieldWriteSlot(t *testing.T) {
-	var builder bytecodeBuilder
-	field := builder.addConstant(StringValue("kind"))
-	builder.emit(instruction{op: opSetRowStringField, a: 0, b: field, c: 1, d: -1})
-
-	_, err := builder.finalizeProto(nil, 2, 0, false)
-	if err == nil {
-		t.Fatal("finalizeProto succeeded, want invalid row string field slot error")
-	}
-	if !strings.Contains(err.Error(), "negative row string field slot") {
-		t.Fatalf("finalizeProto error is %q, want row slot detail", err)
-	}
-}
-
 func TestBytecodeFinalizerRejectsInvalidSubStringFieldConstant(t *testing.T) {
 	var builder bytecodeBuilder
 	field := builder.addConstant(NumberValue(1))
@@ -232,27 +632,6 @@ func TestBytecodeFinalizerRejectsInvalidSubStringFieldConstant(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "constant index 0 is number, want string") {
 		t.Fatalf("finalizeProto error is %q, want non-string field detail", err)
-	}
-}
-
-func TestBytecodeFinalizerRejectsInvalidSubAddStringFieldConstant(t *testing.T) {
-	var builder bytecodeBuilder
-	target := builder.addConstant(StringValue("hp"))
-	add := builder.addConstant(NumberValue(1))
-	desc := builder.addRowFieldSubAddOp(rowFieldSubAddOp{
-		target:     target,
-		add:        add,
-		targetSlot: 0,
-		addSlot:    1,
-	})
-	builder.emit(instruction{op: opSubAddStringField, a: 0, b: desc, c: 1})
-
-	_, err := builder.finalizeProto(nil, 2, 0, false)
-	if err == nil {
-		t.Fatal("finalizeProto succeeded, want non-string add field error")
-	}
-	if !strings.Contains(err.Error(), "constant index 1 is number, want string") {
-		t.Fatalf("finalizeProto error is %q, want non-string add field detail", err)
 	}
 }
 
@@ -304,6 +683,133 @@ func TestCallValueNativeDoesNotAllocateCycleMap(t *testing.T) {
 	}
 }
 
+func TestMetatableWalkCommonCaseDoesNotAllocate(t *testing.T) {
+	fallback := NewTable()
+	if err := fallback.Set(StringValue("hp"), NumberValue(25)); err != nil {
+		t.Fatalf("fallback.Set returned error: %v", err)
+	}
+	index := NewTable()
+	if err := index.Set(StringValue("__index"), TableValue(fallback)); err != nil {
+		t.Fatalf("index.Set returned error: %v", err)
+	}
+	object := NewTable()
+	object.setMetatable(index)
+
+	access := publicTableAccess()
+	key := StringValue("hp")
+	allocs := testing.AllocsPerRun(100, func() {
+		value, err := access.get(object, key)
+		if err != nil {
+			t.Fatalf("table access returned error: %v", err)
+		}
+		got, ok := value.Number()
+		if !ok || got != 25 {
+			t.Fatalf("table access returned %v (%t), want number 25", value, ok)
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("metatable walk allocated %.0f times, want no common-case allocation", allocs)
+	}
+}
+
+func TestMetatableWalkStillRejectsCycles(t *testing.T) {
+	left := NewTable()
+	right := NewTable()
+	leftMeta := NewTable()
+	rightMeta := NewTable()
+	if err := leftMeta.Set(StringValue("__index"), TableValue(right)); err != nil {
+		t.Fatalf("leftMeta.Set returned error: %v", err)
+	}
+	if err := rightMeta.Set(StringValue("__index"), TableValue(left)); err != nil {
+		t.Fatalf("rightMeta.Set returned error: %v", err)
+	}
+	left.setMetatable(leftMeta)
+	right.setMetatable(rightMeta)
+
+	_, err := publicTableAccess().get(left, StringValue("missing"))
+	if err == nil {
+		t.Fatal("table access succeeded, want cyclic __index error")
+	}
+	if !strings.Contains(err.Error(), "cyclic __index chain") {
+		t.Fatalf("table access error is %q, want cyclic __index detail", err)
+	}
+}
+
+func TestFunctionIndexFallbackResolvesOncePerShape(t *testing.T) {
+	first := nativeFuncValueWithID(baseToString, nativeFuncToString)
+	second := nativeFuncValueWithID(baseRawLenNative, nativeFuncRawLen)
+	metatable := NewTable()
+	metatable.setRawStringField("__index", first)
+	object := NewTable()
+	object.setMetatable(metatable)
+
+	index, ok, err := object.cachedIndexFallback()
+	if err != nil {
+		t.Fatalf("cachedIndexFallback returned error: %v", err)
+	}
+	if !ok || index.nativeID != nativeFuncToString {
+		t.Fatalf("cachedIndexFallback = %#v (%t), want first function", index, ok)
+	}
+	index, ok, err = object.cachedIndexFallback()
+	if err != nil {
+		t.Fatalf("cachedIndexFallback second call returned error: %v", err)
+	}
+	if !ok || index.nativeID != nativeFuncToString {
+		t.Fatalf("cachedIndexFallback second call = %#v (%t), want cached first function", index, ok)
+	}
+
+	metatable.setRawStringField("__index", second)
+	index, ok, err = object.cachedIndexFallback()
+	if err != nil {
+		t.Fatalf("cachedIndexFallback after mutation returned error: %v", err)
+	}
+	if !ok || index.nativeID != nativeFuncRawLen {
+		t.Fatalf("cachedIndexFallback after mutation = %#v (%t), want refreshed second function", index, ok)
+	}
+}
+
+func TestNewindexFallbackChainMatchesLuauOrder(t *testing.T) {
+	proto, err := Compile(`
+local log = {}
+local root = {}
+local middle = {}
+setmetatable(root, {__newindex = middle})
+setmetatable(middle, {__newindex = function(self, key, value)
+	log[#log + 1] = self == middle
+	log[#log + 1] = key
+	log[#log + 1] = value
+end})
+
+root.hp = 25
+return log[1], log[2], log[3], rawget(root, "hp"), rawget(middle, "hp")
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(results) != 5 {
+		t.Fatalf("Run returned %d results, want 5", len(results))
+	}
+	if got, ok := results[0].Bool(); !ok || !got {
+		t.Fatalf("first result is %v (%t), want true", results[0], ok)
+	}
+	if got, ok := results[1].String(); !ok || got != "hp" {
+		t.Fatalf("second result is %v (%t), want hp", results[1], ok)
+	}
+	if got, ok := results[2].Number(); !ok || got != 25 {
+		t.Fatalf("third result is %v (%t), want 25", results[2], ok)
+	}
+	if !results[3].IsNil() {
+		t.Fatalf("fourth result is %s, want nil", results[3].Kind())
+	}
+	if !results[4].IsNil() {
+		t.Fatalf("fifth result is %s, want nil", results[4].Kind())
+	}
+}
+
 func TestBytecodeFinalizerRejectsInvalidClosureUpvalue(t *testing.T) {
 	child := newProto(
 		nil,
@@ -328,55 +834,6 @@ func TestBytecodeFinalizerRejectsInvalidClosureUpvalue(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "upvalue 0 local register index 2 out of range") {
 		t.Fatalf("finalizeProto error is %q, want closure upvalue range detail", err)
-	}
-}
-
-func TestBytecodeVerifierRejectsDirectRegisterProtoWithCapturedLocals(t *testing.T) {
-	proto := newProto(
-		nil,
-		[]instruction{{op: opReturn, a: 0, b: 1}},
-		nil,
-		nil,
-		1,
-		0,
-		false,
-	)
-	proto.directRegisters = true
-	proto.capturedLocals = []bool{true}
-
-	err := verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want direct-register captured-local error")
-	}
-	if !strings.Contains(err.Error(), "direct-register prototype has captured locals") {
-		t.Fatalf("verifyProto error is %q, want direct-register captured-local detail", err)
-	}
-}
-
-func TestBytecodeVerifierRejectsDirectFrameDispatchForUnsupportedOpcode(t *testing.T) {
-	proto := newProto(
-		[]Value{StringValue("missing")},
-		[]instruction{
-			{op: opSetGlobal, a: 0, b: 0},
-			{op: opReturnOne, a: 0},
-		},
-		nil,
-		nil,
-		1,
-		0,
-		false,
-	)
-	proto.directFrameDispatch = true
-
-	err := verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want unsupported direct-frame opcode error")
-	}
-	if !strings.Contains(err.Error(), "direct-frame prototype contains unsupported opcode SET_GLOBAL") {
-		t.Fatalf("verifyProto error is %q, want unsupported SET_GLOBAL detail", err)
-	}
-	if !strings.Contains(err.Error(), "global writes require generic frame environment semantics") {
-		t.Fatalf("verifyProto error is %q, want unsupported reason detail", err)
 	}
 }
 
@@ -432,7 +889,7 @@ func TestBytecodeVerifierRejectsStaleIntrinsicDescriptors(t *testing.T) {
 	proto := newProto(
 		nil,
 		[]instruction{
-			{op: opTableInsert, a: 0, b: 2, d: 1},
+			{op: opFastCall, a: 0, b: int(nativeFuncTableInsert), c: 2, d: 1},
 			{op: opReturnOne, a: 0},
 		},
 		nil,
@@ -526,472 +983,32 @@ func TestBytecodeVerifierRejectsStaleNumericOperandFacts(t *testing.T) {
 	}
 }
 
-func TestBytecodeVerifierRejectsStaleReductionFacts(t *testing.T) {
-	proto := newProto(
-		nil,
-		[]instruction{
-			{op: opJumpIfNotGreater, a: 0, b: 1, d: 2},
-			{op: opMove, a: 1, b: 0},
-			{op: opReturnOne, a: 1},
-		},
-		nil,
-		nil,
-		2,
-		2,
-		false,
-	)
-	proto.reductionFacts = nil
-
-	err := verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want stale reduction fact error")
-	}
-	if !strings.Contains(err.Error(), "reduction facts [] do not match finalized plan") {
-		t.Fatalf("verifyProto error is %q, want reduction fact detail", err)
-	}
-}
-
-func TestBytecodeVerifierRejectsStaleDirectBlockPlans(t *testing.T) {
-	proto := newProto(
-		[]Value{NumberValue(0)},
-		[]instruction{
-			{op: opJumpIfNotLessK, a: 0, b: 0, d: 3},
-			{op: opNeg, a: 0, b: 0},
-			{op: opJump, b: 3},
-			{op: opReturnOne, a: 0},
-		},
-		nil,
-		nil,
-		1,
-		1,
-		false,
-	)
-	proto.directBlockPlans = nil
-
-	err := verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want stale direct block plan error")
-	}
-	if !strings.Contains(err.Error(), "direct block plans [] do not match finalized plan") {
-		t.Fatalf("verifyProto error is %q, want direct block plan detail", err)
-	}
-}
-
-func TestBytecodeVerifierRejectsStaleVerifiedPlans(t *testing.T) {
-	proto := newProto(
-		[]Value{NumberValue(0)},
-		[]instruction{
-			{op: opJumpIfNotLessK, a: 0, b: 0, d: 3},
-			{op: opNeg, a: 0, b: 0},
-			{op: opJump, b: 3},
-			{op: opReturnOne, a: 0},
-		},
-		nil,
-		nil,
-		1,
-		1,
-		false,
-	)
-	proto.verifiedPlans = nil
-
-	err := verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want stale verified plan error")
-	}
-	if !strings.Contains(err.Error(), "verified plans [] do not match finalized plan") {
-		t.Fatalf("verifyProto error is %q, want verified plan detail", err)
-	}
-}
-
-func TestVerifyRegionRejectsCallRisk(t *testing.T) {
-	proto := &Proto{
-		code: []instruction{
-			{op: opCallLocalOne, a: 0, b: 0, c: 1, d: 1},
-			{op: opReturnOne, a: 0},
-		},
-		registers: 2,
-	}
-	_, rejection, ok := verifyRegion(proto, 0, verifiedPlanCandidate{
-		kind: verifiedPlanKindDirectBlock,
-		directBlock: directBlockPlanDesc{
-			pc:       0,
-			kind:     "row_field_add_store",
-			startPC:  0,
-			resumePC: 1,
-		},
-	})
-	if ok {
-		t.Fatal("verifyRegion accepted call-risk region, want rejection")
-	}
-	if !strings.Contains(rejection.reason, "call") {
-		t.Fatalf("verifyRegion rejection reason is %q, want call risk detail", rejection.reason)
-	}
-}
-
-func TestExecuteNoopRegionResumesAndCounts(t *testing.T) {
-	proto := &Proto{code: []instruction{{op: opReturnOne, a: 0}}, registers: 1}
-	frame := &vmFrame{
-		proto:           proto,
-		registerCount:   1,
-		directRegisters: true,
-		registers:       make([]Value, 1),
-		pc:              0,
-		openCallStart:   -1,
-	}
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-
-	exit := thread.executeRegion(frame, regionExecutionPlanDesc{
-		kind:       regionExecutionPlanKindNoop,
-		entryPC:    0,
-		exitPC:     1,
-		fallbackPC: 0,
-	})
-	if !exit.resumesDirectFrame() {
-		t.Fatalf("executeRegion exit = %#v, want direct-frame resume", exit)
-	}
-	if frame.pc != 1 {
-		t.Fatalf("frame pc = %d, want 1", frame.pc)
-	}
-	if counts.regionEntries != 1 || counts.regionResumes != 1 || counts.regionFallbacks != 0 {
-		t.Fatalf("region counters = entries %d resumes %d fallbacks %d, want 1/1/0", counts.regionEntries, counts.regionResumes, counts.regionFallbacks)
-	}
-}
-
-func TestExecuteNoopRegionSideExitsOnWrongEntryPC(t *testing.T) {
-	proto := &Proto{code: []instruction{{op: opReturnOne, a: 0}}, registers: 1}
-	frame := &vmFrame{
-		proto:           proto,
-		registerCount:   1,
-		directRegisters: true,
-		registers:       make([]Value, 1),
-		pc:              1,
-		openCallStart:   -1,
-	}
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-
-	exit := thread.executeRegion(frame, regionExecutionPlanDesc{
-		kind:       regionExecutionPlanKindNoop,
-		entryPC:    0,
-		exitPC:     1,
-		fallbackPC: 0,
-	})
-	if exit.resumesDirectFrame() || exit.reason != directFrameSideExitReasonGenericFrame {
-		t.Fatalf("executeRegion exit = %#v, want generic-frame side exit", exit)
-	}
-	if frame.pc != 0 {
-		t.Fatalf("frame pc = %d, want fallback pc 0", frame.pc)
-	}
-	if counts.regionEntries != 1 || counts.regionResumes != 0 || counts.regionFallbacks != 1 {
-		t.Fatalf("region counters = entries %d resumes %d fallbacks %d, want 1/0/1", counts.regionEntries, counts.regionResumes, counts.regionFallbacks)
-	}
-}
-
-func TestRunDirectFrameUsesArrayRowLoopRegionForRowFieldSum(t *testing.T) {
+func TestRunDirectFrameArrayNextJumpUsesInlineArrayIterator(t *testing.T) {
 	proto, err := Compile(`
-local rows = {
-	{value = 2},
-	{value = 3},
-	{value = 5},
-}
+local values = {1, 2, 3, 4}
 local total = 0
-for _, row in rows do
-	total = total + row.value
+for _, value in values do
+	total = total + value * 2 + value % 2
 end
 return total
 `)
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled row loop is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-	if len(proto.regionExecutionPlans) == 0 {
-		t.Fatalf("compiled row loop has no region execution plan:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
 	var counts directFramePICCounts
 	thread := newVMThread(runtimeGlobals(nil))
+	thread.directFrameInstrumented = true
 	thread.directFramePICCounts = &counts
 	results, err := thread.run(proto, nil, nil)
 	if err != nil {
 		t.Fatalf("thread.run returned error: %v", err)
 	}
 	got, ok := results[0].Number()
-	if !ok || got != 10 {
-		t.Fatalf("thread.run result is %v (%t), want 10", got, ok)
+	if !ok || got != 22 {
+		t.Fatalf("thread.run result is %v (%t), want 22", got, ok)
 	}
-	if counts.regionEntries == 0 || counts.regionResumes == 0 {
-		t.Fatalf("region counters = entries %d resumes %d, want array row loop region execution", counts.regionEntries, counts.regionResumes)
-	}
-	if counts.regionFallbacks != 0 {
-		t.Fatalf("region fallbacks = %d, want stable array row loop to stay in region", counts.regionFallbacks)
-	}
-}
-
-func TestRunDirectFrameArrayRowLoopRegionSideExitsBeforeMismatchedRowSlot(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{value = 2},
-	{other = 0, value = 3},
-	{value = 5},
-}
-local total = 0
-for _, row in rows do
-	total = total + row.value
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.regionExecutionPlans) == 0 {
-		t.Fatalf("compiled row loop has no region execution plan:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 10 {
-		t.Fatalf("thread.run result is %v (%t), want 10", got, ok)
-	}
-	if counts.regionEntries == 0 || counts.regionFallbacks == 0 {
-		t.Fatalf("region counters = entries %d fallbacks %d, want row-loop side exit", counts.regionEntries, counts.regionFallbacks)
-	}
-}
-
-func TestRunDirectFrameUsesArrayRowLoopRegionForMultipleRowFieldSum(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{value = 2, bonus = 1},
-	{value = 3, bonus = 4},
-	{value = 5, bonus = 6},
-}
-local total = 0
-for _, row in rows do
-	total = total + row.value + row.bonus
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.regionExecutionPlans) == 0 {
-		t.Fatalf("compiled row loop has no region execution plan:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 21 {
-		t.Fatalf("thread.run result is %v (%t), want 21", got, ok)
-	}
-	if counts.regionEntries == 0 || counts.regionResumes == 0 || counts.regionFallbacks != 0 {
-		t.Fatalf("region counters = entries %d resumes %d fallbacks %d, want stable multi-field row loop region", counts.regionEntries, counts.regionResumes, counts.regionFallbacks)
-	}
-}
-
-func TestRunDirectFrameUsesArrayRowLoopRegionForFilteredRowFieldSum(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{value = 2, bonus = 1},
-	{value = -3, bonus = 4},
-	{value = 5, bonus = 6},
-}
-local total = 0
-for _, row in rows do
-	if row.value > 0 then
-		total = total + row.value + row.bonus
-	end
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.regionExecutionPlans) == 0 {
-		t.Fatalf("compiled filtered row loop has no region execution plan:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 14 {
-		t.Fatalf("thread.run result is %v (%t), want 14", got, ok)
-	}
-	if counts.regionEntries == 0 || counts.regionResumes == 0 || counts.regionFallbacks != 0 {
-		t.Fatalf("region counters = entries %d resumes %d fallbacks %d, want stable filtered row loop region", counts.regionEntries, counts.regionResumes, counts.regionFallbacks)
-	}
-}
-
-func TestRunDirectFrameUsesArrayRowLoopRegionForLessThanFilteredRowFieldSum(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{dist = 4},
-	{dist = 999},
-	{dist = 7},
-}
-local total = 0
-for _, row in rows do
-	if row.dist < 999 then
-		total = total + row.dist
-	end
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.regionExecutionPlans) == 0 {
-		t.Fatalf("compiled less-than filtered row loop has no region execution plan:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 11 {
-		t.Fatalf("thread.run result is %v (%t), want 11", got, ok)
-	}
-	if counts.regionEntries == 0 || counts.regionResumes == 0 || counts.regionFallbacks != 0 {
-		t.Fatalf("region counters = entries %d resumes %d fallbacks %d, want stable less-than filtered row loop region", counts.regionEntries, counts.regionResumes, counts.regionFallbacks)
-	}
-}
-
-func TestRunDirectFrameUsesArrayRowLoopRegionForTruthyRowFieldSum(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{value = 4, enabled = true},
-	{value = 9, enabled = false},
-	{value = 7, enabled = true},
-}
-local total = 0
-for _, row in rows do
-	if row.enabled then
-		total = total + row.value
-	end
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.regionExecutionPlans) == 0 {
-		t.Fatalf("compiled truthy filtered row loop has no region execution plan:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 11 {
-		t.Fatalf("thread.run result is %v (%t), want 11", got, ok)
-	}
-	if counts.regionEntries == 0 || counts.regionResumes == 0 || counts.regionFallbacks != 0 {
-		t.Fatalf("region counters = entries %d resumes %d fallbacks %d, want stable truthy filtered row loop region", counts.regionEntries, counts.regionResumes, counts.regionFallbacks)
-	}
-}
-
-func TestRunDirectFrameUsesArrayRowLoopRegionForFalseyRowFieldSum(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{value = 4, blocked = false},
-	{value = 9, blocked = true},
-	{value = 7, blocked = false},
-}
-local total = 0
-for _, row in rows do
-	if not row.blocked then
-		total = total + row.value
-	end
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.regionExecutionPlans) == 0 {
-		t.Fatalf("compiled falsey filtered row loop has no region execution plan:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 11 {
-		t.Fatalf("thread.run result is %v (%t), want 11", got, ok)
-	}
-	if counts.regionEntries == 0 || counts.regionResumes == 0 || counts.regionFallbacks != 0 {
-		t.Fatalf("region counters = entries %d resumes %d fallbacks %d, want stable falsey filtered row loop region", counts.regionEntries, counts.regionResumes, counts.regionFallbacks)
-	}
-}
-
-func TestRunDirectFrameUsesArrayRowLoopRegionForConditionalRowFieldMutation(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{cooldown = 2},
-	{cooldown = 0},
-	{cooldown = 4},
-}
-local total = 0
-for _, row in rows do
-	if row.cooldown > 0 then
-		row.cooldown = row.cooldown - 1
-	end
-	total = total + row.cooldown
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.regionExecutionPlans) == 0 {
-		t.Fatalf("compiled mutating row loop has no region execution plan:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 4 {
-		t.Fatalf("thread.run result is %v (%t), want 4", got, ok)
-	}
-	if counts.regionEntries == 0 || counts.regionResumes == 0 || counts.regionFallbacks != 0 {
-		t.Fatalf("region counters = entries %d resumes %d fallbacks %d, want stable mutating row loop region", counts.regionEntries, counts.regionResumes, counts.regionFallbacks)
+	if counts.arrayIteratorFastSteps == 0 {
+		t.Fatalf("array iterator fast steps = 0, want direct array iterator handling")
 	}
 }
 
@@ -1014,12 +1031,9 @@ return total
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if len(proto.regionExecutionPlans) == 0 {
-		t.Fatalf("compiled mutating row loop has no region execution plan:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
 	var counts directFramePICCounts
 	thread := newVMThread(runtimeGlobals(nil))
+	thread.directFrameInstrumented = true
 	thread.directFramePICCounts = &counts
 	results, err := thread.run(proto, nil, nil)
 	if err != nil {
@@ -1028,149 +1042,6 @@ return total
 	got, ok := results[0].Number()
 	if !ok || got != 3 {
 		t.Fatalf("thread.run result is %v (%t), want 3", got, ok)
-	}
-	if counts.regionEntries == 0 || counts.regionFallbacks == 0 {
-		t.Fatalf("region counters = entries %d fallbacks %d, want mutating row loop side exit", counts.regionEntries, counts.regionFallbacks)
-	}
-}
-
-func TestRunDirectFrameUsesArrayRowLoopRegionForFieldAndConstantMutationClamp(t *testing.T) {
-	proto, err := Compile(`
-local actor = {haste = 2}
-local rows = {
-	{cooldown = 5},
-	{cooldown = 1},
-	{cooldown = 4},
-}
-local total = 0
-for _, row in rows do
-	if row.cooldown > 0 then
-		row.cooldown = row.cooldown - 1 - actor.haste
-		if row.cooldown < 0 then
-			row.cooldown = 0
-		end
-	end
-	total = total + row.cooldown
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.regionExecutionPlans) == 0 {
-		t.Fatalf("compiled row loop has no region execution plan:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 3 {
-		t.Fatalf("thread.run result is %v (%t), want 3", got, ok)
-	}
-	if counts.regionEntries == 0 || counts.regionResumes == 0 || counts.regionFallbacks != 0 {
-		t.Fatalf("region counters = entries %d resumes %d fallbacks %d, want stable field/constant mutating row loop region", counts.regionEntries, counts.regionResumes, counts.regionFallbacks)
-	}
-}
-
-func TestRunDirectFrameUsesArrayRowLoopRegionForMutationPrefixBeforeUnsupportedTail(t *testing.T) {
-	proto, err := Compile(`
-local actor = {haste = 2}
-local rows = {
-	{cooldown = 5, bonus = 1},
-	{cooldown = 1, bonus = 3},
-	{cooldown = 4, bonus = 2},
-}
-local total = 0
-for _, row in rows do
-	if row.cooldown > 0 then
-		row.cooldown = row.cooldown - 1 - actor.haste
-		if row.cooldown < 0 then
-			row.cooldown = 0
-		end
-	end
-	if row.bonus > 1 then
-		total = total + row.cooldown + row.bonus
-	else
-		total = total + row.cooldown
-	end
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.regionExecutionPlans) == 0 {
-		t.Fatalf("compiled row loop has no region execution plan:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 8 {
-		t.Fatalf("thread.run result is %v (%t), want 8", got, ok)
-	}
-	if counts.regionEntries == 0 || counts.regionResumes == 0 || counts.regionFallbacks != 0 {
-		t.Fatalf("region counters = entries %d resumes %d fallbacks %d, want stable prefix row loop region", counts.regionEntries, counts.regionResumes, counts.regionFallbacks)
-	}
-}
-
-func TestRunDirectFrameUsesArrayRowLoopRegionForCooldownActionBranch(t *testing.T) {
-	proto, err := Compile(`
-local actor = {energy = 10, haste = 2}
-local abilities = {
-	{cost = 4, cooldown = 0, reset = 3, uses = 0},
-	{cost = 5, cooldown = 2, reset = 5, uses = 0},
-	{cost = 20, cooldown = 1, reset = 4, uses = 0},
-}
-local score = 0
-for _, ability in abilities do
-	if ability.cooldown > 0 then
-		ability.cooldown = ability.cooldown - 1 - actor.haste
-		if ability.cooldown < 0 then
-			ability.cooldown = 0
-		end
-	end
-	if ability.cooldown == 0 and actor.energy >= ability.cost then
-		actor.energy = actor.energy - ability.cost
-		ability.uses = ability.uses + 1
-		ability.cooldown = ability.reset
-		score = score + actor.energy + ability.uses * ability.cost
-	else
-		score = score + ability.cooldown + actor.energy
-	end
-end
-return score + actor.energy
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.regionExecutionPlans) == 0 {
-		t.Fatalf("compiled cooldown action row loop has no region execution plan:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 18 {
-		t.Fatalf("thread.run result is %v (%t), want 18", got, ok)
-	}
-	if counts.regionEntries != 1 || counts.regionResumes != 1 || counts.regionFallbacks != 0 {
-		t.Fatalf("region counters = entries %d resumes %d fallbacks %d, want one stable whole-loop region:\n%s", counts.regionEntries, counts.regionResumes, counts.regionFallbacks, strings.Join(disassembleProto(proto), "\n"))
 	}
 }
 
@@ -1197,221 +1068,6 @@ func TestBytecodeVerifierRejectsStaleSlotKindFacts(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "slot kind facts [] do not match finalized plan") {
 		t.Fatalf("verifyProto error is %q, want slot kind fact detail", err)
-	}
-}
-
-func TestBytecodeVerifierRejectsStalePathKindFacts(t *testing.T) {
-	proto := newProto(
-		[]Value{StringValue("child"), StringValue("value"), NumberValue(0), NumberValue(1)},
-		[]instruction{
-			{op: opLoadConst, a: 1, b: 2},
-			{op: opGetStringField2, a: 2, b: 0, c: 0, d: 1},
-			{op: opGetStringField2, a: 3, b: 0, c: 0, d: 1},
-			{op: opAddK, a: 1, b: 1, c: 3},
-			{op: opJump, b: 1},
-			{op: opReturnOne, a: 1},
-		},
-		nil,
-		nil,
-		4,
-		1,
-		false,
-	)
-	proto.pathKindFacts = nil
-
-	err := verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want stale path kind fact error")
-	}
-	if !strings.Contains(err.Error(), "path kind facts [] do not match finalized plan") {
-		t.Fatalf("verifyProto error is %q, want path kind fact detail", err)
-	}
-}
-
-func TestBytecodeVerifierRejectsStalePredicateBranchDescriptors(t *testing.T) {
-	proto := newProto(
-		nil,
-		[]instruction{
-			{op: opJumpIfFalse, a: 0, b: 2},
-			{op: opReturnOne, a: 0},
-			{op: opReturnOne, a: 0},
-		},
-		nil,
-		nil,
-		1,
-		1,
-		false,
-	)
-	proto.predicateBranches = nil
-
-	err := verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want stale predicate branch descriptor error")
-	}
-	if !strings.Contains(err.Error(), "predicate branch descriptors [] do not match finalized plan") {
-		t.Fatalf("verifyProto error is %q, want predicate branch descriptor detail", err)
-	}
-}
-
-func TestBytecodeVerifierRejectsStaleBranchRefinements(t *testing.T) {
-	proto := newProto(
-		nil,
-		[]instruction{
-			{op: opJumpIfFalse, a: 0, b: 2},
-			{op: opReturnOne, a: 0},
-			{op: opReturnOne, a: 0},
-		},
-		nil,
-		nil,
-		1,
-		1,
-		false,
-	)
-	proto.branchRefinements = nil
-
-	err := verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want stale branch refinement error")
-	}
-	if !strings.Contains(err.Error(), "branch refinements [] do not match finalized plan") {
-		t.Fatalf("verifyProto error is %q, want branch refinement detail", err)
-	}
-}
-
-func TestBytecodeVerifierRejectsStaleFiniteTagRefinements(t *testing.T) {
-	proto := newProto(
-		[]Value{StringValue("poison"), StringValue("regen")},
-		[]instruction{
-			{op: opJumpIfNotEqualK, a: 0, b: 0, d: 2},
-			{op: opReturnOne, a: 0},
-			{op: opJumpIfNotEqualK, a: 0, b: 1, d: 4},
-			{op: opReturnOne, a: 0},
-			{op: opReturnOne, a: 0},
-		},
-		nil,
-		nil,
-		1,
-		1,
-		false,
-	)
-	proto.finiteTagRefinements = nil
-
-	err := verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want stale finite tag refinement error")
-	}
-	if !strings.Contains(err.Error(), "finite tag refinements [] do not match finalized plan") {
-		t.Fatalf("verifyProto error is %q, want finite tag refinement detail", err)
-	}
-}
-
-func TestBytecodeVerifierRejectsStalePathFacts(t *testing.T) {
-	proto := newProto(
-		[]Value{StringValue("child"), NumberValue(0), NumberValue(1)},
-		[]instruction{
-			{op: opLoadConst, a: 1, b: 1},
-			{op: opGetStringField, a: 2, b: 0, c: 0},
-			{op: opGetStringField, a: 3, b: 0, c: 0},
-			{op: opAddK, a: 1, b: 1, c: 2},
-			{op: opJump, b: 1},
-			{op: opReturnOne, a: 1},
-		},
-		nil,
-		nil,
-		4,
-		1,
-		false,
-	)
-	proto.pathFacts = nil
-
-	err := verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want stale path fact error")
-	}
-	if !strings.Contains(err.Error(), "path facts [] do not match finalized plan") {
-		t.Fatalf("verifyProto error is %q, want path fact detail", err)
-	}
-}
-
-func TestBytecodeVerifierRejectsStalePathFactRejections(t *testing.T) {
-	proto := newProto(
-		[]Value{StringValue("child"), NumberValue(0), NumberValue(1)},
-		[]instruction{
-			{op: opLoadConst, a: 1, b: 1},
-			{op: opGetStringField, a: 2, b: 0, c: 0},
-			{op: opSetStringField, a: 0, b: 0, c: 1},
-			{op: opGetStringField, a: 3, b: 0, c: 0},
-			{op: opAddK, a: 1, b: 1, c: 2},
-			{op: opJump, b: 1},
-			{op: opReturnOne, a: 1},
-		},
-		nil,
-		nil,
-		4,
-		1,
-		false,
-	)
-	proto.pathFactRejections = nil
-
-	err := verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want stale path fact rejection error")
-	}
-	if !strings.Contains(err.Error(), "path fact rejections [] do not match finalized plan") {
-		t.Fatalf("verifyProto error is %q, want path fact rejection detail", err)
-	}
-}
-
-func TestBytecodeVerifierRejectsStalePathPlans(t *testing.T) {
-	proto := newProto(
-		[]Value{StringValue("child"), StringValue("value"), NumberValue(0), NumberValue(1)},
-		[]instruction{
-			{op: opLoadConst, a: 1, b: 2},
-			{op: opGetStringField2, a: 2, b: 0, c: 0, d: 1},
-			{op: opGetStringField2, a: 3, b: 0, c: 0, d: 1},
-			{op: opAddK, a: 1, b: 1, c: 3},
-			{op: opJump, b: 1},
-			{op: opReturnOne, a: 1},
-		},
-		nil,
-		nil,
-		4,
-		1,
-		false,
-	)
-	proto.pathPlans = nil
-
-	err := verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want stale path plan error")
-	}
-	if !strings.Contains(err.Error(), "path plans [] do not match finalized plan") {
-		t.Fatalf("verifyProto error is %q, want path plan detail", err)
-	}
-}
-
-func TestBytecodeVerifierRejectsStaleBlockPlans(t *testing.T) {
-	proto, err := Compile(`
-local delta = -7
-if delta < 0 then
-	delta = -delta
-end
-return delta
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.blockPlans) == 0 {
-		t.Fatalf("compiled absolute-delta program has no block plans:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-	proto.blockPlans = nil
-
-	err = verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want stale block plan error")
-	}
-	if !strings.Contains(err.Error(), "block plans [] do not match finalized plan") {
-		t.Fatalf("verifyProto error is %q, want block plan detail", err)
 	}
 }
 
@@ -1456,7 +1112,7 @@ func TestVMFrameAllocatesCellsOnlyForCapturedLocals(t *testing.T) {
 	}
 
 	frame.setRegister(1, NumberValue(9))
-	got, ok := frame.cells[1].value.Number()
+	got, ok := frame.cells[1].get().Number()
 	if !ok || got != 9 {
 		t.Fatalf("captured register cell is %v (%t), want number 9", got, ok)
 	}
@@ -1552,7 +1208,7 @@ func TestBaseLibraryTablesPreallocateInlineStringFields(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.table.stringFieldMap != nil {
+			if tt.table.hasStringOverflow() {
 				t.Fatalf("%s base table used string field map, want inline fields", tt.name)
 			}
 			if got := len(tt.table.stringFields); got != tt.want {
@@ -1615,10 +1271,14 @@ func TestTableInlineStringFieldSlotsAreLayoutVersionGuarded(t *testing.T) {
 
 func TestTableMapStringFieldSlotsAreLayoutVersionGuarded(t *testing.T) {
 	table := NewTable()
-	for _, key := range []string{"a", "b", "c", "d", "e", "f", "g", "h", "target"} {
+	for i := 0; i < maxInlineStringFields; i++ {
+		key := fmt.Sprintf("field%d", i)
 		table.setRawStringField(key, NumberValue(float64(len(key))))
 	}
-	if table.stringFieldMap == nil {
+	for _, key := range []string{"target"} {
+		table.setRawStringField(key, NumberValue(float64(len(key))))
+	}
+	if !table.hasStringOverflow() {
 		t.Fatal("table did not promote to string field map, want map-backed slot coverage")
 	}
 
@@ -1644,7 +1304,7 @@ func TestTableMapStringFieldSlotsAreLayoutVersionGuarded(t *testing.T) {
 		t.Fatalf("updated target is %v (%t), want number 42", updated, ok)
 	}
 
-	table.setRawStringField("a", NumberValue(100))
+	table.setRawStringField("field0", NumberValue(100))
 	if _, ok := table.rawStringFieldAtSlot(slot, "target"); !ok {
 		t.Fatal("rawStringFieldAtSlot(target) failed after unrelated map value update")
 	}
@@ -1924,6 +1584,37 @@ func TestDynamicStringIndexCacheRetainsFourStringKeys(t *testing.T) {
 	}
 }
 
+func TestStringFieldSymbolCacheFallsBackForDynamicKeys(t *testing.T) {
+	table := NewTable()
+	table.setRawStringField("wood", NumberValue(4))
+	slot, ok := table.rawStringFieldSlot("wood")
+	if !ok {
+		t.Fatal("rawStringFieldSlot(wood) failed, want inline slot")
+	}
+
+	var cache dynamicStringIndexCache
+	cache.storeSymbol(table, "wood", 0, slot)
+
+	var counts directFramePICCounts
+	value, ok := cache.getSymbolCounted(table, "wood", 99, &counts)
+	if !ok {
+		t.Fatal("symbol cache missed dynamic key, want string fallback hit")
+	}
+	if got, ok := value.Number(); !ok || got != 4 {
+		t.Fatalf("cache.getSymbolCounted(wood) = %v (%t), want number 4", value, ok)
+	}
+	if !cache.writeSymbolCounted(table, "wood", 99, NumberValue(8), &counts) {
+		t.Fatal("symbol cache write missed dynamic key, want string fallback hit")
+	}
+	updated, ok := table.rawStringField("wood")
+	if !ok {
+		t.Fatal("rawStringField(wood) missing after dynamic fallback write")
+	}
+	if got, ok := updated.Number(); !ok || got != 8 {
+		t.Fatalf("rawStringField(wood) = %v (%t), want number 8", updated, ok)
+	}
+}
+
 func TestDynamicStringIndexCacheEvictsAndRejectsStaleShapes(t *testing.T) {
 	table := NewTable()
 	for index, key := range []string{"wood", "ore", "herb", "gem", "coin"} {
@@ -1992,10 +1683,14 @@ func TestDynamicStringIndexCacheWritesFourStringKeys(t *testing.T) {
 
 func TestDynamicStringIndexCacheUsesMapBackedSlots(t *testing.T) {
 	table := NewTable()
-	for _, key := range []string{"a", "b", "c", "d", "e", "f", "g", "h", "target"} {
+	for i := 0; i < maxInlineStringFields; i++ {
+		key := fmt.Sprintf("field%d", i)
 		table.setRawStringField(key, NumberValue(float64(len(key))))
 	}
-	if table.stringFieldMap == nil {
+	for _, key := range []string{"target"} {
+		table.setRawStringField(key, NumberValue(float64(len(key))))
+	}
+	if !table.hasStringOverflow() {
 		t.Fatal("table did not promote to string field map, want map-backed cache coverage")
 	}
 	slot, ok := table.rawStringFieldSlot("target")
@@ -2107,104 +1802,6 @@ func TestDynamicStringIndexCacheCountsHitsAndMisses(t *testing.T) {
 	}
 }
 
-func TestTableFieldCallCacheRetainsFourHandlerKeys(t *testing.T) {
-	handlers := NewTable()
-	closures := make([]*closure, 4)
-	for index, key := range []string{"score", "heal", "buff", "log"} {
-		closures[index] = &closure{proto: &Proto{}}
-		handlers.setRawStringField(key, functionValue(closures[index].proto, nil))
-	}
-
-	var cache tableFieldCallCache
-	for index, key := range []string{"score", "heal", "buff", "log"} {
-		cache.store(handlers, key, closures[index])
-	}
-	for index, key := range []string{"score", "heal", "buff", "log"} {
-		closure, ok := cache.get(handlers, key)
-		if !ok {
-			t.Fatalf("cache.get(%s) missed, want handler PIC hit", key)
-		}
-		if closure != closures[index] {
-			t.Fatalf("cache.get(%s) returned %#v, want %#v", key, closure, closures[index])
-		}
-	}
-}
-
-func TestTableFieldCallCacheEvictsAndRejectsStaleHandlerValues(t *testing.T) {
-	handlers := NewTable()
-	keys := []string{"score", "heal", "buff", "log", "spawn"}
-	closures := make([]*closure, len(keys))
-	for index, key := range keys {
-		closures[index] = &closure{proto: &Proto{}}
-		handlers.setRawStringField(key, functionValue(closures[index].proto, nil))
-	}
-
-	var cache tableFieldCallCache
-	for index, key := range keys[:4] {
-		cache.store(handlers, key, closures[index])
-	}
-	cache.store(handlers, "spawn", closures[4])
-	if _, ok := cache.get(handlers, "score"); ok {
-		t.Fatal("cache.get(score) hit after fifth handler, want oldest entry evicted")
-	}
-	gotClosure, ok := cache.get(handlers, "spawn")
-	if !ok {
-		t.Fatal("cache.get(spawn) missed, want newest handler entry")
-	}
-	if gotClosure != closures[4] {
-		t.Fatalf("cache.get(spawn) returned %#v, want %#v", gotClosure, closures[4])
-	}
-
-	updated := &closure{proto: &Proto{}}
-	handlers.setRawStringField("spawn", functionValue(updated.proto, nil))
-	if _, ok := cache.get(handlers, "spawn"); ok {
-		t.Fatal("cache.get(spawn) hit after handler mutation, want stale value token rejected")
-	}
-}
-
-func TestTableFieldCallCacheCountsHitsAndMisses(t *testing.T) {
-	handlers := NewTable()
-	closures := make([]*closure, 2)
-	for index, key := range []string{"score", "heal"} {
-		closures[index] = &closure{proto: &Proto{}}
-		handlers.setRawStringField(key, functionValue(closures[index].proto, nil))
-	}
-
-	var cache tableFieldCallCache
-	for index, key := range []string{"score", "heal"} {
-		cache.store(handlers, key, closures[index])
-	}
-
-	var counts directFramePICCounts
-	if _, ok := cache.getCounted(handlers, "score", &counts); !ok {
-		t.Fatal("cache.getCounted(score) missed, want monomorphic hit")
-	}
-	if _, ok := cache.getCounted(handlers, "heal", &counts); !ok {
-		t.Fatal("cache.getCounted(heal) missed, want polymorphic hit")
-	}
-	if _, ok := cache.getCounted(handlers, "missing", &counts); ok {
-		t.Fatal("cache.getCounted(missing) hit, want key miss")
-	}
-	updated := &closure{proto: &Proto{}}
-	handlers.setRawStringField("heal", functionValue(updated.proto, nil))
-	if _, ok := cache.getCounted(handlers, "heal", &counts); ok {
-		t.Fatal("cache.getCounted(heal) hit after handler mutation, want shape miss")
-	}
-
-	if counts.monomorphicHits != 1 {
-		t.Fatalf("monomorphicHits = %d, want 1", counts.monomorphicHits)
-	}
-	if counts.polymorphicHits != 1 {
-		t.Fatalf("polymorphicHits = %d, want 1", counts.polymorphicHits)
-	}
-	if counts.keyMisses != 1 {
-		t.Fatalf("keyMisses = %d, want 1", counts.keyMisses)
-	}
-	if counts.shapeMisses != 1 {
-		t.Fatalf("shapeMisses = %d, want 1", counts.shapeMisses)
-	}
-}
-
 func TestTableIndexCacheInvalidatesWhenMetatableIndexChanges(t *testing.T) {
 	first := NewTable()
 	first.setRawStringField("hp", NumberValue(10))
@@ -2233,6 +1830,100 @@ func TestTableIndexCacheInvalidatesWhenMetatableIndexChanges(t *testing.T) {
 	}
 }
 
+func TestRepeatedCallsReuseWarmFieldCaches(t *testing.T) {
+	proto, err := Compile(`
+local rows = {
+	{hp = 1},
+	{hp = 2},
+	{hp = 3},
+}
+
+local function read(key)
+	local total = 0
+	for i = 1, 3 do
+		total = total + rows[i][key]
+	end
+	return total
+end
+
+local total = 0
+for i = 1, 20 do
+	total = total + read("hp")
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
+	if err != nil {
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
+	}
+	if got, ok := results[0].Number(); !ok || got != 120 {
+		t.Fatalf("result is %v (%t), want number 120", got, ok)
+	}
+	if got := snapshot.picCounts.keyMisses; got > 2 {
+		t.Fatalf("key misses = %d, want warmed field caches to survive repeated calls; %s", got, summarizeDirectFrameMechanisms(snapshot))
+	}
+	if got := snapshot.picCounts.monomorphicHits + snapshot.picCounts.polymorphicHits; got == 0 {
+		t.Fatalf("PIC hits = 0, want repeated dynamic string indexes to hit warmed field caches; %s", summarizeDirectFrameMechanisms(snapshot))
+	}
+}
+
+func TestFrameResetNoLongerScalesWithCodeLength(t *testing.T) {
+	shortProto := compileDynamicIndexProgram(t, 4)
+	longProto := compileDynamicIndexProgram(t, 160)
+
+	shortBytes := measuredFreshThreadRunAllocBytes(t, shortProto, 4, 40)
+	longBytes := measuredFreshThreadRunAllocBytes(t, longProto, 160, 40)
+	if delta := int64(longBytes) - int64(shortBytes); delta > 8192 {
+		t.Fatalf("fresh run allocated %d more bytes for long dynamic-index code (%d vs %d), want frame reset cost not to scale with code length", delta, longBytes, shortBytes)
+	}
+}
+
+func compileDynamicIndexProgram(t *testing.T, reads int) *Proto {
+	t.Helper()
+	var source strings.Builder
+	source.WriteString(`
+local row = {hp = 1}
+local key = "hp"
+local total = 0
+`)
+	for i := 0; i < reads; i++ {
+		source.WriteString("total = total + row[key]\n")
+	}
+	source.WriteString("return total\n")
+	proto, err := Compile(source.String())
+	if err != nil {
+		t.Fatalf("Compile(%d reads) returned error: %v", reads, err)
+	}
+	if !proto.directFrameDispatch {
+		t.Fatalf("compiled %d-read dynamic-index program is not direct-frame eligible:\n%s", reads, strings.Join(disassembleProtoFacts(proto), "\n"))
+	}
+	return proto
+}
+
+func measuredFreshThreadRunAllocBytes(t *testing.T, proto *Proto, want float64, runs int) uint64 {
+	t.Helper()
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < runs; i++ {
+		thread := newVMThread(runtimeGlobals(nil))
+		results, err := thread.run(proto, nil, nil)
+		if err != nil {
+			t.Fatalf("thread.run returned error: %v", err)
+		}
+		got, ok := results[0].Number()
+		if !ok || got != want {
+			t.Fatalf("thread.run result is %v (%t), want number %v", got, ok, want)
+		}
+	}
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	return (after.TotalAlloc - before.TotalAlloc) / uint64(runs)
+}
+
 func TestTableFastArrayFrontRemoveKeepsSequenceStorage(t *testing.T) {
 	table := NewTable()
 	table.fastArrayAppend(NumberValue(1))
@@ -2252,8 +1943,8 @@ func TestTableFastArrayFrontRemoveKeepsSequenceStorage(t *testing.T) {
 	if length != 3 {
 		t.Fatalf("rawLen after front remove/append is %d, want 3", length)
 	}
-	if len(table.fields) != 0 {
-		t.Fatalf("fast array spilled %d hash fields, want none", len(table.fields))
+	if table.hashFieldCount() != 0 {
+		t.Fatalf("fast array spilled %d hash fields, want none", table.hashFieldCount())
 	}
 	for index, want := range []float64{2, 3, 4} {
 		got, ok := table.array[index].Number()
@@ -2279,6 +1970,7 @@ return sum(4)
 
 	var counts directFramePICCounts
 	thread := newVMThread(runtimeGlobals(nil))
+	thread.directFrameInstrumented = true
 	thread.directFramePICCounts = &counts
 	results, err := thread.run(proto, nil, nil)
 	if err != nil {
@@ -2329,6 +2021,82 @@ return sum(12)
 	}
 }
 
+func TestScriptCallFixedArityDoesNotAllocatePerCall(t *testing.T) {
+	proto, err := Compile(`
+local function add(a, b)
+	return a + b
+end
+
+local total = 0
+for i = 1, 100 do
+	total = total + add(i, 1)
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	thread := newVMThread(runtimeGlobals(nil))
+	restore := thread.activate()
+	defer restore()
+	if results, err := thread.runScript(proto, nil, nil); err != nil {
+		t.Fatalf("warm thread.runScript returned error: %v", err)
+	} else if got, ok := results[0].Number(); !ok || got != 5150 {
+		t.Fatalf("warm result is %v (%t), want number 5150", got, ok)
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		results, err := thread.runScript(proto, nil, nil)
+		if err != nil {
+			t.Fatalf("thread.runScript returned error: %v", err)
+		}
+		got, ok := results[0].Number()
+		if !ok || got != 5150 {
+			t.Fatalf("thread.runScript result is %v (%t), want number 5150", got, ok)
+		}
+	})
+	if allocs > 2 {
+		t.Fatalf("fixed-arity script calls allocated %.0f times per run, want constant run-boundary allocations only", allocs)
+	}
+}
+
+func TestDeepRecursionGrowsStackWithoutCorruption(t *testing.T) {
+	proto, err := Compile(`
+local function sum(n, acc)
+	if n == 0 then
+		return acc
+	end
+	return sum(n - 1, acc + n)
+end
+return sum(256, 0)
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	thread := newVMThread(runtimeGlobals(nil))
+	results, err := thread.run(proto, nil, nil)
+	if err != nil {
+		t.Fatalf("thread.run returned error: %v", err)
+	}
+	if got, want := len(results), 1; got != want {
+		t.Fatalf("thread.run returned %d results, want %d", got, want)
+	}
+	got, ok := results[0].Number()
+	if !ok || got != 32896 {
+		t.Fatalf("thread.run result is %v (%t), want number 32896", got, ok)
+	}
+	if thread.maxFrames < 250 {
+		t.Fatalf("thread max frame depth is %d, want deep recursion to grow frame stack", thread.maxFrames)
+	}
+	if len(thread.frames) != 0 {
+		t.Fatalf("thread kept %d frames after return, want empty stack", len(thread.frames))
+	}
+	if len(thread.stack) != 0 {
+		t.Fatalf("thread kept %d stack values after return, want empty stack", len(thread.stack))
+	}
+}
+
 func TestVMThreadKeepsRecursiveFibonacciAllocationsBounded(t *testing.T) {
 	proto, err := Compile(`
 local function fib(n)
@@ -2359,6 +2127,526 @@ return fib(10)
 	}
 }
 
+func TestMultiReturnAdjustmentDoesNotAllocatePerCall(t *testing.T) {
+	proto, err := Compile(`
+local function pair(a, b)
+	return a, b
+end
+
+local total = 0
+for i = 1, 80 do
+	local a, b = pair(i, i + 1)
+	total = total + a + b
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	thread := newVMThread(runtimeGlobals(nil))
+	restore := thread.activate()
+	defer restore()
+	if results, err := thread.runScript(proto, nil, nil); err != nil {
+		t.Fatalf("warm thread.runScript returned error: %v", err)
+	} else if got, ok := results[0].Number(); !ok || got != 6560 {
+		t.Fatalf("warm result is %v (%t), want number 6560", got, ok)
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		results, err := thread.runScript(proto, nil, nil)
+		if err != nil {
+			t.Fatalf("thread.runScript returned error: %v", err)
+		}
+		got, ok := results[0].Number()
+		if !ok || got != 6560 {
+			t.Fatalf("thread.runScript result is %v (%t), want number 6560", got, ok)
+		}
+	})
+	if allocs > 2 {
+		t.Fatalf("internal fixed multi-return script calls allocated %.0f times per run, want constant run-boundary allocations only", allocs)
+	}
+}
+
+func TestOpenReturnPrefixDoesNotAllocatePerCall(t *testing.T) {
+	proto, err := Compile(`
+local function route(...)
+	return 1, 2, select("#", ...)
+end
+
+local total = 0
+for i = 1, 80 do
+	local a, b, c = route(i, i + 1, i + 2)
+	total = total + a + b + c
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	thread := newVMThread(runtimeGlobals(nil))
+	restore := thread.activate()
+	defer restore()
+	if results, err := thread.runScript(proto, nil, nil); err != nil {
+		t.Fatalf("warm thread.runScript returned error: %v", err)
+	} else if got, ok := results[0].Number(); !ok || got != 480 {
+		t.Fatalf("warm result is %v (%t), want number 480", got, ok)
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		results, err := thread.runScript(proto, nil, nil)
+		if err != nil {
+			t.Fatalf("thread.runScript returned error: %v", err)
+		}
+		got, ok := results[0].Number()
+		if !ok || got != 480 {
+			t.Fatalf("thread.runScript result is %v (%t), want number 480", got, ok)
+		}
+	})
+	if allocs > 2 {
+		t.Fatalf("open return with prefix allocated %.0f times per run, want constant run-boundary allocations only", allocs)
+	}
+}
+
+func TestVarargForwardingDoesNotCopyPerAccess(t *testing.T) {
+	proto, err := Compile(`
+local function sum(a, b, c, d)
+	return a + b + c + d
+end
+
+local function forward(...)
+	local total = 0
+	for i = 1, 80 do
+		total = total + sum(...)
+	end
+	return total
+end
+
+return forward(1, 2, 3, 4)
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	thread := newVMThread(runtimeGlobals(nil))
+	restore := thread.activate()
+	defer restore()
+	if results, err := thread.runScript(proto, nil, nil); err != nil {
+		t.Fatalf("warm thread.runScript returned error: %v", err)
+	} else if got, ok := results[0].Number(); !ok || got != 800 {
+		t.Fatalf("warm result is %v (%t), want number 800", got, ok)
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		results, err := thread.runScript(proto, nil, nil)
+		if err != nil {
+			t.Fatalf("thread.runScript returned error: %v", err)
+		}
+		got, ok := results[0].Number()
+		if !ok || got != 800 {
+			t.Fatalf("thread.runScript result is %v (%t), want number 800", got, ok)
+		}
+	})
+	if allocs > 8 {
+		t.Fatalf("vararg forwarding allocated %.0f times per run, want constant run-boundary allocations only", allocs)
+	}
+}
+
+func TestFunctionIndexMetamethodCallDoesNotAllocatePerHit(t *testing.T) {
+	proto, err := Compile(`
+local object = {base = 20}
+setmetatable(object, {__index = function(self, key)
+	return self.base + key
+end})
+
+local total = 0
+for i = 1, 80 do
+	total = total + object[5]
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	thread := newVMThread(runtimeGlobals(nil))
+	restore := thread.activate()
+	defer restore()
+	if results, err := thread.runScript(proto, nil, nil); err != nil {
+		t.Fatalf("warm thread.runScript returned error: %v", err)
+	} else if got, ok := results[0].Number(); !ok || got != 2000 {
+		t.Fatalf("warm result is %v (%t), want number 2000", got, ok)
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		results, err := thread.runScript(proto, nil, nil)
+		if err != nil {
+			t.Fatalf("thread.runScript returned error: %v", err)
+		}
+		got, ok := results[0].Number()
+		if !ok || got != 2000 {
+			t.Fatalf("thread.runScript result is %v (%t), want number 2000", got, ok)
+		}
+	})
+	if allocs > 8 {
+		t.Fatalf("function __index hits allocated %.0f times per run, want constant run-boundary allocations only", allocs)
+	}
+}
+
+func TestNewindexMetamethodWriteDoesNotAllocatePerHit(t *testing.T) {
+	proto, err := Compile(`
+local log = {hp = 0}
+local object = {}
+setmetatable(object, {__newindex = function(_, key, value)
+	log[key] = value + 1
+end})
+
+for i = 1, 80 do
+	object.hp = i
+end
+return log.hp, object.hp
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	thread := newVMThread(runtimeGlobals(nil))
+	restore := thread.activate()
+	defer restore()
+	if results, err := thread.runScript(proto, nil, nil); err != nil {
+		t.Fatalf("warm thread.runScript returned error: %v", err)
+	} else if got, ok := results[0].Number(); !ok || got != 81 {
+		t.Fatalf("warm first result is %v (%t), want number 81", got, ok)
+	} else if !results[1].IsNil() {
+		t.Fatalf("warm second result is %s, want nil", results[1].Kind())
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		results, err := thread.runScript(proto, nil, nil)
+		if err != nil {
+			t.Fatalf("thread.runScript returned error: %v", err)
+		}
+		got, ok := results[0].Number()
+		if !ok || got != 81 {
+			t.Fatalf("thread.runScript first result is %v (%t), want number 81", got, ok)
+		}
+		if !results[1].IsNil() {
+			t.Fatalf("thread.runScript second result is %s, want nil", results[1].Kind())
+		}
+	})
+	if allocs > 8 {
+		t.Fatalf("function __newindex hits allocated %.0f times per run, want constant run-boundary allocations only", allocs)
+	}
+}
+
+func TestArithmeticComparisonMetamethodsDoNotAllocatePerHit(t *testing.T) {
+	proto, err := Compile(`
+local values = {left = 4, right = 6}
+setmetatable(values, {
+	__add = function(a, b)
+		return a.left + b.right
+	end,
+	__lt = function(a, b)
+		return a.left < b.right
+	end,
+})
+
+local total = 0
+for i = 1, 80 do
+	if values < values then
+		total = total + (values + values)
+	end
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	thread := newVMThread(runtimeGlobals(nil))
+	restore := thread.activate()
+	defer restore()
+	if results, err := thread.runScript(proto, nil, nil); err != nil {
+		t.Fatalf("warm thread.runScript returned error: %v", err)
+	} else if got, ok := results[0].Number(); !ok || got != 800 {
+		t.Fatalf("warm result is %v (%t), want number 800", got, ok)
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		results, err := thread.runScript(proto, nil, nil)
+		if err != nil {
+			t.Fatalf("thread.runScript returned error: %v", err)
+		}
+		got, ok := results[0].Number()
+		if !ok || got != 800 {
+			t.Fatalf("thread.runScript result is %v (%t), want number 800", got, ok)
+		}
+	})
+	if allocs > 8 {
+		t.Fatalf("arithmetic/comparison metamethod hits allocated %.0f times per run, want constant run-boundary allocations only", allocs)
+	}
+}
+
+func TestTostringMetamethodDoesNotAllocatePerHit(t *testing.T) {
+	proto, err := Compile(`
+local object = {label = "ready"}
+setmetatable(object, {
+	__tostring = function(self)
+		return self.label
+	end,
+})
+
+local total = 0
+for i = 1, 80 do
+	if tostring(object) == "ready" then
+		total = total + 1
+	end
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	thread := newVMThread(runtimeGlobals(nil))
+	restore := thread.activate()
+	defer restore()
+	if results, err := thread.runScript(proto, nil, nil); err != nil {
+		t.Fatalf("warm thread.runScript returned error: %v", err)
+	} else if got, ok := results[0].Number(); !ok || got != 80 {
+		t.Fatalf("warm result is %v (%t), want number 80", got, ok)
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		results, err := thread.runScript(proto, nil, nil)
+		if err != nil {
+			t.Fatalf("thread.runScript returned error: %v", err)
+		}
+		got, ok := results[0].Number()
+		if !ok || got != 80 {
+			t.Fatalf("thread.runScript result is %v (%t), want number 80", got, ok)
+		}
+	})
+	if allocs > 8 {
+		t.Fatalf("tostring metamethod hits allocated %.0f times per run, want constant run-boundary allocations only", allocs)
+	}
+}
+
+func TestCallMetamethodDoesNotAllocatePerHit(t *testing.T) {
+	proto, err := Compile(`
+local object = {base = 7}
+setmetatable(object, {
+	__call = function(self, amount)
+		return self.base + amount
+	end,
+})
+
+local total = 0
+for i = 1, 80 do
+	total = total + object(5)
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	thread := newVMThread(runtimeGlobals(nil))
+	restore := thread.activate()
+	defer restore()
+	if results, err := thread.runScript(proto, nil, nil); err != nil {
+		t.Fatalf("warm thread.runScript returned error: %v", err)
+	} else if got, ok := results[0].Number(); !ok || got != 960 {
+		t.Fatalf("warm result is %v (%t), want number 960", got, ok)
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		results, err := thread.runScript(proto, nil, nil)
+		if err != nil {
+			t.Fatalf("thread.runScript returned error: %v", err)
+		}
+		got, ok := results[0].Number()
+		if !ok || got != 960 {
+			t.Fatalf("thread.runScript result is %v (%t), want number 960", got, ok)
+		}
+	})
+	if allocs > 8 {
+		t.Fatalf("__call metamethod hits allocated %.0f times per run, want constant run-boundary allocations only", allocs)
+	}
+}
+
+func TestRunPublicResultsRemainStableAfterReturnWindowReuse(t *testing.T) {
+	proto, err := Compile(`
+local function many(seed)
+	return seed, seed + 1, seed + 2
+end
+
+local a, b, c = many(3)
+local d, e, f = many(20)
+return a, b, c, d, e, f
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	thread := newVMThread(runtimeGlobals(nil))
+	first, err := thread.run(proto, nil, nil)
+	if err != nil {
+		t.Fatalf("first thread.run returned error: %v", err)
+	}
+	second, err := thread.run(proto, nil, nil)
+	if err != nil {
+		t.Fatalf("second thread.run returned error: %v", err)
+	}
+
+	want := []float64{3, 4, 5, 20, 21, 22}
+	for run, results := range [][]Value{first, second} {
+		if got, wantLen := len(results), len(want); got != wantLen {
+			t.Fatalf("run %d returned %d values, want %d", run+1, got, wantLen)
+		}
+		for i, value := range results {
+			got, ok := value.Number()
+			if !ok || got != want[i] {
+				t.Fatalf("run %d result[%d] is %v (%t), want number %v", run+1, i, value, ok, want[i])
+			}
+		}
+	}
+}
+
+func TestZeroCaptureClosureIdentityIsPreserved(t *testing.T) {
+	proto, err := Compile(`
+local function make()
+	return function()
+		return 17
+	end
+end
+
+local first = make()
+local second = make()
+return first == second, first(), second()
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if got, ok := results[0].Bool(); !ok || got {
+		t.Fatalf("first == second is %v (%t), want false for repeated closure creation", got, ok)
+	}
+	for i := 1; i <= 2; i++ {
+		got, ok := results[i].Number()
+		if !ok || got != 17 {
+			t.Fatalf("result[%d] is %v (%t), want number 17", i, results[i], ok)
+		}
+	}
+}
+
+func TestImmutableCaptureAvoidsCellAllocation(t *testing.T) {
+	proto, err := Compile(`
+local total = 0
+for i = 1, 80 do
+	local base = i
+	local add = function(delta)
+		return base + delta
+	end
+	total = total + add(1)
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	thread := newVMThread(runtimeGlobals(nil))
+	restore := thread.activate()
+	defer restore()
+	if results, err := thread.runScript(proto, nil, nil); err != nil {
+		t.Fatalf("warm thread.runScript returned error: %v", err)
+	} else if got, ok := results[0].Number(); !ok || got != 3320 {
+		t.Fatalf("warm result is %v (%t), want number 3320", got, ok)
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		results, err := thread.runScript(proto, nil, nil)
+		if err != nil {
+			t.Fatalf("thread.runScript returned error: %v", err)
+		}
+		got, ok := results[0].Number()
+		if !ok || got != 3320 {
+			t.Fatalf("thread.runScript result is %v (%t), want number 3320", got, ok)
+		}
+	})
+	if allocs > 85 {
+		t.Fatalf("immutable captures allocated %.0f times per run, want closure allocations without capture cells", allocs)
+	}
+}
+
+func TestZeroCaptureImmediateClosureDoesNotAllocatePerCreation(t *testing.T) {
+	proto, err := Compile(`
+local total = 0
+for i = 1, 80 do
+	total = total + (function()
+		return 1
+	end)()
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	thread := newVMThread(runtimeGlobals(nil))
+	restore := thread.activate()
+	defer restore()
+	if results, err := thread.runScript(proto, nil, nil); err != nil {
+		t.Fatalf("warm thread.runScript returned error: %v", err)
+	} else if got, ok := results[0].Number(); !ok || got != 80 {
+		t.Fatalf("warm result is %v (%t), want number 80", got, ok)
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		results, err := thread.runScript(proto, nil, nil)
+		if err != nil {
+			t.Fatalf("thread.runScript returned error: %v", err)
+		}
+		got, ok := results[0].Number()
+		if !ok || got != 80 {
+			t.Fatalf("thread.runScript result is %v (%t), want number 80", got, ok)
+		}
+	})
+	if allocs > 8 {
+		t.Fatalf("immediate zero-capture closures allocated %.0f times per run, want constant run-boundary allocations only", allocs)
+	}
+}
+
+func TestMutableCaptureStillSharesCell(t *testing.T) {
+	proto, err := Compile(`
+local value = 1
+local function inc()
+	value = value + 1
+	return value
+end
+local function get()
+	return value
+end
+return inc(), get(), inc(), get()
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	want := []float64{2, 2, 3, 3}
+	if got, wantLen := len(results), len(want); got != wantLen {
+		t.Fatalf("Run returned %d values, want %d", got, wantLen)
+	}
+	for i, value := range results {
+		got, ok := value.Number()
+		if !ok || got != want[i] {
+			t.Fatalf("result[%d] is %v (%t), want number %v", i, value, ok, want[i])
+		}
+	}
+}
+
 func TestVMThreadUsesExplicitFrameStackForScriptIndexMetamethod(t *testing.T) {
 	proto, err := Compile(`
 local object = setmetatable({}, {
@@ -2380,6 +2668,7 @@ return object.hp
 
 	var counts directFramePICCounts
 	thread := newVMThread(runtimeGlobals(nil))
+	thread.directFrameInstrumented = true
 	thread.directFramePICCounts = &counts
 	results, err := thread.run(proto, nil, nil)
 	if err != nil {
@@ -2587,6 +2876,44 @@ func TestVMFrameReturnsHostInterruptWhenInstructionBudgetExpires(t *testing.T) {
 	}
 	if result.state != vmCallStateHostInterrupt {
 		t.Fatalf("runFrame state is %v, want host interrupt", result.state)
+	}
+}
+
+func TestInstructionBudgetInterruptsFastExecution(t *testing.T) {
+	proto, err := Compile(`
+local total = 0
+for i = 1, 100 do
+	total = total + i
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if !proto.directFrameDispatch {
+		t.Fatalf("compiled budget program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
+	}
+
+	var counts directFrameOpcodeCounts
+	var pic directFramePICCounts
+	thread := newVMThread(runtimeGlobals(nil))
+	thread.instructionBudget = 5
+	thread.directFrameInstrumented = true
+	thread.directFrameOpcodeCounts = &counts
+	thread.directFramePICCounts = &pic
+
+	result, err := thread.runFrame(newVMFrame(proto, nil, nil))
+	if err != nil {
+		t.Fatalf("runFrame returned error: %v", err)
+	}
+	if result.state != vmCallStateHostInterrupt {
+		t.Fatalf("runFrame state is %v, want host interrupt", result.state)
+	}
+	if counts.count(opNumericForLoop) == 0 && counts.count(opAdd) == 0 && counts.count(opAddK) == 0 {
+		t.Fatalf("direct opcode counts show no loop/body execution: %#v", counts.ranked())
+	}
+	if got := pic.sideExitCount(directFrameSideExitReasonBudget); got != 0 {
+		t.Fatalf("budget side exits = %d, want budget handled inside fast loop", got)
 	}
 }
 
@@ -2851,8 +3178,8 @@ func TestTableCommonArrayWritesUseArrayPart(t *testing.T) {
 	if got, want := len(table.array), 4; got != want {
 		t.Fatalf("array part length is %d, want %d", got, want)
 	}
-	if len(table.fields) != 0 {
-		t.Fatalf("hash fields has %d entries, want 0 for contiguous array writes", len(table.fields))
+	if table.hashFieldCount() != 0 {
+		t.Fatalf("hash fields has %d entries, want 0 for contiguous array writes", table.hashFieldCount())
 	}
 	length, err := table.rawLen()
 	if err != nil {
@@ -2871,7 +3198,7 @@ func TestTableSparseArrayKeysPromoteWhenContiguous(t *testing.T) {
 	if got, want := len(table.array), 0; got != want {
 		t.Fatalf("array length after sparse write is %d, want %d", got, want)
 	}
-	if got, want := len(table.fields), 1; got != want {
+	if got, want := table.hashFieldCount(), 1; got != want {
 		t.Fatalf("hash fields after sparse write is %d, want %d", got, want)
 	}
 	if err := table.rawSet(NumberValue(1), StringValue("first")); err != nil {
@@ -2883,7 +3210,7 @@ func TestTableSparseArrayKeysPromoteWhenContiguous(t *testing.T) {
 	if got, want := len(table.array), 3; got != want {
 		t.Fatalf("array length after promotion is %d, want %d", got, want)
 	}
-	if got, want := len(table.fields), 0; got != want {
+	if got, want := table.hashFieldCount(), 0; got != want {
 		t.Fatalf("hash fields after promotion is %d, want %d", got, want)
 	}
 	length, err := table.rawLen()
@@ -2895,7 +3222,7 @@ func TestTableSparseArrayKeysPromoteWhenContiguous(t *testing.T) {
 	}
 }
 
-func TestTableRawNextIncludesArrayAndHashKeysInDeterministicOrder(t *testing.T) {
+func TestTableRawNextIncludesArrayAndHashKeysInDeterministicInsertionOrder(t *testing.T) {
 	table := NewTable()
 	if err := table.rawSet(StringValue("name"), StringValue("ember")); err != nil {
 		t.Fatalf("rawSet name returned error: %v", err)
@@ -2911,11 +3238,11 @@ func TestTableRawNextIncludesArrayAndHashKeysInDeterministicOrder(t *testing.T) 
 	if err != nil {
 		t.Fatalf("rawNext nil returned error: %v", err)
 	}
-	if number, ok := firstKey.Number(); !ok || number != 1 {
-		t.Fatalf("first next key is %v (%t), want number 1", number, ok)
+	if text, ok := firstKey.String(); !ok || text != "name" {
+		t.Fatalf("first next key is %q (%t), want name", text, ok)
 	}
-	if text, ok := firstValue.String(); !ok || text != "first" {
-		t.Fatalf("first next value is %q (%t), want first", text, ok)
+	if text, ok := firstValue.String(); !ok || text != "ember" {
+		t.Fatalf("first next value is %q (%t), want ember", text, ok)
 	}
 
 	secondKey, secondValue, err := table.rawNext(firstKey)
@@ -2933,11 +3260,167 @@ func TestTableRawNextIncludesArrayAndHashKeysInDeterministicOrder(t *testing.T) 
 	if err != nil {
 		t.Fatalf("rawNext second returned error: %v", err)
 	}
-	if text, ok := thirdKey.String(); !ok || text != "name" {
-		t.Fatalf("third next key is %q (%t), want name", text, ok)
+	if number, ok := thirdKey.Number(); !ok || number != 1 {
+		t.Fatalf("third next key is %v (%t), want number 1", number, ok)
 	}
-	if text, ok := thirdValue.String(); !ok || text != "ember" {
-		t.Fatalf("third next value is %q (%t), want ember", text, ok)
+	if text, ok := thirdValue.String(); !ok || text != "first" {
+		t.Fatalf("third next value is %q (%t), want first", text, ok)
+	}
+}
+
+func TestTableRawNextMixedTableDoesNotAllocatePerStep(t *testing.T) {
+	table := NewTable()
+	for _, item := range []struct {
+		key   Value
+		value Value
+	}{
+		{StringValue("name"), StringValue("ember")},
+		{NumberValue(3), StringValue("third")},
+		{NumberValue(1), StringValue("first")},
+		{TableValue(NewTable()), StringValue("object")},
+	} {
+		if err := table.rawSet(item.key, item.value); err != nil {
+			t.Fatalf("rawSet returned error: %v", err)
+		}
+	}
+	firstKey, _, err := table.rawNext(NilValue())
+	if err != nil {
+		t.Fatalf("rawNext nil returned error: %v", err)
+	}
+
+	var nextKey Value
+	var nextValue Value
+	allocs := testing.AllocsPerRun(1000, func() {
+		nextKey, nextValue, err = table.rawNext(firstKey)
+		if err != nil {
+			t.Fatalf("rawNext first returned error: %v", err)
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("rawNext allocated %.2f times per step, want 0", allocs)
+	}
+	if nextKey.IsNil() || nextValue.IsNil() {
+		t.Fatal("rawNext returned nil key/value during allocation check")
+	}
+}
+
+func TestTableRawNextRejectsInvalidResumptionKey(t *testing.T) {
+	table := NewTable()
+	if err := table.rawSet(StringValue("present"), NumberValue(1)); err != nil {
+		t.Fatalf("rawSet returned error: %v", err)
+	}
+	if _, _, err := table.rawNext(StringValue("missing")); err == nil {
+		t.Fatal("rawNext accepted missing resumption key, want invalid key error")
+	}
+}
+
+func TestTableRawNextPreservesPositionAcrossUpdateDeleteAndReinsert(t *testing.T) {
+	table := NewTable()
+	for _, key := range []string{"a", "b", "c"} {
+		if err := table.rawSet(StringValue(key), StringValue(key+"1")); err != nil {
+			t.Fatalf("rawSet %s returned error: %v", key, err)
+		}
+	}
+	if err := table.rawSet(StringValue("c"), StringValue("c2")); err != nil {
+		t.Fatalf("rawSet c update returned error: %v", err)
+	}
+	if err := table.rawSet(StringValue("b"), NilValue()); err != nil {
+		t.Fatalf("rawSet b delete returned error: %v", err)
+	}
+	if err := table.rawSet(StringValue("b"), StringValue("b2")); err != nil {
+		t.Fatalf("rawSet b reinsert returned error: %v", err)
+	}
+
+	var got []string
+	for key, value, err := table.rawNext(NilValue()); !key.IsNil(); key, value, err = table.rawNext(key) {
+		if err != nil {
+			t.Fatalf("rawNext returned error: %v", err)
+		}
+		keyText, keyOK := key.String()
+		valueText, valueOK := value.String()
+		if !keyOK || !valueOK {
+			t.Fatalf("rawNext returned key/value %v/%v, want strings", key, value)
+		}
+		got = append(got, keyText+"="+valueText)
+	}
+	want := []string{"a=a1", "b=b2", "c=c2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("rawNext order = %v, want %v", got, want)
+	}
+}
+
+func TestTableIterationJournalCompactsOnlyPastTombstoneThreshold(t *testing.T) {
+	table := NewTable()
+	for i := 0; i < 40; i++ {
+		if err := table.rawSet(StringValue(fmt.Sprintf("k%02d", i)), NumberValue(float64(i))); err != nil {
+			t.Fatalf("rawSet seed %d returned error: %v", i, err)
+		}
+	}
+	if table.iteration == nil {
+		t.Fatal("mixed string-map table has no iteration journal")
+	}
+	if got := len(table.iteration.keys); got != 40 {
+		t.Fatalf("journal key count after seed = %d, want 40", got)
+	}
+	for i := 0; i < 20; i++ {
+		if err := table.rawSet(StringValue(fmt.Sprintf("k%02d", i)), NilValue()); err != nil {
+			t.Fatalf("rawSet delete %d returned error: %v", i, err)
+		}
+	}
+	if got := len(table.iteration.keys); got != 40 {
+		t.Fatalf("journal compacted at half tombstones; key count = %d, want 40", got)
+	}
+	if got := table.iteration.tombstones; got != 20 {
+		t.Fatalf("journal tombstones = %d, want 20 before threshold is crossed", got)
+	}
+	if err := table.rawSet(StringValue("k20"), NilValue()); err != nil {
+		t.Fatalf("rawSet threshold delete returned error: %v", err)
+	}
+	if got := len(table.iteration.keys); got != 19 {
+		t.Fatalf("journal key count after compaction = %d, want 19", got)
+	}
+	if got := table.iteration.tombstones; got != 0 {
+		t.Fatalf("journal tombstones after compaction = %d, want 0", got)
+	}
+}
+
+func TestTableObjectKeysUseCreationIDsForStableOrder(t *testing.T) {
+	firstTable := NewTable()
+	secondTable := NewTable()
+	if !(tableKey{kind: TableKind, table: firstTable}).less(tableKey{kind: TableKind, table: secondTable}) {
+		t.Fatal("first table key does not sort before later table key")
+	}
+
+	firstUserData := NewUserData("first")
+	secondUserData := NewUserData("second")
+	if !(tableKey{kind: UserDataKind, userdata: firstUserData}).less(tableKey{kind: UserDataKind, userdata: secondUserData}) {
+		t.Fatal("first userdata key does not sort before later userdata key")
+	}
+}
+
+func TestTableRawNextObjectKeysAvoidPointerFormattingAllocation(t *testing.T) {
+	table := NewTable()
+	if err := table.rawSet(TableValue(NewTable()), NumberValue(1)); err != nil {
+		t.Fatalf("rawSet table key returned error: %v", err)
+	}
+	if err := table.rawSet(UserDataValue(NewUserData("payload")), NumberValue(2)); err != nil {
+		t.Fatalf("rawSet userdata key returned error: %v", err)
+	}
+
+	var key Value
+	var value Value
+	var err error
+	allocs := testing.AllocsPerRun(1000, func() {
+		key, value, err = table.rawNext(NilValue())
+		if err != nil {
+			t.Fatalf("rawNext returned error: %v", err)
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("rawNext object key step allocated %.2f times, want 0", allocs)
+	}
+	if key.IsNil() || value.IsNil() {
+		t.Fatal("rawNext returned nil key/value during allocation check")
 	}
 }
 
@@ -3428,12 +3911,9 @@ func TestDisassembleProtoFactsShowsOptimizedArtifactShape(t *testing.T) {
 
 	got := disassembleProtoFacts(proto)
 	want := []string{
-		"direct_registers false",
-		"direct_frame_dispatch false",
-		"direct_leaf_call_one false",
+		"direct_frame_dispatch true",
 		"captured_locals r1",
 		"entry_nil none",
-		"direct_frame_rejection prototype has captured locals",
 		"constant_key k0 string \"hp\"",
 		"constant_number k1 3",
 		"constant_kind k0 string",
@@ -3485,7 +3965,7 @@ func TestCompilerAttachesExpressionSourceMetadataToBytecodeIR(t *testing.T) {
 	}
 }
 
-func TestCompilerLowersNumericForToCombinedLoopCheck(t *testing.T) {
+func TestCompilerEmitsFusedNumericForLoop(t *testing.T) {
 	proto, err := Compile(`
 local total = 0
 for i = 1, 5, 2 do
@@ -3502,12 +3982,48 @@ return total
 	if !strings.Contains(joined, "NUMERIC_FOR_CHECK") {
 		t.Fatalf("compiled numeric for is missing NUMERIC_FOR_CHECK:\n%s", joined)
 	}
+	if !strings.Contains(joined, "NUMERIC_FOR_LOOP") {
+		t.Fatalf("compiled numeric for is missing NUMERIC_FOR_LOOP:\n%s", joined)
+	}
+	if strings.Contains(joined, "ADD r1 r1 r3\n") && strings.Contains(joined, "JUMP 4") {
+		t.Fatalf("compiled numeric for kept separate increment and back-jump:\n%s", joined)
+	}
 	facts := strings.Join(disassembleProtoFacts(proto), "\n")
 	if !strings.Contains(facts, "numeric_for") {
 		t.Fatalf("compiled numeric for is missing numeric loop descriptor:\n%s", facts)
 	}
 	if !strings.Contains(facts, "increment") {
 		t.Fatalf("compiled numeric for descriptor is missing increment pc:\n%s", facts)
+	}
+}
+
+func TestRunFusedNumericForMatchesStepSemantics(t *testing.T) {
+	proto, err := Compile(`
+local total = 0
+for i = 1, 5, 2 do
+	total = total + i
+end
+for i = 5, 1, -2 do
+	total = total + i * 10
+end
+for i = 1.5, 2.5, 0.5 do
+	total = total + i * 100
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if joined := strings.Join(disassembleProto(proto), "\n"); !strings.Contains(joined, "NUMERIC_FOR_LOOP") {
+		t.Fatalf("compiled numeric for is missing NUMERIC_FOR_LOOP:\n%s", joined)
+	}
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	got, ok := results[0].Number()
+	if !ok || got != 699 {
+		t.Fatalf("Run result is %v (%t), want number 699", got, ok)
 	}
 }
 
@@ -3522,8 +4038,8 @@ return total
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if got, want := proto.registers, 5; got != want {
-		t.Fatalf("compiled numeric for uses %d registers, want %d", got, want)
+	if got, max := proto.registers, 5; got > max {
+		t.Fatalf("compiled numeric for uses %d registers, want at most %d", got, max)
 	}
 	joined := strings.Join(disassembleProto(proto), "\n")
 	for _, oldCoercion := range []string{"ADD r1 r1 r4", "ADD r2 r2 r4", "ADD r3 r3 r4"} {
@@ -3562,7 +4078,7 @@ return total
 	}
 }
 
-func TestCompilerUsesAddNumericModKOpcode(t *testing.T) {
+func TestCompilerRunsNumericAddModExpressionWithoutFusedOpcode(t *testing.T) {
 	proto, err := Compile(`
 local total = 0
 for i = 1, 5 do
@@ -3575,8 +4091,8 @@ return total
 	}
 
 	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "ADD_NUMERIC_MOD_K") {
-		t.Fatalf("compiled numeric update is missing ADD_NUMERIC_MOD_K:\n%s", joined)
+	if strings.Contains(joined, "ADD_NUMERIC_MOD_K") {
+		t.Fatalf("compiled numeric update regrew fused ADD_NUMERIC_MOD_K:\n%s", joined)
 	}
 
 	results, err := Run(proto)
@@ -3608,13 +4124,13 @@ return value
 	}
 }
 
-func TestFinalizedProtoMarksDirectRegisterFrames(t *testing.T) {
+func TestFinalizedProtoMarksDirectFrameDispatch(t *testing.T) {
 	direct, err := Compile("return 1")
 	if err != nil {
 		t.Fatalf("Compile direct returned error: %v", err)
 	}
-	if !direct.directRegisters {
-		t.Fatal("direct prototype is not marked for direct registers")
+	if !direct.directFrameDispatch {
+		t.Fatal("direct prototype is not marked for direct-frame dispatch")
 	}
 
 	captured, err := Compile(`
@@ -3627,11 +4143,11 @@ return get()
 	if err != nil {
 		t.Fatalf("Compile captured returned error: %v", err)
 	}
-	if captured.directRegisters {
-		t.Fatal("capturing parent prototype is marked for direct registers")
+	if !captured.directFrameDispatch {
+		t.Fatal("capturing parent prototype is not marked for direct-frame dispatch")
 	}
-	if !captured.prototypes[0].directRegisters {
-		t.Fatal("non-capturing child frame should still use direct registers")
+	if !captured.prototypes[0].directFrameDispatch {
+		t.Fatal("non-capturing child frame should still use direct-frame dispatch")
 	}
 }
 
@@ -3645,9 +4161,6 @@ return total
 `)
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
-	}
-	if !proto.directRegisters {
-		t.Fatal("compiled scalar loop is not marked for direct registers")
 	}
 	if !proto.directFrameDispatch {
 		t.Fatal("compiled scalar loop is not marked for direct-frame dispatch")
@@ -3666,22 +4179,326 @@ return total
 	}
 }
 
-func TestProtoDirectFrameRejectionReportsFirstUnsupportedOpcode(t *testing.T) {
+func TestAssemblerRemovesJumpToNextInstruction(t *testing.T) {
 	var builder bytecodeBuilder
-	name := builder.addConstant(StringValue("missing"))
-	builder.emit(instruction{op: opSetGlobal, a: name, b: 0})
+	builder.emitLoadConst(0, NumberValue(41))
+	jump := builder.emitJump()
 	builder.emit(instruction{op: opReturnOne, a: 0})
-	proto := builder.proto(nil, 2, 0, false)
+	builder.patchJump(jump, jump+1)
 
-	rejection, ok := protoDirectFrameRejection(proto)
-	if !ok {
-		t.Fatal("protoDirectFrameRejection reported no blocker, want SET_GLOBAL blocker")
+	got := builder.assembledCode()
+	want := []instruction{
+		{op: opLoadConst, a: 0, b: 0},
+		{op: opReturnOne, a: 0},
 	}
-	if rejection.pc != 0 || rejection.op != opSetGlobal {
-		t.Fatalf("rejection = pc %d op %v, want pc 0 SET_GLOBAL", rejection.pc, rejection.op)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("assembled bytecode = %#v, want %#v", got, want)
 	}
-	if !strings.Contains(rejection.reason, "global writes require generic frame environment semantics") {
-		t.Fatalf("rejection reason is %q, want SET_GLOBAL unsupported reason detail", rejection.reason)
+}
+
+func TestRunProductionLoopHasNoInstrumentationSideEffects(t *testing.T) {
+	proto, err := Compile(`
+local value = 1
+return value + 2
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if !proto.directFrameDispatch {
+		t.Fatalf("compiled scalar program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
+	}
+
+	var opcodeCounts directFrameOpcodeCounts
+	pcCounts := make(map[*Proto][]uint64)
+	thread := newVMThread(runtimeGlobals(nil))
+	thread.directFrameOpcodeCounts = &opcodeCounts
+	thread.directFramePCCounts = pcCounts
+	results, err := thread.run(proto, nil, nil)
+	if err != nil {
+		t.Fatalf("thread.run returned error: %v", err)
+	}
+	got, ok := results[0].Number()
+	if !ok || got != 3 {
+		t.Fatalf("result is %v (%t), want number 3", results[0], ok)
+	}
+	if got := len(opcodeCounts.ranked()); got != 0 {
+		t.Fatalf("production direct-frame opcode counters recorded %d opcodes without opt-in", got)
+	}
+	if got := pcCounts[proto]; len(got) != 0 {
+		t.Fatalf("production direct-frame pc counters recorded %v without opt-in", got)
+	}
+}
+
+func TestRunDirectFrameClosureUpvaluesStayEligible(t *testing.T) {
+	proto, err := Compile(`
+local counter = 1
+local function nextValue()
+	counter = counter + 1
+	return counter
+end
+return nextValue(), nextValue()
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if len(proto.prototypes) != 1 {
+		t.Fatalf("compiled %d child prototypes, want 1", len(proto.prototypes))
+	}
+	child := proto.prototypes[0]
+	if !child.directFrameDispatch {
+		t.Fatalf("closure with upvalue reads/writes is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(child), "\n"))
+	}
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
+	if err != nil {
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
+	}
+	if got := snapshot.opcodeCounts.count(opGetUpvalue); got == 0 {
+		t.Fatal("direct-frame GET_UPVALUE count is 0, want captured reads handled directly")
+	}
+	if got := snapshot.opcodeCounts.count(opSetUpvalue); got == 0 {
+		t.Fatal("direct-frame SET_UPVALUE count is 0, want captured writes handled directly")
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonGenericFrame); got != 0 {
+		t.Fatalf("generic side exits = %d, want closure upvalue body to stay direct", got)
+	}
+	if got, ok := results[0].Number(); !ok || got != 2 {
+		t.Fatalf("first result is %v (%t), want 2", results[0], ok)
+	}
+	if got, ok := results[1].Number(); !ok || got != 3 {
+		t.Fatalf("second result is %v (%t), want 3", results[1], ok)
+	}
+}
+
+func TestRunDirectFrameCapturedParentWritesUpdateUpvalueCells(t *testing.T) {
+	proto, err := Compile(`
+local value = 1
+local function get()
+	return value
+end
+value = value + 1
+return get(), value
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if !proto.directFrameDispatch {
+		t.Fatalf("capturing parent is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
+	}
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
+	if err != nil {
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonGenericFrame); got != 0 {
+		t.Fatalf("generic side exits = %d, want captured parent to stay direct", got)
+	}
+	first, ok := results[0].Number()
+	if !ok || first != 2 {
+		t.Fatalf("closure result is %v (%t), want 2", results[0], ok)
+	}
+	second, ok := results[1].Number()
+	if !ok || second != 2 {
+		t.Fatalf("parent result is %v (%t), want 2", results[1], ok)
+	}
+}
+
+func TestRunDirectFrameUpvalueCallOneStaysEligible(t *testing.T) {
+	proto, err := Compile(`
+local function makeCaller()
+	local function inc(value)
+		return value + 1
+	end
+	return function(value)
+		local result = inc(value)
+		return result
+	end
+end
+local caller = makeCaller()
+return caller(41)
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	var callerProto *Proto
+	var dump strings.Builder
+	var findCaller func(*Proto)
+	findCaller = func(proto *Proto) {
+		if proto == nil || callerProto != nil {
+			return
+		}
+		dump.WriteString(strings.Join(disassembleProto(proto), "\n"))
+		dump.WriteString("\n---\n")
+		joined := strings.Join(disassembleProto(proto), "\n")
+		if strings.Contains(joined, "CALL_UPVALUE_ONE") {
+			callerProto = proto
+			return
+		}
+		for _, child := range proto.prototypes {
+			findCaller(child)
+		}
+	}
+	findCaller(proto)
+	if callerProto == nil {
+		t.Fatalf("compiled program is missing CALL_UPVALUE_ONE:\n%s", dump.String())
+	}
+	if !callerProto.directFrameDispatch {
+		t.Fatalf("upvalue-call child is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(callerProto), "\n"))
+	}
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
+	if err != nil {
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
+	}
+	if got := snapshot.opcodeCounts.count(opCallUpvalueOne); got == 0 {
+		t.Fatal("direct-frame CALL_UPVALUE_ONE count is 0, want upvalue call handled directly")
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonGenericFrame); got != 0 {
+		t.Fatalf("generic side exits = %d, want upvalue call body to stay direct", got)
+	}
+	if got, ok := results[0].Number(); !ok || got != 42 {
+		t.Fatalf("upvalue call result is %v (%t), want 42", results[0], ok)
+	}
+}
+
+func TestRunDirectFrameSetGlobalPreservesExpressionValue(t *testing.T) {
+	proto, err := Compile(`
+local value = 12 + 3
+answer = value
+return value, answer
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if !proto.directFrameDispatch {
+		t.Fatalf("compiled global-write program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
+	}
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
+	if err != nil {
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
+	}
+	if got := snapshot.opcodeCounts.count(opSetGlobal); got == 0 {
+		t.Fatal("direct-frame SET_GLOBAL count is 0, want global writes handled directly")
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonGenericFrame); got != 0 {
+		t.Fatalf("generic side exits = %d, want direct SET_GLOBAL execution", got)
+	}
+	for index, result := range results {
+		got, ok := result.Number()
+		if !ok || got != 15 {
+			t.Fatalf("result %d is %v (%t), want 15", index, result, ok)
+		}
+	}
+}
+
+func TestRunDirectFrameVarargFunctionStaysEligible(t *testing.T) {
+	proto, err := Compile(`
+local function collect(...)
+	local count = select("#", ...)
+	local first, second = ...
+	return count, first, second
+end
+return collect(7, 8, 9)
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if len(proto.prototypes) != 1 {
+		t.Fatalf("compiled %d child prototypes, want 1", len(proto.prototypes))
+	}
+	child := proto.prototypes[0]
+	if !child.directFrameDispatch {
+		t.Fatalf("vararg child is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(child), "\n"))
+	}
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
+	if err != nil {
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
+	}
+	if got := snapshot.opcodeCounts.count(opFastCall); got == 0 {
+		t.Fatal("direct-frame FAST_CALL count is 0, want vararg count handled directly")
+	}
+	if got := snapshot.opcodeCounts.count(opVararg); got == 0 {
+		t.Fatal("direct-frame VARARG count is 0, want vararg reads handled directly")
+	}
+	want := []float64{3, 7, 8}
+	for index, want := range want {
+		got, ok := results[index].Number()
+		if !ok || got != want {
+			t.Fatalf("result %d is %v (%t), want %v", index, results[index], ok, want)
+		}
+	}
+}
+
+func TestRunDirectFrameMethodCallOneStaysEligible(t *testing.T) {
+	proto, err := Compile(`
+local object = {value = 10}
+function object:add(amount)
+	self.value = self.value + amount
+	return self.value
+end
+local value = object:add(5)
+return value
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	joined := strings.Join(disassembleProto(proto), "\n")
+	if !strings.Contains(joined, "CALL_METHOD_ONE") {
+		t.Fatalf("compiled method call is missing CALL_METHOD_ONE:\n%s", joined)
+	}
+	if !proto.directFrameDispatch {
+		t.Fatalf("method-call program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
+	}
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
+	if err != nil {
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
+	}
+	if got := snapshot.opcodeCounts.count(opCallMethodOne); got == 0 {
+		t.Fatal("direct-frame CALL_METHOD_ONE count is 0, want raw method call handled directly")
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonGenericFrame); got != 0 {
+		t.Fatalf("generic side exits = %d, want raw method call to stay direct", got)
+	}
+	if got, ok := results[0].Number(); !ok || got != 15 {
+		t.Fatalf("method result is %v (%t), want 15", results[0], ok)
+	}
+}
+
+func TestRunDirectFrameCoroutineResumeSideExitsLocally(t *testing.T) {
+	proto, err := Compile(`
+local ok, value = coroutine.resume(co)
+return ok, value
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	joined := strings.Join(disassembleProto(proto), "\n")
+	if !strings.Contains(joined, "COROUTINE_RESUME") {
+		t.Fatalf("compiled coroutine resume is missing COROUTINE_RESUME:\n%s", joined)
+	}
+	if !proto.directFrameDispatch {
+		t.Fatalf("coroutine-resume program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
+	}
+
+	body, err := Compile(`return 41`)
+	if err != nil {
+		t.Fatalf("Compile coroutine body returned error: %v", err)
+	}
+	coroutine := newVMCoroutine(runtimeGlobals(nil), &closure{proto: body})
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, map[string]Value{
+		"co": UserDataValue(coroutine.userdata),
+	})
+	if err != nil {
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
+	}
+	if got := snapshot.opcodeCounts.count(opFastCall); got == 0 {
+		t.Fatal("direct-frame FAST_CALL count is 0, want local coroutine side-exit point")
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonYield); got == 0 {
+		t.Fatal("coroutine resume had 0 yield side exits, want local side exit")
+	}
+	if got, ok := results[0].Bool(); !ok || !got {
+		t.Fatalf("resume ok result is %v (%t), want true", results[0], ok)
+	}
+	if got, ok := results[1].Number(); !ok || got != 41 {
+		t.Fatalf("resume value result is %v (%t), want 41", results[1], ok)
 	}
 }
 
@@ -3848,6 +4665,7 @@ return 0
 		"proxy": TableValue(proxy),
 	}))
 	counts := &directFramePICCounts{}
+	thread.directFrameInstrumented = true
 	thread.directFramePICCounts = counts
 	results, err := thread.run(proto, nil, nil)
 	if err != nil {
@@ -3976,6 +4794,7 @@ return proxy.value + 3
 
 	var counts directFrameOpcodeCounts
 	thread := newVMThread(runtimeGlobals(map[string]Value{"proxy": TableValue(proxy)}))
+	thread.directFrameInstrumented = true
 	thread.directFrameOpcodeCounts = &counts
 	results, err := thread.run(proto, nil, nil)
 	if err != nil {
@@ -4017,6 +4836,7 @@ return value + 2
 
 	var counts directFrameOpcodeCounts
 	thread := newVMThread(runtimeGlobals(map[string]Value{"proxy": TableValue(proxy)}))
+	thread.directFrameInstrumented = true
 	thread.directFrameOpcodeCounts = &counts
 	results, err := thread.run(proto, nil, nil)
 	if err != nil {
@@ -4061,6 +4881,7 @@ return proxy[key] + 3
 
 	var counts directFrameOpcodeCounts
 	thread := newVMThread(runtimeGlobals(map[string]Value{"proxy": TableValue(proxy)}))
+	thread.directFrameInstrumented = true
 	thread.directFrameOpcodeCounts = &counts
 	results, err := thread.run(proto, nil, nil)
 	if err != nil {
@@ -4103,6 +4924,7 @@ return value + 2
 
 	var counts directFrameOpcodeCounts
 	thread := newVMThread(runtimeGlobals(map[string]Value{"proxy": TableValue(proxy)}))
+	thread.directFrameInstrumented = true
 	thread.directFrameOpcodeCounts = &counts
 	results, err := thread.run(proto, nil, nil)
 	if err != nil {
@@ -4147,6 +4969,7 @@ return math.min(5, 2) + 3
 
 	var counts directFrameOpcodeCounts
 	thread := newVMThread(runtimeGlobals(map[string]Value{"math": TableValue(mathTable)}))
+	thread.directFrameInstrumented = true
 	thread.directFrameOpcodeCounts = &counts
 	results, err := thread.run(proto, nil, nil)
 	if err != nil {
@@ -4177,6 +5000,7 @@ return proxy.value + 3
 
 	var tableCounts directFramePICCounts
 	tableThread := newVMThread(runtimeGlobals(map[string]Value{"proxy": TableValue(proxy)}))
+	tableThread.directFrameInstrumented = true
 	tableThread.directFramePICCounts = &tableCounts
 	if _, err := tableThread.run(tableProto, nil, nil); err != nil {
 		t.Fatalf("table thread.run returned error: %v", err)
@@ -4198,6 +5022,7 @@ return math.min(5, 2) + 3
 
 	var intrinsicCounts directFramePICCounts
 	intrinsicThread := newVMThread(runtimeGlobals(map[string]Value{"math": TableValue(mathTable)}))
+	intrinsicThread.directFrameInstrumented = true
 	intrinsicThread.directFramePICCounts = &intrinsicCounts
 	if _, err := intrinsicThread.run(intrinsicProto, nil, nil); err != nil {
 		t.Fatalf("intrinsic thread.run returned error: %v", err)
@@ -4207,7 +5032,7 @@ return math.min(5, 2) + 3
 	}
 }
 
-func TestRunDirectFrameSideExitCountersRecordDebugAndBudgetBlocks(t *testing.T) {
+func TestRunDirectFrameHandlesDebugAndBudgetWithoutWholeFrameDemotion(t *testing.T) {
 	proto, err := Compile(`return 1`)
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
@@ -4216,62 +5041,38 @@ func TestRunDirectFrameSideExitCountersRecordDebugAndBudgetBlocks(t *testing.T) 
 		t.Fatalf("compiled block counter program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
+	var debugOpcodes directFrameOpcodeCounts
 	var debugCounts directFramePICCounts
 	debugThread := newVMThread(runtimeGlobals(nil))
+	debugThread.directFrameInstrumented = true
+	debugThread.directFrameOpcodeCounts = &debugOpcodes
 	debugThread.directFramePICCounts = &debugCounts
 	debugThread.debugHook = func(_ *globalEnv, _ vmDebugEvent) error { return nil }
 	if _, err := debugThread.run(proto, nil, nil); err != nil {
 		t.Fatalf("debug thread.run returned error: %v", err)
 	}
-	if got := debugCounts.sideExitCount(directFrameSideExitReasonDebug); got == 0 {
-		t.Fatalf("debug side exits = %d, want at least one", got)
+	if got := debugCounts.sideExitCount(directFrameSideExitReasonDebug); got != 0 {
+		t.Fatalf("debug side exits = %d, want debug-capable fast loop", got)
+	}
+	if got := debugOpcodes.count(opReturnOne) + debugOpcodes.count(opReturn); got == 0 {
+		t.Fatalf("debug opcode counts recorded no return, want direct execution")
 	}
 
+	var budgetOpcodes directFrameOpcodeCounts
 	var budgetCounts directFramePICCounts
 	budgetThread := newVMThread(runtimeGlobals(nil))
+	budgetThread.directFrameInstrumented = true
+	budgetThread.directFrameOpcodeCounts = &budgetOpcodes
 	budgetThread.directFramePICCounts = &budgetCounts
 	budgetThread.instructionBudget = 10
 	if _, err := budgetThread.run(proto, nil, nil); err != nil {
 		t.Fatalf("budget thread.run returned error: %v", err)
 	}
-	if got := budgetCounts.sideExitCount(directFrameSideExitReasonBudget); got == 0 {
-		t.Fatalf("budget side exits = %d, want at least one", got)
+	if got := budgetCounts.sideExitCount(directFrameSideExitReasonBudget); got != 0 {
+		t.Fatalf("budget side exits = %d, want budget-capable fast loop", got)
 	}
-}
-
-func TestRunDirectFrameNestedStringFieldPathsPreserveValues(t *testing.T) {
-	proto, err := Compile(`
-local player = {
-	stats = {hp = 10, shield = 3},
-	bonus = {hp = 2},
-	incoming = {hp = 4},
-}
-local before = player.stats.hp
-player.stats.hp = player.stats.hp + player.bonus.hp - player.incoming.hp
-return before, player.stats.hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{"GET_STRING_FIELD2", "ADD_SUB_STRING_FIELD2"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("compiled nested field program is missing %s:\n%s", want, joined)
-		}
-	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled nested field program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 10 {
-		t.Fatalf("first result is %v (%t), want number 10", got, ok)
-	}
-	if got, ok := results[1].Number(); !ok || got != 8 {
-		t.Fatalf("second result is %v (%t), want number 8", got, ok)
+	if got := budgetOpcodes.count(opReturnOne) + budgetOpcodes.count(opReturn); got == 0 {
+		t.Fatalf("budget opcode counts recorded no return, want direct execution")
 	}
 }
 
@@ -4341,6 +5142,555 @@ return removed, values[1], values[2]
 	}
 }
 
+func TestCompilerUsesMixedTableNextJumpForGenericFor(t *testing.T) {
+	proto, err := Compile(`
+local values = {}
+values.name = 2
+values[2] = 3
+values.ready = 4
+local total = 0
+for key, value in values do
+	total = total + value
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	joined := strings.Join(disassembleProto(proto), "\n")
+	for _, want := range []string{"PREPARE_ITER", "ARRAY_NEXT_JUMP2"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("compiled mixed-table loop is missing %s:\n%s", want, joined)
+		}
+	}
+	if !proto.directFrameDispatch {
+		t.Fatalf("compiled mixed-table loop is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
+	}
+}
+
+func TestRunDirectFrameMixedTableIterationMatchesPairs(t *testing.T) {
+	proto, err := Compile(`
+local values = {}
+values.name = 2
+values[2] = 3
+values.ready = 4
+local direct = 0
+for key, value in values do
+	direct = direct + value
+end
+local viaPairs = 0
+for key, value in pairs(values) do
+	viaPairs = viaPairs + value
+end
+return direct, viaPairs
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if !proto.directFrameDispatch {
+		t.Fatalf("compiled mixed-table loop is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
+	}
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
+	if err != nil {
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonGenericFrame); got != 0 {
+		t.Fatalf("direct-frame generic side exits = %d, want 0 for mixed-table raw iteration", got)
+	}
+	if got := snapshot.opcodeCounts.count(opArrayNextJump2); got == 0 {
+		t.Fatal("direct-frame ARRAY_NEXT_JUMP2 count is 0, want mixed-table iteration to stay in direct frame")
+	}
+	direct, ok := results[0].Number()
+	if !ok {
+		t.Fatalf("first result is %s, want number", results[0].Kind())
+	}
+	viaPairs, ok := results[1].Number()
+	if !ok {
+		t.Fatalf("second result is %s, want number", results[1].Kind())
+	}
+	if direct != viaPairs || direct != 9 {
+		t.Fatalf("direct result %v and pairs result %v, want matching total 9", direct, viaPairs)
+	}
+}
+
+func TestRunDirectFrameConcatLenPowRawFastPaths(t *testing.T) {
+	proto, err := Compile(`
+local values = {10, 20, 30}
+local sep = ":"
+local ready = "ready"
+local suffix = "ab"
+local base = 2
+local label = "hp" .. sep .. ready
+local length = #values + #suffix
+local power = base ^ 5
+return label, length, power
+	`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	joined := strings.Join(disassembleProto(proto), "\n")
+	for _, want := range []string{"CONCAT_CHAIN", "LEN", "POW"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("compiled raw fast-path program is missing %s:\n%s", want, joined)
+		}
+	}
+	if !proto.directFrameDispatch {
+		t.Fatalf("compiled raw fast-path program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
+	}
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
+	if err != nil {
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonGenericFrame); got != 0 {
+		t.Fatalf("direct-frame generic side exits = %d, want 0 for raw CONCAT/LEN/POW", got)
+	}
+	if got := snapshot.opcodeCounts.count(opConcatChain); got == 0 {
+		t.Fatal("direct-frame CONCAT_CHAIN count is 0, want raw concat handled directly")
+	}
+	if got := snapshot.opcodeCounts.count(opLen); got == 0 {
+		t.Fatal("direct-frame LEN count is 0, want raw length handled directly")
+	}
+	if got := snapshot.opcodeCounts.count(opPow); got == 0 {
+		t.Fatal("direct-frame POW count is 0, want raw power handled directly")
+	}
+	label, ok := results[0].String()
+	if !ok || label != "hp:ready" {
+		t.Fatalf("label result is %v (%t), want hp:ready", results[0], ok)
+	}
+	length, ok := results[1].Number()
+	if !ok || length != 5 {
+		t.Fatalf("length result is %v (%t), want 5", results[1], ok)
+	}
+	power, ok := results[2].Number()
+	if !ok || power != 32 {
+		t.Fatalf("power result is %v (%t), want 32", results[2], ok)
+	}
+}
+
+func TestCompilerEmitsConcatChainForAssociativeRawConcat(t *testing.T) {
+	proto, err := Compile(`
+local suffix = "ready"
+local label = "hp" .. ":" .. 25 .. "/" .. suffix
+return label
+	`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	joined := strings.Join(disassembleProto(proto), "\n")
+	if !strings.Contains(joined, "CONCAT_CHAIN") {
+		t.Fatalf("compiled concat chain is missing CONCAT_CHAIN:\n%s", joined)
+	}
+	if strings.Count(joined, "CONCAT ") != 0 {
+		t.Fatalf("compiled concat chain kept pairwise CONCAT:\n%s", joined)
+	}
+
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	got, ok := results[0].String()
+	if !ok || got != "hp:25/ready" {
+		t.Fatalf("Run result is %v (%t), want hp:25/ready", results[0], ok)
+	}
+}
+
+func TestConcatChainPreservesMetamethodFallbackOrder(t *testing.T) {
+	proto, err := Compile(`
+return "a" .. left .. right .. "d"
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if joined := strings.Join(disassembleProto(proto), "\n"); !strings.Contains(joined, "CONCAT_CHAIN") {
+		t.Fatalf("compiled concat chain is missing CONCAT_CHAIN:\n%s", joined)
+	}
+	if !proto.directFrameDispatch {
+		t.Fatalf("compiled concat chain is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
+	}
+
+	var calls []string
+	left := NewTable()
+	leftMeta := NewTable()
+	leftMeta.setRawStringField("__concat", HostFuncValue(func(args []Value) ([]Value, error) {
+		calls = append(calls, "left")
+		prefix, ok := args[0].String()
+		if !ok || prefix != "a" {
+			return nil, fmt.Errorf("left __concat first arg is %s, want string a", args[0].Kind())
+		}
+		return []Value{StringValue("ab")}, nil
+	}))
+	left.setMetatable(leftMeta)
+
+	right := NewTable()
+	rightMeta := NewTable()
+	rightMeta.setRawStringField("__concat", HostFuncValue(func(args []Value) ([]Value, error) {
+		calls = append(calls, "right")
+		prefix, ok := args[0].String()
+		if !ok || prefix != "ab" {
+			return nil, fmt.Errorf("right __concat first arg is %s, want string ab", args[0].Kind())
+		}
+		return []Value{StringValue("abc")}, nil
+	}))
+	right.setMetatable(rightMeta)
+
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, map[string]Value{
+		"left":  TableValue(left),
+		"right": TableValue(right),
+	})
+	if err != nil {
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonMetatable); got == 0 {
+		t.Fatal("metatable side exits = 0, want concat chain cold island")
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonGenericFrame); got != 0 {
+		t.Fatalf("generic-frame side exits = %d, want concat chain cold island to stay local", got)
+	}
+	got, ok := results[0].String()
+	if !ok || got != "abcd" {
+		t.Fatalf("Run result is %v (%t), want abcd", results[0], ok)
+	}
+	if !reflect.DeepEqual(calls, []string{"left", "right"}) {
+		t.Fatalf("concat metamethod calls are %#v, want left then right", calls)
+	}
+}
+
+func TestRunDirectFrameConcatLenPowSideExitForMetamethods(t *testing.T) {
+	proto, err := Compile(`
+return #lenObject, concatObject .. "-vm", powObject ^ 3
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if !proto.directFrameDispatch {
+		t.Fatalf("compiled metamethod side-exit program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
+	}
+	lenObject := NewTable()
+	lenMetatable := NewTable()
+	lenMetatable.setRawStringField("__len", HostFuncValue(func(_ []Value) ([]Value, error) {
+		return []Value{NumberValue(4)}, nil
+	}))
+	lenObject.setMetatable(lenMetatable)
+
+	concatObject := NewTable()
+	concatMetatable := NewTable()
+	concatMetatable.setRawStringField("__concat", HostFuncValue(func(args []Value) ([]Value, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("__concat got %d args, want 2", len(args))
+		}
+		right, ok := args[1].String()
+		if !ok {
+			return nil, fmt.Errorf("__concat right arg is %s, want string", args[1].Kind())
+		}
+		return []Value{StringValue("ember" + right)}, nil
+	}))
+	concatObject.setMetatable(concatMetatable)
+
+	powObject := NewTable()
+	powMetatable := NewTable()
+	powMetatable.setRawStringField("__pow", HostFuncValue(func(_ []Value) ([]Value, error) {
+		return []Value{NumberValue(27)}, nil
+	}))
+	powObject.setMetatable(powMetatable)
+
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, map[string]Value{
+		"lenObject":    TableValue(lenObject),
+		"concatObject": TableValue(concatObject),
+		"powObject":    TableValue(powObject),
+	})
+	if err != nil {
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonMetatable); got == 0 {
+		t.Fatal("metamethod program had 0 metatable side exits, want local side exit")
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonGenericFrame); got != 0 {
+		t.Fatalf("generic-frame side exits = %d, want local metatable islands to resume fast loop", got)
+	}
+	if got, ok := results[0].Number(); !ok || got != 4 {
+		t.Fatalf("length result is %v (%t), want 4", results[0], ok)
+	}
+	if got, ok := results[1].String(); !ok || got != "ember-vm" {
+		t.Fatalf("concat result is %v (%t), want ember-vm", results[1], ok)
+	}
+	if got, ok := results[2].Number(); !ok || got != 27 {
+		t.Fatalf("power result is %v (%t), want 27", results[2], ok)
+	}
+}
+
+func TestFastLoopResumesAfterColdIsland(t *testing.T) {
+	proto, err := Compile(`return #lenObject + 3`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if !proto.directFrameDispatch {
+		t.Fatalf("compiled cold-island program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
+	}
+	lenObject := NewTable()
+	metatable := NewTable()
+	metatable.setRawStringField("__len", HostFuncValue(func(_ []Value) ([]Value, error) {
+		return []Value{NumberValue(4)}, nil
+	}))
+	lenObject.setMetatable(metatable)
+
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, map[string]Value{
+		"lenObject": TableValue(lenObject),
+	})
+	if err != nil {
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonMetatable); got == 0 {
+		t.Fatal("metatable side exits = 0, want cold island")
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonGenericFrame); got != 0 {
+		t.Fatalf("generic-frame side exits = %d, want fast loop resume", got)
+	}
+	if got := snapshot.opcodeCounts.count(opAddK); got == 0 {
+		t.Fatalf("ADD_K count = 0, want fast loop to resume after cold island")
+	}
+	if got, ok := results[0].Number(); !ok || got != 7 {
+		t.Fatalf("Run result is %v (%t), want 7", results[0], ok)
+	}
+}
+
+func TestUnsupportedOpcodeSideExitsPerInstruction(t *testing.T) {
+	proto, err := Compile(`
+local sum = left + right
+return sum + 3
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if !proto.directFrameDispatch {
+		t.Fatalf("compiled unsupported-op island program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
+	}
+	left := NewTable()
+	right := NewTable()
+	metatable := NewTable()
+	metatable.setRawStringField("__add", HostFuncValue(func(_ []Value) ([]Value, error) {
+		return []Value{NumberValue(4)}, nil
+	}))
+	left.setMetatable(metatable)
+
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, map[string]Value{
+		"left":  TableValue(left),
+		"right": TableValue(right),
+	})
+	if err != nil {
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonMetatable); got == 0 {
+		t.Fatal("metatable side exits = 0, want unsupported ADD cold island")
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonGenericFrame); got != 0 {
+		t.Fatalf("generic-frame side exits = %d, want per-instruction cold island", got)
+	}
+	if got := snapshot.opcodeCounts.count(opAddK); got == 0 {
+		t.Fatalf("ADD_K count = 0, want fast loop to resume after ADD cold island")
+	}
+	if got, ok := results[0].Number(); !ok || got != 7 {
+		t.Fatalf("Run result is %v (%t), want 7", results[0], ok)
+	}
+}
+
+func TestGenericColdIslandResumesAfterHostCall(t *testing.T) {
+	proto, err := Compile(`
+local value = f(1, 2)
+return value + 3
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if !proto.directFrameDispatch {
+		t.Fatalf("compiled host-call island program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
+	}
+
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, map[string]Value{
+		"f": HostFuncValue(func(args []Value) ([]Value, error) {
+			if len(args) != 2 {
+				t.Fatalf("host call received %d args, want 2", len(args))
+			}
+			return []Value{NumberValue(4)}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
+	}
+	if got := snapshot.opcodeCounts.count(opAddK); got == 0 {
+		t.Fatalf("ADD_K count = 0, want fast loop to resume after host-call cold island")
+	}
+	if got, ok := results[0].Number(); !ok || got != 7 {
+		t.Fatalf("Run result is %v (%t), want 7", results[0], ok)
+	}
+}
+
+func TestFastLoopResumesAfterArithmeticColdIslands(t *testing.T) {
+	proto, err := Compile(`
+local a = object - 1
+local b = object * 1
+local c = object / 1
+local d = object % 1
+local e = object // 1
+local f = -object
+local g = object + 1
+return a + b + c + d + e + f + g + 3
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if !proto.directFrameDispatch {
+		t.Fatalf("compiled arithmetic-island program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
+	}
+
+	object := NewTable()
+	metatable := NewTable()
+	metatable.setRawStringField("__sub", HostFuncValue(func(_ []Value) ([]Value, error) {
+		return []Value{NumberValue(2)}, nil
+	}))
+	metatable.setRawStringField("__mul", HostFuncValue(func(_ []Value) ([]Value, error) {
+		return []Value{NumberValue(3)}, nil
+	}))
+	metatable.setRawStringField("__div", HostFuncValue(func(_ []Value) ([]Value, error) {
+		return []Value{NumberValue(4)}, nil
+	}))
+	metatable.setRawStringField("__mod", HostFuncValue(func(_ []Value) ([]Value, error) {
+		return []Value{NumberValue(5)}, nil
+	}))
+	metatable.setRawStringField("__idiv", HostFuncValue(func(_ []Value) ([]Value, error) {
+		return []Value{NumberValue(6)}, nil
+	}))
+	metatable.setRawStringField("__unm", HostFuncValue(func(_ []Value) ([]Value, error) {
+		return []Value{NumberValue(7)}, nil
+	}))
+	metatable.setRawStringField("__add", HostFuncValue(func(_ []Value) ([]Value, error) {
+		return []Value{NumberValue(8)}, nil
+	}))
+	object.setMetatable(metatable)
+
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, map[string]Value{
+		"object": TableValue(object),
+	})
+	if err != nil {
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonMetatable); got < 7 {
+		t.Fatalf("metatable side exits = %d, want arithmetic cold islands", got)
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonGenericFrame); got != 0 {
+		t.Fatalf("generic-frame side exits = %d, want per-instruction arithmetic islands", got)
+	}
+	if got := snapshot.opcodeCounts.count(opReturnOne) + snapshot.opcodeCounts.count(opReturn); got == 0 {
+		t.Fatalf("return opcode count = 0, want fast loop to reach return")
+	}
+	if got, ok := results[0].Number(); !ok || got != 38 {
+		t.Fatalf("Run result is %v (%t), want 38", results[0], ok)
+	}
+}
+
+func TestFastLoopResumesAfterComparisonColdIslands(t *testing.T) {
+	proto, err := Compile(`
+local eq = left == right
+local ne = left ~= right
+local lt = left < right
+local le = left <= right
+local gt = left > right
+local ge = left >= right
+if eq and not ne and lt and le and gt and ge then
+	return 7
+end
+return 0
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if !proto.directFrameDispatch {
+		t.Fatalf("compiled comparison-island program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
+	}
+
+	left := NewTable()
+	right := NewTable()
+	metatable := NewTable()
+	metatable.setRawStringField("__eq", HostFuncValue(func(_ []Value) ([]Value, error) {
+		return []Value{BoolValue(true)}, nil
+	}))
+	metatable.setRawStringField("__lt", HostFuncValue(func(_ []Value) ([]Value, error) {
+		return []Value{BoolValue(true)}, nil
+	}))
+	metatable.setRawStringField("__le", HostFuncValue(func(_ []Value) ([]Value, error) {
+		return []Value{BoolValue(true)}, nil
+	}))
+	left.setMetatable(metatable)
+	right.setMetatable(metatable)
+
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, map[string]Value{
+		"left":  TableValue(left),
+		"right": TableValue(right),
+	})
+	if err != nil {
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonMetatable); got < 6 {
+		t.Fatalf("metatable side exits = %d, want comparison cold islands", got)
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonGenericFrame); got != 0 {
+		t.Fatalf("generic-frame side exits = %d, want per-instruction comparison islands", got)
+	}
+	if got, ok := results[0].Number(); !ok || got != 7 {
+		t.Fatalf("Run result is %v (%t), want 7", results[0], ok)
+	}
+}
+
+func TestFastLoopResumesAfterComparisonBranchColdIslands(t *testing.T) {
+	proto, err := Compile(`
+local score = 0
+if left < right then
+	score = score + 1
+end
+if left > right then
+	score = score + 2
+end
+if left == right then
+	score = score + 4
+end
+return score + 3
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if !proto.directFrameDispatch {
+		t.Fatalf("compiled comparison-branch island program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
+	}
+
+	left := NewTable()
+	right := NewTable()
+	metatable := NewTable()
+	metatable.setRawStringField("__lt", HostFuncValue(func(_ []Value) ([]Value, error) {
+		return []Value{BoolValue(true)}, nil
+	}))
+	metatable.setRawStringField("__eq", HostFuncValue(func(_ []Value) ([]Value, error) {
+		return []Value{BoolValue(true)}, nil
+	}))
+	left.setMetatable(metatable)
+	right.setMetatable(metatable)
+
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, map[string]Value{
+		"left":  TableValue(left),
+		"right": TableValue(right),
+	})
+	if err != nil {
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonMetatable); got < 3 {
+		t.Fatalf("metatable side exits = %d, want comparison branch cold islands", got)
+	}
+	if got := snapshot.picCounts.sideExitCount(directFrameSideExitReasonGenericFrame); got != 0 {
+		t.Fatalf("generic-frame side exits = %d, want local comparison branch islands", got)
+	}
+	if got, ok := results[0].Number(); !ok || got != 10 {
+		t.Fatalf("Run result is %v (%t), want 10", results[0], ok)
+	}
+}
+
 func TestRunDirectFrameRawLenGlobalPreservesValues(t *testing.T) {
 	proto, err := Compile(`
 local values = {1, 2, 3}
@@ -4354,20 +5704,26 @@ return total
 		t.Fatalf("Compile returned error: %v", err)
 	}
 	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "LOAD_GLOBAL") || !strings.Contains(joined, "CALL") {
-		t.Fatalf("compiled rawlen program is missing global call shape:\n%s", joined)
+	if !strings.Contains(joined, "RAW_LEN") {
+		t.Fatalf("compiled rawlen program is missing RAW_LEN intrinsic:\n%s", joined)
+	}
+	if strings.Contains(joined, "LOAD_GLOBAL") || strings.Contains(joined, "CALL_ONE") {
+		t.Fatalf("compiled rawlen program still uses global call shape:\n%s", joined)
 	}
 	if !proto.directFrameDispatch {
 		t.Fatalf("compiled rawlen program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
-	results, err := Run(proto)
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
 	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
+		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
 	}
 	got, ok := results[0].Number()
 	if !ok || got != 12 {
 		t.Fatalf("Run result is %v (%t), want number 12", got, ok)
+	}
+	if snapshot.picCounts.intrinsicGuardHits == 0 {
+		t.Fatalf("rawlen intrinsic guard hits = 0, want guard reuse after first resolution:\n%s", summarizeDirectFrameMechanisms(snapshot))
 	}
 }
 
@@ -4553,243 +5909,6 @@ return score
 	}
 }
 
-func TestRunDirectFrameRowStringFieldBranchPreservesSlotSemantics(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{kind = "ore", count = 1},
-	{kind = "gem", count = 2},
-	{kind = "key", count = 3},
-}
-local score = 0
-for _, item in rows do
-	if item.kind == "gem" or item.kind == "key" then
-		score = score + item.count
-	end
-end
-return score
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_ROW_STRING_FIELD_NOT_EQUAL_K") {
-		t.Fatalf("compiled row branch program is missing row field branch:\n%s", joined)
-	}
-	if !strings.Contains(joined, "GET_ROW_STRING_FIELD") {
-		t.Fatalf("compiled row branch program is missing row slot read:\n%s", joined)
-	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled row branch program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 5 {
-		t.Fatalf("Run result is %v (%t), want number 5", got, ok)
-	}
-}
-
-func TestCompilerPropagatesRowSlotsThroughLocalArrayIndex(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{hp = 10, alive = true},
-	{hp = 4, alive = false},
-}
-local indexes = {1, 2}
-local score = 0
-for _, index in indexes do
-	local row = rows[index]
-	if row.alive then
-		score = score + row.hp
-	else
-		score = score - row.hp
-	end
-end
-return score
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_STRING_FIELD_FALSE") {
-		t.Fatalf("compiled indexed row program is missing row truthy branch:\n%s", joined)
-	}
-	if !strings.Contains(joined, "GET_ROW_STRING_FIELD") {
-		t.Fatalf("compiled indexed row program is missing row slot read:\n%s", joined)
-	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled indexed row program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 6 {
-		t.Fatalf("Run result is %v (%t), want number 6", got, ok)
-	}
-}
-
-func TestCompilerPropagatesRowSlotsThroughNestedArrayFieldIteration(t *testing.T) {
-	proto, err := Compile(`
-local actors = {
-	{energy = 30, abilities = {
-		{cost = 6, cooldown = 0, reset = 3, uses = 1},
-		{cost = 11, cooldown = 2, reset = 5, uses = 2},
-	}},
-	{energy = 22, abilities = {
-		{cost = 8, cooldown = 0, reset = 4, uses = 3},
-	}},
-}
-local score = 0
-for _, actor in actors do
-	for _, ability in actor.abilities do
-		if ability.cooldown > 0 then
-			score = score + ability.reset
-		else
-			score = score + ability.cost + ability.uses
-		end
-	end
-end
-return score
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	lines := disassembleProto(proto)
-	joined := strings.Join(lines, "\n")
-	hasResetRow := false
-	hasCostRow := false
-	hasUsesRow := false
-	hasCooldownBranch := false
-	for _, line := range lines {
-		if strings.Contains(line, `GET_ROW_STRING_FIELD`) && strings.Contains(line, `"reset"`) {
-			hasResetRow = true
-		}
-		if strings.Contains(line, `GET_ROW_STRING_FIELD`) && strings.Contains(line, `"cost"`) {
-			hasCostRow = true
-		}
-		if strings.Contains(line, `GET_ROW_STRING_FIELD`) && strings.Contains(line, `"uses"`) {
-			hasUsesRow = true
-		}
-		if strings.Contains(line, `JUMP_IF_ROW_STRING_FIELD_NOT_GREATER_K`) && strings.Contains(line, `"cooldown"`) {
-			hasCooldownBranch = true
-		}
-		if strings.Contains(line, `GET_STRING_FIELD `) &&
-			(strings.Contains(line, `"reset"`) || strings.Contains(line, `"cost"`) || strings.Contains(line, `"uses"`)) {
-			t.Fatalf("compiled nested row program still uses generic ability field read:\n%s", joined)
-		}
-	}
-	if !hasResetRow {
-		t.Fatalf("compiled nested row program is missing reset row slot read:\n%s", joined)
-	}
-	if !hasCostRow {
-		t.Fatalf("compiled nested row program is missing cost row slot read:\n%s", joined)
-	}
-	if !hasUsesRow {
-		t.Fatalf("compiled nested row program is missing uses row slot read:\n%s", joined)
-	}
-	if !hasCooldownBranch {
-		t.Fatalf("compiled nested row program is missing cooldown row branch:\n%s", joined)
-	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled nested row program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 23 {
-		t.Fatalf("Run result is %v (%t), want number 23", got, ok)
-	}
-}
-
-func TestCompilerPropagatesNestedRowSlotsThroughArrayFieldWithEmptyArray(t *testing.T) {
-	proto, err := Compile(`
-local nodes = {
-	{edges = {{to = 2, weight = 3}}},
-	{edges = {}},
-}
-local total = 0
-for _, node in nodes do
-	for _, edge in node.edges do
-		total = total + edge.to + edge.weight
-	end
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	lines := disassembleProto(proto)
-	joined := strings.Join(lines, "\n")
-	hasToRow := false
-	hasWeightRow := false
-	for _, line := range lines {
-		if strings.Contains(line, `GET_ROW_STRING_FIELD`) && strings.Contains(line, `"to"`) {
-			hasToRow = true
-		}
-		if strings.Contains(line, `GET_ROW_STRING_FIELD`) && strings.Contains(line, `"weight"`) {
-			hasWeightRow = true
-		}
-		if strings.Contains(line, `GET_STRING_FIELD `) &&
-			(strings.Contains(line, `"to"`) || strings.Contains(line, `"weight"`)) {
-			t.Fatalf("compiled nested empty-array row program still uses generic edge field read:\n%s", joined)
-		}
-	}
-	if !hasToRow {
-		t.Fatalf("compiled nested empty-array row program is missing to row slot read:\n%s", joined)
-	}
-	if !hasWeightRow {
-		t.Fatalf("compiled nested empty-array row program is missing weight row slot read:\n%s", joined)
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 5 {
-		t.Fatalf("Run result is %v (%t), want number 5", got, ok)
-	}
-}
-
-func TestRunRowStringFieldReadFallsBackAfterShapeChange(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{drop = 1, keep = 7},
-}
-local row = rows[1]
-row.drop = nil
-return row.keep
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "GET_ROW_STRING_FIELD") {
-		t.Fatalf("compiled stale row slot program is missing row slot read:\n%s", joined)
-	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled stale row slot program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 7 {
-		t.Fatalf("Run result is %v (%t), want number 7", got, ok)
-	}
-}
-
 func TestScenarioProgramsDoNotEmitBenchmarkNamedArtifacts(t *testing.T) {
 	sources := []string{
 		`
@@ -4897,12 +6016,12 @@ return total
 	}
 
 	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "ADD_NUMERIC_MOD_K") {
-		t.Fatalf("compiled arithmetic is missing ADD_NUMERIC_MOD_K:\n%s", joined)
+	if strings.Contains(joined, "ADD_NUMERIC_MOD_K") {
+		t.Fatalf("compiled arithmetic still uses removed ADD_NUMERIC_MOD_K:\n%s", joined)
 	}
 	for _, want := range []string{"number 3", "number 2", "number 17"} {
 		if !strings.Contains(joined, want) {
-			t.Fatalf("compiled arithmetic descriptor is missing %s:\n%s", want, joined)
+			t.Fatalf("compiled arithmetic is missing %s:\n%s", want, joined)
 		}
 	}
 }
@@ -5002,36 +6121,32 @@ return best
 	}
 }
 
-func TestCompilerRecordsMaxReductionFacts(t *testing.T) {
+func TestCompilerFusesGenericLessThanBranch(t *testing.T) {
 	proto, err := Compile(`
-local scores = {3, 8, 5, 12}
-local best = -999
-local bestIndex = 0
-for i, score in scores do
-	if score > best then
-		best = score
-		bestIndex = i
-	end
+local index = 3
+local depth = 0
+local total = 0
+while index > 0 and depth < 4 do
+	total = total + index + depth
+	index = index - 1
+	depth = depth + 1
 end
-return best, bestIndex
+return total
 `)
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
 
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
 	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{
-		"reduction",
-		"kind max",
-		"accumulator r",
-		"candidate r",
-		"predicate pc",
-		"mutation pc",
-		"mutations 2",
-	} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled reduction program is missing %q:\n%s\nbytecode:\n%s", want, facts, joined)
+	if !strings.Contains(joined, "JUMP_IF_NOT_GREATER") {
+		t.Fatalf("compiled greater-than branch is missing fused register branch:\n%s", joined)
+	}
+	if !strings.Contains(joined, "JUMP_IF_NOT_LESS_K") {
+		t.Fatalf("compiled less-than constant branch is missing fused constant branch:\n%s", joined)
+	}
+	for _, line := range disassembleProto(proto) {
+		if strings.Contains(line, "GREATER r") || strings.Contains(line, "LESS r") {
+			t.Fatalf("compiled loop materialized comparison before branch:\n%s", joined)
 		}
 	}
 
@@ -5039,47 +6154,45 @@ return best, bestIndex
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	if len(results) != 2 {
-		t.Fatalf("Run returned %d results, want 2", len(results))
-	}
-	if got, ok := results[0].Number(); !ok || got != 12 {
-		t.Fatalf("first result is %v (%t), want number 12", got, ok)
-	}
-	if got, ok := results[1].Number(); !ok || got != 4 {
-		t.Fatalf("second result is %v (%t), want number 4", got, ok)
+	got, ok := results[0].Number()
+	if !ok || got != 9 {
+		t.Fatalf("Run result is %v (%t), want number 9", got, ok)
 	}
 }
 
-func TestCompilerRecordsAllCompleteReductionFacts(t *testing.T) {
+func TestCompareBranchFusionPreservesMetamethodCallOrder(t *testing.T) {
 	proto, err := Compile(`
-local objectives = {
-	{have = 1, need = 1},
-	{have = 1, need = 2},
-}
-local complete = true
-for _, objective in objectives do
-	if objective.have < objective.need then
-		complete = false
+local seen = "none"
+local object = {}
+object = setmetatable(object, {
+	__lt = function(left, right)
+		if type(left) == "number" and right == object then
+			seen = "number-object"
+		else
+			seen = "wrong-order"
+		end
+		return true
+	end,
+})
+if object > 3 then
+	if seen == "number-object" then
+		return 7
 	end
+	return 1
 end
-return complete
+return 0
 `)
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
 
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
 	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{
-		"reduction",
-		"kind all_complete",
-		"accumulator r",
-		"predicate pc",
-		"mutation pc",
-		"mutations 1",
-	} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled all-complete reduction program is missing %q:\n%s\nbytecode:\n%s", want, facts, joined)
+	if !strings.Contains(joined, "JUMP_IF_NOT_GREATER_K") {
+		t.Fatalf("compiled greater-than constant branch is missing fused constant branch:\n%s", joined)
+	}
+	for _, line := range disassembleProto(proto) {
+		if strings.Contains(line, "GREATER r") {
+			t.Fatalf("compiled metamethod branch materialized comparison before branch:\n%s", joined)
 		}
 	}
 
@@ -5087,11 +6200,73 @@ return complete
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	if len(results) != 1 {
-		t.Fatalf("Run returned %d results, want 1", len(results))
+	got, ok := results[0].Number()
+	if !ok || got != 7 {
+		t.Fatalf("Run result is %v (%t), want number 7", got, ok)
 	}
-	if got, ok := results[0].Bool(); !ok || got {
-		t.Fatalf("result is %v (%t), want false", results[0], ok)
+}
+
+func TestCompilerFusesLessEqualAndGreaterEqualBranches(t *testing.T) {
+	proto, err := Compile(`
+local i = 1
+local total = 0
+while i <= 3 do
+	total = total + i
+	i = i + 1
+end
+if total >= 6 then
+	return total
+end
+return 0
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	joined := strings.Join(disassembleProto(proto), "\n")
+	if !strings.Contains(joined, "JUMP_IF_GREATER_K") {
+		t.Fatalf("compiled less-equal branch is missing fused greater-than constant branch:\n%s", joined)
+	}
+	if !strings.Contains(joined, "JUMP_IF_LESS_K") {
+		t.Fatalf("compiled greater-equal branch is missing fused less-than constant branch:\n%s", joined)
+	}
+	for _, line := range disassembleProto(proto) {
+		if strings.Contains(line, "LESS_EQUAL r") || strings.Contains(line, "GREATER_EQUAL r") {
+			t.Fatalf("compiled branch materialized relational comparison before branch:\n%s", joined)
+		}
+	}
+
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	got, ok := results[0].Number()
+	if !ok || got != 6 {
+		t.Fatalf("Run result is %v (%t), want number 6", got, ok)
+	}
+}
+
+func TestRunDirectFrameSquaredDistanceBlockPreservesLiveScratchRegisters(t *testing.T) {
+	proto, err := Compile(`
+local projectile = {x = 3, y = 4}
+local target = {x = 0, y = 0, radius = 5}
+local dx = projectile.x - target.x
+local dy = projectile.y - target.y
+if dx * dx + dy * dy <= target.radius * target.radius then
+	return dx + dy + target.radius
+end
+return 0
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	got, ok := results[0].Number()
+	if !ok || got != 12 {
+		t.Fatalf("Run result is %v (%t), want number 12", results[0], ok)
 	}
 }
 
@@ -5134,933 +6309,6 @@ return complete, touched
 	}
 	if got, ok := results[1].Number(); !ok || got != 1 {
 		t.Fatalf("second result is %v (%t), want number 1", results[1], ok)
-	}
-}
-
-func TestCompilerRecordsAbsoluteDeltaReductionFacts(t *testing.T) {
-	proto, err := Compile(`
-local before = {hp = 10}
-local after = {hp = 17}
-local delta = before.hp - after.hp
-if delta < 0 then
-	delta = -delta
-end
-return delta
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{
-		"reduction",
-		"kind absolute_delta",
-		"accumulator r",
-		"predicate pc",
-		"mutation pc",
-		"mutations 1",
-	} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled absolute-delta program is missing %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	if len(results) != 1 {
-		t.Fatalf("Run returned %d results, want 1", len(results))
-	}
-	if got, ok := results[0].Number(); !ok || got != 7 {
-		t.Fatalf("result is %v (%t), want number 7", results[0], ok)
-	}
-}
-
-func TestRunDirectFrameUsesAbsoluteDeltaBlockPlan(t *testing.T) {
-	proto, err := Compile(`
-local delta = -7
-if delta < 0 then
-	delta = -delta
-end
-return delta
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{
-		"direct_block_plan",
-		"kind absolute_delta",
-		"start pc",
-		"resume pc",
-	} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled absolute-delta program is missing %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled absolute-delta program is not direct-frame eligible:\n%s", facts)
-	}
-
-	var counts directFrameOpcodeCounts
-	var picCounts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFrameOpcodeCounts = &counts
-	thread.directFramePICCounts = &picCounts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	if len(results) != 1 {
-		t.Fatalf("thread.run returned %d results, want 1", len(results))
-	}
-	if got, ok := results[0].Number(); !ok || got != 7 {
-		t.Fatalf("result is %v (%t), want number 7", results[0], ok)
-	}
-	if counts.count(opJumpIfNotLessK) == 0 {
-		t.Fatal("direct-frame JUMP_IF_NOT_LESS_K count is 0, want block plan entry counted")
-	}
-	if got := counts.count(opNeg); got != 0 {
-		t.Fatalf("direct-frame NEG count is %d, want absolute-delta block plan to skip NEG dispatch", got)
-	}
-	if got := counts.count(opJump); got != 0 {
-		t.Fatalf("direct-frame JUMP count is %d, want absolute-delta block plan to skip trailing JUMP dispatch", got)
-	}
-}
-
-func TestCompilerRecordsTypedBlockPlanForAbsoluteDelta(t *testing.T) {
-	proto, err := Compile(`
-local delta = -7
-if delta < 0 then
-	delta = -delta
-end
-return delta
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{
-		"block_plan",
-		"family absolute_delta",
-		"start pc",
-		"resume pc",
-		"fallback pc",
-	} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled absolute-delta program is missing typed block plan %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-}
-
-func TestCompilerRecordsDynamicPathAddStoreBlockPlan(t *testing.T) {
-	proto, err := Compile(`
-local row = {child = {value = 10}}
-local key = "value"
-local delta = 3
-for i = 1, 6 do
-	row.child[key] = row.child[key] + delta
-end
-return row.child[key]
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{
-		"block_plan",
-		"family dynamic_path_add_store",
-		"field child dynamic_key",
-		"op ADD",
-		"resume pc",
-		"fallback pc",
-	} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled dynamic path update is missing block plan %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-}
-
-func TestCompilerRecordsDynamicPathAddStoreBlockPlanForRowFieldKey(t *testing.T) {
-	proto, err := Compile(`
-local enemies = {
-	{threat = {tank = 20, mage = 0}},
-}
-local events = {
-	{actor = "tank", amount = 9},
-	{actor = "mage", amount = 17},
-}
-for _, enemy in enemies do
-	for _, event in events do
-		enemy.threat[event.actor] = enemy.threat[event.actor] + event.amount
-	end
-end
-return enemies[1].threat.tank + enemies[1].threat.mage
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{
-		"block_plan",
-		"family dynamic_path_add_store",
-		"field threat dynamic_key",
-		"op ADD",
-		"resume pc",
-		"fallback pc",
-	} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled row-key dynamic path update is missing block plan %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-}
-
-func TestCompilerRecordsDynamicPathSubIDivKBlockPlan(t *testing.T) {
-	proto, err := Compile(`
-local market = {
-	demand = {wood = 8, ore = 14},
-	stock = {wood = 40, ore = 18},
-}
-local orders = {
-	{good = "wood"},
-	{good = "ore"},
-}
-local total = 0
-for _, order in orders do
-	local good = order.good
-	local pressure = market.demand[good] - market.stock[good] // 5
-	total = total + pressure
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{
-		"block_plan",
-		"family dynamic_path_sub_idiv_k",
-		"left demand",
-		"right stock",
-		"divisor",
-		"resume pc",
-		"fallback pc",
-	} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled dynamic pressure calculation is missing block plan %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-}
-
-func TestCompilerRecordsDynamicPathSubBlockPlan(t *testing.T) {
-	proto, err := Compile(`
-local left = {inv = {coins = 20, herbs = 3}}
-local right = {inv = {coins = 17, herbs = 5}}
-local fields = {"coins", "herbs"}
-local total = 0
-for _, field in fields do
-	local delta = left.inv[field] - right.inv[field]
-	total = total + delta
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{
-		"block_plan",
-		"family dynamic_path_sub",
-		"left inv",
-		"right inv",
-		"resume pc",
-		"fallback pc",
-	} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled dynamic diff calculation is missing block plan %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-}
-
-func TestCompilerRecordsRowFieldAddFieldStoreBlockPlan(t *testing.T) {
-	proto, err := Compile(`
-local actor = {energy = 30, haste = 1}
-for i = 1, 4 do
-	actor.energy = actor.energy + 2 + actor.haste
-end
-return actor.energy
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{
-		"block_plan",
-		"family row_field_add_field_store",
-		"field energy",
-		"add_field haste",
-		"op ADD",
-		"resume pc",
-		"fallback pc",
-	} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled row field add-field update is missing block plan %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-}
-
-func TestRunDirectFrameUsesRowFieldAddFieldStoreBlockPlan(t *testing.T) {
-	proto, err := Compile(`
-local actor = {energy = 30, haste = 1}
-for i = 1, 4 do
-	actor.energy = actor.energy + 2 + actor.haste
-end
-return actor.energy
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	if !strings.Contains(facts, "family row_field_add_field_store") {
-		t.Fatalf("compiled row field add-field update is missing block plan:\n%s\nbytecode:\n%s", facts, strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFrameOpcodeCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFrameOpcodeCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 42 {
-		t.Fatalf("thread.run result is %v (%t), want 42", got, ok)
-	}
-	if got := counts.count(opSetRowStringField); got != 0 {
-		t.Fatalf("SET_ROW_STRING_FIELD dispatch count = %d, want row field add-field block to skip stores", got)
-	}
-}
-
-func TestRowFieldAddFieldStoreBlockPlanFallsBackForStringNumberField(t *testing.T) {
-	proto, err := Compile(`
-local actor = {energy = 30, haste = "1"}
-for i = 1, 4 do
-	actor.energy = actor.energy + 2 + actor.haste
-end
-return actor.energy
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	if !strings.Contains(facts, "family row_field_add_field_store") {
-		t.Fatalf("compiled row field add-field update is missing block plan:\n%s\nbytecode:\n%s", facts, strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 42 {
-		t.Fatalf("Run result is %v (%t), want 42 from string-number fallback", got, ok)
-	}
-}
-
-func TestRunDirectFrameUsesDynamicPathAddStoreBlockPlan(t *testing.T) {
-	proto, err := Compile(`
-local row = {child = {value = 10}}
-local key = "value"
-local delta = 3
-for i = 1, 6 do
-	row.child[key] = row.child[key] + delta
-end
-return row.child[key]
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	if !strings.Contains(facts, "family dynamic_path_add_store") {
-		t.Fatalf("compiled dynamic path update is missing block plan:\n%s\nbytecode:\n%s", facts, strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFrameOpcodeCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFrameOpcodeCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 28 {
-		t.Fatalf("thread.run result is %v (%t), want 28", got, ok)
-	}
-	if got := counts.count(opSetStringFieldIndex); got != 0 {
-		t.Fatalf("SET_STRING_FIELD_INDEX dispatch count = %d, want dynamic path block to skip stores", got)
-	}
-}
-
-func TestRunDirectFrameUsesDynamicPathAddStoreBlockPlanForRowFieldKey(t *testing.T) {
-	proto, err := Compile(`
-local enemies = {
-	{threat = {tank = 20, mage = 0}},
-}
-local events = {
-	{actor = "tank", amount = 9},
-	{actor = "mage", amount = 17},
-}
-for _, enemy in enemies do
-	for _, event in events do
-		enemy.threat[event.actor] = enemy.threat[event.actor] + event.amount
-	end
-end
-return enemies[1].threat.tank + enemies[1].threat.mage
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	if !strings.Contains(facts, "family dynamic_path_add_store") {
-		t.Fatalf("compiled row-key dynamic path update is missing block plan:\n%s\nbytecode:\n%s", facts, strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFrameOpcodeCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFrameOpcodeCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 46 {
-		t.Fatalf("thread.run result is %v (%t), want 46", got, ok)
-	}
-	if got := counts.count(opSetStringFieldIndex); got != 0 {
-		t.Fatalf("SET_STRING_FIELD_INDEX dispatch count = %d, want row-key dynamic path block to skip stores", got)
-	}
-}
-
-func TestRunDirectFrameUsesDynamicMapUpdateRegionForRowFieldKeyLoop(t *testing.T) {
-	proto, err := Compile(`
-local enemies = {
-	{threat = {tank = 20, mage = 0}},
-}
-local events = {
-	{actor = "tank", amount = 9},
-	{actor = "mage", amount = 17},
-}
-for _, enemy in enemies do
-	for _, event in events do
-		enemy.threat[event.actor] = enemy.threat[event.actor] + event.amount
-	end
-end
-return enemies[1].threat.tank + enemies[1].threat.mage
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.regionExecutionPlans) == 0 {
-		t.Fatalf("compiled row-key dynamic map update has no region execution plan:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 46 {
-		t.Fatalf("thread.run result is %v (%t), want 46", got, ok)
-	}
-	if counts.regionEntries != 1 || counts.regionResumes != 1 || counts.regionFallbacks != 0 {
-		t.Fatalf("region counters = entries %d resumes %d fallbacks %d, want one stable dynamic map region:\n%s", counts.regionEntries, counts.regionResumes, counts.regionFallbacks, strings.Join(disassembleProto(proto), "\n"))
-	}
-}
-
-func TestRunDirectFrameDynamicMapUpdateRegionSideExitsBeforeMismatchedRowSlot(t *testing.T) {
-	proto, err := Compile(`
-local enemies = {
-	{threat = {tank = 20, mage = 0, rogue = 0}},
-}
-local events = {
-	{actor = "tank", amount = 9},
-	{kind = "damage", actor = "mage", amount = 17},
-	{actor = "rogue", amount = 5},
-}
-for _, enemy in enemies do
-	for _, event in events do
-		enemy.threat[event.actor] = enemy.threat[event.actor] + event.amount
-	end
-end
-return enemies[1].threat.tank + enemies[1].threat.mage + enemies[1].threat.rogue
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.regionExecutionPlans) == 0 {
-		t.Fatalf("compiled row-key dynamic map update has no region execution plan:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 51 {
-		t.Fatalf("thread.run result is %v (%t), want 51", got, ok)
-	}
-	if counts.regionEntries == 0 || counts.regionFallbacks == 0 {
-		t.Fatalf("region counters = entries %d fallbacks %d, want dynamic map side exit", counts.regionEntries, counts.regionFallbacks)
-	}
-}
-
-func TestRunDirectFrameUsesDynamicMapUpdateRegionForAdjustedThreatGainLoop(t *testing.T) {
-	proto, err := Compile(`
-local enemy = {enraged = true, threat = {tank = 20, mage = 0, healer = 4}}
-local events = {
-	{actor = "tank", kind = "taunt", amount = 9},
-	{actor = "mage", kind = "damage", amount = 17},
-	{actor = "healer", kind = "heal", amount = 12},
-}
-local tickMod = 1
-for _, event in events do
-	local gain = event.amount + tickMod
-	if event.kind == "taunt" then
-		gain = gain * 2
-	elseif event.kind == "heal" then
-		gain = gain // 2 + 3
-	end
-	if enemy.enraged then
-		gain = gain + 2
-	end
-	enemy.threat[event.actor] = enemy.threat[event.actor] + gain
-end
-return enemy.threat.tank + enemy.threat.mage + enemy.threat.healer
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.regionExecutionPlans) == 0 {
-		t.Fatalf("compiled adjusted dynamic map update has no region execution plan:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 77 {
-		t.Fatalf("thread.run result is %v (%t), want 77", got, ok)
-	}
-	if counts.regionEntries != 1 || counts.regionResumes != 1 || counts.regionFallbacks != 0 {
-		t.Fatalf("region counters = entries %d resumes %d fallbacks %d, want one stable adjusted dynamic map region:\n%s", counts.regionEntries, counts.regionResumes, counts.regionFallbacks, strings.Join(disassembleProto(proto), "\n"))
-	}
-}
-
-func TestRunDirectFrameAdjustedDynamicMapUpdateRegionSideExitsBeforeMismatchedRowSlot(t *testing.T) {
-	proto, err := Compile(`
-local enemy = {enraged = true, threat = {tank = 20, mage = 0, healer = 4}}
-local events = {
-	{actor = "tank", kind = "taunt", amount = 9},
-	{note = "late", actor = "mage", kind = "damage", amount = 17},
-	{actor = "healer", kind = "heal", amount = 12},
-}
-local tickMod = 1
-for _, event in events do
-	local gain = event.amount + tickMod
-	if event.kind == "taunt" then
-		gain = gain * 2
-	elseif event.kind == "heal" then
-		gain = gain // 2 + 3
-	end
-	if enemy.enraged then
-		gain = gain + 2
-	end
-	enemy.threat[event.actor] = enemy.threat[event.actor] + gain
-end
-return enemy.threat.tank + enemy.threat.mage + enemy.threat.healer
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.regionExecutionPlans) == 0 {
-		t.Fatalf("compiled adjusted dynamic map update has no region execution plan:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 77 {
-		t.Fatalf("thread.run result is %v (%t), want 77", got, ok)
-	}
-	if counts.regionEntries == 0 || counts.regionFallbacks == 0 {
-		t.Fatalf("region counters = entries %d fallbacks %d, want adjusted dynamic map side exit", counts.regionEntries, counts.regionFallbacks)
-	}
-}
-
-func TestRunDirectFrameUsesDynamicPathSubIDivKBlockPlan(t *testing.T) {
-	proto, err := Compile(`
-local market = {
-	demand = {wood = 8, ore = 14},
-	stock = {wood = 40, ore = 18},
-}
-local orders = {
-	{good = "wood"},
-	{good = "ore"},
-}
-local total = 0
-for _, order in orders do
-	local good = order.good
-	local pressure = market.demand[good] - market.stock[good] // 5
-	total = total + pressure
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	if !strings.Contains(facts, "family dynamic_path_sub_idiv_k") {
-		t.Fatalf("compiled dynamic pressure calculation is missing block plan:\n%s\nbytecode:\n%s", facts, strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFrameOpcodeCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFrameOpcodeCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 11 {
-		t.Fatalf("thread.run result is %v (%t), want 11", got, ok)
-	}
-	if got := counts.count(opIDivK); got != 0 {
-		t.Fatalf("IDIV_K dispatch count = %d, want dynamic pressure block to skip divide", got)
-	}
-	if got := counts.count(opSub); got != 0 {
-		t.Fatalf("SUB dispatch count = %d, want dynamic pressure block to skip subtract", got)
-	}
-}
-
-func TestRunDirectFrameUsesDynamicPathSubBlockPlan(t *testing.T) {
-	proto, err := Compile(`
-local left = {inv = {coins = 20, herbs = 3}}
-local right = {inv = {coins = 17, herbs = 5}}
-local fields = {"coins", "herbs"}
-local total = 0
-for _, field in fields do
-	local delta = left.inv[field] - right.inv[field]
-	total = total + delta
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	if !strings.Contains(facts, "family dynamic_path_sub") {
-		t.Fatalf("compiled dynamic diff calculation is missing block plan:\n%s\nbytecode:\n%s", facts, strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFrameOpcodeCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFrameOpcodeCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 1 {
-		t.Fatalf("thread.run result is %v (%t), want 1", got, ok)
-	}
-	if got := counts.count(opSub); got != 0 {
-		t.Fatalf("SUB dispatch count = %d, want dynamic diff block to skip subtract", got)
-	}
-}
-
-func TestDynamicPathAddStoreBlockPlanFallsBackForMetatable(t *testing.T) {
-	proto, err := Compile(`
-local log = {value = 0}
-local child = {}
-setmetatable(child, {
-	__index = function(_, key)
-		if key == "value" then
-			return 10
-		end
-		return 0
-	end,
-	__newindex = function(_, key, value)
-		if key == "value" then
-			log.value = value
-		end
-	end,
-})
-local row = {child = child}
-local key = "value"
-local delta = 3
-for i = 1, 2 do
-	row.child[key] = row.child[key] + delta
-end
-return log.value
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	if !strings.Contains(facts, "family dynamic_path_add_store") {
-		t.Fatalf("compiled dynamic path update is missing block plan:\n%s\nbytecode:\n%s", facts, strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 13 {
-		t.Fatalf("Run result is %v (%t), want 13 from metatable fallback", got, ok)
-	}
-}
-
-func TestRunDirectFrameVerifiedPlansArePICOptIn(t *testing.T) {
-	proto, err := Compile(`
-local delta = -7
-if delta < 0 then
-	delta = -delta
-end
-return delta
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	if !strings.Contains(facts, "direct_block_plan") || !strings.Contains(facts, "kind absolute_delta") {
-		t.Fatalf("compiled absolute-delta program is missing direct block plan:\n%s\nbytecode:\n%s", facts, strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFrameOpcodeCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFrameOpcodeCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 7 {
-		t.Fatalf("result is %v (%t), want number 7", results[0], ok)
-	}
-	if got := counts.count(opNeg); got == 0 {
-		t.Fatalf("direct-frame NEG count is %d, want ordinary dispatch when PIC counters are disabled", got)
-	}
-}
-
-func TestRunDirectFrameAbsoluteDeltaBlockPlanResumesAfterSkippedMutation(t *testing.T) {
-	proto, err := Compile(`
-local delta = 7
-if delta < 0 then
-	delta = -delta
-end
-return delta + 1
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	if !strings.Contains(facts, "direct_block_plan") || !strings.Contains(facts, "kind absolute_delta") {
-		t.Fatalf("compiled positive absolute-delta program is missing direct block plan:\n%s\nbytecode:\n%s", facts, strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFrameOpcodeCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFrameOpcodeCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 8 {
-		t.Fatalf("result is %v (%t), want number 8", results[0], ok)
-	}
-	if got := counts.count(opNeg); got != 0 {
-		t.Fatalf("direct-frame NEG count is %d, want skipped mutation path to bypass NEG", got)
-	}
-	if counts.count(opAddK) == 0 {
-		t.Fatal("direct-frame ADD_K count is 0, want block plan to resume at following bytecode")
-	}
-}
-
-func TestRunDirectFrameUsesMaxReductionBlockPlan(t *testing.T) {
-	proto, err := Compile(`
-local best = 1
-local score = 3
-if score > best then
-	best = score
-end
-return best + 1
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{
-		"direct_block_plan",
-		"kind max",
-		"start pc",
-		"resume pc",
-	} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled max reduction program is missing %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled max reduction program is not direct-frame eligible:\n%s", facts)
-	}
-
-	var counts directFrameOpcodeCounts
-	var picCounts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFrameOpcodeCounts = &counts
-	thread.directFramePICCounts = &picCounts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 4 {
-		t.Fatalf("result is %v (%t), want number 4", results[0], ok)
-	}
-	if counts.count(opJumpIfNotGreater) == 0 {
-		t.Fatal("direct-frame JUMP_IF_NOT_GREATER count is 0, want block plan entry counted")
-	}
-	if got := counts.count(opMove); got != 1 {
-		t.Fatalf("direct-frame MOVE count is %d, want only post-block result move to dispatch", got)
-	}
-	if got := counts.count(opJump); got != 0 {
-		t.Fatalf("direct-frame JUMP count is %d, want max block plan to skip trailing JUMP dispatch", got)
-	}
-	if counts.count(opAddK) == 0 {
-		t.Fatal("direct-frame ADD_K count is 0, want max block plan to resume at following bytecode")
-	}
-}
-
-func TestRunDirectFrameMaxReductionBlockPlanResumesAfterSkippedMutation(t *testing.T) {
-	proto, err := Compile(`
-local best = 5
-local score = 3
-if score > best then
-	best = score
-end
-return best + 1
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	if !strings.Contains(facts, "direct_block_plan") || !strings.Contains(facts, "kind max") {
-		t.Fatalf("compiled skipped max program is missing direct block plan:\n%s\nbytecode:\n%s", facts, strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFrameOpcodeCounts
-	var picCounts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFrameOpcodeCounts = &counts
-	thread.directFramePICCounts = &picCounts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 6 {
-		t.Fatalf("result is %v (%t), want number 6", results[0], ok)
-	}
-	if got := counts.count(opMove); got != 1 {
-		t.Fatalf("direct-frame MOVE count is %d, want only post-block result move to dispatch", got)
-	}
-	if got := counts.count(opJump); got != 0 {
-		t.Fatalf("direct-frame JUMP count is %d, want skipped max path to bypass trailing JUMP", got)
-	}
-	if counts.count(opAddK) == 0 {
-		t.Fatal("direct-frame ADD_K count is 0, want max block plan to resume at following bytecode")
-	}
-}
-
-func TestCompilerRecordsPairedRowDiffReductionFacts(t *testing.T) {
-	proto, err := Compile(`
-local before = {
-	{hp = 10},
-	{hp = 20},
-}
-local after = {
-	{hp = 13},
-	{hp = 12},
-}
-local total = 0
-for i, left in before do
-	local right = after[i]
-	local delta = left.hp - right.hp
-	if delta < 0 then
-		delta = -delta
-	end
-	total = total + delta
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{
-		"reduction",
-		"kind paired_row_diff",
-		"accumulator r",
-		"candidate r",
-		"predicate pc",
-		"mutation pc",
-	} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled paired-row diff program is missing %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	if len(results) != 1 {
-		t.Fatalf("Run returned %d results, want 1", len(results))
-	}
-	if got, ok := results[0].Number(); !ok || got != 11 {
-		t.Fatalf("result is %v (%t), want number 11", results[0], ok)
 	}
 }
 
@@ -6143,472 +6391,6 @@ return total
 	}
 }
 
-func TestRunDirectFrameUsesPairedRowDiffBlockPlan(t *testing.T) {
-	proto, err := Compile(`
-local before = {
-	{hp = 10},
-	{hp = 20},
-}
-local after = {
-	{hp = 13},
-	{hp = 12},
-}
-local total = 0
-for i, left in before do
-	local right = after[i]
-	local delta = left.hp - right.hp
-	if delta < 0 then
-		delta = -delta
-	end
-	total = total + delta
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	hasPairedRowBlockPlan := false
-	for _, line := range strings.Split(facts, "\n") {
-		if strings.Contains(line, "direct_block_plan") && strings.Contains(line, "kind paired_row_diff") {
-			hasPairedRowBlockPlan = true
-			break
-		}
-	}
-	if !hasPairedRowBlockPlan {
-		t.Fatalf("compiled paired-row diff program is missing paired-row direct block plan:\n%s\nbytecode:\n%s", facts, joined)
-	}
-
-	var counts directFrameOpcodeCounts
-	var picCounts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFrameOpcodeCounts = &counts
-	thread.directFramePICCounts = &picCounts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 11 {
-		t.Fatalf("result is %v (%t), want number 11", results[0], ok)
-	}
-	if counts.count(opGetIndex) == 0 {
-		t.Fatal("direct-frame GET_INDEX count is 0, want paired-row block plan entry counted")
-	}
-	if got := counts.count(opGetRowStringField); got != 0 {
-		t.Fatalf("direct-frame GET_ROW_STRING_FIELD count is %d, want paired-row block plan to skip row field dispatch", got)
-	}
-	if got := counts.count(opSub); got != 0 {
-		t.Fatalf("direct-frame SUB count is %d, want paired-row block plan to skip subtraction dispatch", got)
-	}
-}
-
-func TestRunDirectFrameUsesRowFieldAddStoreBlockPlan(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{hp = 10},
-	{hp = 20},
-}
-for _, row in rows do
-	row.hp = row.hp + 3
-end
-return rows[1].hp + rows[2].hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	hasRowFieldAddStoreBlockPlan := false
-	for _, line := range strings.Split(facts, "\n") {
-		if strings.Contains(line, "direct_block_plan") && strings.Contains(line, "kind row_field_add_store") {
-			hasRowFieldAddStoreBlockPlan = true
-			break
-		}
-	}
-	if !hasRowFieldAddStoreBlockPlan {
-		t.Fatalf("compiled row field add-store program is missing row-field direct block plan:\n%s\nbytecode:\n%s", facts, joined)
-	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled row field add-store program is not direct-frame eligible:\n%s", facts)
-	}
-
-	var counts directFrameOpcodeCounts
-	var picCounts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFrameOpcodeCounts = &counts
-	thread.directFramePICCounts = &picCounts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 36 {
-		t.Fatalf("result is %v (%t), want number 36", results[0], ok)
-	}
-	if counts.count(opAddStringField) == 0 && picCounts.regionEntries == 0 {
-		t.Fatal("direct-frame ADD_STRING_FIELD count and region entries are both 0, want row-field block plan or row-loop region entry counted")
-	}
-	if got := counts.count(opAddK); got != 0 {
-		t.Fatalf("direct-frame ADD_K count is %d, want row-field block plan to skip numeric dispatch", got)
-	}
-	if got := counts.count(opSetRowStringField); got != 0 {
-		t.Fatalf("direct-frame SET_ROW_STRING_FIELD count is %d, want row-field block plan to skip store dispatch", got)
-	}
-}
-
-func TestRunDirectFrameDirectBlockPlanCounters(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{hp = 10},
-	{hp = 20},
-}
-for _, row in rows do
-	row.hp = row.hp + 3
-end
-return rows[1].hp + rows[2].hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	if !strings.Contains(facts, "kind row_field_add_store") {
-		t.Fatalf("compiled row field add-store program is missing direct block plan:\n%s\nbytecode:\n%s", facts, strings.Join(disassembleProto(proto), "\n"))
-	}
-	verified, ok := proto.verifiedPlanAt(proto.directBlockPlans[0].pc)
-	if !ok {
-		t.Fatalf("verified plan shell missing at direct block pc %d", proto.directBlockPlans[0].pc)
-	}
-	if verified.kind != verifiedPlanKindDirectBlock {
-		t.Fatalf("verified plan kind = %v, want direct block", verified.kind)
-	}
-	if verified.directBlock.kind != "row_field_add_store" {
-		t.Fatalf("verified direct block kind = %q, want row_field_add_store", verified.directBlock.kind)
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 36 {
-		t.Fatalf("result is %v (%t), want number 36", results[0], ok)
-	}
-	if counts.regionEntries == 0 {
-		if got := counts.directBlockEntries; got != 2 {
-			t.Fatalf("direct block entries = %d, want 2 without row-loop region entry", got)
-		}
-		if got := counts.directBlockResumes; got != 2 {
-			t.Fatalf("direct block resumes = %d, want 2 without row-loop region entry", got)
-		}
-	} else if counts.regionResumes == 0 {
-		t.Fatalf("region entries = %d resumes = %d, want row-loop region to resume", counts.regionEntries, counts.regionResumes)
-	}
-	if got := counts.directBlockFallbacks; got != 0 {
-		t.Fatalf("direct block fallbacks = %d, want 0", got)
-	}
-}
-
-func TestRunDirectFrameDirectBlockPlanCountersRecordFallbackReason(t *testing.T) {
-	proto, err := Compile(`
-local row = {hp = 10}
-row.hp = row.hp + "3"
-return row.hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	if !strings.Contains(facts, "kind row_field_add_store") {
-		t.Fatalf("compiled numeric-string row add-store program is missing direct block plan:\n%s\nbytecode:\n%s", facts, strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 13 {
-		t.Fatalf("result is %v (%t), want number 13", results[0], ok)
-	}
-	if got := counts.directBlockEntries; got != 1 {
-		t.Fatalf("direct block entries = %d, want 1", got)
-	}
-	if got := counts.directBlockResumes; got != 0 {
-		t.Fatalf("direct block resumes = %d, want 0", got)
-	}
-	if got := counts.directBlockFallbacks; got != 1 {
-		t.Fatalf("direct block fallbacks = %d, want 1", got)
-	}
-	if got := counts.directBlockSideExitCount(directFrameSideExitReasonGenericFrame); got != 1 {
-		t.Fatalf("direct block generic fallbacks = %d, want 1", got)
-	}
-}
-
-func TestExecuteVerifiedPlanFallbackPreservesPCAndRegisters(t *testing.T) {
-	proto, err := Compile(`
-local row = {hp = 10}
-row.hp = row.hp + "3"
-return row.hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	verified, ok := proto.verifiedPlanAt(proto.directBlockPlans[0].pc)
-	if !ok {
-		t.Fatalf("verified plan shell missing at direct block pc %d", proto.directBlockPlans[0].pc)
-	}
-	plan := verified.directBlock
-	frame := newVMFrame(proto, nil, nil)
-	frame.pc = plan.startPC
-	row := NewTable()
-	row.setRawStringField("hp", NumberValue(10))
-	frame.registers[plan.register] = TableValue(row)
-	frame.registers[plan.candidate] = StringValue("3")
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	exit := thread.executeVerifiedPlan(frame, verified)
-
-	if exit.kind != directFrameSideExitGenericFrame || exit.reason != directFrameSideExitReasonGenericFrame {
-		t.Fatalf("verified plan exit = kind %d reason %d, want generic fallback", exit.kind, exit.reason)
-	}
-	if frame.pc != plan.startPC {
-		t.Fatalf("frame pc after fallback = %d, want plan start %d", frame.pc, plan.startPC)
-	}
-	value, ok := row.rawStringField("hp")
-	if !ok {
-		t.Fatal("row hp missing after fallback")
-	}
-	if got, ok := value.Number(); !ok || got != 10 {
-		t.Fatalf("row hp after fallback is %v (%t), want number 10", value, ok)
-	}
-	if got := counts.directBlockEntries; got != 1 {
-		t.Fatalf("direct block entries = %d, want 1", got)
-	}
-	if got := counts.directBlockFallbacks; got != 1 {
-		t.Fatalf("direct block fallbacks = %d, want 1", got)
-	}
-}
-
-func TestRunDirectFrameUsesRowFieldBranchStoreBlockPlan(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{hp = 12},
-	{hp = 8},
-}
-for _, row in rows do
-	if row.hp > 10 then
-		row.hp = 10
-	end
-end
-return rows[1].hp + rows[2].hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	hasRowFieldBranchStoreBlockPlan := false
-	for _, line := range strings.Split(facts, "\n") {
-		if strings.Contains(line, "direct_block_plan") && strings.Contains(line, "kind row_field_branch_store") {
-			hasRowFieldBranchStoreBlockPlan = true
-			break
-		}
-	}
-	if !hasRowFieldBranchStoreBlockPlan {
-		t.Fatalf("compiled row field branch-store program is missing row-field branch direct block plan:\n%s\nbytecode:\n%s", facts, joined)
-	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled row field branch-store program is not direct-frame eligible:\n%s", facts)
-	}
-
-	var counts directFrameOpcodeCounts
-	var picCounts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFrameOpcodeCounts = &counts
-	thread.directFramePICCounts = &picCounts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 18 {
-		t.Fatalf("result is %v (%t), want number 18", results[0], ok)
-	}
-	if counts.count(opJumpIfRowStringFieldNotGreaterK) == 0 {
-		t.Fatal("direct-frame JUMP_IF_ROW_STRING_FIELD_NOT_GREATER_K count is 0, want row-field block plan entry counted")
-	}
-	if got := counts.count(opSetRowStringField); got != 0 {
-		t.Fatalf("direct-frame SET_ROW_STRING_FIELD count is %d, want row-field branch block plan to skip store dispatch", got)
-	}
-}
-
-func TestRunDirectFrameUsesRowFieldRegisterBranchStoreBlockPlan(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{best = 12, delta = 3},
-	{best = 8, delta = -1},
-}
-for _, row in rows do
-	local candidate = row.best - row.delta
-	if candidate < row.best then
-		row.best = candidate
-	end
-end
-return rows[1].best + rows[2].best
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	hasRowFieldBranchStoreBlockPlan := false
-	for _, line := range strings.Split(facts, "\n") {
-		if strings.Contains(line, "direct_block_plan") && strings.Contains(line, "kind row_field_branch_store") {
-			hasRowFieldBranchStoreBlockPlan = true
-			break
-		}
-	}
-	if !hasRowFieldBranchStoreBlockPlan {
-		t.Fatalf("compiled row field register-branch program is missing row-field branch direct block plan:\n%s\nbytecode:\n%s", facts, joined)
-	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled row field register-branch program is not direct-frame eligible:\n%s", facts)
-	}
-
-	var counts directFrameOpcodeCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFrameOpcodeCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 17 {
-		t.Fatalf("result is %v (%t), want number 17", results[0], ok)
-	}
-	if counts.count(opJumpIfRowStringFieldNotGreaterR) == 0 {
-		t.Fatal("direct-frame JUMP_IF_ROW_STRING_FIELD_NOT_GREATER_R count is 0, want row-field register block plan entry counted")
-	}
-	if got := counts.count(opSetRowStringField); got != 0 {
-		t.Fatalf("direct-frame SET_ROW_STRING_FIELD count is %d, want row-field register branch block plan to skip store dispatch", got)
-	}
-}
-
-func TestRunDirectFrameUsesRowFieldBranchArithmeticStoreBlockPlan(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{hp = 15},
-	{hp = 8},
-}
-for _, row in rows do
-	if row.hp > 10 then
-		row.hp = row.hp - 2
-	end
-end
-return rows[1].hp + rows[2].hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	hasRowFieldBranchStoreBlockPlan := false
-	for _, line := range strings.Split(facts, "\n") {
-		if strings.Contains(line, "direct_block_plan") && strings.Contains(line, "kind row_field_branch_store") {
-			hasRowFieldBranchStoreBlockPlan = true
-			break
-		}
-	}
-	if !hasRowFieldBranchStoreBlockPlan {
-		t.Fatalf("compiled row field branch arithmetic-store program is missing row-field branch direct block plan:\n%s\nbytecode:\n%s", facts, joined)
-	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled row field branch arithmetic-store program is not direct-frame eligible:\n%s", facts)
-	}
-
-	var counts directFrameOpcodeCounts
-	var picCounts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFrameOpcodeCounts = &counts
-	thread.directFramePICCounts = &picCounts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 21 {
-		t.Fatalf("result is %v (%t), want number 21", results[0], ok)
-	}
-	if counts.count(opJumpIfRowStringFieldNotGreaterK) == 0 && picCounts.regionEntries == 0 {
-		t.Fatal("direct-frame JUMP_IF_ROW_STRING_FIELD_NOT_GREATER_K count and region entries are both 0, want row-field block plan or row-loop region entry counted")
-	}
-	if got := counts.count(opSubStringField); got != 0 {
-		t.Fatalf("direct-frame SUB_STRING_FIELD count is %d, want row-field branch block plan to skip arithmetic store dispatch", got)
-	}
-}
-
-func TestRunDirectFrameUsesRowFieldBranchSubAddStoreBlockPlan(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{hp = 12, regen = 3},
-	{hp = 8, regen = 5},
-}
-local incoming = 2
-for _, row in rows do
-	if row.hp > 10 then
-		row.hp = row.hp - incoming + row.regen
-	end
-end
-return rows[1].hp + rows[2].hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	hasRowFieldBranchStoreBlockPlan := false
-	for _, line := range strings.Split(facts, "\n") {
-		if strings.Contains(line, "direct_block_plan") && strings.Contains(line, "kind row_field_branch_store") {
-			hasRowFieldBranchStoreBlockPlan = true
-			break
-		}
-	}
-	if !hasRowFieldBranchStoreBlockPlan {
-		t.Fatalf("compiled row field branch sub-add program is missing row-field branch direct block plan:\n%s\nbytecode:\n%s", facts, joined)
-	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled row field branch sub-add program is not direct-frame eligible:\n%s", facts)
-	}
-
-	var counts directFrameOpcodeCounts
-	var picCounts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFrameOpcodeCounts = &counts
-	thread.directFramePICCounts = &picCounts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 21 {
-		t.Fatalf("result is %v (%t), want number 21", results[0], ok)
-	}
-	if counts.count(opJumpIfRowStringFieldNotGreaterK) == 0 {
-		t.Fatal("direct-frame JUMP_IF_ROW_STRING_FIELD_NOT_GREATER_K count is 0, want row-field block plan entry counted")
-	}
-	if got := counts.count(opSubAddStringField); got != 0 {
-		t.Fatalf("direct-frame SUB_ADD_STRING_FIELD count is %d, want row-field branch block plan to skip sub-add store dispatch", got)
-	}
-}
-
 func TestNumericSuperinstructionPreservesNumericStringLoopConversion(t *testing.T) {
 	proto, err := Compile(`
 local total = 0
@@ -6621,8 +6403,8 @@ return total
 		t.Fatalf("Compile returned error: %v", err)
 	}
 	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "ADD_NUMERIC_MOD_K") {
-		t.Fatalf("compiled arithmetic is missing ADD_NUMERIC_MOD_K:\n%s", joined)
+	if strings.Contains(joined, "ADD_NUMERIC_MOD_K") {
+		t.Fatalf("compiled arithmetic still uses removed ADD_NUMERIC_MOD_K:\n%s", joined)
 	}
 
 	results, err := Run(proto)
@@ -6662,6 +6444,134 @@ return value + 2
 	if !found {
 		t.Fatalf("compiled constants are %#v, want number 2", proto.constants)
 	}
+}
+
+func TestCompilerDeduplicatesConstantsWithinProto(t *testing.T) {
+	proto, err := Compile(`
+local first = "same"
+local second = "same"
+local left = 7
+local right = 7
+return first, second, left + right
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	stringCount := 0
+	numberCount := 0
+	for _, constant := range proto.constants {
+		if value, ok := constant.String(); ok && value == "same" {
+			stringCount++
+		}
+		if value, ok := constant.Number(); ok && value == 7 {
+			numberCount++
+		}
+	}
+	if stringCount != 1 {
+		t.Fatalf("compiled constants contain %d copies of string %q, want 1: %#v", stringCount, "same", proto.constants)
+	}
+	if numberCount != 1 {
+		t.Fatalf("compiled constants contain %d copies of number 7, want 1: %#v", numberCount, proto.constants)
+	}
+
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if got, ok := results[0].String(); !ok || got != "same" {
+		t.Fatalf("first result is %v (%t), want same", results[0], ok)
+	}
+	if got, ok := results[1].String(); !ok || got != "same" {
+		t.Fatalf("second result is %v (%t), want same", results[1], ok)
+	}
+	if got, ok := results[2].Number(); !ok || got != 14 {
+		t.Fatalf("third result is %v (%t), want 14", results[2], ok)
+	}
+}
+
+func TestCompilerSharesStringSymbolsAcrossChildProtos(t *testing.T) {
+	proto, err := Compile(`
+local function readFirst(row)
+	local noise = 17
+	return row.shared + noise
+end
+local function readSecond(row)
+	local noise = "other"
+	return row.shared, noise
+end
+local first = readFirst({shared = 2})
+local second, label = readSecond({shared = 5})
+return first, second, label
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if len(proto.prototypes) != 2 {
+		t.Fatalf("compiled root has %d child prototypes, want 2", len(proto.prototypes))
+	}
+	firstSymbol := constantStringSymbolFor(t, proto.prototypes[0], "shared")
+	secondSymbol := constantStringSymbolFor(t, proto.prototypes[1], "shared")
+	if firstSymbol == 0 || secondSymbol == 0 {
+		t.Fatalf("shared string symbols are first=%d second=%d, want non-zero symbols", firstSymbol, secondSymbol)
+	}
+	if firstSymbol != secondSymbol {
+		t.Fatalf("shared string symbols are first=%d second=%d, want same compile-local symbol", firstSymbol, secondSymbol)
+	}
+
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if got, ok := results[0].Number(); !ok || got != 19 {
+		t.Fatalf("first result is %v (%t), want 19", results[0], ok)
+	}
+	if got, ok := results[1].Number(); !ok || got != 5 {
+		t.Fatalf("second result is %v (%t), want 5", results[1], ok)
+	}
+	if got, ok := results[2].String(); !ok || got != "other" {
+		t.Fatalf("third result is %v (%t), want other", results[2], ok)
+	}
+}
+
+func TestCompilerInternsFieldNameSymbols(t *testing.T) {
+	proto, err := Compile(`
+local row = {hp = 12, mana = 3}
+return row.hp + row.mana + row.hp
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	hpSymbol := constantStringSymbolFor(t, proto, "hp")
+	manaSymbol := constantStringSymbolFor(t, proto, "mana")
+	if hpSymbol == 0 || manaSymbol == 0 {
+		t.Fatalf("field symbols are hp=%d mana=%d, want non-zero symbols", hpSymbol, manaSymbol)
+	}
+	if hpSymbol == manaSymbol {
+		t.Fatalf("field symbols are both %d, want distinct symbols for distinct field names", hpSymbol)
+	}
+
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if got, ok := results[0].Number(); !ok || got != 27 {
+		t.Fatalf("Run result is %v (%t), want number 27", results[0], ok)
+	}
+}
+
+func constantStringSymbolFor(t *testing.T, proto *Proto, value string) int {
+	t.Helper()
+	for i, constant := range proto.constants {
+		if got, ok := constant.String(); ok && got == value {
+			if i >= len(proto.constantStringSymbols) {
+				t.Fatalf("constantStringSymbols has length %d, want index %d", len(proto.constantStringSymbols), i)
+			}
+			return proto.constantStringSymbols[i]
+		}
+	}
+	t.Fatalf("compiled constants are %#v, want string %q", proto.constants, value)
+	return 0
 }
 
 func TestCompilerUsesConstantComparisonBranches(t *testing.T) {
@@ -6804,127 +6714,6 @@ return player.stats.hp
 	}
 }
 
-func TestCompilerUsesRowStringFieldStoreOpcode(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{hp = 10, shield = 4},
-	{hp = 20, shield = 8},
-}
-for _, row in rows do
-	row.hp = row.shield
-end
-return rows[1].hp + rows[2].hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "SET_ROW_STRING_FIELD") {
-		t.Fatalf("compiled row field write is missing SET_ROW_STRING_FIELD:\n%s", joined)
-	}
-	if !strings.Contains(joined, "slot 0") {
-		t.Fatalf("compiled row field write is missing propagated slot:\n%s", joined)
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 12 {
-		t.Fatalf("Run result is %v (%t), want number 12", got, ok)
-	}
-}
-
-func TestRunRowStringFieldStoreFallsBackToNewIndexAfterDelete(t *testing.T) {
-	proto, err := Compile(`
-local backing = {hp = 0}
-local row = {hp = 10}
-setmetatable(row, {__newindex = backing, __index = backing})
-row.hp = nil
-row.hp = 7
-return row.hp, backing.hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "SET_ROW_STRING_FIELD") {
-		t.Fatalf("compiled row field write is missing SET_ROW_STRING_FIELD:\n%s", joined)
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	for i, result := range results {
-		got, ok := result.Number()
-		if !ok || got != 7 {
-			t.Fatalf("result %d is %v (%t), want number 7", i, result, ok)
-		}
-	}
-}
-
-func TestCompilerUsesTwoStepStringFieldOpcode(t *testing.T) {
-	proto, err := Compile(`
-local player = {stats = {hp = 10}}
-return player.stats.hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "GET_STRING_FIELD2") {
-		t.Fatalf("compiled two-step named field read is missing GET_STRING_FIELD2:\n%s", joined)
-	}
-}
-
-func TestTwoStepStringFieldReadSeesIntermediateMutation(t *testing.T) {
-	proto, err := Compile(`
-local player = {stats = {hp = 10}}
-local first = player.stats.hp
-player.stats = {hp = 20}
-return first, player.stats.hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "GET_STRING_FIELD2") {
-		t.Fatalf("compiled two-step named field read is missing GET_STRING_FIELD2:\n%s", joined)
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 10 {
-		t.Fatalf("first result is %v (%t), want number 10", got, ok)
-	}
-	if got, ok := results[1].Number(); !ok || got != 20 {
-		t.Fatalf("second result is %v (%t), want number 20", got, ok)
-	}
-}
-
-func TestCompilerUsesTwoStepStringFieldSetOpcode(t *testing.T) {
-	proto, err := Compile(`
-local player = {stats = {hp = 10}}
-player.stats.hp = 12
-return player.stats.hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "SET_STRING_FIELD2") {
-		t.Fatalf("compiled two-step named field write is missing SET_STRING_FIELD2:\n%s", joined)
-	}
-}
-
 func TestCompilerUsesAddStringFieldOpcode(t *testing.T) {
 	proto, err := Compile(`
 local counter = {value = 1}
@@ -6956,107 +6745,6 @@ return counter.value
 	joined := strings.Join(disassembleProto(proto), "\n")
 	if !strings.Contains(joined, "SUB_STRING_FIELD") {
 		t.Fatalf("compiled field decrement is missing SUB_STRING_FIELD:\n%s", joined)
-	}
-}
-
-func TestCompilerUsesSubAddStringFieldOpcode(t *testing.T) {
-	proto, err := Compile(`
-local entity = {hp = 10, shield = 4, regen = 2}
-local incoming = 3
-entity.hp = entity.hp - incoming + entity.regen
-return entity.hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "SUB_ADD_STRING_FIELD") {
-		t.Fatalf("compiled same-row field update is missing SUB_ADD_STRING_FIELD:\n%s", joined)
-	}
-	if !strings.Contains(joined, "slots 0 2") {
-		t.Fatalf("compiled same-row field update is missing row slot descriptor:\n%s", joined)
-	}
-}
-
-func TestCompilerPropagatesRowSlotsThroughGenericFor(t *testing.T) {
-	proto, err := Compile(`
-local entities = {
-	{hp = 10, shield = 4, regen = 2},
-	{hp = 20, shield = 8, regen = 3},
-}
-local incoming = 3
-for _, entity in entities do
-	entity.hp = entity.hp - incoming + entity.regen
-end
-return entities[1].hp + entities[2].hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "SUB_ADD_STRING_FIELD") {
-		t.Fatalf("compiled generic-for row update is missing SUB_ADD_STRING_FIELD:\n%s", joined)
-	}
-	if !strings.Contains(joined, "slots 0 2") {
-		t.Fatalf("compiled generic-for row update is missing propagated row slots:\n%s", joined)
-	}
-}
-
-func TestCompilerUsesAddSubStringField2Opcode(t *testing.T) {
-	proto, err := Compile(`
-local player = {stats = {hp = 100, shield = 25}, inventory = {coins = 3}}
-player.stats.hp = player.stats.hp + player.stats.shield - player.inventory.coins
-return player.stats.hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "ADD_SUB_STRING_FIELD2") {
-		t.Fatalf("compiled nested field update is missing ADD_SUB_STRING_FIELD2:\n%s", joined)
-	}
-}
-
-func TestCompileAndRunAddSubStringField2OpcodeUsesMetatableSemantics(t *testing.T) {
-	proto, err := Compile(`
-local log = {value = ""}
-local stats = {hp = 10, shield = 5}
-local inventory = {coins = 2}
-local player = {}
-setmetatable(player, {
-	__index = function(_, key)
-		log.value = log.value .. key .. ","
-		if key == "stats" then
-			return stats
-		end
-		return inventory
-	end
-})
-player.stats.hp = player.stats.hp + player.stats.shield - player.inventory.coins
-return log.value, stats.hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "ADD_SUB_STRING_FIELD2") {
-		t.Fatalf("compiled nested field update is missing ADD_SUB_STRING_FIELD2:\n%s", joined)
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	gotLog, ok := results[0].String()
-	if !ok || gotLog != "stats,stats,inventory,stats," {
-		t.Fatalf("first result is %q (%t), want metatable lookup order", gotLog, ok)
-	}
-	gotHP, ok := results[1].Number()
-	if !ok || gotHP != 13 {
-		t.Fatalf("second result is %v (%t), want number 13", gotHP, ok)
 	}
 }
 
@@ -7120,37 +6808,7 @@ return backing.value
 	}
 }
 
-func TestCompileAndRunSubAddStringFieldOpcodeUsesMetatableSemantics(t *testing.T) {
-	proto, err := Compile(`
-local backing = {hp = 10, regen = 2}
-local proxy = {}
-setmetatable(proxy, {
-	__index = backing,
-	__newindex = backing
-})
-local incoming = 3
-proxy.hp = proxy.hp - incoming + proxy.regen
-return backing.hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "SUB_ADD_STRING_FIELD") {
-		t.Fatalf("compiled same-row field update is missing SUB_ADD_STRING_FIELD:\n%s", joined)
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 9 {
-		t.Fatalf("Run result is %v (%t), want number 9", got, ok)
-	}
-}
-
-func TestCompilerUsesSelectVarargCountOpcode(t *testing.T) {
+func TestCompilerUsesSelectVarargCountFastCall(t *testing.T) {
 	proto, err := Compile(`
 local function count(...)
 	return select("#", ...)
@@ -7165,8 +6823,8 @@ return count(1, 2, 3)
 	}
 
 	joined := strings.Join(disassembleProto(proto.prototypes[0]), "\n")
-	if !strings.Contains(joined, "SELECT_VARARG_COUNT") {
-		t.Fatalf("compiled select count is missing SELECT_VARARG_COUNT:\n%s", joined)
+	if !strings.Contains(joined, "FAST_CALL") || !strings.Contains(joined, "SELECT") {
+		t.Fatalf("compiled select count is missing SELECT fast call:\n%s", joined)
 	}
 	if strings.Contains(joined, "VARARG r") {
 		t.Fatalf("compiled select count kept open VARARG plumbing:\n%s", joined)
@@ -7227,6 +6885,7 @@ return total
 
 	var counts directFramePICCounts
 	thread := newVMThread(runtimeGlobals(nil))
+	thread.directFrameInstrumented = true
 	thread.directFramePICCounts = &counts
 	results, err := thread.run(proto, nil, nil)
 	if err != nil {
@@ -7260,10 +6919,10 @@ return values[1] + value
 	var tableInsert intrinsicOpDesc
 	var mathMin intrinsicOpDesc
 	for _, desc := range proto.intrinsicOps {
-		switch desc.op {
-		case opTableInsert:
+		switch desc.nativeID {
+		case nativeFuncTableInsert:
 			tableInsert = desc
-		case opMathMin:
+		case nativeFuncMathMin:
 			mathMin = desc
 		}
 	}
@@ -7398,117 +7057,7 @@ return nan < 1
 	}
 }
 
-func TestCompilerRecordsBranchAndFiniteTagRefinements(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{kind = "poison", alive = true, key = "a", score = 3},
-	{kind = "regen", alive = false, score = 5},
-	{kind = "shield", alive = true, key = "c", score = 7},
-}
-local total = 0
-for _, row in rows do
-	if row.kind == "poison" then
-		total = total + 1
-	elseif row.kind == "regen" then
-		total = total + 2
-	elseif row.kind == "shield" then
-		total = total + 3
-	end
-	if row.key ~= nil and row.alive then
-		total = total + row.score
-	end
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{
-		"branch_refinement",
-		"edge fallthrough",
-		"edge target",
-		"fact equal_const",
-		"fact not_equal_const",
-		"fact not_nil",
-		"fact truthy",
-		"finite_tag_refinement",
-		"source register",
-	} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled refinement program is missing %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 16 {
-		t.Fatalf("Run result is %v (%t), want 16", got, ok)
-	}
-}
-
-func TestCompilerRecordsPredicateBranchDescriptors(t *testing.T) {
-	proto, err := Compile(`
-local row = {kind = "npc", alive = true, child = {value = 3}}
-local limit = 4
-local total = 0
-if limit < 5 then
-	total = total + 1
-end
-if row.kind == "npc" then
-	total = total + 2
-end
-if row.alive then
-	total = total + 4
-end
-local i = 0
-while i < 4 do
-	if row.child.value > 0 then
-		total = total + 8
-	end
-	total = total + row.child.value
-	total = total + row.child.value
-	i = i + 1
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{
-		"predicate_branch",
-		"source register",
-		"source row_field",
-		"source path_field",
-		"op truthy",
-		"op equal_const",
-		"op numeric_compare",
-		"field child.value",
-	} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled predicate descriptor program is missing %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 63 {
-		t.Fatalf("Run result is %v (%t), want 63", got, ok)
-	}
-}
-
-func TestCompilerRecordsSlotAndPathKindFacts(t *testing.T) {
+func TestCompilerRecordsSlotKindFacts(t *testing.T) {
 	proto, err := Compile(`
 local row = {hp = 3, tag = "kind", alive = true, child = {value = 2}}
 local i = 0
@@ -7539,11 +7088,9 @@ return total
 		"boolean",
 		"field child",
 		"table",
-		"path_kind",
-		"source path_parent",
 	} {
 		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled slot/path kind program is missing %q:\n%s\nbytecode:\n%s", want, facts, joined)
+			t.Fatalf("compiled slot kind program is missing %q:\n%s\nbytecode:\n%s", want, facts, joined)
 		}
 	}
 
@@ -7554,213 +7101,6 @@ return total
 	got, ok := results[0].Number()
 	if !ok || got != 28 {
 		t.Fatalf("Run result is %v (%t), want 28", got, ok)
-	}
-}
-
-func TestCompilerRecordsLoopLocalOneSegmentPathFact(t *testing.T) {
-	proto, err := Compile(`
-local row = {child = {value = 3}}
-local i = 0
-local total = 0
-while i < 4 do
-	local first = row.child
-	local second = row.child
-	total = total + first.value + second.value
-	i = i + 1
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{"path_fact", "field child", "hits 2"} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled repeated path is missing %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 24 {
-		t.Fatalf("Run result is %v (%t), want 24", got, ok)
-	}
-}
-
-func TestCompilerRecordsLoopLocalTwoSegmentFieldPathFact(t *testing.T) {
-	proto, err := Compile(`
-local row = {child = {value = 3}}
-local i = 0
-local total = 0
-while i < 4 do
-	total = total + row.child.value
-	total = total + row.child.value
-	i = i + 1
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{"path_fact", "field child.value", "hits 2", "birth pc", "backedge pc", "kill none"} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled repeated two-segment path is missing %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 24 {
-		t.Fatalf("Run result is %v (%t), want 24", got, ok)
-	}
-}
-
-func TestCompilerRecordsReadPathPlanForLoopLocalTwoSegmentFieldPath(t *testing.T) {
-	proto, err := Compile(`
-local row = {child = {value = 3}}
-local i = 0
-local total = 0
-while i < 4 do
-	total = total + row.child.value
-	total = total + row.child.value
-	i = i + 1
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{"path_plan", "access read", "base r0", "field child.value", "fallback pc"} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled repeated path is missing path plan %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-}
-
-func TestCompilerRecordsWritePathPlanForTwoSegmentFieldPath(t *testing.T) {
-	proto, err := Compile(`
-local row = {child = {value = 3}}
-row.child.value = 4
-return row.child.value
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{"path_plan", "access write", "base r0", "field child.value", "fallback pc"} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled path write is missing path plan %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-}
-
-func TestCompilerRecordsDynamicWritePathPlanForTwoSegmentFieldPath(t *testing.T) {
-	proto, err := Compile(`
-local row = {child = {value = 3}}
-local key = "value"
-row.child[key] = 4
-return row.child[key]
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{"path_plan", "access write", "field child dynamic_key", "key r", "value r", "fallback pc"} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled dynamic path write is missing path plan %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-}
-
-func TestCompilerRecordsReadModifyWritePathPlanForTwoSegmentFieldPath(t *testing.T) {
-	proto, err := Compile(`
-local player = {stats = {hp = 100, shield = 25}, inventory = {coins = 3}}
-player.stats.hp = player.stats.hp + player.stats.shield - player.inventory.coins
-return player.stats.hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{
-		"path_plan",
-		"access read_modify_write",
-		"field stats.hp",
-		"access read",
-		"field stats.shield",
-		"field inventory.coins",
-		"fallback pc",
-	} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled nested path update is missing path plan %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-}
-
-func TestRunDirectFrameUsesRuntimePathCacheForTwoSegmentFieldPath(t *testing.T) {
-	proto, err := Compile(`
-local row = {child = {value = 3}}
-local i = 0
-local total = 0
-while i < 6 do
-	total = total + row.child.value
-	total = total + row.child.value
-	i = i + 1
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.pathFacts) == 0 {
-		t.Fatalf("compiled path cache program has no path facts:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled path cache program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 36 {
-		t.Fatalf("thread.run result is %v (%t), want 36", got, ok)
-	}
-	if thread.intrinsicGuards == nil || thread.intrinsicGuards.pathHits == 0 {
-		t.Fatalf("path cache hits = 0, want repeated two-segment path hits")
-	}
-	if counts.pathCacheStores == 0 {
-		t.Fatal("path cache stores = 0, want runtime path cache store attribution")
-	}
-	if counts.pathCacheMisses == 0 {
-		t.Fatal("path cache misses = 0, want first runtime path cache lookup miss attribution")
-	}
-	if counts.pathCacheHits == 0 {
-		t.Fatal("path cache hits = 0, want runtime path cache hit attribution")
 	}
 }
 
@@ -7789,9 +7129,6 @@ return total
 	}
 	if len(pathSnapshot.rankedOpcodes()) == 0 {
 		t.Fatal("ranked opcodes are empty, want direct-frame dispatch attribution")
-	}
-	if pathSnapshot.picCounts.pathCacheHits == 0 {
-		t.Fatal("path cache hits = 0, want grouped path-cache attribution")
 	}
 
 	callProto, err := Compile(`
@@ -7823,162 +7160,16 @@ return total
 	}
 }
 
-func TestCandidateRegionsReportCoverageAndProfitability(t *testing.T) {
-	proto, err := Compile(`
-local row = {child = {value = 10}}
-local key = "value"
-local delta = 3
-for i = 1, 6 do
-	row.child[key] = row.child[key] + delta
-end
-return row.child[key]
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
-	if err != nil {
-		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 28 {
-		t.Fatalf("instrumented run result is %v (%t), want 28", results[0], ok)
-	}
-
-	report := candidateRegions(proto, snapshot)
-	if report.retiredBytecodes == 0 {
-		t.Fatal("region coverage report has zero retired bytecodes, want per-pc attribution")
-	}
-	if report.coveredBytecodes == 0 {
-		t.Fatal("region coverage report has zero covered bytecodes, want current block plans reported")
-	}
-	candidate, ok := report.candidateByKind("dynamic_path_add_store")
-	if !ok {
-		t.Fatalf("candidate report missing dynamic path region: %#v", report.candidates)
-	}
-	if candidate.retiredBytecodes == 0 || candidate.entries == 0 {
-		t.Fatalf("dynamic path candidate has retired=%d entries=%d, want observed execution counts", candidate.retiredBytecodes, candidate.entries)
-	}
-	if len(candidate.requiredGuards) == 0 || len(candidate.tableSlots) == 0 {
-		t.Fatalf("dynamic path candidate guards=%v slots=%v, want guard and slot attribution", candidate.requiredGuards, candidate.tableSlots)
-	}
-	if !candidate.cost.profitable {
-		t.Fatalf("dynamic path candidate cost = %#v, want profitable region", candidate.cost)
-	}
-}
-
-func TestCandidateRegionsReportArrayRowLoopCoverage(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{value = 2, bonus = 3},
-	{value = 4, bonus = 5},
-}
-local total = 0
-for _, row in rows do
-	if row.value > 0 then
-		total = total + row.value + row.bonus
-	end
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
-	if err != nil {
-		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 14 {
-		t.Fatalf("instrumented run result is %v (%t), want 14", results[0], ok)
-	}
-
-	report := candidateRegions(proto, snapshot)
-	candidate, ok := report.candidateByKind("array_row_loop")
-	if !ok {
-		t.Fatalf("region coverage report is missing array_row_loop candidate: %s", summarizeRegionCoverage(report))
-	}
-	if candidate.retiredBytecodes == 0 {
-		t.Fatalf("array row loop retired bytecodes = 0: %#v", candidate)
-	}
-	if len(candidate.tableSlots) < 2 {
-		t.Fatalf("array row loop table slots = %#v, want value and bonus row slots", candidate.tableSlots)
-	}
-	if len(candidate.callsOrIntrinsics) != 0 {
-		t.Fatalf("array row loop calls/intrinsics = %#v, want none", candidate.callsOrIntrinsics)
-	}
-	if !candidate.cost.profitable {
-		t.Fatalf("array row loop cost is not profitable: %#v", candidate.cost)
-	}
-}
-
-func TestCandidateRegionsRejectTinyDirectBlockProfitability(t *testing.T) {
-	proto, err := Compile(`
-local delta = -7
-if delta < 0 then
-	delta = -delta
-end
-return delta
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
-	if err != nil {
-		t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 7 {
-		t.Fatalf("instrumented run result is %v (%t), want 7", results[0], ok)
-	}
-
-	report := candidateRegions(proto, snapshot)
-	candidate, ok := report.candidateByKind("absolute_delta")
-	if !ok {
-		t.Fatalf("candidate report missing absolute-delta region: %#v", report.candidates)
-	}
-	if candidate.cost.profitable {
-		t.Fatalf("absolute-delta cost = %#v, want tiny one-shot direct block rejected", candidate.cost)
-	}
-	if candidate.cost.reason == "" {
-		t.Fatalf("absolute-delta cost has empty rejection reason: %#v", candidate.cost)
-	}
-}
-
-func TestScenarioRegionCoverageReportsCurrentWorstRows(t *testing.T) {
-	cases := loadScenarioBenchmarkCases(t, []string{
-		"event_dispatch",
-		"economy_market_tick",
-		"cooldown_scheduler",
-		"path_relaxation",
-		"threat_aggro_table",
-		"save_state_diff",
-	})
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			proto, err := Compile(tc.source)
-			if err != nil {
-				t.Fatalf("Compile returned error: %v", err)
-			}
-			results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
-			if err != nil {
-				t.Fatalf("runWithDirectFrameMechanismCounters returned error: %v", err)
-			}
-			if got := singleResultString(t, results); got != tc.want {
-				t.Fatalf("instrumented run result is %q, want %q", got, tc.want)
-			}
-			report := candidateRegions(proto, snapshot)
-			if report.retiredBytecodes == 0 {
-				t.Fatal("scenario region report has zero retired bytecodes")
-			}
-			t.Logf("%s", summarizeRegionCoverage(report))
-		})
-	}
-}
-
 func TestScenarioMechanismAttributionCoversCurrentWorstRows(t *testing.T) {
 	cases := loadScenarioBenchmarkCases(t, []string{
+		"combat_tick",
 		"event_dispatch",
+		"buff_stack_tick",
+		"ability_resolution",
 		"economy_market_tick",
 		"cooldown_scheduler",
+		"quest_progress_update",
+		"behavior_tree_tick",
 		"path_relaxation",
 		"threat_aggro_table",
 		"save_state_diff",
@@ -8047,56 +7238,6 @@ for _, order in orders do
 end
 return cash + market.stock.wood + market.stock.ore + market.price.wood + market.price.ore
 `
-}
-
-func TestRunDirectFrameUsesIndexedMapBranchRegion(t *testing.T) {
-	proto, err := Compile(indexedMapBranchFixtureSource(`{good = "ore", amount = 4, kind = "sell"}`))
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.regionExecutionPlans) == 0 {
-		t.Fatalf("compiled indexed map branch has no region execution plan:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != -112 {
-		t.Fatalf("thread.run result is %v (%t), want -112", got, ok)
-	}
-	if counts.regionEntries != 1 || counts.regionResumes != 1 || counts.regionFallbacks != 0 {
-		t.Fatalf("region counters = entries %d resumes %d fallbacks %d, want one stable indexed map branch region:\n%s", counts.regionEntries, counts.regionResumes, counts.regionFallbacks, strings.Join(disassembleProto(proto), "\n"))
-	}
-}
-
-func TestRunDirectFrameIndexedMapBranchRegionSideExitsBeforeMismatchedRowSlot(t *testing.T) {
-	proto, err := Compile(indexedMapBranchFixtureSource(`{kind = "sell", good = "ore", amount = 4}`))
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.regionExecutionPlans) == 0 {
-		t.Fatalf("compiled indexed map branch has no region execution plan:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != -112 {
-		t.Fatalf("thread.run result is %v (%t), want -112", got, ok)
-	}
-	if counts.regionEntries == 0 || counts.regionFallbacks == 0 {
-		t.Fatalf("region counters = entries %d fallbacks %d, want indexed map branch side exit before mismatched row slot", counts.regionEntries, counts.regionFallbacks)
-	}
 }
 
 type scenarioBenchmarkCase struct {
@@ -8222,7 +7363,7 @@ func summarizeDirectFrameMechanisms(snapshot directFrameMechanismSnapshot) strin
 	}
 	pic := snapshot.picCounts
 	return fmt.Sprintf(
-		"opcodes[%s] pic{hits=%d/%d keyMiss=%d shapeMiss=%d metaMiss=%d missing=%d nilWrite=%d invalid=%d arrayIndex=%d sideTable=%d sideCall=%d sideMeta=%d directBlock=%d/%d/%d region=%d/%d/%d path=%d/%d/%d/%d intrinsic=%d/%d/%d fixed=%d/%d/%d/%d}",
+		"opcodes[%s] pic{hits=%d/%d keyMiss=%d shapeMiss=%d metaMiss=%d missing=%d nilWrite=%d invalid=%d arrayIndex=%d scalarEq=%d sideTable=%d sideCall=%d sideMeta=%d intrinsic=%d/%d/%d fixed=%d/%d/%d/%d}",
 		strings.Join(topOpcodes, ", "),
 		pic.monomorphicHits,
 		pic.polymorphicHits,
@@ -8233,19 +7374,10 @@ func summarizeDirectFrameMechanisms(snapshot directFrameMechanismSnapshot) strin
 		pic.nilWriteFallbacks,
 		pic.invalidKeyFallbacks,
 		pic.numericArrayIndexHits,
+		pic.scalarEqualityFastChecks,
 		pic.sideExitCount(directFrameSideExitReasonTable),
 		pic.sideExitCount(directFrameSideExitReasonCall),
 		pic.sideExitCount(directFrameSideExitReasonMetatable),
-		pic.directBlockEntries,
-		pic.directBlockResumes,
-		pic.directBlockFallbacks,
-		pic.regionEntries,
-		pic.regionResumes,
-		pic.regionFallbacks,
-		pic.pathCacheHits,
-		pic.pathCacheMisses,
-		pic.pathCacheStale,
-		pic.pathCacheStores,
 		pic.intrinsicGuardChecks,
 		pic.intrinsicGuardHits,
 		pic.intrinsicGuardMisses,
@@ -8254,339 +7386,6 @@ func summarizeDirectFrameMechanisms(snapshot directFrameMechanismSnapshot) strin
 		pic.fixedCallArgCopies,
 		pic.fixedCallRegisterCopies,
 	)
-}
-
-func summarizeRegionCoverage(report regionCoverageReport) string {
-	coverage := 0.0
-	if report.retiredBytecodes != 0 {
-		coverage = float64(report.coveredBytecodes) / float64(report.retiredBytecodes) * 100
-	}
-	candidates := report.candidates
-	if len(candidates) > 5 {
-		candidates = candidates[:5]
-	}
-	parts := make([]string, 0, len(candidates))
-	for _, candidate := range candidates {
-		status := "cold"
-		if candidate.cost.profitable {
-			status = "profitable"
-		} else if candidate.cost.reason != "" {
-			status = candidate.cost.reason
-		}
-		parts = append(parts, fmt.Sprintf(
-			"%s@%d entries=%d retired=%d saved=%d %s",
-			candidate.kind,
-			candidate.entryPC,
-			candidate.entries,
-			candidate.retiredBytecodes,
-			candidate.cost.expectedSavedWork,
-			status,
-		))
-	}
-	return fmt.Sprintf(
-		"regions{retired=%d covered=%d coverage=%.1f%% candidates=[%s]}",
-		report.retiredBytecodes,
-		report.coveredBytecodes,
-		coverage,
-		strings.Join(parts, "; "),
-	)
-}
-
-func TestCompilerRecordsLoopLocalTwoSegmentDynamicPathFact(t *testing.T) {
-	proto, err := Compile(`
-local row = {child = {value = 3}}
-local key = "value"
-local i = 0
-local total = 0
-while i < 4 do
-	total = total + row.child[key]
-	total = total + row.child[key]
-	i = i + 1
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{"path_fact", "field child", "dynamic_key", "hits 2"} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled repeated two-segment dynamic path is missing %q:\n%s\nbytecode:\n%s", want, facts, joined)
-		}
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 24 {
-		t.Fatalf("Run result is %v (%t), want 24", got, ok)
-	}
-}
-
-func TestRunDirectFrameUsesRuntimePathCacheForTwoSegmentDynamicPath(t *testing.T) {
-	proto, err := Compile(`
-local row = {child = {value = 3}}
-local key = "value"
-local i = 0
-local total = 0
-while i < 6 do
-	total = total + row.child[key]
-	total = total + row.child[key]
-	i = i + 1
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.pathFacts) == 0 {
-		t.Fatalf("compiled dynamic path cache program has no path facts:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled dynamic path cache program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 36 {
-		t.Fatalf("thread.run result is %v (%t), want 36", got, ok)
-	}
-	if thread.intrinsicGuards == nil || thread.intrinsicGuards.pathHits == 0 {
-		t.Fatalf("dynamic path cache hits = 0, want repeated two-segment dynamic path hits")
-	}
-	if counts.pathCacheStores == 0 {
-		t.Fatal("dynamic path cache stores = 0, want runtime path cache store attribution")
-	}
-	if counts.pathCacheMisses == 0 {
-		t.Fatal("dynamic path cache misses = 0, want first runtime path cache lookup miss attribution")
-	}
-	if counts.pathCacheHits == 0 {
-		t.Fatal("dynamic path cache hits = 0, want runtime path cache hit attribution")
-	}
-}
-
-func TestRunDirectFrameUsesRuntimePathCacheForTwoSegmentFieldPathWrite(t *testing.T) {
-	proto, err := Compile(`
-local row = {child = {value = 0}}
-local i = 0
-while i < 6 do
-	row.child.value = i
-	i = i + 1
-end
-return row.child.value
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled path write program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-	if !strings.Contains(strings.Join(disassembleProto(proto), "\n"), "SET_STRING_FIELD2") {
-		t.Fatalf("compiled path write program is missing SET_STRING_FIELD2:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 5 {
-		t.Fatalf("thread.run result is %v (%t), want 5", got, ok)
-	}
-	if counts.pathCacheStores == 0 {
-		t.Fatal("path write cache stores = 0, want runtime path cache store attribution")
-	}
-	if counts.pathCacheHits == 0 {
-		t.Fatal("path write cache hits = 0, want runtime path cache hit attribution")
-	}
-}
-
-func TestRunDirectFrameUsesRuntimePathCacheForTwoSegmentDynamicPathWrite(t *testing.T) {
-	proto, err := Compile(`
-local row = {child = {value = 0}}
-local key = "value"
-local i = 0
-while i < 6 do
-	row.child[key] = i
-	i = i + 1
-end
-return row.child[key]
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled dynamic path write program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-	if !strings.Contains(strings.Join(disassembleProto(proto), "\n"), "SET_STRING_FIELD_INDEX") {
-		t.Fatalf("compiled dynamic path write program is missing SET_STRING_FIELD_INDEX:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 5 {
-		t.Fatalf("thread.run result is %v (%t), want 5", got, ok)
-	}
-	if counts.pathCacheStores == 0 {
-		t.Fatal("dynamic path write cache stores = 0, want runtime path cache store attribution")
-	}
-	if counts.pathCacheHits == 0 {
-		t.Fatal("dynamic path write cache hits = 0, want runtime path cache hit attribution")
-	}
-}
-
-func TestRunDirectFrameUsesRuntimePathCacheForTwoSegmentReadModifyWrite(t *testing.T) {
-	proto, err := Compile(`
-local player = {stats = {hp = 100, shield = 25}, inventory = {coins = 3}}
-local i = 0
-while i < 6 do
-	player.stats.hp = player.stats.hp + player.stats.shield - player.inventory.coins
-	i = i + 1
-end
-return player.stats.hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled path RMW program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-	if !strings.Contains(strings.Join(disassembleProto(proto), "\n"), "ADD_SUB_STRING_FIELD2") {
-		t.Fatalf("compiled path RMW program is missing ADD_SUB_STRING_FIELD2:\n%s", strings.Join(disassembleProto(proto), "\n"))
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 232 {
-		t.Fatalf("thread.run result is %v (%t), want 232", got, ok)
-	}
-	if counts.pathCacheStores < 3 {
-		t.Fatalf("path RMW cache stores = %d, want target/add/sub path stores", counts.pathCacheStores)
-	}
-	if counts.pathCacheHits < 3 {
-		t.Fatalf("path RMW cache hits = %d, want target/add/sub path hits", counts.pathCacheHits)
-	}
-}
-
-func TestRuntimePathCacheCountersRecordStaleGuard(t *testing.T) {
-	base := NewTable()
-	child := NewTable()
-	child.setRawStringField("value", NumberValue(1))
-	base.setRawStringField("child", TableValue(child))
-	firstSlot, ok := base.rawStringFieldSlot("child")
-	if !ok {
-		t.Fatal("base child slot missing")
-	}
-	secondSlot, ok := child.rawStringFieldSlot("value")
-	if !ok {
-		t.Fatal("child value slot missing")
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	thread.storeRuntimePathCache(17, base, "child", firstSlot, child, "value", secondSlot)
-
-	replacement := NewTable()
-	replacement.setRawStringField("value", NumberValue(2))
-	base.setRawStringField("child", TableValue(replacement))
-
-	if _, ok := thread.getRuntimePathCache(17, base, "child", "value"); ok {
-		t.Fatal("getRuntimePathCache returned hit after parent slot changed, want stale miss")
-	}
-	if counts.pathCacheStores != 1 {
-		t.Fatalf("path cache stores = %d, want 1", counts.pathCacheStores)
-	}
-	if counts.pathCacheStale != 1 {
-		t.Fatalf("path cache stale = %d, want 1", counts.pathCacheStale)
-	}
-	if counts.pathCacheHits != 0 {
-		t.Fatalf("path cache hits = %d, want 0", counts.pathCacheHits)
-	}
-}
-
-func TestCompilerRecordsLoopLocalPathFactRejectionForTableWrite(t *testing.T) {
-	proto, err := Compile(`
-local row = {child = {value = 3}}
-local i = 0
-local total = 0
-while i < 4 do
-	total = total + row.child.value
-	row.child = {value = 4}
-	total = total + row.child.value
-	i = i + 1
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	if strings.Contains(facts, "path_fact loop") {
-		t.Fatalf("compiled mutating loop accepted path fact, want rejection:\n%s", facts)
-	}
-	for _, want := range []string{"path_fact_rejection", "table write", "birth pc", "kill table_local", "kill pc", "fallback pc"} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled mutating loop is missing rejection %q:\n%s", want, facts)
-		}
-	}
-}
-
-func TestCompilerRecordsLoopLocalPathFactRejectionForCall(t *testing.T) {
-	proto, err := Compile(`
-local row = {child = {value = 3}}
-local function touch()
-	return 1
-end
-local i = 0
-local total = 0
-while i < 4 do
-	total = total + row.child.value
-	touch()
-	total = total + row.child.value
-	i = i + 1
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	facts := strings.Join(disassembleProtoFacts(proto), "\n")
-	if strings.Contains(facts, "path_fact loop") {
-		t.Fatalf("compiled call loop accepted path fact, want rejection:\n%s", facts)
-	}
-	for _, want := range []string{"path_fact_rejection", "call", "birth pc", "kill call", "kill pc", "fallback pc"} {
-		if !strings.Contains(facts, want) {
-			t.Fatalf("compiled call loop is missing rejection %q:\n%s", want, facts)
-		}
-	}
 }
 
 func TestCompilerUsesFixedOneResultCallOpcode(t *testing.T) {
@@ -8633,69 +7432,6 @@ return value
 	}
 }
 
-func TestCompilerUsesDynamicFieldCallOpcode(t *testing.T) {
-	proto, err := Compile(`
-local state = {score = 0}
-local handlers = {}
-function handlers.score(s, amount)
-	s.score = s.score + amount
-	return s.score
-end
-local event = {kind = "score", amount = 5}
-local result = handlers[event.kind](state, event.amount)
-return result
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "CALL_TABLE_FIELD_KEY_ONE") {
-		t.Fatalf("compiled dynamic field call is missing CALL_TABLE_FIELD_KEY_ONE:\n%s", joined)
-	}
-}
-
-func TestDynamicFieldCallSeesHandlerMutation(t *testing.T) {
-	proto, err := Compile(`
-local state = {score = 0}
-local handlers = {}
-function handlers.score(s, amount)
-	s.score = s.score + amount
-	return s.score
-end
-local event = {kind = "score", amount = 5}
-local first = handlers[event.kind](state, event.amount)
-function handlers.score(s, amount)
-	s.score = s.score + amount * 2
-	return s.score
-end
-local second = handlers[event.kind](state, event.amount)
-return first, second, state.score
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "CALL_TABLE_FIELD_KEY_ONE") {
-		t.Fatalf("compiled dynamic field call is missing CALL_TABLE_FIELD_KEY_ONE:\n%s", joined)
-	}
-	if !proto.directFrameDispatch {
-		t.Fatalf("compiled dynamic field call is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	wants := []float64{5, 15, 15}
-	for i, want := range wants {
-		got, ok := results[i].Number()
-		if !ok || got != want {
-			t.Fatalf("result %d is %v (%t), want %v", i, got, ok, want)
-		}
-	}
-}
-
 func TestCompilerUsesStringFieldEqualityBranchOpcode(t *testing.T) {
 	proto, err := Compile(`
 local item = {kind = "gem", count = 3}
@@ -8711,224 +7447,6 @@ return 0
 	joined := strings.Join(disassembleProto(proto), "\n")
 	if !strings.Contains(joined, "JUMP_IF_STRING_FIELD_NOT_EQUAL_K") {
 		t.Fatalf("compiled string field branch is missing JUMP_IF_STRING_FIELD_NOT_EQUAL_K:\n%s", joined)
-	}
-}
-
-func TestCompilerUsesRowStringFieldEqualityBranchOpcode(t *testing.T) {
-	proto, err := Compile(`
-local inventory = {
-	{kind = "ore", count = 12},
-	{kind = "gem", count = 3},
-}
-local score = 0
-for _, item in inventory do
-	if item.kind == "gem" or item.kind == "key" then
-		score = score + item.count
-	end
-end
-return score
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_ROW_STRING_FIELD_NOT_EQUAL_K") {
-		t.Fatalf("compiled row string field branch is missing JUMP_IF_ROW_STRING_FIELD_NOT_EQUAL_K:\n%s", joined)
-	}
-	if !strings.Contains(joined, "slot 0") {
-		t.Fatalf("compiled row string field branch is missing propagated slot:\n%s", joined)
-	}
-}
-
-func TestCompilerUsesRowStringFieldNumericEqualityBranchOpcode(t *testing.T) {
-	proto, err := Compile(`
-local abilities = {
-	{cooldown = 0, cost = 6},
-	{cooldown = 2, cost = 11},
-}
-local total = 0
-for _, ability in abilities do
-	if ability.cooldown == 0 then
-		total = total + ability.cost
-	end
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_ROW_STRING_FIELD_NOT_EQUAL_K") {
-		t.Fatalf("compiled row numeric equality branch is missing JUMP_IF_ROW_STRING_FIELD_NOT_EQUAL_K:\n%s", joined)
-	}
-	if !strings.Contains(joined, `"cooldown"`) || !strings.Contains(joined, "slot 0") {
-		t.Fatalf("compiled row numeric equality branch is missing propagated cooldown slot:\n%s", joined)
-	}
-	for _, line := range disassembleProto(proto) {
-		if strings.Contains(line, `GET_ROW_STRING_FIELD`) && strings.Contains(line, `"cooldown"`) {
-			t.Fatalf("compiled row numeric equality branch should not materialize cooldown:\n%s", joined)
-		}
-	}
-}
-
-func TestCompilerUsesRowStringFieldPairEqualityBranchOpcode(t *testing.T) {
-	proto, err := Compile(`
-local events = {
-	{kind = "kill", target = "wolf"},
-	{kind = "visit", target = "tower"},
-}
-local objectives = {
-	{kind = "kill", target = "wolf", score = 3},
-	{kind = "kill", target = "spider", score = 5},
-}
-local total = 0
-for _, event in events do
-	for _, objective in objectives do
-		if objective.kind == event.kind and objective.target == event.target then
-			total = total + objective.score
-		else
-			total = total + 1
-		end
-	end
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_ROW_STRING_FIELD_NOT_EQUAL_FIELD") {
-		t.Fatalf("compiled row field pair equality branch is missing JUMP_IF_ROW_STRING_FIELD_NOT_EQUAL_FIELD:\n%s", joined)
-	}
-	if !strings.Contains(joined, "slots 0 0") {
-		t.Fatalf("compiled row field pair equality branch is missing propagated kind slots:\n%s", joined)
-	}
-	if !strings.Contains(joined, "slots 1 1") {
-		t.Fatalf("compiled row field pair equality branch is missing propagated target slots:\n%s", joined)
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 6 {
-		t.Fatalf("Run result is %v (%t), want number 6", got, ok)
-	}
-}
-
-func TestCompilerUsesRowStringFieldPairInequalityBranchOpcode(t *testing.T) {
-	proto, err := Compile(`
-local before = {
-	{zone = "town"},
-	{zone = "mine"},
-}
-local after = {
-	{zone = "road"},
-	{zone = "mine"},
-}
-local total = 0
-for i, left in before do
-	local right = after[i]
-	if left.zone ~= right.zone then
-		total = total + 17
-	else
-		total = total + 1
-	end
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_ROW_STRING_FIELD_EQUAL_FIELD") {
-		t.Fatalf("compiled row field pair inequality branch is missing JUMP_IF_ROW_STRING_FIELD_EQUAL_FIELD:\n%s", joined)
-	}
-	if !strings.Contains(joined, "slots 0 0") {
-		t.Fatalf("compiled row field pair inequality branch is missing propagated slots:\n%s", joined)
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 18 {
-		t.Fatalf("Run result is %v (%t), want number 18", got, ok)
-	}
-}
-
-func TestCompilerLoadsRowStringTagOnceForElseIfChain(t *testing.T) {
-	proto, err := Compile(`
-local buffs = {
-	{kind = "poison", power = 3},
-	{kind = "regen", power = 5},
-	{kind = "shield", power = 7},
-	{kind = "haste", power = 11},
-	{kind = "unknown", power = 13},
-}
-local total = 0
-for _, buff in buffs do
-	if buff.kind == "poison" then
-		total = total - buff.power
-	elseif buff.kind == "regen" then
-		total = total + buff.power
-	elseif buff.kind == "shield" then
-		total = total + buff.power * 2
-	elseif buff.kind == "haste" then
-		total = total + buff.power * 3
-	else
-		total = total + 1
-	end
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	lines := disassembleProto(proto)
-	joined := strings.Join(lines, "\n")
-	fastLimit := len(lines)
-	for _, line := range lines {
-		if strings.Contains(line, "JUMP_IF_TABLE_HAS_METATABLE") {
-			fields := strings.Fields(line)
-			target, err := strconv.Atoi(fields[len(fields)-1])
-			if err != nil {
-				t.Fatalf("metatable guard target is not numeric in line %q", line)
-			}
-			fastLimit = target
-			break
-		}
-	}
-	kindLoads := 0
-	for _, line := range lines[:fastLimit] {
-		if strings.Contains(line, "GET_ROW_STRING_FIELD") && strings.Contains(line, `"kind"`) {
-			kindLoads++
-		}
-	}
-	if kindLoads != 1 {
-		t.Fatalf("compiled tag chain should load the row tag once:\n%s", joined)
-	}
-	if got := strings.Count(joined, "JUMP_IF_NOT_EQUAL_K"); got < 4 {
-		t.Fatalf("compiled tag chain should branch from the loaded tag, got %d branches:\n%s", got, joined)
-	}
-	if !strings.Contains(joined, "JUMP_IF_TABLE_HAS_METATABLE") {
-		t.Fatalf("compiled tag chain should preserve a metatable fallback path:\n%s", joined)
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 50 {
-		t.Fatalf("Run result is %v (%t), want number 50", got, ok)
 	}
 }
 
@@ -8987,75 +7505,6 @@ return total, calls
 	calls, ok := results[1].Number()
 	if !ok || calls != 2 {
 		t.Fatalf("Run calls is %v (%t), want number 2", calls, ok)
-	}
-}
-
-func TestCompilerLoadsRowStringTagOnceForElseIfChainWithAndGuards(t *testing.T) {
-	proto, err := Compile(`
-local rooms = {
-	{kind = "combat", loot = 4},
-	{kind = "treasure", loot = 5},
-	{kind = "boss", loot = 6},
-	{kind = "empty", loot = 7},
-}
-local total = 0
-local depth = 9
-for step = 1, 4 do
-	for _, room in rooms do
-		if room.kind == "combat" and step % 3 == 0 then
-			total = total + room.loot
-		elseif room.kind == "treasure" and depth > 8 then
-			total = total + room.loot * 2
-		elseif room.kind == "boss" and depth < 10 then
-			total = total - room.loot
-		else
-			total = total + 1
-		end
-	end
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	lines := disassembleProto(proto)
-	joined := strings.Join(lines, "\n")
-	fastLimit := len(lines)
-	for _, line := range lines {
-		if strings.Contains(line, "JUMP_IF_TABLE_HAS_METATABLE") {
-			fields := strings.Fields(line)
-			target, err := strconv.Atoi(fields[len(fields)-1])
-			if err != nil {
-				t.Fatalf("metatable guard target is not numeric in line %q", line)
-			}
-			fastLimit = target
-			break
-		}
-	}
-	kindLoads := 0
-	for _, line := range lines[:fastLimit] {
-		if strings.Contains(line, "GET_ROW_STRING_FIELD") && strings.Contains(line, `"kind"`) {
-			kindLoads++
-		}
-	}
-	if kindLoads != 1 {
-		t.Fatalf("compiled guarded tag chain should load the row tag once:\n%s", joined)
-	}
-	if got := strings.Count(joined, "JUMP_IF_NOT_EQUAL_K"); got < 3 {
-		t.Fatalf("compiled guarded tag chain should branch from the loaded tag, got %d branches:\n%s", got, joined)
-	}
-	if !strings.Contains(joined, "JUMP_IF_TABLE_HAS_METATABLE") {
-		t.Fatalf("compiled guarded tag chain should preserve a metatable fallback path:\n%s", joined)
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 27 {
-		t.Fatalf("Run result is %v (%t), want number 27", got, ok)
 	}
 }
 
@@ -9174,64 +7623,6 @@ return total
 	}
 }
 
-func TestCompilerPropagatesUnionRowSlotsThroughHeterogeneousArrayIteration(t *testing.T) {
-	proto, err := Compile(`
-local checks = {
-	{key = "met_guard", want = true},
-	{stat = "reputation", atLeast = 5},
-}
-local total = 0
-for _, check in checks do
-	if check.key ~= nil then
-		if check.want then
-			total = total + 1
-		end
-	else
-		total = total + check.atLeast
-	end
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	lines := disassembleProto(proto)
-	joined := strings.Join(lines, "\n")
-	hasKeyNilSlot := false
-	hasWantSlot := false
-	hasAtLeastSlot := false
-	for _, line := range lines {
-		if strings.Contains(line, `JUMP_IF_STRING_FIELD_NIL`) && strings.Contains(line, `"key"`) && !strings.Contains(line, "slot -1") {
-			hasKeyNilSlot = true
-		}
-		if strings.Contains(line, `JUMP_IF_STRING_FIELD_FALSE`) && strings.Contains(line, `"want"`) && !strings.Contains(line, "slot -1") {
-			hasWantSlot = true
-		}
-		if strings.Contains(line, `GET_ROW_STRING_FIELD`) && strings.Contains(line, `"atLeast"`) && !strings.Contains(line, "slot -1") {
-			hasAtLeastSlot = true
-		}
-	}
-	if !hasKeyNilSlot {
-		t.Fatalf("compiled heterogeneous row loop is missing key row slot branch:\n%s", joined)
-	}
-	if !hasWantSlot {
-		t.Fatalf("compiled heterogeneous row loop is missing want row slot branch:\n%s", joined)
-	}
-	if !hasAtLeastSlot {
-		t.Fatalf("compiled heterogeneous row loop is missing atLeast row slot read:\n%s", joined)
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 6 {
-		t.Fatalf("Run result is %v (%t), want number 6", got, ok)
-	}
-}
-
 func TestCompilerUsesStringFieldEqualNilBranchOpcode(t *testing.T) {
 	proto, err := Compile(`
 local checks = {
@@ -9294,119 +7685,6 @@ return score
 		if !strings.Contains(joined, want) {
 			t.Fatalf("compiled numeric field branch is missing %s:\n%s", want, joined)
 		}
-	}
-}
-
-func TestCompilerUsesRowStringFieldNumericBranchOpcodes(t *testing.T) {
-	proto, err := Compile(`
-local entities = {
-	{shield = 3, hp = 0},
-	{shield = 0, hp = 4},
-}
-local score = 0
-for _, entity in entities do
-	if entity.shield > 0 then
-		score = score + 5
-	end
-	if entity.hp <= 0 then
-		score = score + 7
-	end
-end
-return score
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	joined := strings.Join(disassembleProto(proto), "\n")
-	for _, want := range []string{
-		"JUMP_IF_ROW_STRING_FIELD_NOT_GREATER_K",
-		"JUMP_IF_ROW_STRING_FIELD_GREATER_K",
-	} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("compiled row numeric field branch is missing %s:\n%s", want, joined)
-		}
-	}
-	if !strings.Contains(joined, "slot 0") || !strings.Contains(joined, "slot 1") {
-		t.Fatalf("compiled row numeric field branch is missing propagated slots:\n%s", joined)
-	}
-}
-
-func TestCompilerUsesRowStringFieldRegisterNumericBranchOpcode(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{dist = 10},
-	{dist = 4},
-}
-local candidates = {8, 4}
-local score = 0
-for i, row in rows do
-	local candidate = candidates[i]
-	if candidate < row.dist then
-		score = score + row.dist
-	else
-		score = score + 1
-	end
-end
-return score
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_ROW_STRING_FIELD_NOT_GREATER_R") {
-		t.Fatalf("compiled row field/register numeric branch is missing JUMP_IF_ROW_STRING_FIELD_NOT_GREATER_R:\n%s", joined)
-	}
-	if !strings.Contains(joined, "slot 0") {
-		t.Fatalf("compiled row field/register numeric branch is missing propagated slot:\n%s", joined)
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 11 {
-		t.Fatalf("Run result is %v (%t), want number 11", got, ok)
-	}
-}
-
-func TestCompilerUsesRowStringFieldPairNumericBranchOpcode(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{have = 1, need = 3},
-	{have = 2, need = 2},
-}
-local score = 0
-for _, row in rows do
-	if row.have < row.need then
-		score = score + row.need
-	else
-		score = score + 1
-	end
-end
-return score
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_ROW_STRING_FIELD_NOT_LESS_FIELD") {
-		t.Fatalf("compiled row field pair numeric branch is missing JUMP_IF_ROW_STRING_FIELD_NOT_LESS_FIELD:\n%s", joined)
-	}
-	if !strings.Contains(joined, "slots 0 1") {
-		t.Fatalf("compiled row field pair numeric branch is missing propagated slots:\n%s", joined)
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 4 {
-		t.Fatalf("Run result is %v (%t), want number 4", got, ok)
 	}
 }
 
@@ -9695,65 +7973,6 @@ return score(1, 2, 3, 4, 5), score(3, 4, 5, 6, 7)
 	}
 }
 
-func TestCompilerUsesSelfUpvalueOneResultCallOpcode(t *testing.T) {
-	proto, err := Compile(`
-local function fib(n)
-	if n < 2 then
-		return n
-	end
-	return fib(n - 1) + fib(n - 2)
-end
-return fib(4)
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if got, want := len(proto.prototypes), 1; got != want {
-		t.Fatalf("compiled root has %d child prototypes, want %d", got, want)
-	}
-
-	joined := strings.Join(disassembleProto(proto.prototypes[0]), "\n")
-	if !strings.Contains(joined, "CALL_UPVALUE_SELF_K_ONE") &&
-		!strings.Contains(joined, "CALL_UPVALUE_SELF_ADD_K_ONE") {
-		t.Fatalf("compiled recursive upvalue call is missing self-call opcode:\n%s", joined)
-	}
-	if strings.Contains(joined, "GET_UPVALUE") {
-		t.Fatalf("compiled recursive upvalue call kept separate GET_UPVALUE:\n%s", joined)
-	}
-}
-
-func TestCompilerUsesSelfUpvaluePairAddOpcode(t *testing.T) {
-	proto, err := Compile(`
-local function fib(n)
-	if n < 2 then
-		return n
-	end
-	return fib(n - 1) + fib(n - 2)
-end
-return fib(6)
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if got, want := len(proto.prototypes), 1; got != want {
-		t.Fatalf("compiled root has %d child prototypes, want %d", got, want)
-	}
-
-	joined := strings.Join(disassembleProto(proto.prototypes[0]), "\n")
-	if !strings.Contains(joined, "CALL_UPVALUE_SELF_ADD_K_ONE") {
-		t.Fatalf("compiled recursive pair-add is missing CALL_UPVALUE_SELF_ADD_K_ONE:\n%s", joined)
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	got, ok := results[0].Number()
-	if !ok || got != 8 {
-		t.Fatalf("Run result is %v (%t), want number 8", got, ok)
-	}
-}
-
 func TestRunSelfUpvalueCallFallsBackAfterReassignment(t *testing.T) {
 	proto, err := Compile(`
 local function replacement(value)
@@ -9964,6 +8183,133 @@ func TestOptimizeBytecodeIRRemovesBlockLocalMoveRoundTripWithBranches(t *testing
 	}
 }
 
+func TestOptimizerPropagatesSingleUseMoves(t *testing.T) {
+	var builder bytecodeBuilder
+	builder.emitLoadConst(1, NumberValue(2))
+	builder.emitLoadConst(2, NumberValue(3))
+	builder.emit(instruction{op: opMove, a: 3, b: 1})
+	builder.emit(instruction{op: opAdd, a: 4, b: 3, c: 2})
+	builder.emit(instruction{op: opReturnOne, a: 4})
+
+	optimized := optimizeBytecodeIRWithConstants(builder.ir, builder.constants, optimizationOptions{})
+	got := assembleBytecodeIR(optimized)
+	want := []instruction{
+		{op: opLoadConst, a: 1, b: 0},
+		{op: opLoadConst, a: 2, b: 1},
+		{op: opAdd, a: 4, b: 1, c: 2},
+		{op: opReturnOne, a: 4},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("optimized bytecode = %#v, want %#v", got, want)
+	}
+}
+
+func TestRegisterCoalescingPreservesBranchValues(t *testing.T) {
+	var builder bytecodeBuilder
+	jumpElse := builder.emitJumpIfFalse(0)
+	builder.emitLoadConst(1, NumberValue(10))
+	builder.emit(instruction{op: opMove, a: 3, b: 1})
+	jumpEnd := builder.emitJump()
+	elseStart := builder.pc()
+	builder.patchJump(jumpElse, elseStart)
+	builder.emitLoadConst(2, NumberValue(20))
+	builder.emit(instruction{op: opMove, a: 3, b: 2})
+	end := builder.pc()
+	builder.patchJump(jumpEnd, end)
+	builder.emit(instruction{op: opReturnOne, a: 3})
+
+	optimized := optimizeBytecodeIRWithConstants(builder.ir, builder.constants, optimizationOptions{})
+	got := assembleBytecodeIR(optimized)
+	want := []instruction{
+		{op: opJumpIfFalse, a: 0, b: 3},
+		{op: opLoadConst, a: 3, b: 0},
+		{op: opJump, b: 4},
+		{op: opLoadConst, a: 3, b: 1},
+		{op: opReturnOne, a: 3},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("optimized bytecode = %#v, want %#v", got, want)
+	}
+
+	proto := newProto(builder.constants, got, nil, nil, 4, 1, false)
+	for _, tc := range []struct {
+		name string
+		arg  Value
+		want float64
+	}{
+		{name: "then", arg: BoolValue(true), want: 10},
+		{name: "else", arg: BoolValue(false), want: 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			thread := newVMThread(runtimeGlobals(nil))
+			results, err := thread.run(proto, []Value{tc.arg}, nil)
+			if err != nil {
+				t.Fatalf("thread.run returned error: %v", err)
+			}
+			got, ok := results[0].Number()
+			if !ok || got != tc.want {
+				t.Fatalf("result is %v (%t), want %v", results[0], ok, tc.want)
+			}
+		})
+	}
+}
+
+func TestOptimizerHoistsLoopInvariantFieldLoad(t *testing.T) {
+	var builder bytecodeBuilder
+	field := builder.addConstant(StringValue("hp"))
+	metaFallback := builder.emit(instruction{op: opJumpIfTableHasMetatable, a: 0})
+	loopStart := builder.pc()
+	builder.emit(instruction{op: opGetStringField, a: 2, b: 0, c: field})
+	builder.emit(instruction{op: opAdd, a: 3, b: 3, c: 2})
+	builder.emit(instruction{op: opJump, b: loopStart})
+	fallback := builder.pc()
+	builder.patchJump(metaFallback, fallback)
+	builder.emit(instruction{op: opReturnOne, a: 3})
+
+	optimized := optimizeBytecodeIRWithConstants(builder.ir, builder.constants, optimizationOptions{})
+	got := assembleBytecodeIR(optimized)
+	want := []instruction{
+		{op: opJumpIfTableHasMetatable, a: 0, d: 4},
+		{op: opGetStringField, a: 2, b: 0, c: field},
+		{op: opAdd, a: 3, b: 3, c: 2},
+		{op: opJump, b: 2},
+		{op: opReturnOne, a: 3},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("optimized bytecode = %#v, want %#v", got, want)
+	}
+}
+
+func TestOptimizerDoesNotHoistFieldLoadAcrossMutation(t *testing.T) {
+	var builder bytecodeBuilder
+	field := builder.addConstant(StringValue("hp"))
+	metaFallback := builder.emit(instruction{op: opJumpIfTableHasMetatable, a: 0})
+	loopStart := builder.pc()
+	builder.emitLoadConst(4, NumberValue(1))
+	builder.emit(instruction{op: opSetStringField, a: 0, b: field, c: 4})
+	builder.emit(instruction{op: opGetStringField, a: 2, b: 0, c: field})
+	builder.emit(instruction{op: opAdd, a: 3, b: 3, c: 2})
+	builder.emit(instruction{op: opJump, b: loopStart})
+	fallback := builder.pc()
+	builder.patchJump(metaFallback, fallback)
+	builder.emit(instruction{op: opReturnOne, a: 3})
+
+	optimized := optimizeBytecodeIRWithConstants(builder.ir, builder.constants, optimizationOptions{})
+	got := assembleBytecodeIR(optimized)
+	want := []instruction{
+		{op: opJumpIfTableHasMetatable, a: 0, d: 6},
+		{op: opLoadConst, a: 4, b: 1},
+		{op: opSetStringField, a: 0, b: field, c: 4},
+		{op: opGetStringField, a: 2, b: 0, c: field},
+		{op: opAdd, a: 3, b: 3, c: 2},
+		{op: opJump, b: 1},
+		{op: opReturnOne, a: 3},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("optimized bytecode = %#v, want %#v", got, want)
+	}
+}
+
 func TestOptimizeBytecodeIRRemapsSpecializedBranchDTarget(t *testing.T) {
 	var builder bytecodeBuilder
 	field := builder.addConstant(StringValue("alive"))
@@ -10074,30 +8420,6 @@ func TestOptimizeBytecodeIRRemovesDeadProvenInPlaceNumericArithmetic(t *testing.
 	}
 }
 
-func TestOptimizeBytecodeIRRemovesDeadProvenNumericAddModArithmetic(t *testing.T) {
-	var builder bytecodeBuilder
-	builder.emitLoadConst(1, NumberValue(10))
-	builder.emitLoadConst(2, NumberValue(4))
-	desc := builder.addNumericAddModOp(numericAddModOp{
-		mul:  builder.addConstant(NumberValue(3)),
-		idiv: builder.addConstant(NumberValue(2)),
-		mod:  builder.addConstant(NumberValue(17)),
-	})
-	builder.emit(instruction{op: opAddNumericModK, a: 1, b: 2, c: desc})
-	builder.emitLoadConst(3, NumberValue(9))
-	builder.emit(instruction{op: opReturnOne, a: 3})
-
-	builder.optimize(optimizationOptions{})
-	got := assembleBytecodeIR(builder.ir)
-	want := []instruction{
-		{op: opLoadConst, a: 3, b: 5},
-		{op: opReturnOne, a: 3},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("optimized bytecode = %#v, want %#v", got, want)
-	}
-}
-
 func TestOptimizeBytecodeIRKeepsDeadUnprovenArithmetic(t *testing.T) {
 	var builder bytecodeBuilder
 	builder.emitLoadConst(1, StringValue("fallback"))
@@ -10111,31 +8433,6 @@ func TestOptimizeBytecodeIRKeepsDeadUnprovenArithmetic(t *testing.T) {
 		{op: opLoadConst, a: 1, b: 0},
 		{op: opAdd, a: 2, b: 0, c: 1},
 		{op: opLoadConst, a: 3, b: 1},
-		{op: opReturnOne, a: 3},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("optimized bytecode = %#v, want %#v", got, want)
-	}
-}
-
-func TestOptimizeBytecodeIRKeepsDeadUnprovenNumericAddModArithmetic(t *testing.T) {
-	var builder bytecodeBuilder
-	builder.emitLoadConst(2, NumberValue(4))
-	desc := builder.addNumericAddModOp(numericAddModOp{
-		mul:  builder.addConstant(NumberValue(3)),
-		idiv: builder.addConstant(NumberValue(2)),
-		mod:  builder.addConstant(NumberValue(17)),
-	})
-	builder.emit(instruction{op: opAddNumericModK, a: 1, b: 2, c: desc})
-	builder.emitLoadConst(3, NumberValue(9))
-	builder.emit(instruction{op: opReturnOne, a: 3})
-
-	builder.optimize(optimizationOptions{})
-	got := assembleBytecodeIR(builder.ir)
-	want := []instruction{
-		{op: opLoadConst, a: 2, b: 0},
-		{op: opAddNumericModK, a: 1, b: 2, c: desc},
-		{op: opLoadConst, a: 3, b: 4},
 		{op: opReturnOne, a: 3},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -10170,10 +8467,10 @@ func TestInstructionReadModelCoversIntrinsicArgumentWindows(t *testing.T) {
 		ins  instruction
 		want []int
 	}{
-		{name: "table insert", ins: instruction{op: opTableInsert, a: 4, b: 2, d: 1}, want: []int{4, 5, 6}},
-		{name: "table remove", ins: instruction{op: opTableRemove, a: 4, b: 1, d: 1}, want: []int{4, 5}},
+		{name: "table insert", ins: instruction{op: opFastCall, a: 4, b: int(nativeFuncTableInsert), c: 2, d: 1}, want: []int{4, 5}},
+		{name: "table remove", ins: instruction{op: opFastCall, a: 4, b: int(nativeFuncTableRemove), c: 1, d: 1}, want: []int{4}},
 		{name: "coroutine resume", ins: instruction{op: opCoroutineResume, a: 4, b: 2, d: 2}, want: []int{4, 5, 6}},
-		{name: "math min", ins: instruction{op: opMathMin, a: 4, b: 2, d: 1}, want: []int{4, 5, 6}},
+		{name: "math min", ins: instruction{op: opFastCall, a: 4, b: int(nativeFuncMathMin), c: 2, d: 1}, want: []int{4, 5}},
 	}
 
 	for _, tt := range tests {
@@ -10267,10 +8564,6 @@ func TestInstructionReadModelCoversTableFieldAndIndexOperands(t *testing.T) {
 		{name: "set index", ins: instruction{op: opSetIndex, a: 4, b: 5, c: 6}, want: []int{4, 5, 6}},
 		{name: "get string field", ins: instruction{op: opGetStringField, a: 8, b: 4, c: 0}, want: []int{4}},
 		{name: "set string field", ins: instruction{op: opSetStringField, a: 4, b: 0, c: 6}, want: []int{4, 6}},
-		{name: "get row string field", ins: instruction{op: opGetRowStringField, a: 8, b: 4, c: 0, d: 1}, want: []int{4}},
-		{name: "set row string field", ins: instruction{op: opSetRowStringField, a: 4, b: 0, c: 6, d: 1}, want: []int{4, 6}},
-		{name: "get string field2", ins: instruction{op: opGetStringField2, a: 8, b: 4, c: 0, d: 1}, want: []int{4}},
-		{name: "set string field2", ins: instruction{op: opSetStringField2, a: 4, b: 0, c: 1, d: 6}, want: []int{4, 6}},
 		{name: "get string field index", ins: instruction{op: opGetStringFieldIndex, a: 8, b: 4, c: 0, d: 6}, want: []int{4, 6}},
 		{name: "set string field index", ins: instruction{op: opSetStringFieldIndex, a: 4, b: 0, c: 5, d: 6}, want: []int{4, 5, 6}},
 	}
@@ -10341,8 +8634,13 @@ func TestInstructionReadModelCoversComparisonBranchOperands(t *testing.T) {
 		{name: "numeric for check", ins: instruction{op: opNumericForCheck, a: 8, b: 1, c: 2, d: 20}, want: []int{1, 2, 8}},
 		{name: "not equal constant", ins: instruction{op: opJumpIfNotEqualK, a: 8, b: 1, d: 20}, want: []int{8}},
 		{name: "not less constant", ins: instruction{op: opJumpIfNotLessK, a: 8, b: 1, d: 20}, want: []int{8}},
+		{name: "not greater constant", ins: instruction{op: opJumpIfNotGreaterK, a: 8, b: 1, d: 20}, want: []int{8}},
+		{name: "less constant", ins: instruction{op: opJumpIfLessK, a: 8, b: 1, d: 20}, want: []int{8}},
+		{name: "greater constant", ins: instruction{op: opJumpIfGreaterK, a: 8, b: 1, d: 20}, want: []int{8}},
 		{name: "not less register", ins: instruction{op: opJumpIfNotLess, a: 8, b: 1, d: 20}, want: []int{1, 8}},
 		{name: "not greater register", ins: instruction{op: opJumpIfNotGreater, a: 8, b: 1, d: 20}, want: []int{1, 8}},
+		{name: "less register", ins: instruction{op: opJumpIfLess, a: 8, b: 1, d: 20}, want: []int{1, 8}},
+		{name: "greater register", ins: instruction{op: opJumpIfGreater, a: 8, b: 1, d: 20}, want: []int{1, 8}},
 		{name: "mod not equal constants", ins: instruction{op: opJumpIfModKNotEqualK, a: 8, b: 1, c: 2, d: 20}, want: []int{8}},
 	}
 
@@ -10366,16 +8664,9 @@ func TestInstructionReadModelCoversTablePredicateBranchOperands(t *testing.T) {
 	}{
 		{name: "table has metatable", ins: instruction{op: opJumpIfTableHasMetatable, a: 8, d: 20}, want: []int{8}},
 		{name: "string field not equal constant", ins: instruction{op: opJumpIfStringFieldNotEqualK, a: 8, b: 1, c: 2, d: 20}, want: []int{8}},
-		{name: "row string field not equal constant", ins: instruction{op: opJumpIfRowStringFieldNotEqualK, a: 8, b: 1, d: 20}, want: []int{8}},
-		{name: "row string field not equal field", ins: instruction{op: opJumpIfRowStringFieldNotEqualField, a: 8, b: 1, c: 2, d: 20}, want: []int{2, 8}},
-		{name: "row string field equal field", ins: instruction{op: opJumpIfRowStringFieldEqualField, a: 8, b: 1, c: 2, d: 20}, want: []int{2, 8}},
 		{name: "string field not greater constant", ins: instruction{op: opJumpIfStringFieldNotGreaterK, a: 8, b: 1, c: 2, d: 20}, want: []int{8}},
 		{name: "string field greater constant", ins: instruction{op: opJumpIfStringFieldGreaterK, a: 8, b: 1, c: 2, d: 20}, want: []int{8}},
-		{name: "row string field not greater constant", ins: instruction{op: opJumpIfRowStringFieldNotGreaterK, a: 8, b: 1, d: 20}, want: []int{8}},
-		{name: "row string field greater constant", ins: instruction{op: opJumpIfRowStringFieldGreaterK, a: 8, b: 1, d: 20}, want: []int{8}},
 		{name: "string field not greater register", ins: instruction{op: opJumpIfStringFieldNotGreaterR, a: 8, b: 1, c: 2, d: 20}, want: []int{2, 8}},
-		{name: "row string field not greater register", ins: instruction{op: opJumpIfRowStringFieldNotGreaterR, a: 8, b: 1, c: 2, d: 20}, want: []int{2, 8}},
-		{name: "row string field not less field", ins: instruction{op: opJumpIfRowStringFieldNotLessField, a: 8, b: 1, d: 20}, want: []int{8}},
 		{name: "string field false", ins: instruction{op: opJumpIfStringFieldFalse, a: 8, b: 1, c: 2, d: 20}, want: []int{8}},
 		{name: "string field nil", ins: instruction{op: opJumpIfStringFieldNil, a: 8, b: 1, c: 2, d: 20}, want: []int{8}},
 		{name: "string field true", ins: instruction{op: opJumpIfStringFieldTrue, a: 8, b: 1, c: 2, d: 20}, want: []int{8}},
@@ -10391,51 +8682,6 @@ func TestInstructionReadModelCoversTablePredicateBranchOperands(t *testing.T) {
 				t.Fatalf("read registers = %#v, want %#v", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestOptimizeBytecodeIRRemovesDeadLoadAroundRowStringFieldOps(t *testing.T) {
-	var builder bytecodeBuilder
-	field := builder.addConstant(StringValue("hp"))
-	builder.emitLoadConst(9, NumberValue(99))
-	builder.emit(instruction{op: opGetRowStringField, a: 1, b: 0, c: field, d: 0})
-	builder.emitLoadConst(2, NumberValue(7))
-	builder.emit(instruction{op: opSetRowStringField, a: 0, b: field, c: 2, d: 0})
-	builder.emit(instruction{op: opReturnOne, a: 1})
-
-	optimized := optimizeBytecodeIR(builder.ir, optimizationOptions{})
-	got := assembleBytecodeIR(optimized)
-	want := []instruction{
-		{op: opGetRowStringField, a: 1, b: 0, c: field, d: 0},
-		{op: opLoadConst, a: 2, b: 2},
-		{op: opSetRowStringField, a: 0, b: field, c: 2, d: 0},
-		{op: opReturnOne, a: 1},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("optimized bytecode = %#v, want %#v", got, want)
-	}
-}
-
-func TestOptimizeBytecodeIRRemovesDeadLoadAroundStringFieldPairOps(t *testing.T) {
-	var builder bytecodeBuilder
-	first := builder.addConstant(StringValue("stats"))
-	second := builder.addConstant(StringValue("hp"))
-	builder.emitLoadConst(9, NumberValue(99))
-	builder.emit(instruction{op: opGetStringField2, a: 1, b: 0, c: first, d: second})
-	builder.emitLoadConst(2, NumberValue(7))
-	builder.emit(instruction{op: opSetStringField2, a: 0, b: first, c: second, d: 2})
-	builder.emit(instruction{op: opReturnOne, a: 1})
-
-	optimized := optimizeBytecodeIR(builder.ir, optimizationOptions{})
-	got := assembleBytecodeIR(optimized)
-	want := []instruction{
-		{op: opGetStringField2, a: 1, b: 0, c: first, d: second},
-		{op: opLoadConst, a: 2, b: 3},
-		{op: opSetStringField2, a: 0, b: first, c: second, d: 2},
-		{op: opReturnOne, a: 1},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("optimized bytecode = %#v, want %#v", got, want)
 	}
 }
 
@@ -10531,7 +8777,7 @@ func TestOptimizeBytecodeIRKeepsIntrinsicArgumentLoads(t *testing.T) {
 	var builder bytecodeBuilder
 	builder.emitLoadConst(1, NumberValue(4))
 	builder.emitLoadConst(2, NumberValue(7))
-	builder.emit(instruction{op: opMathMin, a: 1, b: 1, d: 1})
+	builder.emit(instruction{op: opFastCall, a: 1, b: int(nativeFuncMathMin), c: 2, d: 1})
 	builder.emit(instruction{op: opReturnOne, a: 1})
 
 	optimized := optimizeBytecodeIR(builder.ir, optimizationOptions{})
@@ -10539,7 +8785,7 @@ func TestOptimizeBytecodeIRKeepsIntrinsicArgumentLoads(t *testing.T) {
 	want := []instruction{
 		{op: opLoadConst, a: 1, b: 0},
 		{op: opLoadConst, a: 2, b: 1},
-		{op: opMathMin, a: 1, b: 1, d: 1},
+		{op: opFastCall, a: 1, b: int(nativeFuncMathMin), c: 2, d: 1},
 		{op: opReturnOne, a: 1},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -10552,7 +8798,7 @@ func TestOptimizeBytecodeIRRemovesDeadLoadAroundProvenIntrinsicReads(t *testing.
 	builder.emitLoadConst(9, NumberValue(99))
 	builder.emitLoadConst(1, NumberValue(4))
 	builder.emitLoadConst(2, NumberValue(7))
-	builder.emit(instruction{op: opMathMin, a: 1, b: 1, d: 1})
+	builder.emit(instruction{op: opFastCall, a: 1, b: int(nativeFuncMathMin), c: 2, d: 1})
 	builder.emit(instruction{op: opReturnOne, a: 1})
 
 	optimized := optimizeBytecodeIR(builder.ir, optimizationOptions{})
@@ -10560,7 +8806,7 @@ func TestOptimizeBytecodeIRRemovesDeadLoadAroundProvenIntrinsicReads(t *testing.
 	want := []instruction{
 		{op: opLoadConst, a: 1, b: 1},
 		{op: opLoadConst, a: 2, b: 2},
-		{op: opMathMin, a: 1, b: 1, d: 1},
+		{op: opFastCall, a: 1, b: int(nativeFuncMathMin), c: 2, d: 1},
 		{op: opReturnOne, a: 1},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -10754,60 +9000,6 @@ return got
 `)
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
-	}
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 12 {
-		t.Fatalf("Run result is %v (%t), want number 12", got, ok)
-	}
-}
-
-func TestCompileRunRowStringFieldDCEPreservesEffects(t *testing.T) {
-	proto, err := Compile(`
-local rows = {
-	{hp = 10},
-	{hp = 20},
-}
-local dead = 99
-local total = 0
-for _, row in rows do
-	row.hp = row.hp + 1
-	total = total + row.hp
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "GET_ROW_STRING_FIELD") || !strings.Contains(joined, "ADD_STRING_FIELD") {
-		t.Fatalf("compiled row field program is missing row field ops:\n%s", joined)
-	}
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 32 {
-		t.Fatalf("Run result is %v (%t), want number 32", got, ok)
-	}
-}
-
-func TestCompileRunNestedStringFieldDCEPreservesEffects(t *testing.T) {
-	proto, err := Compile(`
-local row = {stats = {hp = 10}}
-local dead = 99
-row.stats.hp = 12
-local got = row.stats.hp
-return got
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "GET_STRING_FIELD2") && !strings.Contains(joined, "GET_STRING_FIELD_INDEX") {
-		t.Fatalf("compiled nested field program is missing nested field read ops:\n%s", joined)
 	}
 	results, err := Run(proto)
 	if err != nil {
@@ -11042,7 +9234,7 @@ func TestOptimizeBytecodeIRKeepsTableInsertArgumentLoads(t *testing.T) {
 	var builder bytecodeBuilder
 	builder.emit(instruction{op: opNewTable, a: 1})
 	builder.emitLoadConst(2, NumberValue(7))
-	builder.emit(instruction{op: opTableInsert, a: 1, b: 1, d: 1})
+	builder.emit(instruction{op: opFastCall, a: 1, b: int(nativeFuncTableInsert), c: 2, d: 1})
 	builder.emit(instruction{op: opReturnOne, a: 1})
 
 	optimized := optimizeBytecodeIR(builder.ir, optimizationOptions{})
@@ -11050,7 +9242,7 @@ func TestOptimizeBytecodeIRKeepsTableInsertArgumentLoads(t *testing.T) {
 	want := []instruction{
 		{op: opNewTable, a: 1},
 		{op: opLoadConst, a: 2, b: 0},
-		{op: opTableInsert, a: 1, b: 1, d: 1},
+		{op: opFastCall, a: 1, b: int(nativeFuncTableInsert), c: 2, d: 1},
 		{op: opReturnOne, a: 1},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -11201,6 +9393,62 @@ return live
 	}
 }
 
+func TestCompilerShrinksFrameUsingLiveness(t *testing.T) {
+	proto, err := Compile(`
+local a = 1
+local b = a + 2
+local c = b + 3
+local d = c + 4
+return d
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if got, want := proto.registers, 2; got != want {
+		t.Fatalf("compiled register count is %d, want %d after liveness frame shrink", got, want)
+	}
+
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if got, ok := results[0].Number(); !ok || got != 10 {
+		t.Fatalf("Run result is %v (%t), want 10", got, ok)
+	}
+}
+
+func TestFrameShrinkPreservesCapturedAndVarargRegisters(t *testing.T) {
+	proto, err := Compile(`
+local function collect(...)
+	local base = 4
+	local function add(x)
+		return base + x
+	end
+	local first, second = ...
+	return add(first), second, select("#", ...)
+end
+return collect(3, 8, 13)
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	want := []float64{7, 8, 3}
+	if len(results) != len(want) {
+		t.Fatalf("Run returned %d results, want %d", len(results), len(want))
+	}
+	for i, wantNumber := range want {
+		got, ok := results[i].Number()
+		if !ok || got != wantNumber {
+			t.Fatalf("result %d is %v (%t), want %v", i, results[i], ok, wantNumber)
+		}
+	}
+}
+
 func TestRegisterAllocationClaimsFixedVarargResultSpan(t *testing.T) {
 	compiler := compiler{
 		variadic:  true,
@@ -11294,8 +9542,9 @@ func TestOpcodeMetadataCoversEveryOpcode(t *testing.T) {
 		if meta.writesTable != wantOpcodeWritesTable(op) {
 			t.Fatalf("opcode metadata writesTable for %s is %t, want %t", opcodeName(op), meta.writesTable, wantOpcodeWritesTable(op))
 		}
-		if meta.readsGlobal != (op == opLoadGlobal) {
-			t.Fatalf("opcode metadata readsGlobal for %s is %t, want %t", opcodeName(op), meta.readsGlobal, op == opLoadGlobal)
+		wantReadsGlobal := op == opLoadGlobal || op == opFastCall
+		if meta.readsGlobal != wantReadsGlobal {
+			t.Fatalf("opcode metadata readsGlobal for %s is %t, want %t", opcodeName(op), meta.readsGlobal, wantReadsGlobal)
 		}
 		if meta.writesGlobal != (op == opSetGlobal) {
 			t.Fatalf("opcode metadata writesGlobal for %s is %t, want %t", opcodeName(op), meta.writesGlobal, op == opSetGlobal)
@@ -11303,7 +9552,7 @@ func TestOpcodeMetadataCoversEveryOpcode(t *testing.T) {
 		if meta.allocates != wantOpcodeAllocates(op) {
 			t.Fatalf("opcode metadata allocates for %s is %t, want %t", opcodeName(op), meta.allocates, wantOpcodeAllocates(op))
 		}
-		if meta.writesTable && meta.readsGlobal {
+		if meta.writesTable && meta.readsGlobal && op != opFastCall {
 			t.Fatalf("opcode metadata %s mixes table write and global read effects", opcodeName(op))
 		}
 		if meta.controlFlow == opcodeControlBranch && meta.jumpTarget == opcodeJumpTargetNone {
@@ -11381,37 +9630,24 @@ func wantOpcodeReadsTable(op opcode) bool {
 	case opSetIndex,
 		opGetField,
 		opGetStringField,
-		opGetRowStringField,
-		opGetStringField2,
 		opGetStringFieldIndex,
 		opAddStringField,
 		opSubStringField,
-		opSubAddStringField,
-		opAddSubStringField2,
 		opGetIndex,
 		opPrepareIter,
 		opArrayNext,
 		opArrayNextJump2,
 		opJumpIfTableHasMetatable,
 		opJumpIfStringFieldNotEqualK,
-		opJumpIfRowStringFieldNotEqualK,
-		opJumpIfRowStringFieldNotEqualField,
-		opJumpIfRowStringFieldEqualField,
 		opJumpIfStringFieldNotGreaterK,
 		opJumpIfStringFieldGreaterK,
-		opJumpIfRowStringFieldNotGreaterK,
-		opJumpIfRowStringFieldGreaterK,
 		opJumpIfStringFieldNotGreaterR,
-		opJumpIfRowStringFieldNotGreaterR,
-		opJumpIfRowStringFieldNotLessField,
 		opJumpIfStringFieldFalse,
 		opJumpIfStringFieldNil,
 		opJumpIfStringFieldTrue,
 		opJumpIfStringFieldNotNil,
-		opTableInsert,
-		opTableRemove,
-		opCallMethodOne,
-		opCallTableFieldKeyOne:
+		opFastCall,
+		opCallMethodOne:
 		return true
 	default:
 		return false
@@ -11422,16 +9658,11 @@ func wantOpcodeWritesTable(op opcode) bool {
 	switch op {
 	case opSetField,
 		opSetStringField,
-		opSetRowStringField,
-		opSetStringField2,
 		opSetStringFieldIndex,
 		opAddStringField,
 		opSubStringField,
-		opSubAddStringField,
-		opAddSubStringField2,
 		opSetIndex,
-		opTableInsert,
-		opTableRemove:
+		opFastCall:
 		return true
 	default:
 		return false
@@ -11444,16 +9675,13 @@ func wantOpcodeAllocates(op opcode) bool {
 		opClosure,
 		opVararg,
 		opConcat,
+		opConcatChain,
 		opCoroutineResume,
 		opCall,
 		opCallOne,
 		opCallLocalOne,
 		opCallUpvalueOne,
-		opCallUpvalueSelfOne,
-		opCallUpvalueSelfKOne,
-		opCallUpvalueSelfAddKOne,
-		opCallMethodOne,
-		opCallTableFieldKeyOne:
+		opCallMethodOne:
 		return true
 	default:
 		return false
@@ -11463,15 +9691,12 @@ func wantOpcodeAllocates(op opcode) bool {
 func wantOpcodeMayCall(op opcode) bool {
 	switch op {
 	case opCoroutineResume,
+		opFastCall,
 		opCall,
 		opCallOne,
 		opCallLocalOne,
 		opCallUpvalueOne,
-		opCallUpvalueSelfOne,
-		opCallUpvalueSelfKOne,
-		opCallUpvalueSelfAddKOne,
-		opCallMethodOne,
-		opCallTableFieldKeyOne:
+		opCallMethodOne:
 		return true
 	default:
 		return false
@@ -11486,24 +9711,22 @@ func wantDirectFrameOpcodeSupported(op opcode) bool {
 	switch op {
 	case opLoadConst,
 		opLoadGlobal,
+		opSetGlobal,
 		opNewTable,
 		opSetField,
 		opGetField,
 		opSetStringField,
-		opSetRowStringField,
-		opSetStringField2,
 		opSetStringFieldIndex,
 		opGetStringField,
-		opGetRowStringField,
-		opGetStringField2,
 		opGetStringFieldIndex,
 		opAddStringField,
 		opSubStringField,
-		opSubAddStringField,
-		opAddSubStringField2,
 		opSetIndex,
 		opGetIndex,
 		opClosure,
+		opGetUpvalue,
+		opSetUpvalue,
+		opVararg,
 		opPrepareIter,
 		opArrayNext,
 		opArrayNextJump2,
@@ -11520,8 +9743,11 @@ func wantDirectFrameOpcodeSupported(op opcode) bool {
 		opDivK,
 		opModK,
 		opIDivK,
-		opAddNumericModK,
+		opPow,
 		opNeg,
+		opLen,
+		opConcat,
+		opConcatChain,
 		opEqual,
 		opNotEqual,
 		opLess,
@@ -11529,35 +9755,34 @@ func wantDirectFrameOpcodeSupported(op opcode) bool {
 		opGreater,
 		opGreaterEqual,
 		opNumericForCheck,
+		opNumericForLoop,
 		opJumpIfNotEqualK,
 		opJumpIfNotLessK,
+		opJumpIfNotGreaterK,
+		opJumpIfLessK,
+		opJumpIfGreaterK,
 		opJumpIfNotLess,
 		opJumpIfNotGreater,
+		opJumpIfLess,
+		opJumpIfGreater,
 		opJumpIfModKNotEqualK,
 		opJumpIfTableHasMetatable,
 		opJumpIfStringFieldNotEqualK,
-		opJumpIfRowStringFieldNotEqualK,
-		opJumpIfRowStringFieldNotEqualField,
-		opJumpIfRowStringFieldEqualField,
 		opJumpIfStringFieldNotGreaterK,
 		opJumpIfStringFieldGreaterK,
-		opJumpIfRowStringFieldNotGreaterK,
-		opJumpIfRowStringFieldGreaterK,
 		opJumpIfStringFieldNotGreaterR,
-		opJumpIfRowStringFieldNotGreaterR,
-		opJumpIfRowStringFieldNotLessField,
 		opJumpIfStringFieldFalse,
 		opJumpIfStringFieldNil,
 		opJumpIfStringFieldTrue,
 		opJumpIfStringFieldNotNil,
-		opTableInsert,
-		opTableRemove,
-		opMathMin,
+		opCoroutineResume,
+		opFastCall,
 		opJumpIfFalse,
 		opCall,
 		opCallOne,
 		opCallLocalOne,
-		opCallTableFieldKeyOne,
+		opCallUpvalueOne,
+		opCallMethodOne,
 		opJump,
 		opReturnOne,
 		opReturn:
@@ -11569,27 +9794,26 @@ func wantDirectFrameOpcodeSupported(op opcode) bool {
 
 func wantOpcodeControlFlow(op opcode) opcodeControlFlowKind {
 	switch op {
-	case opJump:
+	case opJump,
+		opNumericForLoop:
 		return opcodeControlJump
 	case opArrayNextJump2,
 		opNumericForCheck,
 		opJumpIfNotEqualK,
 		opJumpIfNotLessK,
+		opJumpIfNotGreaterK,
+		opJumpIfLessK,
+		opJumpIfGreaterK,
 		opJumpIfNotLess,
 		opJumpIfNotGreater,
+		opJumpIfLess,
+		opJumpIfGreater,
 		opJumpIfModKNotEqualK,
 		opJumpIfTableHasMetatable,
 		opJumpIfStringFieldNotEqualK,
-		opJumpIfRowStringFieldNotEqualK,
-		opJumpIfRowStringFieldNotEqualField,
-		opJumpIfRowStringFieldEqualField,
 		opJumpIfStringFieldNotGreaterK,
 		opJumpIfStringFieldGreaterK,
-		opJumpIfRowStringFieldNotGreaterK,
-		opJumpIfRowStringFieldGreaterK,
 		opJumpIfStringFieldNotGreaterR,
-		opJumpIfRowStringFieldNotGreaterR,
-		opJumpIfRowStringFieldNotLessField,
 		opJumpIfStringFieldFalse,
 		opJumpIfStringFieldNil,
 		opJumpIfStringFieldTrue,
@@ -11794,162 +10018,6 @@ func assertTableNumber(t *testing.T, table *Table, key Value, want float64) {
 	}
 }
 
-func TestRunDirectLeafCallOnePreservesSemantics(t *testing.T) {
-	proto, err := Compile(`
-local function add(a, b)
-	return a + b
-end
-local function first(a, b)
-	if b == nil then
-		return a
-	end
-	return b
-end
-local total = 0
-for i = 1, 8 do
-	total = total + add(i, 2)
-end
-return total, first(9)
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.prototypes) < 2 || !proto.prototypes[0].directLeafCallOne || !proto.prototypes[1].directLeafCallOne {
-		t.Fatalf("compiled closures are not direct leaf-call eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 52 {
-		t.Fatalf("first result is %v (%t), want number 52", results[0], ok)
-	}
-	if got, ok := results[1].Number(); !ok || got != 9 {
-		t.Fatalf("second result is %v (%t), want number 9", results[1], ok)
-	}
-}
-
-func TestRunDirectLeafCallOneCountersRecordReusableFrame(t *testing.T) {
-	proto, err := Compile(`
-local function add(a, b)
-	return a + b
-end
-local total = 0
-for i = 1, 8 do
-	total = total + add(i, 2)
-end
-return total
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.prototypes) == 0 || !proto.prototypes[0].directLeafCallOne {
-		t.Fatalf("compiled closures are not direct leaf-call eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 52 {
-		t.Fatalf("first result is %v (%t), want number 52", results[0], ok)
-	}
-	if counts.fixedCallFrameReuses != 8 {
-		t.Fatalf("fixed-call frame reuses = %d, want 8", counts.fixedCallFrameReuses)
-	}
-	if counts.fixedCallArgCopies != 16 {
-		t.Fatalf("fixed-call arg copies = %d, want 16", counts.fixedCallArgCopies)
-	}
-	if counts.fixedCallFrameMaterializations != 0 {
-		t.Fatalf("fixed-call frame materializations = %d, want 0", counts.fixedCallFrameMaterializations)
-	}
-}
-
-func TestRunDirectLeafCallOneCountersRecordFallbackMaterialization(t *testing.T) {
-	proto, err := Compile(`
-local function read(t)
-	return t.x
-end
-local proxy = setmetatable({}, {
-	__index = function()
-		return 41
-	end,
-})
-local value = read(proxy)
-return value
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.prototypes) == 0 || !proto.prototypes[0].directLeafCallOne {
-		t.Fatalf("compiled read closure is not direct leaf-call eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 41 {
-		t.Fatalf("first result is %v (%t), want number 41", results[0], ok)
-	}
-	if counts.fixedCallFrameReuses != 1 {
-		t.Fatalf("fixed-call frame reuses = %d, want 1", counts.fixedCallFrameReuses)
-	}
-	if counts.fixedCallFrameMaterializations == 0 {
-		t.Fatalf("fixed-call frame materializations = 0, want direct leaf side-exit materialization")
-	}
-	if counts.fixedCallRegisterCopies == 0 {
-		t.Fatalf("fixed-call register copies = 0, want side-exit materialization copies")
-	}
-}
-
-func TestRunDirectFrameTableFieldKeyCallUsesFastMethodFieldAdd(t *testing.T) {
-	proto, err := Compile(`
-local handlers = {}
-function handlers.bump(state, amount)
-	state.score = state.score + amount
-	return state.score
-end
-local state = {score = 0}
-local event = {kind = "bump", amount = 3}
-local total = 0
-for i = 1, 4 do
-	total = total + handlers[event.kind](state, event.amount)
-end
-return total, state.score
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.prototypes) == 0 || !proto.prototypes[0].hasFastMethodFieldAdd {
-		t.Fatalf("compiled handler is not fast field-add eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-	if joined := strings.Join(disassembleProto(proto), "\n"); !strings.Contains(joined, "CALL_TABLE_FIELD_KEY_ONE") {
-		t.Fatalf("compiled dynamic handler call is missing table field-key call:\n%s", joined)
-	}
-
-	var counts directFramePICCounts
-	thread := newVMThread(runtimeGlobals(nil))
-	thread.directFramePICCounts = &counts
-	results, err := thread.run(proto, nil, nil)
-	if err != nil {
-		t.Fatalf("thread.run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 30 {
-		t.Fatalf("first result is %v (%t), want number 30", results[0], ok)
-	}
-	if got, ok := results[1].Number(); !ok || got != 12 {
-		t.Fatalf("second result is %v (%t), want number 12", results[1], ok)
-	}
-	if counts.fixedCallFrameReuses != 0 || counts.fixedCallArgCopies != 0 {
-		t.Fatalf("fixed-call counters = reuse %d arg copies %d, want table field-key fast add to avoid script call frames", counts.fixedCallFrameReuses, counts.fixedCallArgCopies)
-	}
-}
-
 func TestRunDirectFrameNumericIndexReadsArraySlotWithoutGenericFallback(t *testing.T) {
 	proto, err := Compile(`
 local rows = {
@@ -11968,6 +10036,7 @@ return rows[i].value
 
 	var counts directFramePICCounts
 	thread := newVMThread(runtimeGlobals(nil))
+	thread.directFrameInstrumented = true
 	thread.directFramePICCounts = &counts
 	results, err := thread.run(proto, nil, nil)
 	if err != nil {
@@ -11981,33 +10050,5 @@ return rows[i].value
 	}
 	if counts.numericArrayIndexHits != 1 {
 		t.Fatalf("numeric array index hits = %d, want one direct array read", counts.numericArrayIndexHits)
-	}
-}
-
-func TestRunDirectLeafCallOneFallsBackAcrossProtectedBoundary(t *testing.T) {
-	proto, err := Compile(`
-local function bad(t)
-	return t.missing.value
-end
-local ok, message = pcall(function()
-	return bad({})
-end)
-return ok, type(message)
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.prototypes) == 0 || !proto.prototypes[0].directLeafCallOne {
-		t.Fatalf("compiled bad closure is not direct leaf-call eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
-	}
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	if got, ok := results[0].Bool(); !ok || got {
-		t.Fatalf("first result is %v (%t), want false", results[0], ok)
-	}
-	if got, ok := results[1].String(); !ok || got != "string" {
-		t.Fatalf("second result is %v (%t), want string", results[1], ok)
 	}
 }
