@@ -2,8 +2,12 @@ package ember
 
 import (
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 )
+
+var compilerComplexityProtoSink *Proto
 
 func TestCompilerComplexityBudgets(t *testing.T) {
 	tests := []struct {
@@ -107,6 +111,119 @@ return value.name, value.hp`,
 			}
 		})
 	}
+}
+
+func TestCompileNestedClosuresAllocationBudget(t *testing.T) {
+	source := nestedClosureCompileSource(12)
+	proto, err := Compile(source)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Run returned %d results, want 1", len(results))
+	}
+	if got, ok := results[0].Number(); !ok || got != 2 {
+		t.Fatalf("Run result is %v (%t), want number 2", got, ok)
+	}
+
+	const maxAllocsPerCompile = 3800
+	allocs := testing.AllocsPerRun(25, func() {
+		compiled, err := Compile(source)
+		if err != nil {
+			t.Fatalf("Compile returned error: %v", err)
+		}
+		compilerComplexityProtoSink = compiled
+	})
+	if allocs > maxAllocsPerCompile {
+		t.Fatalf("nested closure Compile used %.0f allocs/op, want at most %d", allocs, maxAllocsPerCompile)
+	}
+}
+
+func TestCompileNestedClosurePreservesChildMetadata(t *testing.T) {
+	proto, err := Compile(`local function read(row)
+    return row.hp
+end
+return read({hp = 7})`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if len(proto.prototypes) != 1 {
+		t.Fatalf("compiled root has %d child prototypes, want 1", len(proto.prototypes))
+	}
+	child := proto.prototypes[0]
+	if len(child.lines) != len(child.code) {
+		t.Fatalf("child line table has %d entries for %d instructions", len(child.lines), len(child.code))
+	}
+	if symbol := constantStringSymbolFor(t, child, "hp"); symbol == 0 {
+		t.Fatal("child field name symbol is zero, want interned symbol")
+	}
+
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Run returned %d results, want 1", len(results))
+	}
+	if got, ok := results[0].Number(); !ok || got != 7 {
+		t.Fatalf("Run result is %v (%t), want number 7", got, ok)
+	}
+}
+
+func TestCompileNestedClosuresPreservesParentUpvalues(t *testing.T) {
+	proto, err := Compile(`local base = 4
+local function outer(x)
+    local function middle(y)
+        local function inner(z)
+            return base + x + y + z
+        end
+        return inner(3)
+    end
+    return middle(2)
+end
+return outer(1)`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Run returned %d results, want 1", len(results))
+	}
+	if got, ok := results[0].Number(); !ok || got != 10 {
+		t.Fatalf("Run result is %v (%t), want number 10", got, ok)
+	}
+}
+
+func nestedClosureCompileSource(depth int) string {
+	var source strings.Builder
+	for index := range depth {
+		source.WriteString(strings.Repeat("    ", index))
+		source.WriteString("local function f")
+		source.WriteString(strconv.Itoa(index))
+		source.WriteString("(x)\n")
+	}
+	source.WriteString(strings.Repeat("    ", depth))
+	source.WriteString("return x + 1\n")
+	for index := depth - 1; index >= 0; index-- {
+		source.WriteString(strings.Repeat("    ", index))
+		source.WriteString("end\n")
+		source.WriteString(strings.Repeat("    ", index))
+		source.WriteString("return f")
+		source.WriteString(strconv.Itoa(index))
+		if index == 0 {
+			source.WriteString("(1)\n")
+		} else {
+			source.WriteString("(x)\n")
+		}
+	}
+	return source.String()
 }
 
 func assertCompilerComplexityResults(t *testing.T, got []Value, want []Value) {

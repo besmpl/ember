@@ -27,6 +27,7 @@ type compiler struct {
 	assignedSymbols          map[int]bool
 	stringSymbols            map[string]int
 	loops                    []loopContext
+	prototypeDrafts          []*functionDraft
 	nextReg                  int
 	freeTemps                []int
 	suppressTagChains        bool
@@ -81,21 +82,22 @@ func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (
 		c.emit(instruction{op: opReturn})
 	}
 
-	c.optimize(options.optimizations)
-	return c.finalizeCompiledProto(nil, 0, false)
+	c.optimizeFunction(options.optimizations)
+	draft := c.buildFunctionDraft(nil, 0, false)
+	return sealFunctionDraft(draft)
 }
 
-func (c *compiler) finalizeCompiledProto(upvalues []upvalueDesc, params int, variadic bool) (*Proto, error) {
+func (c *compiler) buildFunctionDraft(upvalues []upvalueDesc, params int, variadic bool) *functionDraft {
 	c.shrinkCompiledFrameRegisters(params, variadic)
-	registers := compactedCompiledRegisterCount(c.assembledCode(), c.prototypes, c.nextReg, params)
-	return c.finalizeProto(upvalues, registers, params, variadic)
+	registers := compactedCompiledRegisterCount(c.assembledCode(), c.prototypeDrafts, c.nextReg, params)
+	return newFunctionDraft(&c.bytecodeBuilder, c.prototypeDrafts, upvalues, registers, params, variadic)
 }
 
 func (c *compiler) shrinkCompiledFrameRegisters(params int, variadic bool) {
 	if c == nil ||
 		c.parent != nil ||
 		variadic ||
-		len(c.prototypes) != 0 ||
+		len(c.prototypeDrafts) != 0 ||
 		len(c.upvalueDescs) != 0 ||
 		c.selfFunctionSymbol >= 0 ||
 		!bytecodeIRFrameShrinkSafe(c.ir) {
@@ -239,7 +241,7 @@ func remapBytecodeIRRegisterOperands(operands *bytecodeOperands, remap []int) {
 	remapOperand(&operands.d)
 }
 
-func compactedCompiledRegisterCount(code []instruction, children []*Proto, allocated int, params int) int {
+func compactedCompiledRegisterCount(code []instruction, children []*functionDraft, allocated int, params int) int {
 	limit := allocated
 	if limit < params {
 		limit = params
@@ -515,7 +517,7 @@ func (c *compiler) compileFunctionDeclaration(stmt functionDeclarationStatement)
 	return c.compileAssignTargetFromRegister(stmt.target, value)
 }
 
-func (c *compiler) compileFunctionProto(closure loweredClosure, selfFunctionSymbol int) (*Proto, error) {
+func (c *compiler) compileFunctionDraft(closure loweredClosure, selfFunctionSymbol int) (*functionDraft, error) {
 	selfNumericPairBase, selfNumericPairAdd := selfNumericPairAddClosureBase(closure)
 	fn := compiler{
 		bind:                     c.bind,
@@ -553,8 +555,8 @@ func (c *compiler) compileFunctionProto(closure loweredClosure, selfFunctionSymb
 		fn.emit(instruction{op: opReturn})
 	}
 
-	fn.optimize(c.options.optimizations)
-	return fn.finalizeCompiledProto(fn.upvalueDescs, len(closure.params), closure.variadic)
+	fn.optimizeFunction(c.options.optimizations)
+	return fn.buildFunctionDraft(fn.upvalueDescs, len(closure.params), closure.variadic), nil
 }
 
 func (c *compiler) compileExpression(expr expression) (int, error) {
@@ -881,12 +883,12 @@ func (c *compiler) compileClosureTo(closure loweredClosure, target int) error {
 }
 
 func (c *compiler) compileClosureToSelf(closure loweredClosure, target int, selfFunctionSymbol int) error {
-	proto, err := c.compileFunctionProto(closure, selfFunctionSymbol)
+	draft, err := c.compileFunctionDraft(closure, selfFunctionSymbol)
 	if err != nil {
 		return err
 	}
 
-	protoIndex := c.addPrototype(proto)
+	protoIndex := c.addFunctionDraft(draft)
 	c.emit(instruction{op: opClosure, a: target, b: protoIndex})
 	return nil
 }
