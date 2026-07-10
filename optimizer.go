@@ -89,16 +89,16 @@ func bytecodeIRDeadCodeRemovalSet(ir []bytecodeIRInstruction, facts bytecodeIROp
 		liveRegisters := live.liveOut.copy()
 		for pc := live.block.end - 1; pc >= live.block.start; pc-- {
 			ins := code[pc]
-			writes := bytecodeIRWrittenRegisters(ir[pc])
-			reads := bytecodeIRReadRegisters(ir[pc])
-			if len(writes) > 0 && instructionWritesOnlyDeadRegisters(writes, liveRegisters) && instructionCanRemoveWhenResultDead(ins, numberFacts[pc], facts) {
+			if instructionWritesOnlyDeadRegisters(ins, liveRegisters) && instructionCanRemoveWhenResultDead(ins, numberFacts[pc], facts) {
 				remove[pc] = true
 				continue
 			}
-			for _, register := range writes {
+			writes := instructionRegisters(ins, instructionRegisterWrite)
+			for register, ok := writes.next(); ok; register, ok = writes.next() {
 				delete(liveRegisters, register)
 			}
-			for _, register := range reads {
+			reads := instructionRegisters(ins, instructionRegisterRead)
+			for register, ok := reads.next(); ok; register, ok = reads.next() {
 				liveRegisters.add(register)
 			}
 		}
@@ -144,13 +144,16 @@ func instructionAllowsDeadCodeCleanupInBlock(ins instruction) bool {
 	}
 }
 
-func instructionWritesOnlyDeadRegisters(writes []int, liveRegisters registerSet) bool {
-	for _, register := range writes {
+func instructionWritesOnlyDeadRegisters(ins instruction, liveRegisters registerSet) bool {
+	hasWrite := false
+	writes := instructionRegisters(ins, instructionRegisterWrite)
+	for register, ok := writes.next(); ok; register, ok = writes.next() {
+		hasWrite = true
 		if liveRegisters[register] {
 			return false
 		}
 	}
-	return true
+	return hasWrite
 }
 
 func instructionCanRemoveWhenResultDead(ins instruction, numberFacts registerSet, facts bytecodeIROptimizationFacts) bool {
@@ -206,10 +209,8 @@ func applyInstructionNumberFacts(numberFacts registerSet, ins instruction, facts
 		return
 	}
 	producesNumber := instructionProducesNumber(ins, numberFacts, facts)
-	writes := registersMatching(ins, func(register int) bool {
-		return instructionWritesRegister(ins, register)
-	})
-	for _, register := range writes {
+	writes := instructionRegisters(ins, instructionRegisterWrite)
+	for register, ok := writes.next(); ok; register, ok = writes.next() {
 		delete(numberFacts, register)
 	}
 	if producesNumber {
@@ -401,9 +402,8 @@ func applyInstructionConstantFacts(registerConstants map[int]int, ins instructio
 		return
 	}
 	sourceConstant, sourceKnown := registerConstants[ins.b]
-	for _, register := range registersMatching(ins, func(register int) bool {
-		return instructionWritesRegister(ins, register)
-	}) {
+	writes := instructionRegisters(ins, instructionRegisterWrite)
+	for register, ok := writes.next(); ok; register, ok = writes.next() {
 		delete(registerConstants, register)
 	}
 	if opcodeMayCall(ins.op) {
@@ -1148,126 +1148,4 @@ func registerDeadAfter(code []instruction, register int) bool {
 		}
 	}
 	return true
-}
-
-func instructionReadsRegister(ins instruction, register int) bool {
-	switch ins.op {
-	case opMove:
-		return ins.b == register
-	case opSetGlobal:
-		return ins.b == register
-	case opSetField, opSetStringField:
-		return ins.a == register || ins.c == register
-	case opGetField, opGetStringField:
-		return ins.b == register
-	case opSetStringFieldIndex:
-		return ins.a == register || ins.c == register || ins.d == register
-	case opGetStringFieldIndex:
-		return ins.b == register || ins.d == register
-	case opAddStringField, opSubStringField:
-		return ins.a == register || ins.c == register
-	case opSetIndex:
-		return ins.a == register || ins.b == register || ins.c == register
-	case opGetIndex:
-		return ins.b == register || ins.c == register
-	case opSetUpvalue:
-		return ins.b == register
-	case opPrepareIter:
-		return ins.a == register
-	case opArrayNext:
-		return ins.a == register || ins.b == register || ins.c == register
-	case opArrayNextJump2:
-		return ins.a == register || ins.b == register || ins.c == register
-	case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow, opConcat,
-		opEqual, opNotEqual, opLess, opLessEqual, opGreater, opGreaterEqual:
-		return ins.b == register || ins.c == register
-	case opConcatChain:
-		return register >= ins.b && register < ins.b+ins.c
-	case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
-		return ins.b == register
-	case opNumericForCheck:
-		return ins.a == register || ins.b == register || ins.c == register
-	case opNumericForLoop:
-		return ins.a == register || ins.b == register
-	case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
-		return ins.a == register || ins.b == register
-	case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK,
-		opJumpIfModKNotEqualK,
-		opJumpIfTableHasMetatable,
-		opJumpIfStringFieldNotEqualK, opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK,
-		opJumpIfStringFieldFalse, opJumpIfStringFieldNil, opJumpIfStringFieldTrue, opJumpIfStringFieldNotNil:
-		return ins.a == register
-	case opJumpIfStringFieldNotGreaterR:
-		return ins.a == register || ins.c == register
-	case opNeg, opLen:
-		return ins.b == register
-	case opCoroutineResume:
-		return register >= ins.a && register <= ins.a+ins.b
-	case opFastCall:
-		return register >= ins.a && register < ins.a+ins.c
-	case opCall, opCallOne:
-		if ins.b == register {
-			return true
-		}
-		if ins.c < 0 {
-			prefixCount := -ins.c - 1
-			return register > ins.b && register <= ins.b+prefixCount
-		}
-		return register > ins.b && register <= ins.b+ins.c
-	case opCallLocalOne:
-		return ins.b == register || (register >= ins.c && register < ins.c+ins.d)
-	case opCallUpvalueOne:
-		return register >= ins.c && register < ins.c+ins.d
-	case opCallMethodOne:
-		return ins.b == register || (register >= ins.a+2 && register <= ins.a+1+ins.d)
-	case opJumpIfFalse:
-		return ins.a == register
-	case opReturnOne:
-		return ins.a == register
-	case opReturn:
-		if ins.b < 0 {
-			prefixCount := -ins.b - 1
-			return register >= ins.a && register < ins.a+prefixCount
-		}
-		return register >= ins.a && register < ins.a+ins.b
-	default:
-		return false
-	}
-}
-
-func instructionWritesRegister(ins instruction, register int) bool {
-	switch ins.op {
-	case opLoadConst, opLoadGlobal, opMove, opNewTable, opGetField, opGetStringField, opGetStringFieldIndex,
-		opClosure, opGetUpvalue, opVararg, opAdd, opSub, opMul, opDiv, opMod,
-		opIDiv, opPow, opNeg, opLen, opConcat, opConcatChain, opEqual, opNotEqual, opLess,
-		opLessEqual, opGreater, opGreaterEqual, opAddK, opSubK, opMulK,
-		opDivK, opModK, opIDivK, opCoroutineResume, opFastCall:
-		if ins.op == opVararg && ins.b > 0 {
-			return register >= ins.a && register < ins.a+ins.b
-		}
-		return ins.a == register
-	case opNumericForLoop:
-		return register == ins.a
-	case opPrepareIter:
-		return ins.a == register || ins.b == register || ins.c == register
-	case opArrayNext:
-		return register >= ins.a && register < ins.a+ins.d
-	case opArrayNextJump2:
-		return register == ins.a || register == ins.a+1
-	case opCall:
-		resultCount := ins.d
-		if resultCount == 0 {
-			resultCount = 1
-		}
-		if resultCount < 0 {
-			return register >= ins.a
-		}
-		return register >= ins.a && register < ins.a+resultCount
-	case opCallOne, opCallLocalOne, opCallUpvalueOne:
-		return register == ins.a
-	case opCallMethodOne:
-		return register == ins.a || register == ins.a+1
-	default:
-		return false
-	}
 }

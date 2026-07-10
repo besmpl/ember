@@ -161,9 +161,8 @@ func bytecodeIRLivenessRegisterRemap(ir []bytecodeIRInstruction, params int) ([]
 		touch(register, 0)
 	}
 	for pc, ins := range code {
-		for _, register := range registersMatching(ins, func(register int) bool {
-			return instructionReadsRegister(ins, register) || instructionWritesRegister(ins, register)
-		}) {
+		registers := instructionRegisters(ins, instructionRegisterReadWrite)
+		for register, ok := registers.next(); ok; register, ok = registers.next() {
 			touch(register, pc)
 		}
 	}
@@ -249,11 +248,10 @@ func compactedCompiledRegisterCount(code []instruction, children []*functionDraf
 	}
 	maxRegister := params - 1
 	for _, ins := range code {
-		for register := 0; register < limit; register++ {
-			if instructionReadsRegister(ins, register) || instructionWritesRegister(ins, register) {
-				if register > maxRegister {
-					maxRegister = register
-				}
+		registers := instructionRegisters(ins, instructionRegisterReadWrite)
+		for register, ok := registers.next(); ok; register, ok = registers.next() {
+			if register < limit && register > maxRegister {
+				maxRegister = register
 			}
 		}
 	}

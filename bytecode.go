@@ -1397,12 +1397,15 @@ func bytecodeIRBlockUseDef(ir []bytecodeIRInstruction, block bytecodeIRBlock) (r
 	use := make(registerSet)
 	def := make(registerSet)
 	for pc := block.start; pc < block.end; pc++ {
-		for _, register := range bytecodeIRReadRegisters(ir[pc]) {
+		raw := assembleBytecodeIRInstruction(ir[pc])
+		reads := instructionRegisters(raw, instructionRegisterRead)
+		for register, ok := reads.next(); ok; register, ok = reads.next() {
 			if !def[register] {
 				use.add(register)
 			}
 		}
-		for _, register := range bytecodeIRWrittenRegisters(ir[pc]) {
+		writes := instructionRegisters(raw, instructionRegisterWrite)
+		for register, ok := writes.next(); ok; register, ok = writes.next() {
 			def.add(register)
 		}
 	}
@@ -1444,121 +1447,6 @@ func bytecodeIRBlockSuccessors(ir []bytecodeIRInstruction, blocks []bytecodeIRBl
 		}
 	}
 	return successors
-}
-
-func bytecodeIRReadRegisters(ins bytecodeIRInstruction) []int {
-	raw := assembleBytecodeIRInstruction(ins)
-	return registersMatching(raw, func(register int) bool {
-		return instructionReadsRegister(raw, register)
-	})
-}
-
-func bytecodeIRWrittenRegisters(ins bytecodeIRInstruction) []int {
-	raw := assembleBytecodeIRInstruction(ins)
-	return registersMatching(raw, func(register int) bool {
-		return instructionWritesRegister(raw, register)
-	})
-}
-
-func registersMatching(ins instruction, matches func(int) bool) []int {
-	candidates := registerCandidates(ins)
-	registers := make([]int, 0, len(candidates))
-	for _, register := range candidates {
-		if matches(register) {
-			registers = append(registers, register)
-		}
-	}
-	return registers
-}
-
-func registerCandidates(ins instruction) []int {
-	candidates := make(registerSet)
-	addNonNegativeRegisterCandidate(candidates, ins.a)
-	addNonNegativeRegisterCandidate(candidates, ins.b)
-	addNonNegativeRegisterCandidate(candidates, ins.c)
-	addNonNegativeRegisterCandidate(candidates, ins.d)
-	if ins.op == opCall || ins.op == opCallOne {
-		if ins.c >= 0 {
-			for register := ins.b; register <= ins.b+ins.c; register++ {
-				addNonNegativeRegisterCandidate(candidates, register)
-			}
-		} else {
-			prefixCount := -ins.c - 1
-			for register := ins.b; register <= ins.b+prefixCount; register++ {
-				addNonNegativeRegisterCandidate(candidates, register)
-			}
-		}
-		if ins.d > 0 {
-			for register := ins.a; register < ins.a+ins.d; register++ {
-				addNonNegativeRegisterCandidate(candidates, register)
-			}
-		}
-	}
-	if ins.op == opCallUpvalueOne {
-		for register := ins.c; register < ins.c+ins.d; register++ {
-			addNonNegativeRegisterCandidate(candidates, register)
-		}
-	}
-	if ins.op == opCallLocalOne {
-		for register := ins.c; register < ins.c+ins.d; register++ {
-			addNonNegativeRegisterCandidate(candidates, register)
-		}
-	}
-	if ins.op == opCallMethodOne {
-		for register := ins.a + 1; register <= ins.a+1+ins.d; register++ {
-			addNonNegativeRegisterCandidate(candidates, register)
-		}
-	}
-	if ins.op == opCoroutineResume {
-		for register := ins.a; register <= ins.a+ins.b; register++ {
-			addNonNegativeRegisterCandidate(candidates, register)
-		}
-	}
-	if ins.op == opFastCall {
-		count := ins.c
-		if ins.d > count {
-			count = ins.d
-		}
-		for register := ins.a; register < ins.a+count; register++ {
-			addNonNegativeRegisterCandidate(candidates, register)
-		}
-	}
-	if ins.op == opArrayNext {
-		for register := ins.a; register < ins.a+ins.d; register++ {
-			addNonNegativeRegisterCandidate(candidates, register)
-		}
-	}
-	if ins.op == opArrayNextJump2 {
-		addNonNegativeRegisterCandidate(candidates, ins.a+1)
-	}
-	if ins.op == opVararg && ins.b > 0 {
-		for register := ins.a; register < ins.a+ins.b; register++ {
-			addNonNegativeRegisterCandidate(candidates, register)
-		}
-	}
-	if ins.op == opConcatChain {
-		for register := ins.b; register < ins.b+ins.c; register++ {
-			addNonNegativeRegisterCandidate(candidates, register)
-		}
-	}
-	if ins.op == opReturn && ins.b > 0 {
-		for register := ins.a; register < ins.a+ins.b; register++ {
-			addNonNegativeRegisterCandidate(candidates, register)
-		}
-	}
-	if ins.op == opReturn && ins.b < 0 {
-		prefixCount := -ins.b - 1
-		for register := ins.a; register < ins.a+prefixCount; register++ {
-			addNonNegativeRegisterCandidate(candidates, register)
-		}
-	}
-	return candidates.values()
-}
-
-func addNonNegativeRegisterCandidate(registers registerSet, register int) {
-	if register >= 0 {
-		registers.add(register)
-	}
 }
 
 func (s registerSet) add(register int) {
