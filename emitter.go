@@ -305,94 +305,83 @@ func (c *compiler) compileStatements(statements []statement) error {
 }
 
 func (c *compiler) compileStatement(stmt statement) error {
-	return c.compileLoweredStatement(lowerStatement(stmt))
-}
-
-func (c *compiler) compileLoweredStatement(stmt loweredStatement) error {
-	switch stmt.kind {
-	case loweredStatementLocal:
-		return c.compileLoweredLocal(*stmt.local)
-	case loweredStatementLocalFunction:
-		return c.compileLocalFunction(*stmt.localFunction)
-	case loweredStatementFunctionDeclaration:
-		return c.compileFunctionDeclaration(*stmt.functionDeclaration)
-	case loweredStatementAssignment:
-		return c.compileLoweredAssignment(*stmt.assignment)
-	case loweredStatementCall:
-		return c.compileLoweredCallStatement(*stmt.call)
-	case loweredStatementIf:
-		return c.compileLoweredIf(*stmt.ifStatement)
-	case loweredStatementWhile:
+	switch {
+	case stmt.local != nil:
+		return c.compileLocal(*stmt.local)
+	case stmt.localFunc != nil:
+		return c.compileLocalFunction(*stmt.localFunc)
+	case stmt.funcDecl != nil:
+		return c.compileFunctionDeclaration(*stmt.funcDecl)
+	case stmt.assign != nil:
+		return c.compileAssignment(*stmt.assign)
+	case stmt.call != nil:
+		return c.compileCallStatement(*stmt.call)
+	case stmt.ifStmt != nil:
+		return c.compileIf(*stmt.ifStmt)
+	case stmt.while != nil:
 		return c.compileWhile(*stmt.while)
-	case loweredStatementNumericFor:
-		return c.compileFor(*stmt.numericFor)
-	case loweredStatementGenericFor:
+	case stmt.forLoop != nil:
+		return c.compileFor(*stmt.forLoop)
+	case stmt.genericFor != nil:
 		return c.compileGenericFor(*stmt.genericFor)
-	case loweredStatementRepeat:
+	case stmt.repeat != nil:
 		return c.compileRepeat(*stmt.repeat)
-	case loweredStatementBlock:
-		return c.compileLoweredBlock(*stmt.block)
-	case loweredStatementTypeAlias:
+	case stmt.block != nil:
+		return c.compileBlock(*stmt.block)
+	case stmt.typeAlias != nil:
 		return nil
-	case loweredStatementBreak:
+	case stmt.breaking:
 		return c.compileBreak()
-	case loweredStatementContinue:
+	case stmt.continues:
 		return c.compileContinue()
-	case loweredStatementReturn:
-		return c.compileLoweredReturn(*stmt.ret)
-	case loweredStatementEmpty:
-		return fmt.Errorf("compile: empty statement")
+	case stmt.ret != nil:
+		return c.compileReturn(*stmt.ret)
 	default:
-		return fmt.Errorf("compile: unknown lowered statement kind %d", stmt.kind)
+		return fmt.Errorf("compile: empty statement")
 	}
 }
 
 func (c *compiler) compileLocal(stmt localStatement) error {
-	return c.compileLoweredLocal(lowerLocal(stmt))
-}
-
-func (c *compiler) compileLoweredLocal(lowered loweredLocal) error {
-	if len(lowered.names) == 0 {
+	if len(stmt.names) == 0 {
 		return fmt.Errorf("compile: local statement has no names")
 	}
 
 	first := c.allocReg()
-	targets := make([]int, len(lowered.names))
+	targets := make([]int, len(stmt.names))
 	for i := range targets {
 		targets[i] = first + i
 	}
 	c.reserveRegistersThrough(first + len(targets))
 
-	if err := c.compileLoweredValueListTo(lowered.values, lowered.sources, targets); err != nil {
+	plan := fixedValueListPlan(stmt.values, len(targets))
+	if err := c.compileValueListTo(plan, targets); err != nil {
 		return err
 	}
-	for i, name := range lowered.names {
+	for i, name := range stmt.names {
 		c.locals[name] = targets[i]
-		if i < len(lowered.values.items) {
-			item := lowered.values.items[i]
-			if item.kind == loweredValueSingle && item.source >= 0 {
-				if slots, ok := expressionNamedTableFieldSlots(lowered.sources[item.source]); ok {
-					setLocalSlots(&c.localStringSlots, targets[i], slots)
-				}
-				if slots, ok := expressionArrayElementNamedTableFieldSlots(lowered.sources[item.source]); ok {
-					setLocalSlots(&c.localArrayElemSlots, targets[i], slots)
-				}
-				if slots, ok := expressionArrayElementFieldArrayElementSlots(lowered.sources[item.source]); ok {
-					setLocalNestedSlots(&c.localArrayElemFieldSlots, targets[i], slots)
-				}
-				if slots, ok := c.expressionIndexedLocalArrayElementSlots(lowered.sources[item.source]); ok {
-					setLocalSlots(&c.localStringSlots, targets[i], slots)
-					setLocalSlots(&c.localRowStringSlots, targets[i], slots)
-				}
-				if slots, ok := c.expressionIndexedLocalArrayElementFieldSlots(lowered.sources[item.source]); ok {
-					setLocalNestedSlots(&c.localFieldArrayElemSlots, targets[i], slots)
-				}
-				if slots, ok := c.expressionLocalFieldArrayElementSlots(lowered.sources[item.source]); ok {
-					setLocalSlots(&c.localArrayElemSlots, targets[i], slots)
-				}
+		item := plan.item(i)
+		if item.kind == valuePlanSingle && item.source >= 0 {
+			if slots, ok := expressionNamedTableFieldSlots(stmt.values[item.source]); ok {
+				setLocalSlots(&c.localStringSlots, targets[i], slots)
+			}
+			if slots, ok := expressionArrayElementNamedTableFieldSlots(stmt.values[item.source]); ok {
+				setLocalSlots(&c.localArrayElemSlots, targets[i], slots)
+			}
+			if slots, ok := expressionArrayElementFieldArrayElementSlots(stmt.values[item.source]); ok {
+				setLocalNestedSlots(&c.localArrayElemFieldSlots, targets[i], slots)
+			}
+			if slots, ok := c.expressionIndexedLocalArrayElementSlots(stmt.values[item.source]); ok {
+				setLocalSlots(&c.localStringSlots, targets[i], slots)
+				setLocalSlots(&c.localRowStringSlots, targets[i], slots)
+			}
+			if slots, ok := c.expressionIndexedLocalArrayElementFieldSlots(stmt.values[item.source]); ok {
+				setLocalNestedSlots(&c.localFieldArrayElemSlots, targets[i], slots)
+			}
+			if slots, ok := c.expressionLocalFieldArrayElementSlots(stmt.values[item.source]); ok {
+				setLocalSlots(&c.localArrayElemSlots, targets[i], slots)
 			}
 		}
-		if symbol, ok := c.claimSymbol(syntaxNameID(lowered.nameID, i), symbolLocal); ok {
+		if symbol, ok := c.claimSymbol(syntaxNameID(stmt.nameID, i), symbolLocal); ok {
 			c.symbolRegisters[symbol.id] = targets[i]
 		}
 	}
@@ -400,33 +389,30 @@ func (c *compiler) compileLoweredLocal(lowered loweredLocal) error {
 }
 
 func (c *compiler) compileReturn(stmt returnStatement) error {
-	return c.compileLoweredReturn(lowerReturn(stmt))
-}
-
-func (c *compiler) compileLoweredReturn(lowered loweredReturn) error {
-	if len(lowered.sources) == 0 {
+	if len(stmt.values) == 0 {
 		c.emit(instruction{op: opReturn})
 		return nil
 	}
 
-	list := lowered.values
-	if len(list.items) == 1 && list.items[0].kind == loweredValueSingle {
-		if ref, ok := c.expressionLocalRef(lowered.sources[list.items[0].source]); ok {
+	plan := openValueListPlan(stmt.values)
+	if plan.len() == 1 && plan.item(0).kind == valuePlanSingle {
+		if ref, ok := c.expressionLocalRef(stmt.values[0]); ok {
 			c.emit(instruction{op: opReturnOne, a: ref.index})
 			return nil
 		}
 	}
 	first := c.allocReg()
-	for i, item := range list.items {
+	for i := 0; i < plan.len(); i++ {
+		item := plan.item(i)
 		target := first + i
 		c.reserveRegistersThrough(target + 1)
 		switch item.kind {
-		case loweredValueExpanded:
-			if vararg, ok := expressionSingleVararg(lowered.sources[item.source]); ok {
+		case valuePlanExpanded:
+			if vararg, ok := expressionSingleVararg(stmt.values[item.source]); ok {
 				if err := c.compileVarargToResults(vararg, target, item.resultCount); err != nil {
 					return err
 				}
-			} else if call, ok := expressionSingleCall(lowered.sources[item.source]); ok {
+			} else if call, ok := expressionSingleCall(stmt.values[item.source]); ok {
 				if err := c.compileCallToResults(call, target, item.resultCount); err != nil {
 					return err
 				}
@@ -435,61 +421,61 @@ func (c *compiler) compileLoweredReturn(lowered loweredReturn) error {
 			}
 			c.emit(instruction{op: opReturn, a: first, b: -(i + 1)})
 			return nil
-		case loweredValueSingle:
-			if err := c.compileExpressionTo(lowered.sources[item.source], target); err != nil {
+		case valuePlanSingle:
+			if err := c.compileExpressionTo(stmt.values[item.source], target); err != nil {
 				return err
 			}
 		default:
-			return fmt.Errorf("compile: unknown lowered value kind %d", item.kind)
+			return fmt.Errorf("compile: unknown value plan kind %d", item.kind)
 		}
 	}
-	c.reserveRegistersThrough(first + len(list.items))
-	if len(list.items) == 1 {
+	c.reserveRegistersThrough(first + plan.len())
+	if plan.len() == 1 {
 		c.emit(instruction{op: opReturnOne, a: first})
 		return nil
 	}
-	c.emit(instruction{op: opReturn, a: first, b: len(list.items)})
+	c.emit(instruction{op: opReturn, a: first, b: plan.len()})
 	return nil
 }
 
 func (c *compiler) compileCallStatement(stmt term) error {
-	return c.compileLoweredCallStatement(lowerCallStatement(stmt))
-}
-
-func (c *compiler) compileLoweredCallStatement(lowered loweredCallStatement) error {
+	if stmt.call == nil {
+		return fmt.Errorf("compile: call statement has no call")
+	}
 	result := c.allocReg()
-	return c.compileLoweredCallToResults(lowered.call, lowered.args, result, lowered.resultCount)
+	return c.compilePlannedCallToResults(planCall(*stmt.call), stmt.call.args, result, 1)
 }
 
 func (c *compiler) compileExpressionListTo(values []expression, targets []int) error {
 	if len(targets) == 0 {
 		return nil
 	}
-	return c.compileLoweredValueListTo(lowerFixedValueList(values, len(targets)), values, targets)
+	return c.compileValueListTo(fixedValueListPlan(values, len(targets)), targets)
 }
 
-func (c *compiler) compileLoweredValueListTo(list loweredValueList, values []expression, targets []int) error {
-	for i, item := range list.items {
+func (c *compiler) compileValueListTo(plan valueListPlan, targets []int) error {
+	for i := 0; i < plan.len(); i++ {
+		item := plan.item(i)
 		target := targets[i]
 		c.reserveRegistersThrough(target + 1)
 		switch item.kind {
-		case loweredValueNil:
+		case valuePlanNil:
 			c.compileNilTo(target)
 			continue
-		case loweredValueExpanded:
-			if vararg, ok := expressionSingleVararg(values[item.source]); ok {
+		case valuePlanExpanded:
+			if vararg, ok := expressionSingleVararg(plan.values[item.source]); ok {
 				return c.compileVarargToResults(vararg, target, item.resultCount)
 			}
-			if call, ok := expressionSingleCall(values[item.source]); ok {
+			if call, ok := expressionSingleCall(plan.values[item.source]); ok {
 				return c.compileCallToResults(call, target, item.resultCount)
 			}
 			return fmt.Errorf("compile: expanded value is not a call or vararg")
-		case loweredValueSingle:
-			if err := c.compileExpressionTo(values[item.source], target); err != nil {
+		case valuePlanSingle:
+			if err := c.compileExpressionTo(plan.values[item.source], target); err != nil {
 				return err
 			}
 		default:
-			return fmt.Errorf("compile: unknown lowered value kind %d", item.kind)
+			return fmt.Errorf("compile: unknown value plan kind %d", item.kind)
 		}
 	}
 	return nil
@@ -500,7 +486,7 @@ func (c *compiler) compileNilTo(target int) {
 }
 
 func (c *compiler) compileLocalFunction(stmt localFunctionStatement) error {
-	closure := lowerLocalFunctionClosure(stmt)
+	closure := planLocalFunction(stmt)
 	target := c.allocReg()
 	c.locals[stmt.name] = target
 	selfFunctionSymbol := -1
@@ -515,7 +501,7 @@ func (c *compiler) compileLocalFunction(stmt localFunctionStatement) error {
 }
 
 func (c *compiler) compileFunctionDeclaration(stmt functionDeclarationStatement) error {
-	closure := lowerFunctionDeclarationClosure(stmt)
+	closure := planFunctionDeclaration(stmt)
 
 	value := c.allocReg()
 	if err := c.compileClosureTo(closure, value); err != nil {
@@ -524,7 +510,7 @@ func (c *compiler) compileFunctionDeclaration(stmt functionDeclarationStatement)
 	return c.compileAssignTargetFromRegister(stmt.target, value)
 }
 
-func (c *compiler) compileFunctionDraft(closure loweredClosure, selfFunctionSymbol int) (*functionDraft, error) {
+func (c *compiler) compileFunctionDraft(closure closurePlan, selfFunctionSymbol int) (*functionDraft, error) {
 	selfNumericPairBase, selfNumericPairAdd := selfNumericPairAddClosureBase(closure)
 	fn := compiler{
 		bind:                c.bind,
@@ -537,13 +523,14 @@ func (c *compiler) compileFunctionDraft(closure loweredClosure, selfFunctionSymb
 		selfNumericPairBase: selfNumericPairBase,
 		variadic:            closure.variadic,
 		upvaluesByID:        newDenseSymbolSlots(len(c.bind.symbols)),
-		nextReg:             len(closure.params),
+		nextReg:             closure.paramCount(),
 		options:             c.options,
 	}
 	fn.sourceText = c.sourceText
-	for i, param := range closure.params {
+	for i := 0; i < closure.paramCount(); i++ {
+		param, paramID := closure.param(i)
 		fn.locals[param] = i
-		if symbol, ok := fn.claimSymbol(syntaxNameID(closure.paramID, i), symbolParameter); ok {
+		if symbol, ok := fn.claimSymbol(paramID, symbolParameter); ok {
 			fn.symbolRegisters[symbol.id] = i
 		}
 	}
@@ -555,7 +542,7 @@ func (c *compiler) compileFunctionDraft(closure loweredClosure, selfFunctionSymb
 	}
 
 	fn.optimizeFunction(c.options.optimizations)
-	return fn.buildFunctionDraft(fn.upvalueDescs, len(closure.params), closure.variadic), nil
+	return fn.buildFunctionDraft(fn.upvalueDescs, closure.paramCount(), closure.variadic), nil
 }
 
 func (c *compiler) compileExpression(expr expression) (int, error) {
@@ -570,7 +557,12 @@ func (c *compiler) compileExpressionTo(expr expression, target int) error {
 	c.claimRegister(target)
 	source := expressionRange(expr)
 	return c.withSourceRange(source, func() error {
-		expr = optimizeExpression(expr, c.options.optimizations)
+		if c.options.optimizations.enabled(optimizationHIRSimplify) {
+			if value, ok := foldConstantExpression(expr); ok {
+				c.emitLoadConst(target, value)
+				return nil
+			}
+		}
 		if len(expr.terms) == 0 {
 			return fmt.Errorf("compile: empty expression")
 		}
@@ -836,7 +828,7 @@ func (c *compiler) compileTermTo(term term, target int) error {
 		return c.compileTableTo(*term.table, target)
 	}
 	if term.function != nil {
-		return c.compileClosureTo(lowerClosure(*term.function), target)
+		return c.compileClosureTo(planFunctionExpression(*term.function), target)
 	}
 	if term.ifExpr != nil {
 		return c.compileIfExpressionTo(*term.ifExpr, target)
@@ -877,11 +869,11 @@ func (c *compiler) compilePowerTo(power powerExpression, target int) error {
 	return nil
 }
 
-func (c *compiler) compileClosureTo(closure loweredClosure, target int) error {
+func (c *compiler) compileClosureTo(closure closurePlan, target int) error {
 	return c.compileClosureToSelf(closure, target, -1)
 }
 
-func (c *compiler) compileClosureToSelf(closure loweredClosure, target int, selfFunctionSymbol int) error {
+func (c *compiler) compileClosureToSelf(closure closurePlan, target int, selfFunctionSymbol int) error {
 	draft, err := c.compileFunctionDraft(closure, selfFunctionSymbol)
 	if err != nil {
 		return err
@@ -1026,37 +1018,34 @@ func (c *compiler) compileLengthTo(term term, target int) error {
 }
 
 func (c *compiler) compileAssignment(stmt assignStatement) error {
-	return c.compileLoweredAssignment(lowerAssignment(stmt))
-}
-
-func (c *compiler) compileLoweredAssignment(lowered loweredAssignment) error {
-	if len(lowered.targets) == 0 {
+	if len(stmt.targets) == 0 {
 		return fmt.Errorf("compile: assignment has no targets")
 	}
+	plan := fixedValueListPlan(stmt.values, len(stmt.targets))
 
-	if c.canCompileSingleLocalAssignmentInPlace(lowered) {
-		target := lowered.targets[0]
+	if c.canCompileSingleLocalAssignmentInPlace(stmt, plan) {
+		target := stmt.targets[0]
 		ref, _ := c.resolveAssignTarget(target)
-		return c.compileExpressionTo(lowered.sources[lowered.values.items[0].source], ref.index)
+		return c.compileExpressionTo(stmt.values[plan.item(0).source], ref.index)
 	}
 
-	if addField, ok := c.addStringFieldAssignment(lowered); ok {
+	if addField, ok := c.addStringFieldAssignment(stmt, plan); ok {
 		return c.compileAddStringFieldAssignment(addField)
 	}
-	if subField, ok := c.subStringFieldAssignment(lowered); ok {
+	if subField, ok := c.subStringFieldAssignment(stmt, plan); ok {
 		return c.compileSubStringFieldAssignment(subField)
 	}
 	first := c.allocReg()
-	values := make([]int, len(lowered.targets))
+	values := make([]int, len(stmt.targets))
 	for i := range values {
 		values[i] = first + i
 	}
 	c.reserveRegistersThrough(first + len(values))
-	if err := c.compileLoweredValueListTo(lowered.values, lowered.sources, values); err != nil {
+	if err := c.compileValueListTo(plan, values); err != nil {
 		return err
 	}
 
-	for i, target := range lowered.targets {
+	for i, target := range stmt.targets {
 		if err := c.compileAssignTargetFromRegister(target, values[i]); err != nil {
 			return err
 		}
@@ -1064,26 +1053,26 @@ func (c *compiler) compileLoweredAssignment(lowered loweredAssignment) error {
 	return nil
 }
 
-func (c *compiler) canCompileSingleLocalAssignmentInPlace(lowered loweredAssignment) bool {
+func (c *compiler) canCompileSingleLocalAssignmentInPlace(stmt assignStatement, plan valueListPlan) bool {
 	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
 		return false
 	}
-	if len(lowered.targets) != 1 || len(lowered.values.items) != 1 {
+	if len(stmt.targets) != 1 || plan.len() != 1 {
 		return false
 	}
-	target := lowered.targets[0]
+	target := stmt.targets[0]
 	if len(target.selectors) != 0 {
 		return false
 	}
-	item := lowered.values.items[0]
-	if item.kind != loweredValueSingle {
+	item := plan.item(0)
+	if item.kind != valuePlanSingle {
 		return false
 	}
 	ref, ok := c.resolveAssignTarget(target)
 	if !ok || ref.kind != variableLocal {
 		return false
 	}
-	return expressionCanAssignToNameInPlace(lowered.sources[item.source], target.name)
+	return expressionCanAssignToNameInPlace(stmt.values[item.source], target.name)
 }
 
 func expressionCanAssignToNameInPlace(expr expression, name string) bool {
@@ -1350,18 +1339,18 @@ type subStringFieldAssignment struct {
 	slot    int
 }
 
-func (c *compiler) addStringFieldAssignment(lowered loweredAssignment) (addStringFieldAssignment, bool) {
+func (c *compiler) addStringFieldAssignment(stmt assignStatement, plan valueListPlan) (addStringFieldAssignment, bool) {
 	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
 		return addStringFieldAssignment{}, false
 	}
-	if len(lowered.targets) != 1 || len(lowered.values.items) != 1 {
+	if len(stmt.targets) != 1 || plan.len() != 1 {
 		return addStringFieldAssignment{}, false
 	}
-	item := lowered.values.items[0]
-	if item.kind != loweredValueSingle {
+	item := plan.item(0)
+	if item.kind != valuePlanSingle {
 		return addStringFieldAssignment{}, false
 	}
-	target := lowered.targets[0]
+	target := stmt.targets[0]
 	if len(target.selectors) != 1 || target.selectors[0].field == "" {
 		return addStringFieldAssignment{}, false
 	}
@@ -1369,7 +1358,7 @@ func (c *compiler) addStringFieldAssignment(lowered loweredAssignment) (addStrin
 	if !ok || ref.kind != variableLocal {
 		return addStringFieldAssignment{}, false
 	}
-	operand, ok := fieldAddAssignmentOperand(lowered.sources[item.source], target)
+	operand, ok := fieldAddAssignmentOperand(stmt.values[item.source], target)
 	if !ok {
 		return addStringFieldAssignment{}, false
 	}
@@ -1387,18 +1376,18 @@ func (c *compiler) addStringFieldAssignment(lowered loweredAssignment) (addStrin
 	}, true
 }
 
-func (c *compiler) subStringFieldAssignment(lowered loweredAssignment) (subStringFieldAssignment, bool) {
+func (c *compiler) subStringFieldAssignment(stmt assignStatement, plan valueListPlan) (subStringFieldAssignment, bool) {
 	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
 		return subStringFieldAssignment{}, false
 	}
-	if len(lowered.targets) != 1 || len(lowered.values.items) != 1 {
+	if len(stmt.targets) != 1 || plan.len() != 1 {
 		return subStringFieldAssignment{}, false
 	}
-	item := lowered.values.items[0]
-	if item.kind != loweredValueSingle {
+	item := plan.item(0)
+	if item.kind != valuePlanSingle {
 		return subStringFieldAssignment{}, false
 	}
-	target := lowered.targets[0]
+	target := stmt.targets[0]
 	if len(target.selectors) != 1 || target.selectors[0].field == "" {
 		return subStringFieldAssignment{}, false
 	}
@@ -1406,7 +1395,7 @@ func (c *compiler) subStringFieldAssignment(lowered loweredAssignment) (subStrin
 	if !ok || ref.kind != variableLocal {
 		return subStringFieldAssignment{}, false
 	}
-	operand, ok := fieldSubAssignmentOperand(lowered.sources[item.source], target)
+	operand, ok := fieldSubAssignmentOperand(stmt.values[item.source], target)
 	if !ok {
 		return subStringFieldAssignment{}, false
 	}
@@ -1828,28 +1817,25 @@ func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value in
 }
 
 func (c *compiler) compileIf(stmt ifStatement) error {
-	return c.compileLoweredIf(lowerIfStatement(stmt))
-}
-
-func (c *compiler) compileLoweredIf(branch loweredIfStatement) error {
+	branch := stmt
 	if !c.suppressTagChains {
 		if ok, err := c.compileStringTagElseIfChain(branch); ok || err != nil {
 			return err
 		}
 	}
-	return c.compileLoweredIfDefault(branch)
+	return c.compileIfDefault(branch)
 }
 
-func (c *compiler) compileLoweredIfSlowPath(branch loweredIfStatement) error {
+func (c *compiler) compileIfSlowPath(branch ifStatement) error {
 	previous := c.suppressTagChains
 	c.suppressTagChains = true
 	defer func() {
 		c.suppressTagChains = previous
 	}()
-	return c.compileLoweredIfDefault(branch)
+	return c.compileIfDefault(branch)
 }
 
-func (c *compiler) compileLoweredIfDefault(branch loweredIfStatement) error {
+func (c *compiler) compileIfDefault(branch ifStatement) error {
 	jumpIfFalse, ok, err := c.compileConditionJumpIfFalse(branch.condition)
 	if err != nil {
 		return err
@@ -1864,7 +1850,7 @@ func (c *compiler) compileLoweredIfDefault(branch loweredIfStatement) error {
 	}
 
 	outerLocals := copyLocals(c.locals)
-	if err := c.compileStatements(branch.thenBody); err != nil {
+	if err := c.compileStatements(branch.thenStatements); err != nil {
 		return err
 	}
 	c.locals = copyLocals(outerLocals)
@@ -1874,8 +1860,8 @@ func (c *compiler) compileLoweredIfDefault(branch loweredIfStatement) error {
 	elseStart := c.pc()
 	c.patchJump(jumpIfFalse, elseStart)
 
-	if len(branch.elseBody) > 0 {
-		if err := c.compileStatements(branch.elseBody); err != nil {
+	if len(branch.elseStatements) > 0 {
+		if err := c.compileStatements(branch.elseStatements); err != nil {
 			return err
 		}
 		c.locals = copyLocals(outerLocals)
@@ -1899,7 +1885,7 @@ type stringTagElseIfChain struct {
 	elseBody []statement
 }
 
-func (c *compiler) compileStringTagElseIfChain(branch loweredIfStatement) (bool, error) {
+func (c *compiler) compileStringTagElseIfChain(branch ifStatement) (bool, error) {
 	chain, ok := c.stringTagElseIfChain(branch)
 	if !ok {
 		return false, nil
@@ -1959,7 +1945,7 @@ func (c *compiler) compileStringTagElseIfChain(branch loweredIfStatement) (bool,
 	slowStart := c.pc()
 	c.patchJump(metatableJump, slowStart)
 	c.releaseTemp(tag)
-	if err := c.compileLoweredIfSlowPath(branch); err != nil {
+	if err := c.compileIfSlowPath(branch); err != nil {
 		return true, err
 	}
 	end := c.pc()
@@ -1970,7 +1956,7 @@ func (c *compiler) compileStringTagElseIfChain(branch loweredIfStatement) (bool,
 	return true, nil
 }
 
-func (c *compiler) stringTagElseIfChain(branch loweredIfStatement) (stringTagElseIfChain, bool) {
+func (c *compiler) stringTagElseIfChain(branch ifStatement) (stringTagElseIfChain, bool) {
 	first, firstGuards, ok := c.stringTagArmCondition(branch.condition)
 	if !ok {
 		return stringTagElseIfChain{}, false
@@ -1986,12 +1972,12 @@ func (c *compiler) stringTagElseIfChain(branch loweredIfStatement) (stringTagEls
 		arms: []stringTagElseIfArm{{
 			value:  firstValue,
 			guards: firstGuards,
-			body:   branch.thenBody,
+			body:   branch.thenStatements,
 		}},
 	}
-	elseBody := branch.elseBody
+	elseBody := branch.elseStatements
 	for len(elseBody) == 1 && elseBody[0].ifStmt != nil {
-		nextBranch := lowerIfStatement(*elseBody[0].ifStmt)
+		nextBranch := *elseBody[0].ifStmt
 		condition, guards, ok := c.stringTagArmCondition(nextBranch.condition)
 		if !ok ||
 			condition.table != chain.table ||
@@ -2006,9 +1992,9 @@ func (c *compiler) stringTagElseIfChain(branch loweredIfStatement) (stringTagEls
 		chain.arms = append(chain.arms, stringTagElseIfArm{
 			value:  conditionValue,
 			guards: guards,
-			body:   nextBranch.thenBody,
+			body:   nextBranch.thenStatements,
 		})
-		elseBody = nextBranch.elseBody
+		elseBody = nextBranch.elseStatements
 	}
 	if len(chain.arms) < 3 {
 		return stringTagElseIfChain{}, false
@@ -2037,13 +2023,12 @@ func (c *compiler) singleStringFieldEqualityCondition(expr expression) (stringFi
 }
 
 func (c *compiler) compileIfExpressionTo(expr ifExpression, target int) error {
-	branch := lowerIfExpression(expr)
-	jumpIfFalse, ok, err := c.compileConditionJumpIfFalse(branch.condition)
+	jumpIfFalse, ok, err := c.compileConditionJumpIfFalse(expr.condition)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		condition, err := c.compileExpression(branch.condition)
+		condition, err := c.compileExpression(expr.condition)
 		if err != nil {
 			return err
 		}
@@ -2051,14 +2036,14 @@ func (c *compiler) compileIfExpressionTo(expr ifExpression, target int) error {
 		c.releaseTemp(condition)
 	}
 
-	if err := c.compileExpressionTo(branch.thenValue, target); err != nil {
+	if err := c.compileExpressionTo(expr.thenValue, target); err != nil {
 		return err
 	}
 
 	jumpEnd := c.emitJump()
 
 	c.patchJump(jumpIfFalse, c.pc())
-	if err := c.compileExpressionTo(branch.elseValue, target); err != nil {
+	if err := c.compileExpressionTo(expr.elseValue, target); err != nil {
 		return err
 	}
 
@@ -2070,7 +2055,6 @@ func (c *compiler) compileConditionJumpIfFalse(expr expression) (int, bool, erro
 	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
 		return 0, false, nil
 	}
-	expr = optimizeExpression(expr, c.options.optimizations)
 	if jump, ok, err := c.compileRowStringFieldPairEqualityJumpIfFalse(expr); ok || err != nil {
 		return jump, ok, err
 	}
@@ -2852,7 +2836,11 @@ func (c *compiler) concatLocalRef(expr concatExpression) (variableRef, bool) {
 }
 
 func (c *compiler) expressionLocalRef(expr expression) (variableRef, bool) {
-	expr = optimizeExpression(expr, c.options.optimizations)
+	if c.options.optimizations.enabled(optimizationHIRSimplify) {
+		if _, ok := foldConstantExpression(expr); ok {
+			return variableRef{}, false
+		}
+	}
 	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
 		return variableRef{}, false
 	}
@@ -2889,18 +2877,14 @@ func (c *compiler) compileContinue() error {
 }
 
 func (c *compiler) compileWhile(stmt whileStatement) error {
-	loopShape := lowerWhileLoop(stmt)
-	if loopShape.kind != loweredLoopPreTest || loopShape.continueTarget != loweredLoopContinueCondition {
-		return fmt.Errorf("compile: invalid while loop lowering")
-	}
 	conditionStart := c.pc()
 
-	jumpIfFalse, ok, err := c.compileConditionJumpIfFalse(loopShape.condition)
+	jumpIfFalse, ok, err := c.compileConditionJumpIfFalse(stmt.condition)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		condition, err := c.compileExpression(loopShape.condition)
+		condition, err := c.compileExpression(stmt.condition)
 		if err != nil {
 			return err
 		}
@@ -2910,7 +2894,7 @@ func (c *compiler) compileWhile(stmt whileStatement) error {
 
 	outerLocals := copyLocals(c.locals)
 	c.loops = append(c.loops, loopContext{continueTarget: conditionStart})
-	if err := c.compileStatements(loopShape.body); err != nil {
+	if err := c.compileStatements(stmt.statements); err != nil {
 		return err
 	}
 	loop := c.loops[len(c.loops)-1]
@@ -2926,22 +2910,18 @@ func (c *compiler) compileWhile(stmt whileStatement) error {
 }
 
 func (c *compiler) compileFor(stmt forStatement) error {
-	loopShape := lowerNumericForLoop(stmt)
-	if loopShape.continueTarget != loweredNumericForContinueIncrement {
-		return fmt.Errorf("compile: invalid numeric for loop lowering")
-	}
 	loopVar := c.allocReg()
 	limit := c.allocReg()
 	step := c.allocReg()
 
-	if err := c.compileExpressionTo(loopShape.start, loopVar); err != nil {
+	if err := c.compileExpressionTo(stmt.start, loopVar); err != nil {
 		return err
 	}
-	if err := c.compileExpressionTo(loopShape.limit, limit); err != nil {
+	if err := c.compileExpressionTo(stmt.limit, limit); err != nil {
 		return err
 	}
-	if !loopShape.defaultStep {
-		if err := c.compileExpressionTo(*loopShape.step, step); err != nil {
+	if stmt.step != nil {
+		if err := c.compileExpressionTo(*stmt.step, step); err != nil {
 			return err
 		}
 	} else {
@@ -2957,9 +2937,9 @@ func (c *compiler) compileFor(stmt forStatement) error {
 	jumpExit := c.emit(instruction{op: opNumericForCheck, a: loopVar, b: limit, c: step})
 
 	outerLocals := copyLocals(c.locals)
-	c.locals[loopShape.name] = loopVar
+	c.locals[stmt.name] = loopVar
 	c.loops = append(c.loops, loopContext{continueTarget: -1})
-	if err := c.compileStatements(loopShape.body); err != nil {
+	if err := c.compileStatements(stmt.statements); err != nil {
 		return err
 	}
 	loop := c.loops[len(c.loops)-1]
@@ -2981,11 +2961,7 @@ func (c *compiler) compileFor(stmt forStatement) error {
 }
 
 func (c *compiler) compileGenericFor(stmt genericForStatement) error {
-	loopShape := lowerGenericForLoop(stmt)
-	if loopShape.continueTarget != loweredGenericForContinueIterator {
-		return fmt.Errorf("compile: invalid generic for loop lowering")
-	}
-	if len(loopShape.names) == 0 {
+	if len(stmt.names) == 0 {
 		return fmt.Errorf("compile: generic for has no names")
 	}
 
@@ -2993,26 +2969,26 @@ func (c *compiler) compileGenericFor(stmt genericForStatement) error {
 	state := c.allocReg()
 	control := c.allocReg()
 	targets := []int{generator, state, control}
-	if err := c.compileExpressionListTo(loopShape.values, targets); err != nil {
+	if err := c.compileExpressionListTo(stmt.values, targets); err != nil {
 		return err
 	}
-	if loopShape.prepareDirectIterator {
+	if len(stmt.values) == 1 {
 		c.emit(instruction{op: opPrepareIter, a: generator, b: state, c: control})
 	}
 
 	resultStart := control
 	c.reserveRegistersThrough(resultStart + 4)
-	c.reserveRegistersThrough(resultStart + len(loopShape.names))
-	c.claimRegisterRange(resultStart, resultStart+len(loopShape.names))
+	c.reserveRegistersThrough(resultStart + len(stmt.names))
+	c.claimRegisterRange(resultStart, resultStart+len(stmt.names))
 	loopStart := c.pc()
 	var jumpExit int
-	if len(loopShape.names) == 2 {
+	if len(stmt.names) == 2 {
 		jumpExit = c.emit(instruction{op: opArrayNextJump2, a: resultStart, b: generator, c: state})
 	} else {
 		nilReg := c.allocReg()
 		c.compileNilTo(nilReg)
 		condition := c.allocReg()
-		c.emit(instruction{op: opArrayNext, a: resultStart, b: generator, c: state, d: len(loopShape.names)})
+		c.emit(instruction{op: opArrayNext, a: resultStart, b: generator, c: state, d: len(stmt.names)})
 		c.emit(instruction{op: opMove, a: control, b: resultStart})
 		c.emit(instruction{op: opNotEqual, a: condition, b: resultStart, c: nilReg})
 		jumpExit = c.emitJumpIfFalse(condition)
@@ -3022,21 +2998,21 @@ func (c *compiler) compileGenericFor(stmt genericForStatement) error {
 	outerStringSlots := copyLocalStringSlots(c.localStringSlots)
 	outerRowStringSlots := copyLocalStringSlots(c.localRowStringSlots)
 	outerFieldArrayElemSlots := copyLocalFieldArrayElemSlots(c.localFieldArrayElemSlots)
-	for i, name := range loopShape.names {
+	for i, name := range stmt.names {
 		register := resultStart + i
 		c.locals[name] = register
-		if i == 1 && len(loopShape.values) == 1 {
-			if slots, ok := c.expressionArrayElementSlots(loopShape.values[0]); ok {
+		if i == 1 && len(stmt.values) == 1 {
+			if slots, ok := c.expressionArrayElementSlots(stmt.values[0]); ok {
 				setLocalSlots(&c.localStringSlots, register, slots)
 				setLocalSlots(&c.localRowStringSlots, register, slots)
 			}
-			if slots, ok := c.expressionArrayElementFieldSlots(loopShape.values[0]); ok {
+			if slots, ok := c.expressionArrayElementFieldSlots(stmt.values[0]); ok {
 				setLocalNestedSlots(&c.localFieldArrayElemSlots, register, slots)
 			}
 		}
 	}
 	c.loops = append(c.loops, loopContext{continueTarget: loopStart})
-	if err := c.compileStatements(loopShape.body); err != nil {
+	if err := c.compileStatements(stmt.statements); err != nil {
 		return err
 	}
 	loop := c.loops[len(c.loops)-1]
@@ -3056,15 +3032,11 @@ func (c *compiler) compileGenericFor(stmt genericForStatement) error {
 }
 
 func (c *compiler) compileRepeat(stmt repeatStatement) error {
-	loopShape := lowerRepeatLoop(stmt)
-	if loopShape.kind != loweredLoopPostTest || loopShape.continueTarget != loweredLoopContinueCondition {
-		return fmt.Errorf("compile: invalid repeat loop lowering")
-	}
 	bodyStart := c.pc()
 
 	outerLocals := copyLocals(c.locals)
 	c.loops = append(c.loops, loopContext{continueTarget: -1})
-	if err := c.compileStatements(loopShape.body); err != nil {
+	if err := c.compileStatements(stmt.statements); err != nil {
 		return err
 	}
 	loop := c.loops[len(c.loops)-1]
@@ -3075,7 +3047,7 @@ func (c *compiler) compileRepeat(stmt repeatStatement) error {
 		c.patchJump(jump, conditionStart)
 	}
 
-	condition, err := c.compileExpression(loopShape.condition)
+	condition, err := c.compileExpression(stmt.condition)
 	if err != nil {
 		return err
 	}
@@ -3091,35 +3063,25 @@ func (c *compiler) compileRepeat(stmt repeatStatement) error {
 }
 
 func (c *compiler) compileBlock(stmt blockStatement) error {
-	return c.compileLoweredBlock(lowerBlock(stmt))
-}
-
-func (c *compiler) compileLoweredBlock(lowered loweredBlock) error {
-	var outerLocals map[string]int
-	if lowered.lexicalScope {
-		outerLocals = copyLocals(c.locals)
-	}
-	if err := c.compileStatements(lowered.body); err != nil {
+	outerLocals := copyLocals(c.locals)
+	if err := c.compileStatements(stmt.statements); err != nil {
 		return err
 	}
-	if lowered.lexicalScope {
-		c.locals = copyLocals(outerLocals)
-	}
+	c.locals = copyLocals(outerLocals)
 	return nil
 }
 
 func (c *compiler) compileTableTo(table tableExpression, target int) error {
-	lowered := lowerTable(table)
-	arrayCapacity, fieldCapacity := loweredTableCapacity(lowered)
+	arrayCapacity, fieldCapacity := tableCapacity(table)
 	c.emit(instruction{op: opNewTable, a: target, b: arrayCapacity, c: fieldCapacity})
-	for _, field := range lowered.fields {
+	for _, field := range table.fields {
 		value := c.allocTemp()
 		if err := c.compileExpressionTo(field.value, value); err != nil {
 			c.releaseTemp(value)
 			return err
 		}
-		switch field.kind {
-		case loweredTableFieldComputed:
+		switch {
+		case field.key != nil:
 			key := c.allocTemp()
 			if err := c.compileExpressionTo(*field.key, key); err != nil {
 				c.releaseTemp(key)
@@ -3128,31 +3090,31 @@ func (c *compiler) compileTableTo(table tableExpression, target int) error {
 			}
 			c.emit(instruction{op: opSetIndex, a: target, b: key, c: value})
 			c.releaseTemp(key)
-		case loweredTableFieldArray:
+		case field.arrayIndex != 0:
 			key := c.addConstant(NumberValue(float64(field.arrayIndex)))
 			c.emit(instruction{op: opSetField, a: target, b: key, c: value})
-		case loweredTableFieldNamed:
+		case field.name != "":
 			key := c.addStringConstant(field.name)
 			c.emit(instruction{op: opSetStringField, a: target, b: key, c: value})
 		default:
 			c.releaseTemp(value)
-			return fmt.Errorf("compile: unknown lowered table field kind %d", field.kind)
+			return fmt.Errorf("compile: table field has no key")
 		}
 		c.releaseTemp(value)
 	}
 	return nil
 }
 
-func loweredTableCapacity(table loweredTable) (int, int) {
+func tableCapacity(table tableExpression) (int, int) {
 	arrayCapacity := 0
 	fieldCapacity := 0
 	for _, field := range table.fields {
-		switch field.kind {
-		case loweredTableFieldArray:
+		switch {
+		case field.arrayIndex != 0:
 			if field.arrayIndex > arrayCapacity {
 				arrayCapacity = field.arrayIndex
 			}
-		case loweredTableFieldNamed, loweredTableFieldComputed:
+		case field.name != "" || field.key != nil:
 			fieldCapacity++
 		}
 	}
@@ -3335,14 +3297,14 @@ func (c *compiler) compileCallTo(call callExpression, target int) error {
 }
 
 func (c *compiler) compileCallToResults(call callExpression, target int, resultCount int) error {
-	lowered := lowerCall(call)
-	return c.compileLoweredCallToResults(lowered, call.args, target, resultCount)
+	plan := planCall(call)
+	return c.compilePlannedCallToResults(plan, call.args, target, resultCount)
 }
 
-func (c *compiler) compileLoweredCallToResults(lowered loweredCall, args []expression, target int, resultCount int) error {
+func (c *compiler) compilePlannedCallToResults(plan callPlan, args []expression, target int, resultCount int) error {
 	if c.callNeedsScratch(target, resultCount) {
 		scratch := c.nextReg
-		if err := c.compileLoweredCallToResultsDirect(lowered, args, scratch, resultCount); err != nil {
+		if err := c.compilePlannedCallToResultsDirect(plan, args, scratch, resultCount); err != nil {
 			return err
 		}
 		for i := 0; i < resultCount; i++ {
@@ -3351,7 +3313,7 @@ func (c *compiler) compileLoweredCallToResults(lowered loweredCall, args []expre
 		c.claimRegisterRange(target, target+resultCount)
 		return nil
 	}
-	return c.compileLoweredCallToResultsDirect(lowered, args, target, resultCount)
+	return c.compilePlannedCallToResultsDirect(plan, args, target, resultCount)
 }
 
 func (c *compiler) callNeedsScratch(target int, resultCount int) bool {
@@ -3373,7 +3335,7 @@ func (c *compiler) registerIsLocal(register int) bool {
 	return false
 }
 
-func (c *compiler) compileLoweredCallToResultsDirect(lowered loweredCall, args []expression, target int, resultCount int) error {
+func (c *compiler) compilePlannedCallToResultsDirect(lowered callPlan, args []expression, target int, resultCount int) error {
 	if c.selectVarargCountCall(lowered, args, resultCount) {
 		return c.compileSelectVarargCountToResults(target, resultCount)
 	}
@@ -3398,7 +3360,7 @@ func (c *compiler) compileLoweredCallToResultsDirect(lowered loweredCall, args [
 	if upvalue, ok := c.upvalueOneResultCall(lowered, resultCount); ok {
 		return c.compileUpvalueOneResultCallToResults(upvalue, lowered, args, target)
 	}
-	return c.compileLoweredCallToResultsGeneric(lowered, args, target, resultCount)
+	return c.compilePlannedCallToResultsGeneric(lowered, args, target, resultCount)
 }
 
 type methodOneResultCall struct {
@@ -3413,7 +3375,7 @@ type tableFieldKeyOneResultCall struct {
 	keySlot  int
 }
 
-func (c *compiler) methodOneResultCall(lowered loweredCall, resultCount int) (methodOneResultCall, bool) {
+func (c *compiler) methodOneResultCall(lowered callPlan, resultCount int) (methodOneResultCall, bool) {
 	if resultCount != 1 || lowered.receiver == nil {
 		return methodOneResultCall{}, false
 	}
@@ -3433,8 +3395,8 @@ func (c *compiler) methodOneResultCall(lowered loweredCall, resultCount int) (me
 	if !ok || targetBase.index != receiver.index {
 		return methodOneResultCall{}, false
 	}
-	for _, item := range lowered.args.items {
-		if item.kind != loweredValueSingle {
+	for i := range lowered.args.len() {
+		if lowered.args.item(i).kind != valuePlanSingle {
 			return methodOneResultCall{}, false
 		}
 	}
@@ -3446,13 +3408,14 @@ func (c *compiler) methodOneResultCall(lowered loweredCall, resultCount int) (me
 
 func (c *compiler) compileMethodOneResultCallToResults(
 	method methodOneResultCall,
-	lowered loweredCall,
+	lowered callPlan,
 	args []expression,
 	target int,
 ) error {
 	span := len(args) + 2
 	c.reserveRegistersThrough(target + span)
-	for i, item := range lowered.args.items {
+	for i := range lowered.args.len() {
+		item := lowered.args.item(i)
 		if err := c.compileExpressionTo(args[item.source], target+2+i); err != nil {
 			return err
 		}
@@ -3463,14 +3426,14 @@ func (c *compiler) compileMethodOneResultCallToResults(
 	return nil
 }
 
-func (c *compiler) tableFieldKeyOneResultCall(lowered loweredCall, resultCount int) (tableFieldKeyOneResultCall, bool) {
+func (c *compiler) tableFieldKeyOneResultCall(lowered callPlan, resultCount int) (tableFieldKeyOneResultCall, bool) {
 	if !c.options.optimizations.enabled(optimizationBytecodePeephole) ||
 		resultCount != 1 ||
 		lowered.receiver != nil {
 		return tableFieldKeyOneResultCall{}, false
 	}
-	for _, item := range lowered.args.items {
-		if item.kind != loweredValueSingle {
+	for i := range lowered.args.len() {
+		if lowered.args.item(i).kind != valuePlanSingle {
 			return tableFieldKeyOneResultCall{}, false
 		}
 	}
@@ -3513,14 +3476,15 @@ func (c *compiler) localStringFieldSlot(register int, field string) int {
 
 func (c *compiler) compileTableFieldKeyOneResultCallToResults(
 	call tableFieldKeyOneResultCall,
-	lowered loweredCall,
+	lowered callPlan,
 	args []expression,
 	target int,
 ) error {
 	argCount := len(args)
 	keySource := target + argCount + 1
 	c.reserveRegistersThrough(keySource + 1)
-	for i, item := range lowered.args.items {
+	for i := range lowered.args.len() {
+		item := lowered.args.item(i)
 		if err := c.compileExpressionTo(args[item.source], target+1+i); err != nil {
 			return err
 		}
@@ -3536,14 +3500,14 @@ func (c *compiler) compileTableFieldKeyOneResultCallToResults(
 	return nil
 }
 
-func (c *compiler) selectVarargCountCall(lowered loweredCall, args []expression, resultCount int) bool {
+func (c *compiler) selectVarargCountCall(lowered callPlan, args []expression, resultCount int) bool {
 	if resultCount == 0 || lowered.receiver != nil || !c.variadic {
 		return false
 	}
 	if !c.isUnboundGlobalName(lowered.target, "select") {
 		return false
 	}
-	if len(args) != 2 || len(lowered.args.items) != 2 {
+	if len(args) != 2 || lowered.args.len() != 2 {
 		return false
 	}
 	if marker, ok := expressionStringLiteral(args[0]); !ok || marker != "#" {
@@ -3552,8 +3516,8 @@ func (c *compiler) selectVarargCountCall(lowered loweredCall, args []expression,
 	if _, ok := expressionSingleVararg(args[1]); !ok {
 		return false
 	}
-	return lowered.args.items[0].kind == loweredValueSingle &&
-		lowered.args.items[1].kind == loweredValueExpanded
+	return lowered.args.item(0).kind == valuePlanSingle &&
+		lowered.args.item(1).kind == valuePlanExpanded
 }
 
 func (c *compiler) compileSelectVarargCountToResults(target int, resultCount int) error {
@@ -3563,7 +3527,7 @@ func (c *compiler) compileSelectVarargCountToResults(target int, resultCount int
 	return nil
 }
 
-func (c *compiler) rawLenIntrinsicCall(lowered loweredCall) bool {
+func (c *compiler) rawLenIntrinsicCall(lowered callPlan) bool {
 	return c.options.optimizations.enabled(optimizationBytecodePeephole) &&
 		lowered.receiver == nil &&
 		c.isUnboundGlobalName(lowered.target, "rawlen")
@@ -3592,7 +3556,7 @@ func expressionStringLiteral(expr expression) (string, bool) {
 	return value.lit.String()
 }
 
-func (c *compiler) upvalueOneResultCall(lowered loweredCall, resultCount int) (int, bool) {
+func (c *compiler) upvalueOneResultCall(lowered callPlan, resultCount int) (int, bool) {
 	if resultCount != 1 || lowered.receiver != nil {
 		return 0, false
 	}
@@ -3600,8 +3564,8 @@ func (c *compiler) upvalueOneResultCall(lowered loweredCall, resultCount int) (i
 	if !isNamedTerm(target) || len(target.selectors) != 0 {
 		return 0, false
 	}
-	for _, item := range lowered.args.items {
-		if item.kind != loweredValueSingle {
+	for i := range lowered.args.len() {
+		if lowered.args.item(i).kind != valuePlanSingle {
 			return 0, false
 		}
 	}
@@ -3613,7 +3577,7 @@ func (c *compiler) upvalueOneResultCall(lowered loweredCall, resultCount int) (i
 	return ref.index, ok && ref.kind == variableUpvalue
 }
 
-func (c *compiler) selfUpvalueOneResultCall(lowered loweredCall, resultCount int) (int, bool) {
+func (c *compiler) selfUpvalueOneResultCall(lowered callPlan, resultCount int) (int, bool) {
 	if c.selfFunctionSymbol < 0 || resultCount != 1 || lowered.receiver != nil {
 		return 0, false
 	}
@@ -3621,8 +3585,8 @@ func (c *compiler) selfUpvalueOneResultCall(lowered loweredCall, resultCount int
 	if !isNamedTerm(target) || len(target.selectors) != 0 {
 		return 0, false
 	}
-	for _, item := range lowered.args.items {
-		if item.kind != loweredValueSingle {
+	for i := range lowered.args.len() {
+		if lowered.args.item(i).kind != valuePlanSingle {
 			return 0, false
 		}
 	}
@@ -3634,7 +3598,7 @@ func (c *compiler) selfUpvalueOneResultCall(lowered loweredCall, resultCount int
 	return ref.index, ok && ref.kind == variableUpvalue
 }
 
-func (c *compiler) localOneResultCall(lowered loweredCall, resultCount int) (int, bool) {
+func (c *compiler) localOneResultCall(lowered callPlan, resultCount int) (int, bool) {
 	if resultCount != 1 || lowered.receiver != nil {
 		return 0, false
 	}
@@ -3642,8 +3606,8 @@ func (c *compiler) localOneResultCall(lowered loweredCall, resultCount int) (int
 	if !isNamedTerm(target) || len(target.selectors) != 0 {
 		return 0, false
 	}
-	for _, item := range lowered.args.items {
-		if item.kind != loweredValueSingle {
+	for i := range lowered.args.len() {
+		if lowered.args.item(i).kind != valuePlanSingle {
 			return 0, false
 		}
 	}
@@ -3655,13 +3619,14 @@ func (c *compiler) localOneResultCall(lowered loweredCall, resultCount int) (int
 	return ref.index, ok && ref.kind == variableLocal
 }
 
-func (c *compiler) compileLocalOneResultCallToResults(local int, lowered loweredCall, args []expression, target int) error {
+func (c *compiler) compileLocalOneResultCallToResults(local int, lowered callPlan, args []expression, target int) error {
 	span := len(args)
 	if span <= 0 {
 		span = 1
 	}
 	c.reserveRegistersThrough(target + span)
-	for i, item := range lowered.args.items {
+	for i := range lowered.args.len() {
+		item := lowered.args.item(i)
 		if err := c.compileExpressionTo(args[item.source], target+i); err != nil {
 			return err
 		}
@@ -3671,13 +3636,14 @@ func (c *compiler) compileLocalOneResultCallToResults(local int, lowered lowered
 	return nil
 }
 
-func (c *compiler) compileUpvalueOneResultCallToResults(upvalue int, lowered loweredCall, args []expression, target int) error {
+func (c *compiler) compileUpvalueOneResultCallToResults(upvalue int, lowered callPlan, args []expression, target int) error {
 	span := len(args)
 	if span <= 0 {
 		span = 1
 	}
 	c.reserveRegistersThrough(target + span)
-	for i, item := range lowered.args.items {
+	for i := range lowered.args.len() {
+		item := lowered.args.item(i)
 		if err := c.compileExpressionTo(args[item.source], target+i); err != nil {
 			return err
 		}
@@ -3687,7 +3653,7 @@ func (c *compiler) compileUpvalueOneResultCallToResults(upvalue int, lowered low
 	return nil
 }
 
-func (c *compiler) compileSelfUpvalueOneResultCallToResults(upvalue int, lowered loweredCall, args []expression, target int) error {
+func (c *compiler) compileSelfUpvalueOneResultCallToResults(upvalue int, lowered callPlan, args []expression, target int) error {
 	if source, constant, ok := c.selfCallSubtractConstantArg(args); ok {
 		c.reserveRegistersThrough(target + 1)
 		c.claimRegister(target)
@@ -3701,7 +3667,8 @@ func (c *compiler) compileSelfUpvalueOneResultCallToResults(upvalue int, lowered
 		span = 1
 	}
 	c.reserveRegistersThrough(target + span)
-	for i, item := range lowered.args.items {
+	for i := range lowered.args.len() {
+		item := lowered.args.item(i)
 		if err := c.compileExpressionTo(args[item.source], target+i); err != nil {
 			return err
 		}
@@ -3824,19 +3791,19 @@ func (c *compiler) selfCallSubtractConstantArg(args []expression) (int, int, boo
 	return ref.index, c.addConstant(NumberValue(number)), true
 }
 
-func (c *compiler) tableIntrinsicCall(lowered loweredCall) (nativeFuncID, bool) {
+func (c *compiler) tableIntrinsicCall(lowered callPlan) (nativeFuncID, bool) {
 	return c.baseFieldIntrinsicCall(lowered, "table")
 }
 
-func (c *compiler) coroutineIntrinsicCall(lowered loweredCall) (nativeFuncID, bool) {
+func (c *compiler) coroutineIntrinsicCall(lowered callPlan) (nativeFuncID, bool) {
 	return c.baseFieldIntrinsicCall(lowered, "coroutine")
 }
 
-func (c *compiler) mathIntrinsicCall(lowered loweredCall) (nativeFuncID, bool) {
+func (c *compiler) mathIntrinsicCall(lowered callPlan) (nativeFuncID, bool) {
 	return c.baseFieldIntrinsicCall(lowered, "math")
 }
 
-func (c *compiler) baseFieldIntrinsicCall(lowered loweredCall, globalName string) (nativeFuncID, bool) {
+func (c *compiler) baseFieldIntrinsicCall(lowered callPlan, globalName string) (nativeFuncID, bool) {
 	if !c.options.optimizations.enabled(optimizationBytecodePeephole) ||
 		lowered.receiver != nil ||
 		!c.isUnboundBaseField(lowered.target, globalName) {
@@ -3850,15 +3817,15 @@ func (c *compiler) baseFieldIntrinsicCall(lowered loweredCall, globalName string
 	return intrinsic.nativeID, true
 }
 
-func selfNumericPairAddClosureBase(closure loweredClosure) (float64, bool) {
-	if len(closure.params) != 1 ||
+func selfNumericPairAddClosureBase(closure closurePlan) (float64, bool) {
+	if closure.paramCount() != 1 ||
 		closure.variadic ||
 		len(closure.body) != 2 ||
 		closure.body[0].ifStmt == nil ||
 		closure.body[1].ret == nil {
 		return 0, false
 	}
-	param := closure.params[0]
+	param, _ := closure.param(0)
 	ifStmt := closure.body[0].ifStmt
 	if len(ifStmt.thenStatements) != 1 ||
 		ifStmt.thenStatements[0].ret == nil ||
@@ -3924,14 +3891,14 @@ func (c *compiler) isUnboundBaseField(term term, name string) bool {
 
 func (c *compiler) compileBaseIntrinsicCallToResults(
 	nativeID nativeFuncID,
-	lowered loweredCall,
+	lowered callPlan,
 	args []expression,
 	target int,
 	resultCount int,
 ) error {
-	for _, item := range lowered.args.items {
-		if item.kind != loweredValueSingle {
-			return c.compileLoweredCallToResultsGeneric(lowered, args, target, resultCount)
+	for i := range lowered.args.len() {
+		if lowered.args.item(i).kind != valuePlanSingle {
+			return c.compilePlannedCallToResultsGeneric(lowered, args, target, resultCount)
 		}
 	}
 
@@ -3943,7 +3910,8 @@ func (c *compiler) compileBaseIntrinsicCallToResults(
 		span = 1
 	}
 	c.reserveRegistersThrough(target + span)
-	for i, item := range lowered.args.items {
+	for i := range lowered.args.len() {
+		item := lowered.args.item(i)
 		if err := c.compileExpressionTo(args[item.source], target+i); err != nil {
 			return err
 		}
@@ -3957,7 +3925,7 @@ func (c *compiler) compileBaseIntrinsicCallToResults(
 	return nil
 }
 
-func (c *compiler) compileLoweredCallToResultsGeneric(lowered loweredCall, args []expression, target int, resultCount int) error {
+func (c *compiler) compilePlannedCallToResultsGeneric(lowered callPlan, args []expression, target int, resultCount int) error {
 	if err := c.compileCallTargetTo(lowered.target, target); err != nil {
 		return err
 	}
@@ -3976,10 +3944,11 @@ func (c *compiler) compileLoweredCallToResultsGeneric(lowered loweredCall, args 
 	}
 
 	argCount := fixedArgCount
-	for _, item := range lowered.args.items {
+	for i := range lowered.args.len() {
+		item := lowered.args.item(i)
 		argRegister := firstArg + item.source
 		switch item.kind {
-		case loweredValueExpanded:
+		case valuePlanExpanded:
 			openTarget := argRegister
 			c.reserveRegistersThrough(openTarget + 1)
 			if vararg, ok := expressionSingleVararg(args[item.source]); ok {
@@ -3994,14 +3963,14 @@ func (c *compiler) compileLoweredCallToResultsGeneric(lowered loweredCall, args 
 				return fmt.Errorf("compile: expanded call argument is not a call or vararg")
 			}
 			argCount = -(fixedArgCount + 1)
-		case loweredValueSingle:
+		case valuePlanSingle:
 			if err := c.compileExpressionTo(args[item.source], argRegister); err != nil {
 				return err
 			}
 			fixedArgCount++
 			argCount = fixedArgCount
 		default:
-			return fmt.Errorf("compile: unknown lowered value kind %d", item.kind)
+			return fmt.Errorf("compile: unknown value plan kind %d", item.kind)
 		}
 	}
 	if resultCount > 0 {

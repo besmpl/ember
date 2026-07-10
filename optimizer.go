@@ -830,49 +830,6 @@ func registerKilledBeforeRead(code []instruction, register int) (bool, bool) {
 	return false, false
 }
 
-func optimizeExpression(expr expression, options optimizationOptions) expression {
-	if !options.enabled(optimizationHIRSimplify) {
-		return expr
-	}
-	if value, ok := foldConstantExpression(expr); ok {
-		return valueLiteralExpression(value)
-	}
-	return expr
-}
-
-func numberLiteralExpression(number float64) expression {
-	return valueLiteralExpression(NumberValue(number))
-}
-
-func valueLiteralExpression(value Value) expression {
-	literal := term{}
-	switch value.kind {
-	case NumberKind:
-		number := value.number
-		literal.number = &number
-	default:
-		value := value
-		literal.lit = &value
-	}
-	return expression{
-		terms: []andExpression{
-			{
-				terms: []comparisonExpression{
-					{
-						left: concatExpression{
-							first: additiveExpression{
-								first: multiplicativeExpression{
-									first: literal,
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
 func foldConstantExpression(expr expression) (Value, bool) {
 	if len(expr.terms) != 1 {
 		return NilValue(), false
@@ -1056,12 +1013,11 @@ func foldConstantLength(expr term) (Value, bool) {
 }
 
 func foldConstantTableLength(table tableExpression) (int, bool) {
-	lowered := lowerTable(table)
-	if len(lowered.fields) == 0 {
+	if len(table.fields) == 0 {
 		return 0, true
 	}
-	for index, field := range lowered.fields {
-		if field.kind != loweredTableFieldArray || field.arrayIndex != index+1 {
+	for index, field := range table.fields {
+		if field.key != nil || field.name != "" || field.arrayIndex != index+1 {
 			return 0, false
 		}
 		value, ok := foldConstantExpression(field.value)
@@ -1069,7 +1025,7 @@ func foldConstantTableLength(table tableExpression) (int, bool) {
 			return 0, false
 		}
 	}
-	return len(lowered.fields), true
+	return len(table.fields), true
 }
 
 func foldNumberExpression(expr expression) (float64, bool) {
