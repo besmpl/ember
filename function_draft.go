@@ -34,6 +34,7 @@ func (c *compiler) optimizeFunction(options optimizationOptions) {
 	c.ir = optimizeBytecodeIRWithFacts(c.ir, bytecodeIROptimizationFacts{
 		constants:         c.constants,
 		capturedRegisters: functionDraftCapturedRegisters(c.prototypeDrafts),
+		constantPool:      &c.bytecodeBuilder,
 	}, options)
 }
 

@@ -2714,7 +2714,7 @@ return total
 	var counts directFrameOpcodeCounts
 	var pic directFramePICCounts
 	thread := newVMThread(runtimeGlobals(nil))
-	thread.instructionBudget = 5
+	thread.instructionBudget = 7
 	thread.directFrameInstrumented = true
 	thread.directFrameOpcodeCounts = &counts
 	thread.directFramePICCounts = &pic
@@ -2894,7 +2894,7 @@ func TestVMLineDebugHookReportsSourceLineChanges(t *testing.T) {
 	if !ok || got != 3 {
 		t.Fatalf("thread.run result is %v (%t), want number 3", got, ok)
 	}
-	wantLines := []int{1, 2}
+	wantLines := []int{2}
 	if !reflect.DeepEqual(lines, wantLines) {
 		t.Fatalf("line hook lines are %#v, want %#v", lines, wantLines)
 	}
@@ -3864,10 +3864,6 @@ return total
 			t.Fatalf("compiled numeric for kept register-form zero coercion %q:\n%s", oldCoercion, joined)
 		}
 	}
-	if !strings.Contains(joined, "ADD_K") {
-		t.Fatalf("compiled numeric for did not use constant-form coercions:\n%s", joined)
-	}
-
 	results, err := Run(proto)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
@@ -4629,7 +4625,7 @@ return proxy.value + 3
 func TestRunDirectFrameTableAccessIslandResumesAfterNewIndexMetatable(t *testing.T) {
 	proto, err := Compile(`
 proxy.value = 4
-local value = 1
+local value = seed
 return value + 2
 `)
 	if err != nil {
@@ -4652,7 +4648,7 @@ return value + 2
 	proxy.setMetatable(metatable)
 
 	var counts directFrameOpcodeCounts
-	thread := newVMThread(runtimeGlobals(map[string]Value{"proxy": TableValue(proxy)}))
+	thread := newVMThread(runtimeGlobals(map[string]Value{"proxy": TableValue(proxy), "seed": NumberValue(1)}))
 	thread.directFrameInstrumented = true
 	thread.directFrameOpcodeCounts = &counts
 	results, err := thread.run(proto, nil, nil)
@@ -4717,7 +4713,7 @@ func TestRunDirectFrameTableAccessIslandResumesAfterDynamicNewIndexMetatable(t *
 	proto, err := Compile(`
 local key = "value"
 proxy[key] = 4
-local value = 1
+local value = seed
 return value + 2
 `)
 	if err != nil {
@@ -4740,7 +4736,7 @@ return value + 2
 	proxy.setMetatable(metatable)
 
 	var counts directFrameOpcodeCounts
-	thread := newVMThread(runtimeGlobals(map[string]Value{"proxy": TableValue(proxy)}))
+	thread := newVMThread(runtimeGlobals(map[string]Value{"proxy": TableValue(proxy), "seed": NumberValue(1)}))
 	thread.directFrameInstrumented = true
 	thread.directFrameOpcodeCounts = &counts
 	results, err := thread.run(proto, nil, nil)
@@ -5032,27 +5028,30 @@ return direct, viaPairs
 
 func TestRunDirectFrameConcatLenPowRawFastPaths(t *testing.T) {
 	proto, err := Compile(`
-local values = {10, 20, 30}
-local sep = ":"
-local ready = "ready"
-local suffix = "ab"
-local base = 2
-local label = "hp" .. sep .. ready
-local length = #values + #suffix
-local power = base ^ 5
-return label, length, power
+	local function compute(sep, ready, suffix, base)
+		local values = {10, 20, 30}
+		local label = "hp" .. sep .. ready
+		local length = #values + #suffix
+		local power = base ^ 5
+		return label, length, power
+	end
+	return compute(":", "ready", "ab", 2)
 	`)
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	joined := strings.Join(disassembleProto(proto), "\n")
+	if len(proto.prototypes) != 1 {
+		t.Fatalf("compiled raw fast-path program has %d child prototypes, want 1", len(proto.prototypes))
+	}
+	compute := proto.prototypes[0]
+	joined := strings.Join(disassembleProto(compute), "\n")
 	for _, want := range []string{"CONCAT_CHAIN", "LEN", "POW"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("compiled raw fast-path program is missing %s:\n%s", want, joined)
 		}
 	}
-	if !protoSupportsDirectFrame(proto) {
-		t.Fatalf("compiled raw fast-path program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
+	if !protoSupportsDirectFrame(compute) {
+		t.Fatalf("compiled raw fast-path function is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(compute), "\n"))
 	}
 	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
 	if err != nil {
@@ -5882,17 +5881,21 @@ return total
 
 func TestRegisterNumericLessBranchFallsBackToStringComparison(t *testing.T) {
 	proto, err := Compile(`
-local left = "apple"
-local right = "pear"
-if left < right then
-	return 7
+local function compare(left, right)
+	if left < right then
+		return 7
+	end
+	return 0
 end
-return 0
+return compare("apple", "pear")
 `)
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	joined := strings.Join(disassembleProto(proto), "\n")
+	if len(proto.prototypes) != 1 {
+		t.Fatalf("compiled comparison program has %d child prototypes, want 1", len(proto.prototypes))
+	}
+	joined := strings.Join(disassembleProto(proto.prototypes[0]), "\n")
 	if !strings.Contains(joined, "JUMP_IF_NOT_LESS") {
 		t.Fatalf("compiled string comparison branch is missing register branch opcode:\n%s", joined)
 	}
@@ -6240,8 +6243,7 @@ return total
 
 func TestFinalizedProtoCachesNumberConstants(t *testing.T) {
 	proto, err := Compile(`
-local value = 1
-return value + 2
+return input + 2
 `)
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
@@ -6270,7 +6272,7 @@ local first = "same"
 local second = "same"
 local left = 7
 local right = 7
-return first, second, left + right
+return first, second, left, right, left + right
 `)
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
@@ -6303,8 +6305,14 @@ return first, second, left + right
 	if got, ok := results[1].String(); !ok || got != "same" {
 		t.Fatalf("second result is %v (%t), want same", results[1], ok)
 	}
-	if got, ok := results[2].Number(); !ok || got != 14 {
-		t.Fatalf("third result is %v (%t), want 14", results[2], ok)
+	if got, ok := results[2].Number(); !ok || got != 7 {
+		t.Fatalf("third result is %v (%t), want 7", results[2], ok)
+	}
+	if got, ok := results[3].Number(); !ok || got != 7 {
+		t.Fatalf("fourth result is %v (%t), want 7", results[3], ok)
+	}
+	if got, ok := results[4].Number(); !ok || got != 14 {
+		t.Fatalf("fifth result is %v (%t), want 14", results[4], ok)
 	}
 }
 
@@ -6685,13 +6693,16 @@ return values[1] + value
 }
 
 func TestCompilerRecordsRegisterAndConstantKindFacts(t *testing.T) {
-	proto, err := Compile(`
+	artifact := parseSourceForOptimizationTest(t, `
 local n = 4
 local s = "kind"
 local b = n < 5
 local t = {}
 return n, s, b, t
 `)
+	proto, err := compileProgramWithOptions(artifact, compilerOptions{optimizations: optimizationOptions{
+		disabledCategories: map[optimizationCategory]bool{optimizationBytecodePeephole: true},
+	}})
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
@@ -6722,7 +6733,7 @@ return n, s, b, t
 }
 
 func TestCompilerRecordsNumericOperandFactsForProvenNumbers(t *testing.T) {
-	proto, err := Compile(`
+	artifact := parseSourceForOptimizationTest(t, `
 local left = 4
 local right = 2
 local sum = left + right
@@ -6730,6 +6741,9 @@ local scaled = sum * 3
 local small = scaled < 20
 return sum, scaled, small
 `)
+	proto, err := compileProgramWithOptions(artifact, compilerOptions{optimizations: optimizationOptions{
+		disabledCategories: map[optimizationCategory]bool{optimizationBytecodePeephole: true},
+	}})
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
@@ -8089,7 +8103,7 @@ func TestOptimizeBytecodeIRRemovesDeadPureTemporaries(t *testing.T) {
 	}
 }
 
-func TestOptimizeBytecodeIRKeepsDeadProvenNumericArithmeticConservatively(t *testing.T) {
+func TestOptimizeBytecodeIRRemovesDeadFoldedNumericArithmetic(t *testing.T) {
 	var builder bytecodeBuilder
 	builder.emitLoadConst(1, NumberValue(2))
 	builder.emitLoadConst(2, NumberValue(3))
@@ -8100,10 +8114,7 @@ func TestOptimizeBytecodeIRKeepsDeadProvenNumericArithmeticConservatively(t *tes
 	builder.optimize(optimizationOptions{})
 	got := assembleBytecodeIR(builder.ir)
 	want := []instruction{
-		{op: opLoadConst, a: 1, b: 0},
-		{op: opLoadConst, a: 2, b: 1},
-		{op: opAdd, a: 3, b: 1, c: 2},
-		{op: opLoadConst, a: 4, b: 2},
+		{op: opLoadConst, a: 4, b: 0},
 		{op: opReturnOne, a: 4},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -8111,7 +8122,7 @@ func TestOptimizeBytecodeIRKeepsDeadProvenNumericArithmeticConservatively(t *tes
 	}
 }
 
-func TestOptimizeBytecodeIRKeepsDeadProvenInPlaceNumericArithmeticConservatively(t *testing.T) {
+func TestOptimizeBytecodeIRRemovesDeadFoldedInPlaceNumericArithmetic(t *testing.T) {
 	var builder bytecodeBuilder
 	builder.emitLoadConst(1, NumberValue(2))
 	addend := builder.addConstant(NumberValue(3))
@@ -8123,10 +8134,7 @@ func TestOptimizeBytecodeIRKeepsDeadProvenInPlaceNumericArithmeticConservatively
 	builder.optimize(optimizationOptions{})
 	got := assembleBytecodeIR(builder.ir)
 	want := []instruction{
-		{op: opLoadConst, a: 1, b: 0},
-		{op: opAddK, a: 1, b: 1, c: addend},
-		{op: opNeg, a: 2, b: 1},
-		{op: opLoadConst, a: 3, b: 2},
+		{op: opLoadConst, a: 3, b: 0},
 		{op: opReturnOne, a: 3},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -9076,7 +9084,7 @@ return d
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if got, want := proto.registers, 2; got != want {
+	if got, want := proto.registers, 1; got != want {
 		t.Fatalf("compiled register count is %d, want %d after liveness frame shrink", got, want)
 	}
 

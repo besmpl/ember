@@ -659,6 +659,17 @@ func (b *bytecodeBuilder) addConstant(value Value) int {
 	return b.addKeyedConstant(value, key, keyed)
 }
 
+func (b *bytecodeBuilder) resetConstants(constants []Value) {
+	b.constants = nil
+	b.constantIndices = nil
+	b.constantStrings = nil
+	b.constantShapes = nil
+	b.nextConstantShape = 0
+	for _, value := range constants {
+		b.addConstant(value)
+	}
+}
+
 func (b *bytecodeBuilder) addStringConstant(text string) int {
 	return b.addInternedStringConstant(text, nil)
 }
@@ -831,6 +842,7 @@ func (b *bytecodeBuilder) optimize(options optimizationOptions) {
 	b.ir = optimizeBytecodeIRWithFacts(b.ir, bytecodeIROptimizationFacts{
 		constants:         b.constants,
 		capturedRegisters: bytecodeBuilderCapturedRegisters(b.prototypes),
+		constantPool:      b,
 	}, options)
 }
 

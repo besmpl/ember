@@ -2,10 +2,224 @@ package ember
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestScalarConstantPropagationFoldsAcrossAliasesAndBranches(t *testing.T) {
+	proto, err := Compile(`
+local function calculate(input)
+	local value = nil
+	local enabled = nil
+	if input then
+		value = 40
+		enabled = true
+	else
+		value = 40
+		enabled = true
+	end
+	local alias = value
+	if enabled then
+		return alias + 2
+	end
+	return 0
+end
+return calculate(false)
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Run returned %d results, want 1: %#v", len(results), results)
+	}
+	if number, ok := results[0].Number(); !ok || number != 42 {
+		t.Fatalf("Run result is %#v, want number 42", results[0])
+	}
+
+	if len(proto.prototypes) != 1 {
+		t.Fatalf("compiled program has %d child prototypes, want 1", len(proto.prototypes))
+	}
+	disassembly := disassembleProto(proto.prototypes[0])
+	if disassemblyHasAnyInstruction(disassembly, "ADD", "ADD_K") {
+		t.Fatalf("constant arithmetic survived scalar propagation: %#v", disassembly)
+	}
+	branches := 0
+	for _, line := range disassembly {
+		if strings.Contains(line, "JUMP_IF_FALSE") {
+			branches++
+		}
+	}
+	if branches != 1 {
+		t.Fatalf("compiled bytecode has %d conditional branches, want only the unknown input branch: %#v", branches, disassembly)
+	}
+}
+
+func TestScalarConstantPropagationTracksNilBoolAndStringJoins(t *testing.T) {
+	proto, err := Compile(`
+local function render(input)
+	local text = ""
+	local absent = true
+	local disabled = true
+	if input then
+		text = "ember"
+		absent = nil
+		disabled = false
+	else
+		text = "ember"
+		absent = nil
+		disabled = false
+	end
+	if absent then
+		return "bad nil"
+	end
+	if disabled then
+		return "bad bool"
+	end
+	return text .. "!"
+end
+return render(false)
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Run returned %d results, want 1: %#v", len(results), results)
+	}
+	if text, ok := results[0].String(); !ok || text != "ember!" {
+		t.Fatalf("Run result is %#v, want string ember!", results[0])
+	}
+	if len(proto.prototypes) != 1 {
+		t.Fatalf("compiled program has %d child prototypes, want 1", len(proto.prototypes))
+	}
+	disassembly := disassembleProto(proto.prototypes[0])
+	if disassemblyHasInstruction(disassembly, "CONCAT") {
+		t.Fatalf("constant string concat survived scalar propagation: %#v", disassembly)
+	}
+	branches := 0
+	for _, line := range disassembly {
+		if strings.Contains(line, "JUMP_IF_FALSE") {
+			branches++
+		}
+	}
+	if branches != 1 {
+		t.Fatalf("compiled bytecode has %d conditional branches, want only the unknown input branch: %#v", branches, disassembly)
+	}
+}
+
+func TestScalarConstantPropagationPreservesNumericEdgeSemantics(t *testing.T) {
+	proto, err := Compile(`
+local left = -7
+local right = 3
+local zero = -0.0
+return left % right, left // right, zero * 1
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("Run returned %d results, want 3: %#v", len(results), results)
+	}
+	for index, want := range []float64{2, -3} {
+		if got, ok := results[index].Number(); !ok || got != want {
+			t.Fatalf("result %d is %#v, want number %v", index, results[index], want)
+		}
+	}
+	zero, ok := results[2].Number()
+	if !ok || zero != 0 || !math.Signbit(zero) {
+		t.Fatalf("result 2 is %#v, want negative zero", results[2])
+	}
+	if disassemblyHasAnyInstruction(disassembleProto(proto), "MOD", "IDIV", "MUL") {
+		t.Fatalf("constant numeric bytecode was not folded: %#v", disassembleProto(proto))
+	}
+}
+
+func TestScalarConstantPropagationInvalidatesCapturedLocalsAcrossCalls(t *testing.T) {
+	proto, err := Compile(`
+local value = 1
+local function mutate()
+	value = 2
+end
+mutate()
+return value + 1
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Run returned %d results, want 1: %#v", len(results), results)
+	}
+	if number, ok := results[0].Number(); !ok || number != 3 {
+		t.Fatalf("Run result is %#v, want number 3", results[0])
+	}
+	if !disassemblyHasAnyInstruction(disassembleProto(proto), "ADD", "ADD_K") {
+		t.Fatalf("captured local arithmetic was unsafely folded across a call: %#v", disassembleProto(proto))
+	}
+}
+
+func TestScalarConstantPropagationExcludesTablesAndFunctions(t *testing.T) {
+	proto, err := Compile(`
+local object = {}
+local function callback()
+	return 1
+end
+return object == object, callback == callback
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("Run returned %d results, want 2: %#v", len(results), results)
+	}
+	for index, result := range results {
+		if value, ok := result.Bool(); !ok || !value {
+			t.Fatalf("result %d is %#v, want true", index, result)
+		}
+	}
+	if !disassemblyHasInstruction(disassembleProto(proto), "EQUAL") {
+		t.Fatalf("table/function equality was unsafely replaced by a scalar constant: %#v", disassembleProto(proto))
+	}
+}
+
+func TestScalarConstantPropagationDoesNotFoldNaNOrdering(t *testing.T) {
+	proto, err := Compile(`
+local zero = 0
+local nan = zero / zero
+local alias = nan
+return alias < 1
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	_, err = Run(proto)
+	if err == nil {
+		t.Fatal("Run succeeded, want NaN comparison error")
+	}
+	if !strings.Contains(err.Error(), "NaN") {
+		t.Fatalf("Run error is %q, want NaN detail", err)
+	}
+}
 
 func TestHIRSimplifyFoldsNumberArithmetic(t *testing.T) {
 	proto, err := Compile("return 1 + 2 * 3")
@@ -29,7 +243,8 @@ func TestHIRSimplifyFoldsNumberArithmetic(t *testing.T) {
 	disabled, err := compileProgramWithOptions(artifact, compilerOptions{
 		optimizations: optimizationOptions{
 			disabledCategories: map[optimizationCategory]bool{
-				optimizationHIRSimplify: true,
+				optimizationHIRSimplify:      true,
+				optimizationBytecodePeephole: true,
 			},
 		},
 	})

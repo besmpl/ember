@@ -40,6 +40,7 @@ func optimizeBytecodeIRWithConstants(ir []bytecodeIRInstruction, constants []Val
 type bytecodeIROptimizationFacts struct {
 	constants         []Value
 	capturedRegisters []bool
+	constantPool      *bytecodeBuilder
 }
 
 func optimizeBytecodeIRWithFacts(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts, options optimizationOptions) []bytecodeIRInstruction {
@@ -51,7 +52,8 @@ func optimizeBytecodeIRWithFacts(ir []bytecodeIRInstruction, facts bytecodeIROpt
 		function.instructions,
 		bytecodeIRPeepholeRemovalSet(function.instructions, assembleBytecodeIRRaw(function.instructions), function.currentAnalysis()),
 	))
-	function.replace(simplifyBytecodeIRControlFlow(function.instructions, facts))
+	function.replace(simplifyBytecodeIRControlFlow(function.instructions, bytecodeIROptimizationFacts{}))
+	function.replace(propagateBytecodeIRScalarConstants(function.instructions, facts))
 	function.replace(propagateBytecodeIRSingleUseMoves(function.instructions, function.currentAnalysis()))
 	function.replace(coalesceBytecodeIRMoveProducers(function.instructions, facts.capturedRegisters, function.currentAnalysis()))
 	function.replace(hoistBytecodeIRLoopInvariantHeaderLoads(function.instructions))
@@ -59,8 +61,57 @@ func optimizeBytecodeIRWithFacts(ir []bytecodeIRInstruction, facts bytecodeIROpt
 		function.instructions,
 		bytecodeIRDeadCodeRemovalSet(function.instructions, facts, function.currentAnalysis()),
 	))
-	function.replace(simplifyBytecodeIRControlFlow(function.instructions, facts))
+	function.replace(simplifyBytecodeIRControlFlow(function.instructions, bytecodeIROptimizationFacts{}))
+	if facts.constantPool != nil {
+		constants := facts.scalarConstants()
+		compactedIR, compactedConstants := compactBytecodeIRConstants(function.instructions, constants)
+		function.replace(compactedIR)
+		if len(compactedConstants) != len(constants) {
+			facts.constantPool.resetConstants(compactedConstants)
+		}
+	}
 	return function.instructions
+}
+
+func compactBytecodeIRConstants(ir []bytecodeIRInstruction, constants []Value) ([]bytecodeIRInstruction, []Value) {
+	if len(constants) == 0 {
+		return ir, constants
+	}
+	used := make([]bool, len(constants))
+	for _, ins := range ir {
+		for _, operand := range [...]bytecodeOperand{ins.operands.a, ins.operands.b, ins.operands.c, ins.operands.d} {
+			if operand.kind == bytecodeOperandConstant && operand.value >= 0 && operand.value < len(used) {
+				used[operand.value] = true
+			}
+		}
+	}
+	oldToNew := make([]int, len(constants))
+	compacted := make([]Value, 0, len(constants))
+	for index, value := range constants {
+		oldToNew[index] = -1
+		if used[index] {
+			oldToNew[index] = len(compacted)
+			compacted = append(compacted, value)
+		}
+	}
+	if len(compacted) == len(constants) {
+		return ir, constants
+	}
+	optimized := append([]bytecodeIRInstruction(nil), ir...)
+	for index := range optimized {
+		operands := []*bytecodeOperand{
+			&optimized[index].operands.a,
+			&optimized[index].operands.b,
+			&optimized[index].operands.c,
+			&optimized[index].operands.d,
+		}
+		for _, operand := range operands {
+			if operand.kind == bytecodeOperandConstant && operand.value >= 0 && operand.value < len(oldToNew) {
+				operand.value = oldToNew[operand.value]
+			}
+		}
+	}
+	return optimized, compacted
 }
 
 func applyBytecodeIRRemovalSet(ir []bytecodeIRInstruction, remove []bool) []bytecodeIRInstruction {
@@ -426,6 +477,584 @@ func copyRegisterConstants(registerConstants map[int]int) map[int]int {
 		copied[register] = constant
 	}
 	return copied
+}
+
+type scalarLatticeValue int
+
+const (
+	scalarVarying   scalarLatticeValue = -2
+	scalarUnreached scalarLatticeValue = -1
+)
+
+func propagateBytecodeIRScalarConstants(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts) []bytecodeIRInstruction {
+	if len(ir) == 0 || len(facts.scalarConstants()) == 0 {
+		return ir
+	}
+	if !bytecodeIRHasScalarControlFlow(ir) {
+		if len(ir) <= 256 && !straightLineBytecodeIRMayFoldScalarConstants(ir, facts) {
+			return ir
+		}
+		return propagateStraightLineBytecodeIRScalarConstants(ir, facts)
+	}
+	blocks := bytecodeIRBlockOrder(ir)
+	registerCount := bytecodeIRScalarRegisterCount(ir, len(facts.capturedRegisters))
+	blockByStart := make(map[int]int, len(blocks))
+	for _, block := range blocks {
+		blockByStart[block.start] = block.id
+	}
+	successors := bytecodeIRBlockSuccessors(ir, blocks)
+	entries := make([]scalarLatticeValue, len(blocks)*registerCount)
+	for index := range entries {
+		entries[index] = scalarUnreached
+	}
+	executable := make([]bool, len(blocks))
+	inWorklist := make([]bool, len(blocks))
+
+	entry := bytecodeIRScalarBlockState(entries, 0, registerCount)
+	for register := range entry {
+		entry[register] = scalarVarying
+	}
+	executable[0] = true
+	worklist := []int{0}
+	inWorklist[0] = true
+	state := make([]scalarLatticeValue, registerCount)
+
+	for len(worklist) != 0 {
+		blockID := worklist[0]
+		worklist = worklist[1:]
+		inWorklist[blockID] = false
+		copy(state, bytecodeIRScalarBlockState(entries, blockID, registerCount))
+		block := blocks[blockID]
+		for pc := block.start; pc < block.end; pc++ {
+			applyBytecodeIRScalarTransfer(state, assembleBytecodeIRInstruction(ir[pc]), facts)
+		}
+		for _, successor := range bytecodeIRScalarSuccessors(ir, block, successors[blockID], blockByStart, state, facts) {
+			if successor < 0 || successor >= len(entries) {
+				continue
+			}
+			changed := false
+			destination := bytecodeIRScalarBlockState(entries, successor, registerCount)
+			if !executable[successor] {
+				copy(destination, state)
+				executable[successor] = true
+				changed = true
+			} else {
+				changed = mergeBytecodeIRScalarState(destination, state)
+			}
+			if changed && !inWorklist[successor] {
+				worklist = append(worklist, successor)
+				inWorklist[successor] = true
+			}
+		}
+	}
+
+	optimized := ir
+	changed := false
+	rewriteState := make([]scalarLatticeValue, registerCount)
+	for blockID, block := range blocks {
+		if !executable[blockID] {
+			continue
+		}
+		copy(rewriteState, bytecodeIRScalarBlockState(entries, blockID, registerCount))
+		for pc := block.start; pc < block.end; pc++ {
+			ins := assembleBytecodeIRInstruction(ir[pc])
+			if value, ok := bytecodeIRScalarInstructionValue(ins, rewriteState, facts); ok && ins.op != opLoadConst && ins.op != opMove {
+				if constant, ok := facts.internScalarConstant(value); ok {
+					if !changed {
+						optimized = append([]bytecodeIRInstruction(nil), ir...)
+					}
+					optimized[pc] = lowerInstructionToBytecodeIR(instruction{op: opLoadConst, a: ins.a, b: constant}, ir[pc].source)
+					changed = true
+				}
+			} else if taken, ok := bytecodeIRScalarBranchDecision(ins, rewriteState, facts); ok {
+				if !changed {
+					optimized = append([]bytecodeIRInstruction(nil), ir...)
+				}
+				target := pc + 1
+				if taken {
+					if jumpTarget, hasTarget := instructionJumpTarget(ins); hasTarget {
+						target = jumpTarget
+					}
+				}
+				optimized[pc] = lowerInstructionToBytecodeIR(instruction{op: opJump, b: target}, ir[pc].source)
+				changed = true
+			}
+			applyBytecodeIRScalarTransfer(rewriteState, ins, facts)
+		}
+	}
+	if !changed {
+		return ir
+	}
+	return simplifyBytecodeIRControlFlow(optimized, bytecodeIROptimizationFacts{})
+}
+
+func straightLineBytecodeIRMayFoldScalarConstants(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts) bool {
+	registerCount := bytecodeIRScalarRegisterCount(ir, 0)
+	var inline [64]bool
+	known := inline[:min(registerCount, len(inline))]
+	if registerCount > len(inline) {
+		known = make([]bool, registerCount)
+	}
+	for _, raw := range ir {
+		ins := assembleBytecodeIRInstruction(raw)
+		switch ins.op {
+		case opNeg, opLen:
+			if ins.b >= 0 && ins.b < len(known) && known[ins.b] {
+				return true
+			}
+		case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow, opConcat,
+			opEqual, opNotEqual, opLess, opLessEqual, opGreater, opGreaterEqual:
+			if ins.b >= 0 && ins.b < len(known) && known[ins.b] &&
+				ins.c >= 0 && ins.c < len(known) && known[ins.c] {
+				return true
+			}
+		case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
+			if ins.b >= 0 && ins.b < len(known) && known[ins.b] {
+				return true
+			}
+		}
+
+		sourceKnown := ins.op == opMove && ins.b >= 0 && ins.b < len(known) && known[ins.b]
+		if instructionClearsAllNumberFacts(ins) {
+			clear(known)
+		} else {
+			writes := instructionRegisters(ins, instructionRegisterWrite)
+			for register, ok := writes.next(); ok; register, ok = writes.next() {
+				if register >= 0 && register < len(known) {
+					known[register] = false
+				}
+			}
+		}
+		switch ins.op {
+		case opLoadConst:
+			if ins.a >= 0 && ins.a < len(known) {
+				_, known[ins.a] = facts.scalarConstantAt(ins.b)
+			}
+		case opMove:
+			if ins.a >= 0 && ins.a < len(known) {
+				known[ins.a] = sourceKnown
+			}
+		}
+	}
+	return false
+}
+
+func bytecodeIRHasScalarControlFlow(ir []bytecodeIRInstruction) bool {
+	for _, ins := range ir {
+		switch opcodeControlFlow(ins.op) {
+		case opcodeControlJump, opcodeControlBranch:
+			return true
+		}
+	}
+	return false
+}
+
+func propagateStraightLineBytecodeIRScalarConstants(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts) []bytecodeIRInstruction {
+	state := make([]scalarLatticeValue, bytecodeIRScalarRegisterCount(ir, len(facts.capturedRegisters)))
+	for register := range state {
+		state[register] = scalarVarying
+	}
+	optimized := ir
+	changed := false
+	for pc, raw := range ir {
+		ins := assembleBytecodeIRInstruction(raw)
+		if value, ok := bytecodeIRScalarInstructionValue(ins, state, facts); ok && ins.op != opLoadConst && ins.op != opMove {
+			if constant, ok := facts.internScalarConstant(value); ok {
+				if !changed {
+					optimized = append([]bytecodeIRInstruction(nil), ir...)
+				}
+				optimized[pc] = lowerInstructionToBytecodeIR(instruction{op: opLoadConst, a: ins.a, b: constant}, raw.source)
+				changed = true
+			}
+		}
+		applyBytecodeIRScalarTransfer(state, ins, facts)
+	}
+	if !changed {
+		return ir
+	}
+	return optimized
+}
+
+func bytecodeIRScalarBlockState(states []scalarLatticeValue, block int, registerCount int) []scalarLatticeValue {
+	start := block * registerCount
+	return states[start : start+registerCount]
+}
+
+func (facts bytecodeIROptimizationFacts) scalarConstants() []Value {
+	if facts.constantPool != nil {
+		return facts.constantPool.constants
+	}
+	return facts.constants
+}
+
+func (facts bytecodeIROptimizationFacts) scalarConstantAt(index int) (Value, bool) {
+	constants := facts.scalarConstants()
+	if index < 0 || index >= len(constants) || !isScalarConstant(constants[index]) {
+		return Value{}, false
+	}
+	return constants[index], true
+}
+
+func (facts bytecodeIROptimizationFacts) internScalarConstant(value Value) (int, bool) {
+	if !isScalarConstant(value) {
+		return 0, false
+	}
+	if facts.constantPool != nil {
+		return facts.constantPool.addConstant(value), true
+	}
+	for index, constant := range facts.constants {
+		if scalarConstantsEqual(constant, value) {
+			return index, true
+		}
+	}
+	return 0, false
+}
+
+func isScalarConstant(value Value) bool {
+	switch value.kind {
+	case NilKind, BoolKind, NumberKind, StringKind:
+		return true
+	default:
+		return false
+	}
+}
+
+func scalarConstantsEqual(left Value, right Value) bool {
+	if left.kind != right.kind {
+		return false
+	}
+	switch left.kind {
+	case NilKind:
+		return true
+	case BoolKind:
+		return left.bool == right.bool
+	case NumberKind:
+		return math.Float64bits(left.number) == math.Float64bits(right.number)
+	case StringKind:
+		return left.stringText() == right.stringText()
+	default:
+		return false
+	}
+}
+
+func bytecodeIRScalarRegisterCount(ir []bytecodeIRInstruction, minimum int) int {
+	count := minimum
+	for _, raw := range ir {
+		ins := assembleBytecodeIRInstruction(raw)
+		if limit := instructionRegisterLimit(ins); limit > count {
+			count = limit
+		}
+	}
+	return count
+}
+
+func mergeBytecodeIRScalarState(destination []scalarLatticeValue, incoming []scalarLatticeValue) bool {
+	changed := false
+	for register := range destination {
+		joined := joinBytecodeIRScalarValue(destination[register], incoming[register])
+		if joined != destination[register] {
+			destination[register] = joined
+			changed = true
+		}
+	}
+	return changed
+}
+
+func joinBytecodeIRScalarValue(left scalarLatticeValue, right scalarLatticeValue) scalarLatticeValue {
+	if left == scalarUnreached {
+		return right
+	}
+	if right == scalarUnreached {
+		return left
+	}
+	if left == right {
+		return left
+	}
+	return scalarVarying
+}
+
+func bytecodeIRScalarSuccessors(
+	ir []bytecodeIRInstruction,
+	block bytecodeIRBlock,
+	successors []int,
+	blockByStart map[int]int,
+	state []scalarLatticeValue,
+	facts bytecodeIROptimizationFacts,
+) []int {
+	if block.end <= block.start || block.end > len(ir) {
+		return successors
+	}
+	ins := assembleBytecodeIRInstruction(ir[block.end-1])
+	taken, known := bytecodeIRScalarBranchDecision(ins, state, facts)
+	if !known {
+		return successors
+	}
+	nextPC := block.end
+	if taken {
+		var ok bool
+		nextPC, ok = instructionJumpTarget(ins)
+		if !ok {
+			return successors
+		}
+	}
+	next, ok := blockByStart[nextPC]
+	if !ok {
+		return nil
+	}
+	return []int{next}
+}
+
+func applyBytecodeIRScalarTransfer(state []scalarLatticeValue, ins instruction, facts bytecodeIROptimizationFacts) {
+	value, hasValue := bytecodeIRScalarInstructionValue(ins, state, facts)
+	constant := 0
+	if hasValue {
+		constant, hasValue = facts.internScalarConstant(value)
+	}
+	_, branchKnown := bytecodeIRScalarBranchDecision(ins, state, facts)
+	if instructionClearsAllNumberFacts(ins) {
+		for register := range state {
+			state[register] = scalarVarying
+		}
+	} else if opcodeMayCall(ins.op) && !hasValue && !branchKnown {
+		for register, captured := range facts.capturedRegisters {
+			if captured && register < len(state) {
+				state[register] = scalarVarying
+			}
+		}
+	}
+	markBytecodeIRScalarWritesVarying(state, ins)
+	if hasValue && ins.a >= 0 && ins.a < len(state) {
+		state[ins.a] = scalarLatticeValue(constant)
+	}
+}
+
+func markBytecodeIRScalarWritesVarying(state []scalarLatticeValue, ins instruction) {
+	switch ins.op {
+	case opLoadConst, opLoadGlobal, opMove, opNewTable, opGetStringField, opGetStringFieldIndex,
+		opClosure, opGetUpvalue, opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow,
+		opNeg, opLen, opConcat, opConcatChain, opEqual, opNotEqual, opLess, opLessEqual,
+		opGreater, opGreaterEqual, opAddK, opSubK, opMulK, opDivK, opModK, opIDivK,
+		opFastCall, opNumericForLoop, opCallOne, opCallLocalOne, opCallUpvalueOne:
+		markBytecodeIRScalarRegisterVarying(state, ins.a)
+	case opPrepareIter:
+		markBytecodeIRScalarRegisterVarying(state, ins.a)
+		markBytecodeIRScalarRegisterVarying(state, ins.b)
+		markBytecodeIRScalarRegisterVarying(state, ins.c)
+	case opArrayNext:
+		markBytecodeIRScalarRegisterRangeVarying(state, ins.a, ins.d)
+	case opArrayNextJump2:
+		markBytecodeIRScalarRegisterRangeVarying(state, ins.a, 2)
+	case opVararg:
+		markBytecodeIRScalarRegisterRangeVarying(state, ins.a, ins.b)
+	case opCall:
+		count := ins.d
+		if count == 0 {
+			count = 1
+		}
+		markBytecodeIRScalarRegisterRangeVarying(state, ins.a, count)
+	case opCallMethodOne:
+		markBytecodeIRScalarRegisterRangeVarying(state, ins.a, 2)
+	}
+}
+
+func markBytecodeIRScalarRegisterVarying(state []scalarLatticeValue, register int) {
+	if register >= 0 && register < len(state) {
+		state[register] = scalarVarying
+	}
+}
+
+func markBytecodeIRScalarRegisterRangeVarying(state []scalarLatticeValue, start int, count int) {
+	if count < 0 {
+		count = len(state) - start
+	}
+	for register := max(start, 0); register < start+count && register < len(state); register++ {
+		state[register] = scalarVarying
+	}
+}
+
+func bytecodeIRScalarInstructionValue(ins instruction, state []scalarLatticeValue, facts bytecodeIROptimizationFacts) (Value, bool) {
+	register := func(index int) (Value, bool) {
+		if index < 0 || index >= len(state) || state[index] < 0 {
+			return Value{}, false
+		}
+		return facts.scalarConstantAt(int(state[index]))
+	}
+	number := func(index int) (float64, bool) {
+		value, ok := register(index)
+		return value.number, ok && value.kind == NumberKind
+	}
+	constantNumber := func(index int) (float64, bool) {
+		value, ok := facts.scalarConstantAt(index)
+		return value.number, ok && value.kind == NumberKind
+	}
+
+	switch ins.op {
+	case opLoadConst:
+		return facts.scalarConstantAt(ins.b)
+	case opMove:
+		return register(ins.b)
+	case opNeg:
+		operand, ok := number(ins.b)
+		if ok {
+			return NumberValue(-operand), true
+		}
+	case opLen:
+		operand, ok := register(ins.b)
+		if ok && operand.kind == StringKind {
+			return NumberValue(float64(len(operand.stringText()))), true
+		}
+	case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow:
+		left, leftOK := number(ins.b)
+		right, rightOK := number(ins.c)
+		if leftOK && rightOK {
+			return foldBytecodeIRScalarArithmetic(ins.op, left, right), true
+		}
+	case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
+		left, leftOK := number(ins.b)
+		right, rightOK := constantNumber(ins.c)
+		if leftOK && rightOK {
+			return foldBytecodeIRScalarArithmetic(ins.op, left, right), true
+		}
+	case opConcat:
+		left, leftOK := register(ins.b)
+		right, rightOK := register(ins.c)
+		if leftOK && rightOK {
+			text, err := valuesConcat(left, right)
+			if err == nil {
+				return StringValue(text), true
+			}
+		}
+	case opEqual, opNotEqual:
+		left, leftOK := register(ins.b)
+		right, rightOK := register(ins.c)
+		if leftOK && rightOK {
+			equal := valuesEqual(left, right)
+			if ins.op == opNotEqual {
+				equal = !equal
+			}
+			return BoolValue(equal), true
+		}
+	case opLess, opLessEqual, opGreater, opGreaterEqual:
+		left, leftOK := register(ins.b)
+		right, rightOK := register(ins.c)
+		if leftOK && rightOK {
+			if result, ok := foldBytecodeIRScalarOrdering(ins.op, left, right); ok {
+				return BoolValue(result), true
+			}
+		}
+	}
+	return Value{}, false
+}
+
+func foldBytecodeIRScalarArithmetic(op opcode, left float64, right float64) Value {
+	switch op {
+	case opAdd, opAddK:
+		return NumberValue(left + right)
+	case opSub, opSubK:
+		return NumberValue(left - right)
+	case opMul, opMulK:
+		return NumberValue(left * right)
+	case opDiv, opDivK:
+		return NumberValue(left / right)
+	case opMod, opModK:
+		return NumberValue(left - math.Floor(left/right)*right)
+	case opIDiv, opIDivK:
+		return NumberValue(math.Floor(left / right))
+	case opPow:
+		return NumberValue(math.Pow(left, right))
+	default:
+		return Value{}
+	}
+}
+
+func foldBytecodeIRScalarOrdering(op opcode, left Value, right Value) (bool, bool) {
+	var less bool
+	var equal bool
+	if left.kind != right.kind {
+		return false, false
+	}
+	switch left.kind {
+	case NumberKind:
+		if math.IsNaN(left.number) || math.IsNaN(right.number) {
+			return false, false
+		}
+		less = left.number < right.number
+		equal = left.number == right.number
+	case StringKind:
+		less = left.stringText() < right.stringText()
+		equal = left.stringText() == right.stringText()
+	default:
+		return false, false
+	}
+	switch op {
+	case opLess:
+		return less, true
+	case opLessEqual:
+		return less || equal, true
+	case opGreater:
+		return !less && !equal, true
+	case opGreaterEqual:
+		return !less, true
+	default:
+		return false, false
+	}
+}
+
+func bytecodeIRScalarBranchDecision(ins instruction, state []scalarLatticeValue, facts bytecodeIROptimizationFacts) (bool, bool) {
+	register := func(index int) (Value, bool) {
+		if index < 0 || index >= len(state) || state[index] < 0 {
+			return Value{}, false
+		}
+		return facts.scalarConstantAt(int(state[index]))
+	}
+	left, leftOK := register(ins.a)
+	switch ins.op {
+	case opJumpIfFalse:
+		return !left.truthy(), leftOK
+	case opJumpIfNotEqualK:
+		right, rightOK := facts.scalarConstantAt(ins.b)
+		if leftOK && rightOK {
+			return !valuesEqual(left, right), true
+		}
+	case opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
+		right, rightOK := facts.scalarConstantAt(ins.b)
+		if leftOK && rightOK {
+			op := opLess
+			if ins.op == opJumpIfNotGreaterK || ins.op == opJumpIfGreaterK {
+				op = opGreater
+			}
+			result, ok := foldBytecodeIRScalarOrdering(op, left, right)
+			if ok {
+				if ins.op == opJumpIfNotLessK || ins.op == opJumpIfNotGreaterK {
+					result = !result
+				}
+				return result, true
+			}
+		}
+	case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
+		right, rightOK := register(ins.b)
+		if leftOK && rightOK {
+			op := opLess
+			if ins.op == opJumpIfNotGreater || ins.op == opJumpIfGreater {
+				op = opGreater
+			}
+			result, ok := foldBytecodeIRScalarOrdering(op, left, right)
+			if ok {
+				if ins.op == opJumpIfNotLess || ins.op == opJumpIfNotGreater {
+					result = !result
+				}
+				return result, true
+			}
+		}
+	case opJumpIfModKNotEqualK:
+		modRight, modOK := facts.scalarConstantAt(ins.b)
+		want, wantOK := facts.scalarConstantAt(ins.c)
+		if leftOK && modOK && wantOK && left.kind == NumberKind && modRight.kind == NumberKind && want.kind == NumberKind {
+			got := left.number - math.Floor(left.number/modRight.number)*modRight.number
+			return got != want.number, true
+		}
+	}
+	return false, false
 }
 
 func bytecodeIRReachabilityRemovalSet(ir []bytecodeIRInstruction) []bool {
