@@ -358,6 +358,7 @@ type parser struct {
 	pos        int
 	mode       sourceMode
 	tokens     []sourceToken
+	stringPool []string
 	tokenIndex int
 }
 
@@ -371,12 +372,13 @@ func (p *parser) restore(checkpoint parserCheckpoint) {
 }
 
 func (p *parser) parse() (program, error) {
-	tokens, _, mode, err := lexSource(p.source)
+	lexed, err := lexSourceForCompile(p.source)
 	if err != nil {
 		return program{}, err
 	}
-	p.mode = mode
-	p.tokens = tokens
+	p.mode = lexed.mode
+	p.tokens = lexed.tokens
+	p.stringPool = lexed.decodedStrings
 
 	statements, err := p.parseBlock()
 	if err != nil {
@@ -443,14 +445,14 @@ func (p *parser) parseStatement() (statement, error) {
 		return statement{local: &stmt}, nil
 	}
 
-	if token, ok := p.currentToken(); ok && token.matchesWordAt(p.pos, "return") {
+	if token, ok := p.currentToken(); ok && token.matchesWordAt(p.source, p.pos, "return") {
 		p.consumeKeyword("return")
 		stmt, err := p.parseReturnStatement()
 		if err != nil {
 			return statement{}, err
 		}
-		stmt.start = token.start
-		stmt.end = token.end
+		stmt.start = token.startOffset()
+		stmt.end = token.endOffset()
 		return statement{ret: &stmt}, nil
 	}
 
@@ -2230,7 +2232,13 @@ func (p *parser) parseString() (string, error) {
 	if !ok {
 		return "", p.errorf("expected string")
 	}
-	return token.stringValue, nil
+	value := token.stringValue(p.source, p.stringPool)
+	if token.payload == 0 {
+		// Clone source-span strings before they enter the syntax tree. A parsed
+		// program must not retain the complete source through a small literal.
+		value = strings.Clone(value)
+	}
+	return value, nil
 }
 
 func (p *parser) parseNumber() (float64, error) {
@@ -2238,7 +2246,7 @@ func (p *parser) parseNumber() (float64, error) {
 	if !ok {
 		return 0, p.errorf("expected number")
 	}
-	return token.number, nil
+	return token.numberValue(), nil
 }
 
 func (p *parser) parseIdentifier() (string, error) {
@@ -2246,45 +2254,45 @@ func (p *parser) parseIdentifier() (string, error) {
 	if !ok {
 		return "", p.errorf("expected identifier")
 	}
-	return token.text, nil
+	return token.textAt(p.source), nil
 }
 
 func (p *parser) consumeKeyword(keyword string) bool {
 	token, ok := p.currentToken()
-	if !ok || !token.matchesWordAt(p.pos, keyword) {
+	if !ok || !token.matchesWordAt(p.source, p.pos, keyword) {
 		return false
 	}
 	p.tokenIndex++
-	p.pos = token.end
+	p.pos = token.endOffset()
 	return true
 }
 
 func (p *parser) matchKeyword(keyword string) bool {
 	token, ok := p.currentToken()
-	return ok && token.matchesWordAt(p.pos, keyword)
+	return ok && token.matchesWordAt(p.source, p.pos, keyword)
 }
 
 func (p *parser) consumeByte(ch byte) bool {
 	token, ok := p.currentToken()
 	if !ok ||
 		token.kind != tokenSymbol ||
-		token.start != p.pos ||
-		len(token.text) != 1 ||
-		token.text[0] != ch {
+		token.startOffset() != p.pos ||
+		token.endOffset()-token.startOffset() != 1 ||
+		p.source[token.startOffset()] != ch {
 		return false
 	}
 	p.tokenIndex++
-	p.pos = token.end
+	p.pos = token.endOffset()
 	return true
 }
 
 func (p *parser) consumeString(s string) bool {
 	token, ok := p.currentToken()
-	if !ok || token.kind != tokenSymbol || token.start != p.pos || token.text != s {
+	if !ok || token.kind != tokenSymbol || token.startOffset() != p.pos || !token.rawEquals(p.source, s) {
 		return false
 	}
 	p.tokenIndex++
-	p.pos = token.end
+	p.pos = token.endOffset()
 	return true
 }
 
@@ -2294,7 +2302,7 @@ func (p *parser) skipSpace() {
 		p.pos = len(p.source)
 		return
 	}
-	if next := p.tokens[p.tokenIndex].start; next > p.pos {
+	if next := p.tokens[p.tokenIndex].startOffset(); next > p.pos {
 		p.pos = next
 	}
 }
@@ -2337,11 +2345,11 @@ func (p *parser) consumeToken(kind tokenKind) (sourceToken, bool) {
 		return sourceToken{}, false
 	}
 	token := p.tokens[p.tokenIndex]
-	if token.start != p.pos || token.kind != kind {
+	if token.startOffset() != p.pos || token.kind != kind {
 		return sourceToken{}, false
 	}
 	p.tokenIndex++
-	p.pos = token.end
+	p.pos = token.endOffset()
 	return token, true
 }
 
@@ -2355,7 +2363,7 @@ func (p *parser) currentToken() (sourceToken, bool) {
 
 func (p *parser) currentTokenKind(kind tokenKind) bool {
 	token, ok := p.currentToken()
-	return ok && token.start == p.pos && token.kind == kind
+	return ok && token.startOffset() == p.pos && token.kind == kind
 }
 
 func (p *parser) currentIdentifier() bool {
@@ -2364,16 +2372,16 @@ func (p *parser) currentIdentifier() bool {
 
 func (p *parser) currentSymbol(symbol string) bool {
 	token, ok := p.currentToken()
-	return ok && token.start == p.pos && token.kind == tokenSymbol && token.text == symbol
+	return ok && token.startOffset() == p.pos && token.kind == tokenSymbol && token.rawEquals(p.source, symbol)
 }
 
 func (p *parser) currentDoubleQuotedString() bool {
 	token, ok := p.currentToken()
-	return ok && token.start == p.pos && token.kind == tokenString && strings.HasPrefix(token.text, "\"")
+	return ok && token.startOffset() == p.pos && token.kind == tokenString && p.pos < len(p.source) && p.source[p.pos] == '"'
 }
 
 func (p *parser) advanceTokenIndex() {
-	for p.tokenIndex < len(p.tokens) && p.tokens[p.tokenIndex].end <= p.pos {
+	for p.tokenIndex < len(p.tokens) && p.tokens[p.tokenIndex].endOffset() <= p.pos {
 		p.tokenIndex++
 	}
 }

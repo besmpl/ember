@@ -140,12 +140,12 @@ func benchmarkCompilerStageLex(b *testing.B, fixture compilerStageFixture) {
 	b.SetBytes(int64(len(fixture.source)))
 	b.ResetTimer()
 	for range b.N {
-		tokens, comments, _, err := lexSource(fixture.source)
+		lexed, err := lexSourceForCompile(fixture.source)
 		if err != nil {
 			b.Fatal(err)
 		}
-		compilerStageTokensSink = tokens
-		compilerStageCommentsSink = comments
+		compilerStageTokensSink = lexed.tokens
+		compilerStageCommentsSink = lexed.comments
 	}
 	b.StopTimer()
 	reportCompilerStageMetrics(b, fixture, compilerStageMetrics{})

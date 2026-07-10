@@ -6,12 +6,12 @@ import (
 
 func TestParserCheckpointRestoresExactToken(t *testing.T) {
 	source := "type Value = number\nreturn Value"
-	tokens, _, _, err := lexSource(source)
+	lexed, err := lexSource(source)
 	if err != nil {
 		t.Fatalf("lexSource returned error: %v", err)
 	}
 
-	parser := parser{source: source, tokens: tokens}
+	parser := parser{source: source, tokens: lexed.tokens, stringPool: lexed.decodedStrings}
 	parser.skipSpace()
 	checkpoint := parser.mark()
 	want, ok := parser.currentToken()

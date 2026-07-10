@@ -11,7 +11,7 @@ func TestCompilerLayoutBudgets(t *testing.T) {
 		got  uintptr
 		want uintptr
 	}{
-		{name: "sourceToken", got: reflect.TypeOf(sourceToken{}).Size(), want: 72},
+		{name: "sourceToken", got: reflect.TypeOf(sourceToken{}).Size(), want: 24},
 		{name: "boundNodeFacts", got: reflect.TypeOf(boundNodeFacts{}).Size(), want: 96},
 		{name: "bytecodeIRInstruction", got: reflect.TypeOf(bytecodeIRInstruction{}).Size(), want: 88},
 		{name: "instruction", got: reflect.TypeOf(instruction{}).Size(), want: 40},
