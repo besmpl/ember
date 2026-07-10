@@ -24,8 +24,9 @@ Comparison options read or create distinct raw benchmark runs:
   --save-after PATH   run the benchmark and save its raw output as after
 
 BENCH, BENCHTIME, COUNT, and PKG select the benchmark command. BEFORE_RAW and
-AFTER_RAW are aliases for --before and --after. Set REQUIRE_FIXED_CORE=1 to
-fail when the fixed cold-Compile aggregate is incomplete.
+AFTER_RAW are aliases for --before and --after. Set REQUIRE_FIXED_CORE=0 only
+for exploratory partial fixtures; comparison runs fail by default when the
+fixed cold-Compile aggregate is incomplete.
 EOF
 }
 
@@ -152,7 +153,7 @@ fi
 [ -r "$after_file" ] || { printf 'bench-summary: cannot read after raw run %s\n' "$after_file" >&2; exit 2; }
 
 awk -v before="$before_file" -v after="$after_file" \
-	-v require_fixed_core="${REQUIRE_FIXED_CORE:-0}" \
+	-v require_fixed_core="${REQUIRE_FIXED_CORE:-1}" \
 	-v scaling_max_ratio="${SCALING_MAX_RATIO:-15}" \
 	-v scaling_max_time_ns="${SCALING_MAX_TIME_NS:-100000000}" \
 	-v branch_max_time_ns="${BRANCH_MAX_TIME_NS:-5000000}" \
@@ -253,6 +254,8 @@ function cold_case(name) {
 function set_name(name) {
     if (cold_case(name)) { return "cold-core" }
     if (name ~ /^BenchmarkCompileMatrix\/straight_line\//) { return "scaling" }
+    if (tolower(name) ~ /concurrent/) { return "concurrency" }
+    if (name ~ /^BenchmarkCompilerCorpus\/malformed/ || tolower(name) ~ /error/) { return "error-path" }
     if (name ~ /^Benchmark(LoadProgramCompile|CompilerGraphMatrix)\//) { return "graph" }
     if (name ~ /^Benchmark(Top10Luau|ClassicLuau|ScenarioLuau)\/.*\/ember_run$/) { return "runtime" }
     if (name ~ /^Benchmark[^\/]*Stage[^\/]*\//) { return "stage" }
@@ -307,6 +310,27 @@ function average_after(metric_name, unused, name) {
     return sample_median("after", metric_name, name)
 }
 
+function check_required_row(name, label, missing) {
+    if (!(name in before_rows) || !(name in after_rows)) {
+        printf "missing %s row: %s\n", label, name
+        failures++
+        return
+    }
+    if (b_ns_count[name] <= 0 || a_ns_count[name] <= 0) {
+        printf "missing %s ns/op metric: %s\n", label, name
+        missing++
+    }
+    if (b_bytes_count[name] <= 0 || a_bytes_count[name] <= 0) {
+        printf "missing %s B/op metric: %s\n", label, name
+        missing++
+    }
+    if (b_allocs_count[name] <= 0 || a_allocs_count[name] <= 0) {
+        printf "missing %s allocs/op metric: %s\n", label, name
+        missing++
+    }
+    if (missing > 0) { failures++ }
+}
+
 function print_scaling_pair(label, left, right, left_value, right_value, left_bytes, right_bytes, left_allocs, right_allocs, ratio, bytes_ratio, allocs_ratio, status) {
     left_value = average_after("ns", "", left)
     right_value = average_after("ns", "", right)
@@ -345,8 +369,6 @@ BEGIN {
     cold["BenchmarkCompileMatrix/top10/metatable_index"] = 1
     cold["BenchmarkCompileMatrix/top10/varargs_select"] = 1
     cold["BenchmarkCompileMatrix/top10/coroutine_yield"] = 1
-    cold["BenchmarkCompileMatrix/top10/recursive_fibonacci"] = 1
-    cold["BenchmarkCompileMatrix/top10/iterative_fibonacci"] = 1
     cold["BenchmarkCompileMatrix/scenario/combat_tick"] = 1
     cold["BenchmarkCompileMatrix/scenario/inventory_value"] = 1
     cold["BenchmarkCompileMatrix/scenario/event_dispatch"] = 1
@@ -402,17 +424,21 @@ END {
     emit_set("stage", "stage")
     emit_set("graph", "graph")
     emit_set("runtime", "runtime")
+    emit_set("error-path", "error-path")
+    emit_set("concurrency", "concurrency")
     emit_set("artifact-hit", "artifact-hit")
     emit_set("compile-other", "compile-other")
 
-    missing = 0
     for (name in cold) {
-        if (!(name in before_rows) || !(name in after_rows)) {
-            missing++
-            printf "missing fixed cold-core row: %s\n", name
-        }
+        if (require_fixed_core != 0) { check_required_row(name, "fixed cold-core") }
     }
-    if (missing > 0 && require_fixed_core != 0) { failures++ }
+
+    required_scaling["BenchmarkCompileMatrix/straight_line/100"] = 1
+    required_scaling["BenchmarkCompileMatrix/straight_line/1000"] = 1
+    required_scaling["BenchmarkCompileMatrix/straight_line/10000"] = 1
+    for (name in required_scaling) {
+        check_required_row(name, "required scaling")
+    }
 
     print ""
     print "Scaling gates (after run; thresholds belong to this tool, not unit tests):"
@@ -437,6 +463,7 @@ END {
         if (status == "fail") { failures++ }
         printf "| branch_dense_cfg absolute | %.0f ns/op, %.0f registers | <= %.0f ns/op, <= %.0f | %s |\n", branch_time, branch_registers, branch_max_time_ns, branch_max_registers, status
     } else {
+        failures++
         print "| branch_dense_cfg absolute | missing | missing | missing |"
     }
 

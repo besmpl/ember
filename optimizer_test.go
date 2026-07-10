@@ -467,7 +467,11 @@ return (x + y) * 3 - 4 / 2
 		t.Fatalf("compiled arithmetic has %d packed instructions, want at most 8", got)
 	}
 
-	const maxAllocsPerCompile = 520
+	// The green baseline measured 132 allocations for this fixed source. Keep
+	// only a small deterministic headroom so this gate cannot drift back to the
+	// historical 520-allocation ceiling.
+	const measuredArithmeticCompileAllocs = 132
+	const maxAllocsPerCompile = measuredArithmeticCompileAllocs * 105 / 100
 	allocs := testing.AllocsPerRun(100, func() {
 		if _, err := Compile(source); err != nil {
 			t.Fatalf("Compile returned error: %v", err)

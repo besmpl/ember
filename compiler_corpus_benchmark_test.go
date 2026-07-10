@@ -29,10 +29,18 @@ type compilerCorpusFixture struct {
 
 type compilerCorpusGraph struct {
 	size        int
+	shape       compilerCorpusGraphShape
 	loader      compilerCorpusLoader
 	root        ModuleID
 	sourceBytes int
 }
+
+type compilerCorpusGraphShape string
+
+const (
+	compilerCorpusGraphChain   compilerCorpusGraphShape = "chain"
+	compilerCorpusGraphDiamond compilerCorpusGraphShape = "diamond"
+)
 
 type compilerCorpusLoader struct {
 	sources map[string]string
@@ -245,31 +253,81 @@ func BenchmarkCompilerGraphMatrix(b *testing.B) {
 				benchmarkCompilerCorpusGraphConcurrent(b, graph)
 			})
 		})
+
+		diamond := prepareCompilerCorpusGraphShape(b, size, compilerCorpusGraphDiamond)
+		b.Run("diamond_modules_"+strconv.Itoa(size), func(b *testing.B) {
+			b.Run("public_loader_reused_fresh_store", func(b *testing.B) {
+				benchmarkCompilerCorpusGraphPublic(b, diamond)
+			})
+			b.Run("private_store_unchanged_repeats", func(b *testing.B) {
+				benchmarkCompilerCorpusGraphPrivateUnchanged(b, diamond)
+			})
+			b.Run("private_store_one_edit", func(b *testing.B) {
+				benchmarkCompilerCorpusGraphPrivateOneEdit(b, diamond)
+			})
+			b.Run("private_store_edited_repeats", func(b *testing.B) {
+				benchmarkCompilerCorpusGraphPrivateEditedRepeats(b, diamond)
+			})
+			b.Run("concurrent_independent_compilation", func(b *testing.B) {
+				benchmarkCompilerCorpusGraphConcurrent(b, diamond)
+			})
+		})
 	}
 }
 
 func prepareCompilerCorpusGraph(tb testing.TB, size int) compilerCorpusGraph {
+	return prepareCompilerCorpusGraphShape(tb, size, compilerCorpusGraphChain)
+}
+
+func prepareCompilerCorpusGraphShape(tb testing.TB, size int, shape compilerCorpusGraphShape) compilerCorpusGraph {
 	tb.Helper()
+	if size < 3 {
+		tb.Fatalf("compiler corpus graph size %d is too small; want at least 3", size)
+	}
 	sources := make(map[string]string, size)
 	totalBytes := 0
 	for index := size - 1; index >= 0; index-- {
 		pathName := fmt.Sprintf("corpus/%d/module%04d", size, index)
 		moduleName := LogicalModule(pathName).String()
-		text := "return 1\n"
-		if index+1 < size {
-			text = fmt.Sprintf("local next = require(\"./module%04d\")\nreturn next\n", index+1)
-		}
+		text := compilerCorpusGraphSource(size, index, shape)
 		sources[moduleName] = text
 		totalBytes += len(text)
 	}
 	graph := compilerCorpusGraph{
 		size:        size,
+		shape:       shape,
 		loader:      compilerCorpusLoader{sources: sources},
 		root:        LogicalModule(fmt.Sprintf("corpus/%d/module%04d", size, 0)),
 		sourceBytes: totalBytes,
 	}
 	validateCompilerCorpusGraph(tb, graph)
 	return graph
+}
+
+func compilerCorpusGraphSource(size, index int, shape compilerCorpusGraphShape) string {
+	if index+1 >= size {
+		return "return 1\n"
+	}
+	switch shape {
+	case compilerCorpusGraphChain:
+		return fmt.Sprintf("local next = require(\"./module%04d\")\nreturn next\n", index+1)
+	case compilerCorpusGraphDiamond:
+		if index%3 == 0 && index+2 < size {
+			return fmt.Sprintf("local left = require(\"./module%04d\")\nlocal right = require(\"./module%04d\")\nreturn left\n", index+1, index+2)
+		}
+		if index%3 == 1 && index+2 < size {
+			return fmt.Sprintf("local next = require(\"./module%04d\")\nreturn next\n", index+2)
+		}
+		if index%3 == 2 && index+1 < size {
+			return fmt.Sprintf("local next = require(\"./module%04d\")\nreturn next\n", index+1)
+		}
+		if index+1 < size {
+			return fmt.Sprintf("local next = require(\"./module%04d\")\nreturn next\n", index+1)
+		}
+		return "return 1\n"
+	default:
+		panic("unknown compiler corpus graph shape " + string(shape))
+	}
 }
 
 func validateCompilerCorpusGraph(tb testing.TB, graph compilerCorpusGraph) {

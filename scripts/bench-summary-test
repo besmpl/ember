@@ -12,11 +12,17 @@ trap cleanup EXIT HUP INT TERM
 before="$fixture_dir/before.txt"
 after="$fixture_dir/after.txt"
 bad_after="$fixture_dir/after-bad.txt"
+missing_scaling_after="$fixture_dir/after-missing-scaling.txt"
+missing_metric_after="$fixture_dir/after-missing-metric.txt"
+missing_branch_after="$fixture_dir/after-missing-branch.txt"
+complete_before="$fixture_dir/complete-before.txt"
+complete_after="$fixture_dir/complete-after.txt"
 
 cat >"$before" <<'EOF'
 BenchmarkCompileMatrix/tiny_arithmetic-8 100 ns/op 100 B/op 10 allocs/op
 BenchmarkCompileMatrix/tiny_arithmetic-8 100 ns/op 100 B/op 10 allocs/op
 BenchmarkCompileMatrix/tiny_arithmetic-8 10000 ns/op 100 B/op 10 allocs/op
+BenchmarkCompileMatrix/branch_dense_cfg-8 200 ns/op 200 B/op 20 allocs/op 2 register_slots/op
 BenchmarkCompileMatrix/straight_line/100-8 100 ns/op 100 B/op 10 allocs/op
 BenchmarkCompileMatrix/straight_line/1000-8 1000 ns/op 1000 B/op 100 allocs/op
 BenchmarkCompileMatrix/straight_line/10000-8 10000 ns/op 10000 B/op 1000 allocs/op
@@ -25,12 +31,15 @@ BenchmarkTop10Luau/arithmetic_for/ember_run-8 50 ns/op 20 B/op 2 allocs/op
 BenchmarkLoadProgramCompile/cold/check=false/parallelism=1-8 100 ns/op 10 B/op 1 allocs/op
 BenchmarkCompilerGraphMatrix/modules_10/private_store_unchanged_repeats-8 200 ns/op 20 B/op 2 allocs/op
 BenchmarkSourceArtifactStoreHits/compile-8 30 ns/op 4 B/op 1 allocs/op
+BenchmarkCompilerCorpus/malformed_error-8 70 ns/op 30 B/op 3 allocs/op
+BenchmarkCompilerCorpusConcurrentCompile-8 60 ns/op 40 B/op 4 allocs/op
 EOF
 
 cat >"$after" <<'EOF'
 BenchmarkCompileMatrix/tiny_arithmetic-8 50 ns/op 50 B/op 5 allocs/op
 BenchmarkCompileMatrix/tiny_arithmetic-8 50 ns/op 50 B/op 5 allocs/op
 BenchmarkCompileMatrix/tiny_arithmetic-8 10000 ns/op 10000 B/op 50 allocs/op
+BenchmarkCompileMatrix/branch_dense_cfg-8 180 ns/op 180 B/op 18 allocs/op 2 register_slots/op
 BenchmarkCompileMatrix/straight_line/100-8 100 ns/op 100 B/op 10 allocs/op
 BenchmarkCompileMatrix/straight_line/1000-8 1200 ns/op 1200 B/op 120 allocs/op
 BenchmarkCompileMatrix/straight_line/10000-8 12000 ns/op 12000 B/op 1200 allocs/op
@@ -39,15 +48,19 @@ BenchmarkTop10Luau/arithmetic_for/ember_run-8 40 ns/op 10 B/op 1 allocs/op
 BenchmarkLoadProgramCompile/cold/check=false/parallelism=1-8 80 ns/op 8 B/op 1 allocs/op
 BenchmarkCompilerGraphMatrix/modules_10/private_store_unchanged_repeats-8 100 ns/op 10 B/op 1 allocs/op
 BenchmarkSourceArtifactStoreHits/compile-8 20 ns/op 2 B/op 1 allocs/op
+BenchmarkCompilerCorpus/malformed_error-8 60 ns/op 20 B/op 2 allocs/op
+BenchmarkCompilerCorpusConcurrentCompile-8 50 ns/op 20 B/op 2 allocs/op
 EOF
 
 summary=$(REQUIRE_FIXED_CORE=0 scripts/bench-summary --before "$before" --after "$after")
-printf '%s\n' "$summary" | grep -F '| cold-core | 1 | 0.5000x | 0.5000x | 0.5000x |' >/dev/null
+printf '%s\n' "$summary" | grep -F '| cold-core | 2 | 0.6708x | 0.6708x | 0.6708x |' >/dev/null
 printf '%s\n' "$summary" | grep -F '| scaling | 3 |' >/dev/null
 printf '%s\n' "$summary" | grep -F '| stage | 1 |' >/dev/null
 printf '%s\n' "$summary" | grep -F '| graph | 2 |' >/dev/null
 printf '%s\n' "$summary" | grep -F '| runtime | 1 |' >/dev/null
 printf '%s\n' "$summary" | grep -F '| artifact-hit | 1 |' >/dev/null
+printf '%s\n' "$summary" | grep -F '| error-path | 1 |' >/dev/null
+printf '%s\n' "$summary" | grep -F '| concurrency | 1 |' >/dev/null
 printf '%s\n' "$summary" | grep -F 'straight_line/100 -> 1000 | 12.0000x' >/dev/null
 
 sed 's#straight_line/1000-8 1200#straight_line/1000-8 2000#' "$after" >"$bad_after"
@@ -55,6 +68,87 @@ if REQUIRE_FIXED_CORE=0 scripts/bench-summary --before "$before" --after "$bad_a
 	printf '%s\n' 'bench-summary-test: scaling regression unexpectedly passed' >&2
 	exit 1
 fi
+
+grep -v 'BenchmarkCompileMatrix/straight_line/10000-' "$after" >"$missing_scaling_after"
+if REQUIRE_FIXED_CORE=0 scripts/bench-summary --before "$before" --after "$missing_scaling_after" >"$fixture_dir/missing-scaling-output"; then
+	printf '%s\n' 'bench-summary-test: missing scaling row unexpectedly passed' >&2
+	exit 1
+fi
+grep -F 'missing required scaling row: BenchmarkCompileMatrix/straight_line/10000' "$fixture_dir/missing-scaling-output" >/dev/null
+
+sed 's#straight_line/1000-8 1200 ns/op 1200 B/op 120 allocs/op#straight_line/1000-8 1200 ns/op 120 allocs/op#' "$after" >"$missing_metric_after"
+if REQUIRE_FIXED_CORE=0 scripts/bench-summary --before "$before" --after "$missing_metric_after" >"$fixture_dir/missing-metric-output"; then
+	printf '%s\n' 'bench-summary-test: missing required metric unexpectedly passed' >&2
+	exit 1
+fi
+grep -F 'missing required scaling B/op metric: BenchmarkCompileMatrix/straight_line/1000' "$fixture_dir/missing-metric-output" >/dev/null
+
+grep -v 'BenchmarkCompileMatrix/branch_dense_cfg-' "$after" >"$missing_branch_after"
+if REQUIRE_FIXED_CORE=0 scripts/bench-summary --before "$before" --after "$missing_branch_after" >"$fixture_dir/missing-branch-output"; then
+	printf '%s\n' 'bench-summary-test: missing branch row unexpectedly passed' >&2
+	exit 1
+fi
+grep -F 'branch_dense_cfg absolute | missing' "$fixture_dir/missing-branch-output" >/dev/null
+
+if scripts/bench-summary --before "$before" --after "$after" >"$fixture_dir/missing-fixed-output"; then
+	printf '%s\n' 'bench-summary-test: missing fixed rows unexpectedly passed' >&2
+	exit 1
+fi
+grep -F 'missing fixed cold-core row:' "$fixture_dir/missing-fixed-output" >/dev/null
+
+cp "$before" "$complete_before"
+cp "$after" "$complete_after"
+while IFS= read -r name; do
+	[ -n "$name" ] || continue
+	printf 'BenchmarkCompileMatrix/%s-8 100 ns/op 100 B/op 10 allocs/op 2 register_slots/op\n' "$name" >>"$complete_before"
+	printf 'BenchmarkCompileMatrix/%s-8 50 ns/op 50 B/op 5 allocs/op 2 register_slots/op\n' "$name" >>"$complete_after"
+done <<'EOF'
+constants/unique
+constants/repeated
+closures_upvalues
+varargs_multi_return
+table_string_fields
+top10/arithmetic_for
+top10/while_branching
+top10/table_fields
+top10/array_ops
+top10/generic_iteration
+top10/closures_upvalues
+top10/method_calls
+top10/metatable_index
+top10/varargs_select
+top10/coroutine_yield
+scenario/combat_tick
+scenario/inventory_value
+scenario/event_dispatch
+scenario/buff_stack_tick
+scenario/ability_resolution
+scenario/ai_utility_scoring
+scenario/cooldown_scheduler
+scenario/projectile_sweep
+scenario/quest_progress_update
+scenario/behavior_tree_tick
+scenario/threat_aggro_table
+scenario/economy_market_tick
+scenario/formation_layout_score
+scenario/dialogue_condition_eval
+scenario/procgen_room_scoring
+scenario/save_state_diff
+scenario/path_relaxation
+scenario/component_churn
+scenario/prototype_fallback
+scenario/signal_bus_callbacks
+scenario/state_machine_transitions
+scenario/sparse_grid_neighbors
+scenario/dirty_metatable_writes
+scenario/array_hole_compaction
+scenario/command_vararg_router
+EOF
+if ! scripts/bench-summary --before "$complete_before" --after "$complete_after" >"$fixture_dir/complete-output"; then
+	printf '%s\n' 'bench-summary-test: complete fixed fixture unexpectedly failed' >&2
+	exit 1
+fi
+grep -F '| cold-core | 42 |' "$fixture_dir/complete-output" >/dev/null
 
 if scripts/bench-summary --before "$before" --after "$before" >"$fixture_dir/same-output" 2>&1; then
 	printf '%s\n' 'bench-summary-test: identical before/after files unexpectedly accepted' >&2

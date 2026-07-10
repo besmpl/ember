@@ -14,6 +14,7 @@ type compilerStageFixture struct {
 	artifact      sourceArtifact
 	emission      compilerStageEmission
 	optimized     compilerStageOptimization
+	stageMetrics  CompilerBenchmarkMetrics
 	outputMetrics CompilerBenchmarkMetrics
 }
 
@@ -30,6 +31,7 @@ type compilerStageEmission struct {
 	allocatedRegisters int
 	params             int
 	variadic           bool
+	selfFunctionSymbol int
 	sourceLines        sourceLineMap
 }
 
@@ -215,7 +217,7 @@ func benchmarkCompilerStageOptimize(b *testing.B, fixture compilerStageFixture) 
 		syntaxNodes:    fixture.artifact.program.nodeCount,
 		irInstructions: len(fixture.optimized.ir),
 		cfgBlocks:      len(bytecodeIRBlockOrder(fixture.optimized.ir)),
-		peakRegisters:  compilerStagePeakRegisters(fixture.optimized.ir),
+		peakRegisters:  compilerStagePeakRegisters(fixture.optimized.ir, fixture.emission.allocatedRegisters),
 	})
 }
 
@@ -235,10 +237,10 @@ func benchmarkCompilerStageAssembleSeal(b *testing.B, fixture compilerStageFixtu
 		syntaxNodes:         fixture.artifact.program.nodeCount,
 		irInstructions:      len(fixture.optimized.ir),
 		cfgBlocks:           len(bytecodeIRBlockOrder(fixture.optimized.ir)),
-		peakRegisters:       compilerStagePeakRegisters(fixture.optimized.ir),
-		packedBytes:         fixture.outputMetrics.PackedBytes,
-		protoOwnedBytes:     fixture.outputMetrics.ProtoOwnedBytes,
-		retainedStringBytes: fixture.outputMetrics.RetainedStringBytes,
+		peakRegisters:       fixture.stageMetrics.RegisterSlots,
+		packedBytes:         fixture.stageMetrics.PackedBytes,
+		protoOwnedBytes:     fixture.stageMetrics.ProtoOwnedBytes,
+		retainedStringBytes: fixture.stageMetrics.RetainedStringBytes,
 	})
 }
 
@@ -325,9 +327,13 @@ func prepareCompilerStageFixtures() ([]compilerStageFixture, error) {
 			return nil, fmt.Errorf("prepare %s: emit: %w", name, err)
 		}
 		optimized := optimizeCompilerStageIR(emission)
-		proto, err := assembleAndSealCompilerStage(emission, optimized)
+		stageProto, err := assembleAndSealCompilerStage(emission, optimized)
 		if err != nil {
 			return nil, fmt.Errorf("prepare %s: seal: %w", name, err)
+		}
+		fullProto, err := Compile(source)
+		if err != nil {
+			return nil, fmt.Errorf("prepare %s: full compile: %w", name, err)
 		}
 		fixtures = append(fixtures, compilerStageFixture{
 			name:          name,
@@ -335,7 +341,8 @@ func prepareCompilerStageFixtures() ([]compilerStageFixture, error) {
 			artifact:      artifact,
 			emission:      emission,
 			optimized:     optimized,
-			outputMetrics: CompilerBenchmarkMetricsForTest(proto),
+			stageMetrics:  CompilerBenchmarkMetricsForTest(stageProto),
+			outputMetrics: CompilerBenchmarkMetricsForTest(fullProto),
 		})
 	}
 	return fixtures, nil
@@ -369,9 +376,7 @@ func emitCompilerStage(artifact sourceArtifact) (compilerStageEmission, error) {
 		symbolRegisters:    newDenseSymbolSlots(len(artifact.bind.symbols)),
 		locals:             make(map[string]int),
 		selfFunctionSymbol: -1,
-		options: compilerOptions{
-			optimizations: optimizationOptions{disableAll: true},
-		},
+		options:            defaultCompilerOptions(),
 	}
 	c.sourceText = artifact.source.Text
 	if err := c.compileStatements(artifact.program.statements); err != nil {
@@ -386,6 +391,9 @@ func emitCompilerStage(artifact sourceArtifact) (compilerStageEmission, error) {
 		children:           append([]*functionDraft(nil), c.prototypeDrafts...),
 		upvalues:           append([]upvalueDesc(nil), c.upvalueDescs...),
 		allocatedRegisters: c.nextReg,
+		params:             0,
+		variadic:           c.variadic,
+		selfFunctionSymbol: c.selfFunctionSymbol,
 		sourceLines:        c.sourceLines,
 	}, nil
 }
@@ -415,7 +423,20 @@ func cloneCompilerStageIR(ir []bytecodeIRInstruction) []bytecodeIRInstruction {
 }
 
 func assembleAndSealCompilerStage(emission compilerStageEmission, optimized compilerStageOptimization) (*Proto, error) {
-	assembly := assembleFunctionBytecode(emission.sourceLines, optimized.ir)
+	ir := cloneCompilerStageIR(optimized.ir)
+	shrinker := compiler{
+		bytecodeBuilder:    bytecodeBuilder{ir: ir},
+		prototypeDrafts:    emission.children,
+		upvalueDescs:       emission.upvalues,
+		nextReg:            emission.allocatedRegisters,
+		selfFunctionSymbol: emission.selfFunctionSymbol,
+	}
+	shrinker.shrinkCompiledFrameRegisters(emission.params, emission.variadic)
+	ir = shrinker.ir
+	if ir == nil {
+		ir = optimized.ir
+	}
+	assembly := assembleFunctionBytecode(emission.sourceLines, ir)
 	registers := compactedCompiledRegisterCount(
 		assembly.code,
 		emission.children,
@@ -434,10 +455,10 @@ func assembleAndSealCompilerStage(emission compilerStageEmission, optimized comp
 	return sealFunctionDraft(draft)
 }
 
-func compilerStagePeakRegisters(ir []bytecodeIRInstruction) int {
+func compilerStagePeakRegisters(ir []bytecodeIRInstruction, frameBound int) int {
 	peak := 0
 	for _, item := range assembleBytecodeIR(ir) {
-		iterator := instructionRegisters(item, instructionRegisterReadWrite)
+		iterator := instructionRegistersBounded(item, instructionRegisterReadWrite, frameBound)
 		for register, ok := iterator.next(); ok; register, ok = iterator.next() {
 			if register+1 > peak {
 				peak = register + 1
