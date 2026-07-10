@@ -9731,10 +9731,8 @@ func parseSourceForBytecodeIRTest(t *testing.T, source string) sourceArtifact {
 }
 
 func compilerForBytecodeIRTest(artifact sourceArtifact, options compilerOptions) compiler {
-	bindCursor := 0
 	return compiler{
 		bind:            artifact.bind,
-		bindCursor:      &bindCursor,
 		symbolRegisters: make(map[int]int),
 		locals:          make(map[string]int),
 		options:         options,

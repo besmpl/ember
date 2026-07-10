@@ -73,12 +73,9 @@ return value
 `)
 
 	result := bindProgram(prog)
-	symbol, ok := result.findSymbol(1, "value", symbolLocal)
-	if !ok {
-		t.Fatalf("findSymbol did not find block local; symbols: %#v", result.symbols)
-	}
+	symbol := result.mustSymbol(t, "value", symbolLocal, 1)
 	if symbol.scope != 1 || symbol.name != "value" || symbol.kind != symbolLocal {
-		t.Fatalf("findSymbol returned %#v, want block value local", symbol)
+		t.Fatalf("symbol = %#v, want block value local", symbol)
 	}
 }
 
@@ -100,12 +97,12 @@ return add(2)
 	result.mustUse(t, "inner", inner.id, false)
 	result.mustCapture(t, outer.id, 1)
 
-	resolved, ok := result.useAt(outerUse.start, outerUse.end)
+	resolved, ok := result.findUseAtRange(outerUse.start, outerUse.end)
 	if !ok {
-		t.Fatalf("useAt(%d, %d) did not find outer use", outerUse.start, outerUse.end)
+		t.Fatalf("range lookup (%d, %d) did not find outer use", outerUse.start, outerUse.end)
 	}
 	if resolved.symbol != outer.id {
-		t.Fatalf("useAt resolved symbol %d, want outer %d", resolved.symbol, outer.id)
+		t.Fatalf("range lookup resolved symbol %d, want outer %d", resolved.symbol, outer.id)
 	}
 	if got := source[outerUse.start:outerUse.end]; got != "outer" {
 		t.Fatalf("outer use range contains %q, want outer", got)
@@ -126,9 +123,9 @@ return value
 	if targetStart < 0 {
 		t.Fatalf("test source missing assignment target")
 	}
-	targetUse, ok := result.useAt(targetStart, targetStart+len("value"))
+	targetUse, ok := result.findUseAtRange(targetStart, targetStart+len("value"))
 	if !ok {
-		t.Fatalf("useAt did not find assignment target at %d", targetStart)
+		t.Fatalf("range lookup did not find assignment target at %d", targetStart)
 	}
 	if targetUse.symbol != value.id {
 		t.Fatalf("assignment target resolved symbol %d, want %d", targetUse.symbol, value.id)
@@ -158,6 +155,99 @@ return convert(value)
 	result.mustUseAtText(t, source, "): Alias", "Alias", alias.id)
 }
 
+func TestBindProgramIndexesUsesAndDefinitionsByStableSyntaxID(t *testing.T) {
+	prog := parseSourceForBindTest(t, `
+local value = 1
+value = value + 1
+return value
+`)
+	result := bindProgram(prog)
+
+	definitionID := prog.statements[0].local.nameID
+	symbol, ok := result.definition(definitionID)
+	if !ok || symbol.name != "value" {
+		t.Fatalf("definition(%d) = %#v, %t, want value symbol", definitionID, symbol, ok)
+	}
+	assignmentID := prog.statements[1].assign.targets[0].id
+	use, ok := result.use(assignmentID)
+	if !ok || use.symbol != symbol.id {
+		t.Fatalf("use(%d) = %#v, %t, want symbol %d", assignmentID, use, ok, symbol.id)
+	}
+	returnTerm, ok := expressionSingleTerm(prog.statements[2].ret.values[0])
+	if !ok {
+		t.Fatal("return expression is not a single term")
+	}
+	if use, ok := result.use(returnTerm.id); !ok || use.symbol != symbol.id {
+		t.Fatalf("use(%d) = %#v, %t, want symbol %d", returnTerm.id, use, ok, symbol.id)
+	}
+}
+
+func TestBindProgramRecordsDenseCaptureAndExpressionFacts(t *testing.T) {
+	prog := parseSourceForBindTest(t, `
+local before = 0
+before = 1
+local readBefore = function() return before end
+
+local after = 0
+local readAfter = function() return after end
+after = 1
+
+return before, after, readAfter()
+`)
+	result := bindProgram(prog)
+	before := result.mustSymbol(t, "before", symbolLocal, 0)
+	after := result.mustSymbol(t, "after", symbolLocal, 0)
+
+	beforeFacts := result.symbols[before.id].facts
+	if !beforeFacts.assigned || !beforeFacts.captured || beforeFacts.mutatedAfterCapture || !beforeFacts.immutableCopyEligible {
+		t.Fatalf("before facts = %#v, want assigned captured immutable copy", beforeFacts)
+	}
+	afterFacts := result.symbols[after.id].facts
+	if !afterFacts.assigned || !afterFacts.captured || !afterFacts.mutatedAfterCapture || afterFacts.immutableCopyEligible {
+		t.Fatalf("after facts = %#v, want assigned captured mutation after capture", afterFacts)
+	}
+
+	ret := prog.statements[len(prog.statements)-1].ret
+	if fact, ok := result.expressionFact(ret.values[0].id); !ok || fact.multiret {
+		t.Fatalf("first return expression fact = %#v, %t, want single result", fact, ok)
+	}
+	if fact, ok := result.expressionFact(ret.values[1].id); !ok || fact.multiret {
+		t.Fatalf("second return expression fact = %#v, %t, want single result", fact, ok)
+	}
+	if fact, ok := result.expressionFact(ret.values[2].id); !ok || !fact.multiret || fact.arity != -1 {
+		t.Fatalf("third return expression fact = %#v, %t, want open multiret", fact, ok)
+	}
+}
+
+func TestParserAssignsStableFunctionIDs(t *testing.T) {
+	const source = `
+local function outer(value)
+	return function() return value end
+end
+`
+	first := parseSourceForBindTest(t, source)
+	second := parseSourceForBindTest(t, source)
+	outerFirst := first.statements[0].localFunc
+	outerSecond := second.statements[0].localFunc
+	innerFirst, ok := expressionSingleTerm(outerFirst.statements[0].ret.values[0])
+	if !ok || innerFirst.function == nil {
+		t.Fatal("inner expression is not a function")
+	}
+	innerSecond, ok := expressionSingleTerm(outerSecond.statements[0].ret.values[0])
+	if !ok || innerSecond.function == nil {
+		t.Fatal("second inner expression is not a function")
+	}
+	if outerFirst.functionID <= 0 || innerFirst.function.functionID <= 0 || outerFirst.functionID == innerFirst.function.functionID {
+		t.Fatalf("function IDs = outer %d inner %d, want distinct positive IDs", outerFirst.functionID, innerFirst.function.functionID)
+	}
+	if outerFirst.functionID != outerSecond.functionID {
+		t.Fatalf("outer function ID changed from %d to %d", outerFirst.functionID, outerSecond.functionID)
+	}
+	if innerFirst.function.functionID != innerSecond.function.functionID {
+		t.Fatalf("inner function ID changed from %d to %d", innerFirst.function.functionID, innerSecond.function.functionID)
+	}
+}
+
 func parseSourceForBindTest(t *testing.T, source string) program {
 	t.Helper()
 	p := parser{source: source}
@@ -170,12 +260,13 @@ func parseSourceForBindTest(t *testing.T, source string) program {
 
 func (r bindResult) mustUse(t *testing.T, name string, symbolID int, captured bool) boundUse {
 	t.Helper()
-	for _, use := range r.uses {
+	for _, facts := range r.nodeFacts {
+		use := facts.use
 		if use.name == name && use.symbol == symbolID && use.captured == captured {
 			return use
 		}
 	}
-	t.Fatalf("missing use %q -> %d captured=%t; uses: %#v", name, symbolID, captured, r.uses)
+	t.Fatalf("missing use %q -> %d captured=%t; node facts: %#v", name, symbolID, captured, r.nodeFacts)
 	return boundUse{}
 }
 
@@ -190,14 +281,24 @@ func (r bindResult) mustUseAtText(t *testing.T, source string, context string, n
 		t.Fatalf("context %q missing name %q", context, name)
 	}
 	start := contextStart + nameStart
-	use, ok := r.useAt(start, start+len(name))
+	use, ok := r.findUseAtRange(start, start+len(name))
 	if !ok {
-		t.Fatalf("missing use for %q at [%d,%d); uses: %#v", name, start, start+len(name), r.uses)
+		t.Fatalf("missing use for %q at [%d,%d); node facts: %#v", name, start, start+len(name), r.nodeFacts)
 	}
 	if use.symbol != symbolID {
 		t.Fatalf("use %q at [%d,%d) resolved symbol %d, want %d", name, start, start+len(name), use.symbol, symbolID)
 	}
 	return use
+}
+
+func (r bindResult) findUseAtRange(start int, end int) (boundUse, bool) {
+	for _, facts := range r.nodeFacts {
+		use := facts.use
+		if use.start == start && use.end == end {
+			return use, true
+		}
+	}
+	return boundUse{}, false
 }
 
 func (r bindResult) mustCapture(t *testing.T, symbolID int, scope int) boundCapture {

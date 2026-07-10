@@ -13,14 +13,17 @@ const (
 
 type boundSymbol struct {
 	id       int
+	node     syntaxID
 	name     string
 	kind     symbolKind
 	scope    int
 	funcID   int
 	shadowed int
+	facts    boundSymbolFacts
 }
 
 type boundUse struct {
+	node     syntaxID
 	name     string
 	symbol   int
 	scope    int
@@ -35,47 +38,94 @@ type boundCapture struct {
 }
 
 type bindScope struct {
-	id     int
-	parent int
-	funcID int
+	id              int
+	parent          int
+	funcID          int
+	names           map[string]int
+	capturedSymbols []bool
+}
+
+type boundSymbolFacts struct {
+	assigned              bool
+	captured              bool
+	mutatedAfterCapture   bool
+	immutableCopyEligible bool
+}
+
+type boundExpressionFact struct {
+	valid    bool
+	arity    int
+	multiret bool
+}
+
+type boundNodeFacts struct {
+	definition int
+	use        boundUse
+	expression boundExpressionFact
 }
 
 type bindResult struct {
-	scopes   []bindScope
-	symbols  []boundSymbol
-	uses     []boundUse
-	captures []boundCapture
+	scopes    []bindScope
+	symbols   []boundSymbol
+	captures  []boundCapture
+	nodeFacts []boundNodeFacts
 }
 
-func (r bindResult) findSymbol(scope int, name string, kind symbolKind) (boundSymbol, bool) {
-	for _, symbol := range r.symbols {
-		if symbol.scope == scope && symbol.name == name && symbol.kind == kind {
-			return symbol, true
-		}
+func (r bindResult) definition(node syntaxID) (boundSymbol, bool) {
+	if node <= 0 || int(node) >= len(r.nodeFacts) {
+		return boundSymbol{}, false
 	}
-	return boundSymbol{}, false
+	symbolID := r.nodeFacts[node].definition
+	if symbolID < 0 || symbolID >= len(r.symbols) {
+		return boundSymbol{}, false
+	}
+	return r.symbols[symbolID], true
 }
 
-func (r bindResult) useAt(start int, end int) (boundUse, bool) {
-	for _, use := range r.uses {
-		if use.start == start && use.end == end {
-			return use, true
-		}
+func (r bindResult) use(node syntaxID) (boundUse, bool) {
+	if node <= 0 || int(node) >= len(r.nodeFacts) {
+		return boundUse{}, false
 	}
-	return boundUse{}, false
+	use := r.nodeFacts[node].use
+	return use, use.symbol >= 0
+}
+
+func (r bindResult) expressionFact(node syntaxID) (boundExpressionFact, bool) {
+	if node <= 0 || int(node) >= len(r.nodeFacts) {
+		return boundExpressionFact{}, false
+	}
+	fact := r.nodeFacts[node].expression
+	return fact, fact.valid
 }
 
 type binder struct {
-	result     bindResult
-	scopes     []int
-	nextFuncID int
+	result      bindResult
+	scopes      []int
+	activeNames map[string]int
 }
 
 func bindProgram(prog program) bindResult {
-	b := binder{}
-	b.pushScope()
+	if prog.nodeCount == 0 {
+		assignProgramSyntaxIDs(&prog)
+	}
+	nodeFacts := make([]boundNodeFacts, prog.nodeCount+1)
+	for i := range nodeFacts {
+		nodeFacts[i].definition = -1
+		nodeFacts[i].use.symbol = -1
+	}
+	b := binder{
+		result: bindResult{
+			nodeFacts: nodeFacts,
+		},
+		activeNames: make(map[string]int),
+	}
+	b.pushScopeForFunction(0)
 	b.bindStatements(prog.statements)
 	b.popScope()
+	for i := range b.result.symbols {
+		facts := &b.result.symbols[i].facts
+		facts.immutableCopyEligible = facts.captured && !facts.mutatedAfterCapture
+	}
 	return b.result
 }
 
@@ -94,21 +144,27 @@ func (b *binder) bindStatement(stmt statement) {
 		for _, value := range stmt.local.values {
 			b.bindExpression(value)
 		}
-		for _, name := range stmt.local.names {
-			b.define(name, symbolLocal)
+		for i, name := range stmt.local.names {
+			b.define(name, symbolLocal, syntaxNameID(stmt.local.nameID, i))
 		}
 	case stmt.localFunc != nil:
-		b.define(stmt.localFunc.name, symbolLocalFunction)
-		b.bindFunction(stmt.localFunc.typeParams, stmt.localFunc.typePacks, stmt.localFunc.params, stmt.localFunc.paramAnnotations, stmt.localFunc.variadicAnnotation, stmt.localFunc.returnAnnotation, stmt.localFunc.statements)
+		b.define(stmt.localFunc.name, symbolLocalFunction, stmt.localFunc.nameID)
+		b.bindFunction(stmt.localFunc.functionID, stmt.localFunc.typeParams, stmt.localFunc.typeParamID, stmt.localFunc.typePacks, stmt.localFunc.typePackID, stmt.localFunc.params, stmt.localFunc.paramID, stmt.localFunc.paramAnnotations, stmt.localFunc.variadicAnnotation, stmt.localFunc.returnAnnotation, stmt.localFunc.statements)
 	case stmt.funcDecl != nil:
-		b.bindAssignTarget(stmt.funcDecl.target)
-		b.bindFunction(stmt.funcDecl.typeParams, stmt.funcDecl.typePacks, stmt.funcDecl.params, stmt.funcDecl.paramAnnotations, stmt.funcDecl.variadicAnnotation, stmt.funcDecl.returnAnnotation, stmt.funcDecl.statements)
+		b.bindAssignTarget(stmt.funcDecl.target, true)
+		params := stmt.funcDecl.params
+		paramID := stmt.funcDecl.paramID
+		if stmt.funcDecl.method {
+			params = append([]string{"self"}, params...)
+			paramID = stmt.funcDecl.selfID
+		}
+		b.bindFunction(stmt.funcDecl.functionID, stmt.funcDecl.typeParams, stmt.funcDecl.typeParamID, stmt.funcDecl.typePacks, stmt.funcDecl.typePackID, params, paramID, stmt.funcDecl.paramAnnotations, stmt.funcDecl.variadicAnnotation, stmt.funcDecl.returnAnnotation, stmt.funcDecl.statements)
 	case stmt.assign != nil:
 		for _, value := range stmt.assign.values {
 			b.bindExpression(value)
 		}
 		for _, target := range stmt.assign.targets {
-			b.bindAssignTarget(target)
+			b.bindAssignTarget(target, true)
 		}
 	case stmt.call != nil:
 		b.bindTerm(*stmt.call)
@@ -126,7 +182,7 @@ func (b *binder) bindStatement(stmt statement) {
 			b.bindExpression(*stmt.forLoop.step)
 		}
 		b.pushScope()
-		b.define(stmt.forLoop.name, symbolLocal)
+		b.define(stmt.forLoop.name, symbolLocal, stmt.forLoop.nameID)
 		b.bindStatements(stmt.forLoop.statements)
 		b.popScope()
 	case stmt.genericFor != nil:
@@ -134,8 +190,8 @@ func (b *binder) bindStatement(stmt statement) {
 			b.bindExpression(value)
 		}
 		b.pushScope()
-		for _, name := range stmt.genericFor.names {
-			b.define(name, symbolLocal)
+		for i, name := range stmt.genericFor.names {
+			b.define(name, symbolLocal, syntaxNameID(stmt.genericFor.nameID, i))
 		}
 		b.bindStatements(stmt.genericFor.statements)
 		b.popScope()
@@ -151,40 +207,48 @@ func (b *binder) bindStatement(stmt statement) {
 			b.bindExpression(value)
 		}
 	case stmt.typeAlias != nil:
-		b.define(stmt.typeAlias.name, symbolTypeAlias)
+		b.define(stmt.typeAlias.name, symbolTypeAlias, stmt.typeAlias.nameID)
 		b.pushScope()
-		for _, name := range stmt.typeAlias.typeParams {
-			b.define(name, symbolTypeParameter)
+		for i, name := range stmt.typeAlias.typeParams {
+			b.define(name, symbolTypeParameter, syntaxNameID(stmt.typeAlias.typeParamID, i))
 		}
-		for _, name := range stmt.typeAlias.typePacks {
-			b.define(name, symbolTypePack)
+		for i, name := range stmt.typeAlias.typePacks {
+			b.define(name, symbolTypePack, syntaxNameID(stmt.typeAlias.typePackID, i))
 		}
 		b.bindTypeExpression(stmt.typeAlias.value)
 		b.popScope()
 	}
 }
 
-func (b *binder) bindFunction(typeParams []string, typePacks []string, params []string, paramAnnotations []*typeExpression, variadicAnnotation *typeExpression, returnAnnotation *typeExpression, statements []statement) {
-	b.pushFunctionScope()
-	for _, name := range typeParams {
-		b.define(name, symbolTypeParameter)
+func (b *binder) bindFunction(functionID int, typeParams []string, typeParamID syntaxID, typePacks []string, typePackID syntaxID, params []string, paramID syntaxID, paramAnnotations []*typeExpression, variadicAnnotation *typeExpression, returnAnnotation *typeExpression, statements []statement) {
+	b.pushScopeForFunction(functionID)
+	for i, name := range typeParams {
+		b.define(name, symbolTypeParameter, syntaxNameID(typeParamID, i))
 	}
-	for _, name := range typePacks {
-		b.define(name, symbolTypePack)
+	for i, name := range typePacks {
+		b.define(name, symbolTypePack, syntaxNameID(typePackID, i))
 	}
 	for _, annotation := range paramAnnotations {
 		b.bindTypeExpression(annotation)
 	}
 	b.bindTypeExpression(variadicAnnotation)
 	b.bindTypeExpression(returnAnnotation)
-	for _, name := range params {
-		b.define(name, symbolParameter)
+	for i, name := range params {
+		b.define(name, symbolParameter, syntaxNameID(paramID, i))
 	}
 	b.bindStatements(statements)
 	b.popScope()
 }
 
 func (b *binder) bindExpression(expr expression) {
+	if expr.id > 0 {
+		multiret := expressionExpands(expr)
+		arity := 1
+		if multiret {
+			arity = -1
+		}
+		b.result.nodeFacts[expr.id].expression = boundExpressionFact{valid: true, arity: arity, multiret: multiret}
+	}
 	for _, and := range expr.terms {
 		for _, comparison := range and.terms {
 			b.bindConcatExpression(comparison.left)
@@ -230,7 +294,7 @@ func (b *binder) bindTerm(value term) {
 		}
 	}
 	if value.function != nil {
-		b.bindFunction(value.function.typeParams, value.function.typePacks, value.function.params, value.function.paramAnnotations, value.function.variadicAnnotation, value.function.returnAnnotation, value.function.statements)
+		b.bindFunction(value.function.functionID, value.function.typeParams, value.function.typeParamID, value.function.typePacks, value.function.typePackID, value.function.params, value.function.paramID, value.function.paramAnnotations, value.function.variadicAnnotation, value.function.returnAnnotation, value.function.statements)
 	}
 	if value.ifExpr != nil {
 		b.bindExpression(value.ifExpr.condition)
@@ -254,7 +318,7 @@ func (b *binder) bindTerm(value term) {
 	}
 	b.bindTypeExpression(value.cast)
 	if value.name != "" {
-		b.use(value.name, value.start, value.start+len(value.name))
+		b.recordUse(value.id, value.name, value.start, value.start+len(value.name))
 	}
 	for _, selector := range value.selectors {
 		if selector.index != nil {
@@ -283,7 +347,7 @@ func (b *binder) bindTypeExpression(value *typeExpression) {
 	switch value.kind {
 	case typeKindName:
 		if len(value.name) > 0 {
-			b.useType(value.name[0], value.start, value.start+len(value.name[0]))
+			b.recordUse(value.id, value.name[0], value.start, value.start+len(value.name[0]))
 		}
 		for _, arg := range value.typeArgs {
 			b.bindTypeExpression(arg)
@@ -303,11 +367,11 @@ func (b *binder) bindTypeExpression(value *typeExpression) {
 		b.bindTypeFunction(value)
 	case typeKindGenericFunction:
 		b.pushScope()
-		for _, name := range value.typeParams {
-			b.define(name, symbolTypeParameter)
+		for i, name := range value.typeParams {
+			b.define(name, symbolTypeParameter, syntaxNameID(value.typeParamID, i))
 		}
-		for _, name := range value.typePacks {
-			b.define(name, symbolTypePack)
+		for i, name := range value.typePacks {
+			b.define(name, symbolTypePack, syntaxNameID(value.typePackID, i))
 		}
 		b.bindTypeFunction(value)
 		b.popScope()
@@ -325,27 +389,22 @@ func (b *binder) bindTypeFunction(value *typeExpression) {
 	b.bindTypeExpression(value.returnType)
 }
 
-func (b *binder) bindAssignTarget(target assignTarget) {
-	b.use(target.name, target.start, target.end)
+func (b *binder) bindAssignTarget(target assignTarget, assignment bool) {
+	b.recordUse(target.id, target.name, target.start, target.end)
+	if assignment && len(target.selectors) == 0 {
+		if use, ok := b.result.use(target.id); ok {
+			facts := &b.result.symbols[use.symbol].facts
+			facts.assigned = true
+			if facts.captured {
+				facts.mutatedAfterCapture = true
+			}
+		}
+	}
 	for _, selector := range target.selectors {
 		if selector.index != nil {
 			b.bindExpression(*selector.index)
 		}
 	}
-}
-
-func (b *binder) useType(name string, start int, end int) {
-	symbol, ok := b.lookup(name)
-	if !ok {
-		return
-	}
-	b.result.uses = append(b.result.uses, boundUse{
-		name:   name,
-		symbol: symbol.id,
-		scope:  b.currentScope(),
-		start:  start,
-		end:    end,
-	})
 }
 
 func (b *binder) bindScoped(statements []statement) {
@@ -354,10 +413,11 @@ func (b *binder) bindScoped(statements []statement) {
 	b.popScope()
 }
 
-func (b *binder) define(name string, kind symbolKind) boundSymbol {
+func (b *binder) define(name string, kind symbolKind, node syntaxID) boundSymbol {
 	scope := b.currentScope()
 	symbol := boundSymbol{
 		id:       len(b.result.symbols),
+		node:     node,
 		name:     name,
 		kind:     kind,
 		scope:    scope,
@@ -368,56 +428,60 @@ func (b *binder) define(name string, kind symbolKind) boundSymbol {
 		symbol.shadowed = shadowed.id
 	}
 	b.result.symbols = append(b.result.symbols, symbol)
+	if node > 0 {
+		b.result.nodeFacts[node].definition = symbol.id
+	}
+	b.result.scopes[scope].names[name] = symbol.id
+	b.activeNames[name] = symbol.id
 	return symbol
 }
 
-func (b *binder) use(name string, start int, end int) {
+func (b *binder) recordUse(node syntaxID, name string, start int, end int) {
 	symbol, ok := b.lookup(name)
 	if !ok {
 		return
 	}
 	captured := symbol.funcID != b.currentFunction()
-	b.result.uses = append(b.result.uses, boundUse{
+	use := boundUse{
+		node:     node,
 		name:     name,
 		symbol:   symbol.id,
 		scope:    b.currentScope(),
 		start:    start,
 		end:      end,
 		captured: captured,
-	})
+	}
+	if node > 0 {
+		b.result.nodeFacts[node].use = use
+	}
 	if captured {
 		b.capture(symbol.id, b.currentScope())
 	}
 }
 
 func (b *binder) capture(symbolID int, scope int) {
-	for _, capture := range b.result.captures {
-		if capture.symbol == symbolID && capture.scope == scope {
-			return
-		}
+	facts := &b.result.symbols[symbolID].facts
+	facts.captured = true
+	scopeFacts := &b.result.scopes[scope]
+	if len(scopeFacts.capturedSymbols) <= symbolID {
+		scopeFacts.capturedSymbols = append(scopeFacts.capturedSymbols, make([]bool, symbolID-len(scopeFacts.capturedSymbols)+1)...)
 	}
+	if scopeFacts.capturedSymbols[symbolID] {
+		return
+	}
+	scopeFacts.capturedSymbols[symbolID] = true
 	b.result.captures = append(b.result.captures, boundCapture{symbol: symbolID, scope: scope})
 }
 
 func (b *binder) lookup(name string) (boundSymbol, bool) {
-	for i := len(b.scopes) - 1; i >= 0; i-- {
-		scope := b.scopes[i]
-		for j := len(b.result.symbols) - 1; j >= 0; j-- {
-			if b.result.symbols[j].scope == scope && b.result.symbols[j].name == name {
-				return b.result.symbols[j], true
-			}
-		}
+	if symbolID, ok := b.activeNames[name]; ok {
+		return b.result.symbols[symbolID], true
 	}
 	return boundSymbol{}, false
 }
 
 func (b *binder) pushScope() int {
 	return b.pushScopeForFunction(b.currentFunction())
-}
-
-func (b *binder) pushFunctionScope() int {
-	b.nextFuncID++
-	return b.pushScopeForFunction(b.nextFuncID)
 }
 
 func (b *binder) pushScopeForFunction(funcID int) int {
@@ -429,6 +493,7 @@ func (b *binder) pushScopeForFunction(funcID int) int {
 		id:     len(b.result.scopes),
 		parent: parent,
 		funcID: funcID,
+		names:  make(map[string]int),
 	}
 	b.result.scopes = append(b.result.scopes, scope)
 	b.scopes = append(b.scopes, scope.id)
@@ -436,6 +501,18 @@ func (b *binder) pushScopeForFunction(funcID int) int {
 }
 
 func (b *binder) popScope() {
+	scope := b.result.scopes[b.currentScope()]
+	for name, symbolID := range scope.names {
+		shadowed := b.result.symbols[symbolID].shadowed
+		for shadowed >= 0 && b.result.symbols[shadowed].scope == scope.id {
+			shadowed = b.result.symbols[shadowed].shadowed
+		}
+		if shadowed >= 0 {
+			b.activeNames[name] = shadowed
+		} else {
+			delete(b.activeNames, name)
+		}
+	}
 	b.scopes = b.scopes[:len(b.scopes)-1]
 }
 

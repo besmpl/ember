@@ -79,6 +79,7 @@ type loweredClosure struct {
 	typeParams         []string
 	typePacks          []string
 	params             []string
+	paramID            syntaxID
 	paramAnnotations   []*typeExpression
 	variadic           bool
 	variadicAnnotation *typeExpression
@@ -126,6 +127,7 @@ type loweredAssignment struct {
 
 type loweredLocal struct {
 	names       []string
+	nameID      syntaxID
 	annotations []*typeExpression
 	sources     []expression
 	values      loweredValueList
@@ -288,6 +290,7 @@ func lowerClosure(fn functionExpression) loweredClosure {
 		typeParams:         append([]string(nil), fn.typeParams...),
 		typePacks:          append([]string(nil), fn.typePacks...),
 		params:             append([]string(nil), fn.params...),
+		paramID:            fn.paramID,
 		paramAnnotations:   append([]*typeExpression(nil), fn.paramAnnotations...),
 		variadic:           fn.variadic,
 		variadicAnnotation: fn.variadicAnnotation,
@@ -301,6 +304,7 @@ func lowerLocalFunctionClosure(stmt localFunctionStatement) loweredClosure {
 		typeParams:         stmt.typeParams,
 		typePacks:          stmt.typePacks,
 		params:             stmt.params,
+		paramID:            stmt.paramID,
 		paramAnnotations:   stmt.paramAnnotations,
 		variadic:           stmt.variadic,
 		variadicAnnotation: stmt.variadicAnnotation,
@@ -311,13 +315,16 @@ func lowerLocalFunctionClosure(stmt localFunctionStatement) loweredClosure {
 
 func lowerFunctionDeclarationClosure(stmt functionDeclarationStatement) loweredClosure {
 	params := append([]string(nil), stmt.params...)
+	paramID := stmt.paramID
 	if stmt.method {
 		params = append([]string{"self"}, params...)
+		paramID = stmt.selfID
 	}
 	return lowerClosure(functionExpression{
 		typeParams:         stmt.typeParams,
 		typePacks:          stmt.typePacks,
 		params:             params,
+		paramID:            paramID,
 		paramAnnotations:   stmt.paramAnnotations,
 		variadic:           stmt.variadic,
 		variadicAnnotation: stmt.variadicAnnotation,
@@ -380,6 +387,7 @@ func lowerLocal(stmt localStatement) loweredLocal {
 	sources := append([]expression(nil), stmt.values...)
 	return loweredLocal{
 		names:       names,
+		nameID:      stmt.nameID,
 		annotations: annotations,
 		sources:     sources,
 		values:      lowerFixedValueList(sources, len(names)),

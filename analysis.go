@@ -49,7 +49,6 @@ type analysisState struct {
 	mode            SourceMode
 	typeEnv         typeEnv
 	moduleSummaries moduleSummaryEnv
-	bindCursor      int
 	symbolTypes     map[int]simpleType
 	functions       map[int]functionFact
 	scopes          []map[string]simpleType
@@ -243,7 +242,7 @@ func (a *analysisState) analyzeNumericForStatement(stmt forStatement) {
 	}
 	a.pushScope()
 	a.defineLocal(stmt.name, simpleTypeNumber)
-	if symbol, ok := a.claimSymbol(stmt.name, symbolLocal); ok {
+	if symbol, ok := a.claimSymbol(stmt.nameID, symbolLocal); ok {
 		a.symbolTypes[symbol.id] = simpleTypeNumber
 	}
 	a.analyzeStatements(stmt.statements)
@@ -275,7 +274,7 @@ func (a *analysisState) analyzeGenericForStatement(stmt genericForStatement) {
 			typ = types[i]
 		}
 		a.defineLocal(name, typ)
-		if symbol, ok := a.claimSymbol(name, symbolLocal); ok {
+		if symbol, ok := a.claimSymbol(syntaxNameID(stmt.nameID, i), symbolLocal); ok {
 			a.symbolTypes[symbol.id] = typ
 		}
 	}
@@ -389,7 +388,7 @@ func (a *analysisState) analyzeConditionExpression(expr expression) {
 }
 
 func (a *analysisState) analyzeTypeAliasStatement(stmt typeAliasStatement) {
-	if _, ok := a.claimSymbol(stmt.name, symbolTypeAlias); ok {
+	if _, ok := a.claimSymbol(stmt.nameID, symbolTypeAlias); ok {
 		a.defineTypeAlias(stmt)
 	}
 	a.checkUnknownTypeNames(stmt.value)
@@ -417,10 +416,10 @@ func (a *analysisState) analyzeLocalFunctionStatement(stmt localFunctionStatemen
 		returnPack:      returnPack,
 		returnGeneric:   genericAnnotationName(stmt.returnAnnotation, stmt.typeParams),
 	}
-	if symbol, ok := a.claimSymbol(stmt.name, symbolLocalFunction); ok {
+	if symbol, ok := a.claimSymbol(stmt.nameID, symbolLocalFunction); ok {
 		a.functions[symbol.id] = fact
 	}
-	restore := a.bindLocals(stmt.params, paramTypes)
+	restore := a.bindLocals(stmt.params, stmt.paramID, paramTypes)
 	a.analyzeFunctionBody(stmt.returnAnnotation, stmt.statements)
 	restore()
 }
@@ -450,7 +449,7 @@ func (a *analysisState) analyzeFunctionBodyWithReturn(returnType simpleType, ret
 	a.returnPacks = a.returnPacks[:len(a.returnPacks)-1]
 }
 
-func (a *analysisState) bindLocals(names []string, types []simpleType) func() {
+func (a *analysisState) bindLocals(names []string, nameID syntaxID, types []simpleType) func() {
 	previous := make(map[string]simpleType, len(names))
 	hadPrevious := make(map[string]bool, len(names))
 	for i, name := range names {
@@ -458,7 +457,7 @@ func (a *analysisState) bindLocals(names []string, types []simpleType) func() {
 		if i < len(types) {
 			typ := types[i]
 			a.currentScope()[name] = typ
-			if symbol, ok := a.claimSymbol(name, symbolParameter); ok {
+			if symbol, ok := a.claimSymbol(syntaxNameID(nameID, i), symbolParameter); ok {
 				a.symbolTypes[symbol.id] = typ
 			}
 		}
@@ -519,7 +518,7 @@ func (a *analysisState) analyzeLocalStatement(stmt localStatement) {
 		if hasModuleSummary {
 			a.defineModuleLocal(name, moduleSummary)
 		}
-		if symbol, ok := a.claimSymbol(name, symbolLocal); ok {
+		if symbol, ok := a.claimSymbol(syntaxNameID(stmt.nameID, i), symbolLocal); ok {
 			a.symbolTypes[symbol.id] = selected
 			if !hasFunctionFact && i < len(stmt.values) {
 				functionFact, hasFunctionFact = a.functionFactFromExpression(stmt.values[i])
@@ -797,7 +796,7 @@ func (a *analysisState) analyzeAnnotatedFunctionExpression(annotation *typeExpre
 		return
 	}
 	function := *functionTerm.function
-	restore := a.bindLocals(function.params, functionExpressionParamTypes(function, fact))
+	restore := a.bindLocals(function.params, function.paramID, functionExpressionParamTypes(function, fact))
 	a.analyzeFunctionBodyWithReturn(fact.returnType, fact.returnTable, fact.returnSpan, fact.returnPack, function.statements)
 	restore()
 }
@@ -810,7 +809,7 @@ func (a *analysisState) analyzeFunctionExpressionAnnotations(value expression) {
 	a.checkFunctionParameterTypeNames(function.paramAnnotations, function.variadicAnnotation)
 	a.checkUnknownTypeNames(function.returnAnnotation)
 	fact := a.functionFactFromFunctionExpression(function)
-	restore := a.bindLocals(function.params, functionExpressionParamTypes(function, fact))
+	restore := a.bindLocals(function.params, function.paramID, functionExpressionParamTypes(function, fact))
 	a.analyzeFunctionBodyWithReturn(fact.returnType, fact.returnTable, fact.returnSpan, fact.returnPack, function.statements)
 	restore()
 }
@@ -1192,7 +1191,7 @@ func (a *analysisState) applyTableFieldAssignmentRefinement(name string, field s
 }
 
 func (a *analysisState) lookupAssignTarget(target assignTarget) simpleType {
-	if use, ok := a.bind.useAt(target.start, target.end); ok {
+	if use, ok := a.bind.use(target.id); ok {
 		if typ, ok := a.symbolTypes[use.symbol]; ok {
 			return typ
 		}
@@ -1212,14 +1211,14 @@ func (a *analysisState) tableFactFromAssignTarget(target assignTarget) tableFact
 }
 
 func (a *analysisState) lookupNamedTerm(value term) simpleType {
-	return a.lookupBoundName(value.name, value.start, value.start+len(value.name))
+	return a.lookupBoundName(value.id, value.name)
 }
 
-func (a *analysisState) checkUnknownName(name string, start int, end int) {
+func (a *analysisState) checkUnknownName(node syntaxID, name string, start int, end int) {
 	if !policyForMode(a.mode).reportsUnknownNames() || name == "" || a.isKnownGlobalName(name) {
 		return
 	}
-	if _, ok := a.bind.useAt(start, end); ok {
+	if _, ok := a.bind.use(node); ok {
 		return
 	}
 	a.diagnostics = append(a.diagnostics, unknownNameDiagnostic(name, start, end))
@@ -1230,8 +1229,8 @@ func (a *analysisState) isKnownGlobalName(name string) bool {
 	return ok
 }
 
-func (a *analysisState) lookupBoundName(name string, start int, end int) simpleType {
-	if use, ok := a.bind.useAt(start, end); ok {
+func (a *analysisState) lookupBoundName(node syntaxID, name string) simpleType {
+	if use, ok := a.bind.use(node); ok {
 		if typ, ok := a.symbolTypes[use.symbol]; ok {
 			local := a.lookupLocal(name)
 			if local != simpleTypeUnknown && typeAllows(typ, local) {
@@ -1249,15 +1248,9 @@ func (a *analysisState) lookupBoundName(name string, start int, end int) simpleT
 	return simpleTypeUnknown
 }
 
-func (a *analysisState) claimSymbol(name string, kind symbolKind) (boundSymbol, bool) {
-	for a.bindCursor < len(a.bind.symbols) {
-		symbol := a.bind.symbols[a.bindCursor]
-		a.bindCursor++
-		if symbol.name == name && symbol.kind == kind {
-			return symbol, true
-		}
-	}
-	return boundSymbol{}, false
+func (a *analysisState) claimSymbol(node syntaxID, kind symbolKind) (boundSymbol, bool) {
+	symbol, ok := a.bind.definition(node)
+	return symbol, ok && symbol.kind == kind
 }
 
 func selectedLocalType(annotation, value simpleType) simpleType {
@@ -1470,13 +1463,13 @@ func (a *analysisState) inferTerm(value term) simpleType {
 		return simpleTypeNumber
 	}
 	if len(value.selectors) != 0 {
-		a.checkUnknownName(value.name, value.start, value.start+len(value.name))
+		a.checkUnknownName(value.id, value.name, value.start, value.start+len(value.name))
 		return simpleTypeUnknown
 	}
 	if value.name != "" {
 		typ := a.lookupNamedTerm(value)
 		if typ == simpleTypeUnknown {
-			a.checkUnknownName(value.name, value.start, value.start+len(value.name))
+			a.checkUnknownName(value.id, value.name, value.start, value.start+len(value.name))
 		}
 		return typ
 	}
@@ -1738,7 +1731,7 @@ func (a *analysisState) functionFactForCallWithDiagnostics(call callExpression, 
 	if target.name == "" {
 		return functionFact{}, false
 	}
-	if use, ok := a.bind.useAt(target.start, target.start+len(target.name)); ok {
+	if use, ok := a.bind.use(target.id); ok {
 		if len(target.selectors) != 0 {
 			if fact, ok := a.tableFunctionFactForCallTarget(target, diagnoseAccess); ok {
 				return fact, true
@@ -2109,7 +2102,7 @@ func (a *analysisState) checkUnknownTypeName(annotation *typeExpression) {
 	}
 	start := annotation.start
 	end := start + len(annotation.name[0])
-	if _, ok := a.bind.useAt(start, end); ok {
+	if _, ok := a.bind.use(annotation.id); ok {
 		if len(annotation.name) == 2 {
 			if _, isModule := a.lookupModuleLocal(annotation.name[0]); isModule {
 				if _, ok := a.lookupModuleExportedTypeAlias(annotation.name[0], annotation.name[1]); !ok {

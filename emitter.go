@@ -8,7 +8,6 @@ import (
 type compiler struct {
 	bytecodeBuilder
 	bind                     bindResult
-	bindCursor               *int
 	sourceLines              sourceLineMap
 	symbolRegisters          map[int]int
 	locals                   map[string]int
@@ -25,7 +24,6 @@ type compiler struct {
 	upvalues                 map[string]int
 	upvaluesByID             map[int]int
 	upvalueDescs             []upvalueDesc
-	assignedSymbols          map[int]bool
 	loops                    []loopContext
 	prototypeDrafts          []*functionDraft
 	nextReg                  int
@@ -57,10 +55,8 @@ func compileProgram(source sourceArtifact) (*Proto, error) {
 }
 
 func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (*Proto, error) {
-	bindCursor := 0
 	c := compiler{
 		bind:                     source.bind,
-		bindCursor:               &bindCursor,
 		sourceLines:              newSourceLineMap(source.source.Text),
 		symbolRegisters:          make(map[int]int),
 		locals:                   make(map[string]int),
@@ -70,7 +66,6 @@ func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (
 		localFieldArrayElemSlots: make(map[int]map[string]map[string]int),
 		localArrayElemFieldSlots: make(map[int]map[string]map[string]int),
 		selfFunctionSymbol:       -1,
-		assignedSymbols:          assignedSymbolsInStatements(source.bind, source.program.statements),
 		options:                  options,
 	}
 	c.sourceText = source.source.Text
@@ -369,7 +364,7 @@ func (c *compiler) compileLoweredLocal(lowered loweredLocal) error {
 				}
 			}
 		}
-		if symbol, ok := c.claimSymbol(name, symbolLocal); ok {
+		if symbol, ok := c.claimSymbol(syntaxNameID(lowered.nameID, i), symbolLocal); ok {
 			c.symbolRegisters[symbol.id] = targets[i]
 		}
 	}
@@ -481,7 +476,7 @@ func (c *compiler) compileLocalFunction(stmt localFunctionStatement) error {
 	target := c.allocReg()
 	c.locals[stmt.name] = target
 	selfFunctionSymbol := -1
-	if symbol, ok := c.claimSymbol(stmt.name, symbolLocalFunction); ok {
+	if symbol, ok := c.claimSymbol(stmt.nameID, symbolLocalFunction); ok {
 		c.symbolRegisters[symbol.id] = target
 		selfFunctionSymbol = symbol.id
 	}
@@ -505,7 +500,6 @@ func (c *compiler) compileFunctionDraft(closure loweredClosure, selfFunctionSymb
 	selfNumericPairBase, selfNumericPairAdd := selfNumericPairAddClosureBase(closure)
 	fn := compiler{
 		bind:                     c.bind,
-		bindCursor:               c.bindCursor,
 		sourceLines:              c.sourceLines,
 		symbolRegisters:          make(map[int]int),
 		locals:                   make(map[string]int),
@@ -521,14 +515,13 @@ func (c *compiler) compileFunctionDraft(closure loweredClosure, selfFunctionSymb
 		variadic:                 closure.variadic,
 		upvalues:                 make(map[string]int),
 		upvaluesByID:             make(map[int]int),
-		assignedSymbols:          assignedSymbolsInStatements(c.bind, closure.body),
 		nextReg:                  len(closure.params),
 		options:                  c.options,
 	}
 	fn.sourceText = c.sourceText
 	for i, param := range closure.params {
 		fn.locals[param] = i
-		if symbol, ok := fn.claimSymbol(param, symbolParameter); ok {
+		if symbol, ok := fn.claimSymbol(syntaxNameID(closure.paramID, i), symbolParameter); ok {
 			fn.symbolRegisters[symbol.id] = i
 		}
 	}
@@ -2827,7 +2820,7 @@ func (c *compiler) concatLocalRef(expr concatExpression) (variableRef, bool) {
 	if !isNamedTerm(term) {
 		return variableRef{}, false
 	}
-	if use, ok := c.bind.useAt(term.start, term.start+len(term.name)); ok {
+	if use, ok := c.bind.use(term.id); ok {
 		if ref, ok := c.resolveSymbol(use.symbol); ok && ref.kind == variableLocal {
 			return ref, true
 		}
@@ -3155,7 +3148,7 @@ func (c *compiler) compileNamedValueTo(name string, target int) error {
 }
 
 func (c *compiler) compileNamedTermTo(term term, target int) error {
-	if use, ok := c.bind.useAt(term.start, term.start+len(term.name)); ok {
+	if use, ok := c.bind.use(term.id); ok {
 		if ref, ok := c.resolveSymbol(use.symbol); ok {
 			return c.compileVariableRefTo(ref, target)
 		}
@@ -3167,7 +3160,7 @@ func (c *compiler) termLocalRef(term term) (variableRef, bool) {
 	if !isNamedTerm(term) {
 		return variableRef{}, false
 	}
-	if use, ok := c.bind.useAt(term.start, term.start+len(term.name)); ok {
+	if use, ok := c.bind.use(term.id); ok {
 		if ref, ok := c.resolveSymbol(use.symbol); ok && ref.kind == variableLocal {
 			return ref, true
 		}
@@ -3177,7 +3170,7 @@ func (c *compiler) termLocalRef(term term) (variableRef, bool) {
 }
 
 func (c *compiler) compileAssignTargetBaseTo(target assignTarget, register int) error {
-	if use, ok := c.bind.useAt(target.start, target.end); ok {
+	if use, ok := c.bind.use(target.id); ok {
 		if ref, ok := c.resolveSymbol(use.symbol); ok {
 			return c.compileVariableRefTo(ref, register)
 		}
@@ -3186,7 +3179,7 @@ func (c *compiler) compileAssignTargetBaseTo(target assignTarget, register int) 
 }
 
 func (c *compiler) resolveAssignTarget(target assignTarget) (variableRef, bool) {
-	if use, ok := c.bind.useAt(target.start, target.end); ok {
+	if use, ok := c.bind.use(target.id); ok {
 		if ref, ok := c.resolveSymbol(use.symbol); ok {
 			return ref, true
 		}
@@ -3291,10 +3284,6 @@ func (c *compiler) addSymbolUpvalue(symbolID int, desc upvalueDesc) int {
 	return upvalue
 }
 
-func (c *compiler) symbolAssigned(symbolID int) bool {
-	return c != nil && c.assignedSymbols != nil && c.assignedSymbols[symbolID]
-}
-
 func (c *compiler) canCopyParentLocalUpvalue(symbolID int) bool {
 	if c == nil || c.parent == nil {
 		return false
@@ -3306,7 +3295,7 @@ func (c *compiler) canCopyParentLocalUpvalue(symbolID int) bool {
 	if symbol.kind != symbolLocal && symbol.kind != symbolParameter {
 		return false
 	}
-	return !c.symbolAssigned(symbolID) && !c.parent.symbolAssigned(symbolID)
+	return symbolID < len(c.bind.symbols) && c.bind.symbols[symbolID].facts.immutableCopyEligible
 }
 
 func (c *compiler) bindSymbol(symbolID int) (boundSymbol, bool) {
@@ -3316,18 +3305,9 @@ func (c *compiler) bindSymbol(symbolID int) (boundSymbol, bool) {
 	return c.bind.symbols[symbolID], true
 }
 
-func (c *compiler) claimSymbol(name string, kind symbolKind) (boundSymbol, bool) {
-	if c.bindCursor == nil {
-		return boundSymbol{}, false
-	}
-	for *c.bindCursor < len(c.bind.symbols) {
-		symbol := c.bind.symbols[*c.bindCursor]
-		*c.bindCursor = *c.bindCursor + 1
-		if symbol.name == name && symbol.kind == kind {
-			return symbol, true
-		}
-	}
-	return boundSymbol{}, false
+func (c *compiler) claimSymbol(node syntaxID, kind symbolKind) (boundSymbol, bool) {
+	symbol, ok := c.bind.definition(node)
+	return symbol, ok && symbol.kind == kind
 }
 
 func (c *compiler) compileCallTo(call callExpression, target int) error {
@@ -3573,7 +3553,7 @@ func (c *compiler) isUnboundGlobalName(term term, name string) bool {
 	if !isNamedTerm(term) || term.name != name {
 		return false
 	}
-	if use, ok := c.bind.useAt(term.start, term.start+len(term.name)); ok {
+	if use, ok := c.bind.use(term.id); ok {
 		if _, resolved := c.resolveSymbol(use.symbol); resolved {
 			return false
 		}
@@ -3605,7 +3585,7 @@ func (c *compiler) upvalueOneResultCall(lowered loweredCall, resultCount int) (i
 			return 0, false
 		}
 	}
-	if use, ok := c.bind.useAt(target.start, target.start+len(target.name)); ok {
+	if use, ok := c.bind.use(target.id); ok {
 		ref, ok := c.resolveSymbol(use.symbol)
 		return ref.index, ok && ref.kind == variableUpvalue
 	}
@@ -3626,7 +3606,7 @@ func (c *compiler) selfUpvalueOneResultCall(lowered loweredCall, resultCount int
 			return 0, false
 		}
 	}
-	use, ok := c.bind.useAt(target.start, target.start+len(target.name))
+	use, ok := c.bind.use(target.id)
 	if !ok || use.symbol != c.selfFunctionSymbol {
 		return 0, false
 	}
@@ -3647,7 +3627,7 @@ func (c *compiler) localOneResultCall(lowered loweredCall, resultCount int) (int
 			return 0, false
 		}
 	}
-	if use, ok := c.bind.useAt(target.start, target.start+len(target.name)); ok {
+	if use, ok := c.bind.use(target.id); ok {
 		ref, ok := c.resolveSymbol(use.symbol)
 		return ref.index, ok && ref.kind == variableLocal
 	}
@@ -3775,7 +3755,7 @@ func (c *compiler) selfCallSubtractConstantCall(call callExpression) (selfCallSu
 		len(call.target.selectors) != 0 {
 		return selfCallSubtractConstantCall{}, false
 	}
-	use, ok := c.bind.useAt(call.target.start, call.target.start+len(call.target.name))
+	use, ok := c.bind.use(call.target.id)
 	if !ok || use.symbol != c.selfFunctionSymbol {
 		return selfCallSubtractConstantCall{}, false
 	}
@@ -3911,7 +3891,7 @@ func (c *compiler) isUnboundBaseField(term term, name string) bool {
 		term.selectors[0].index != nil {
 		return false
 	}
-	if use, ok := c.bind.useAt(term.start, term.start+len(base.name)); ok {
+	if use, ok := c.bind.use(term.id); ok {
 		if _, resolved := c.resolveSymbol(use.symbol); resolved {
 			return false
 		}
@@ -4087,179 +4067,6 @@ func copyLocals(locals map[string]int) map[string]int {
 		copied[name] = register
 	}
 	return copied
-}
-
-func assignedSymbolsInStatements(bind bindResult, statements []statement) map[int]bool {
-	assigned := make(map[int]bool)
-	collectAssignedSymbols(bind, statements, assigned)
-	if len(assigned) == 0 {
-		return nil
-	}
-	return assigned
-}
-
-func collectAssignedSymbols(bind bindResult, statements []statement, assigned map[int]bool) {
-	for _, stmt := range statements {
-		switch {
-		case stmt.local != nil:
-			for _, value := range stmt.local.values {
-				collectAssignedSymbolsInExpression(bind, value, assigned)
-			}
-		case stmt.assign != nil:
-			for _, target := range stmt.assign.targets {
-				collectAssignedSymbol(bind, target, assigned)
-			}
-			for _, value := range stmt.assign.values {
-				collectAssignedSymbolsInExpression(bind, value, assigned)
-			}
-		case stmt.call != nil:
-			collectAssignedSymbolsInTerm(bind, *stmt.call, assigned)
-		case stmt.funcDecl != nil:
-			collectAssignedSymbol(bind, stmt.funcDecl.target, assigned)
-			collectAssignedSymbols(bind, stmt.funcDecl.statements, assigned)
-		case stmt.localFunc != nil:
-			collectAssignedSymbols(bind, stmt.localFunc.statements, assigned)
-		case stmt.ifStmt != nil:
-			collectAssignedSymbolsInExpression(bind, stmt.ifStmt.condition, assigned)
-			collectAssignedSymbols(bind, stmt.ifStmt.thenStatements, assigned)
-			collectAssignedSymbols(bind, stmt.ifStmt.elseStatements, assigned)
-		case stmt.while != nil:
-			collectAssignedSymbolsInExpression(bind, stmt.while.condition, assigned)
-			collectAssignedSymbols(bind, stmt.while.statements, assigned)
-		case stmt.forLoop != nil:
-			collectAssignedSymbolsInExpression(bind, stmt.forLoop.start, assigned)
-			collectAssignedSymbolsInExpression(bind, stmt.forLoop.limit, assigned)
-			if stmt.forLoop.step != nil {
-				collectAssignedSymbolsInExpression(bind, *stmt.forLoop.step, assigned)
-			}
-			collectAssignedSymbols(bind, stmt.forLoop.statements, assigned)
-		case stmt.genericFor != nil:
-			for _, value := range stmt.genericFor.values {
-				collectAssignedSymbolsInExpression(bind, value, assigned)
-			}
-			collectAssignedSymbols(bind, stmt.genericFor.statements, assigned)
-		case stmt.repeat != nil:
-			collectAssignedSymbols(bind, stmt.repeat.statements, assigned)
-			collectAssignedSymbolsInExpression(bind, stmt.repeat.condition, assigned)
-		case stmt.block != nil:
-			collectAssignedSymbols(bind, stmt.block.statements, assigned)
-		case stmt.ret != nil:
-			for _, value := range stmt.ret.values {
-				collectAssignedSymbolsInExpression(bind, value, assigned)
-			}
-		}
-	}
-}
-
-func collectAssignedSymbol(bind bindResult, target assignTarget, assigned map[int]bool) {
-	if len(target.selectors) != 0 {
-		for _, selector := range target.selectors {
-			if selector.index != nil {
-				collectAssignedSymbolsInExpression(bind, *selector.index, assigned)
-			}
-		}
-		return
-	}
-	if use, ok := bind.useAt(target.start, target.end); ok {
-		assigned[use.symbol] = true
-	}
-}
-
-func collectAssignedSymbolsInExpression(bind bindResult, expr expression, assigned map[int]bool) {
-	for _, term := range expr.terms {
-		collectAssignedSymbolsInAndExpression(bind, term, assigned)
-	}
-}
-
-func collectAssignedSymbolsInAndExpression(bind bindResult, expr andExpression, assigned map[int]bool) {
-	for _, term := range expr.terms {
-		collectAssignedSymbolsInComparisonExpression(bind, term, assigned)
-	}
-}
-
-func collectAssignedSymbolsInComparisonExpression(bind bindResult, expr comparisonExpression, assigned map[int]bool) {
-	collectAssignedSymbolsInConcatExpression(bind, expr.left, assigned)
-	if expr.right != nil {
-		collectAssignedSymbolsInConcatExpression(bind, *expr.right, assigned)
-	}
-}
-
-func collectAssignedSymbolsInConcatExpression(bind bindResult, expr concatExpression, assigned map[int]bool) {
-	collectAssignedSymbolsInAdditiveExpression(bind, expr.first, assigned)
-	for _, part := range expr.rest {
-		collectAssignedSymbolsInAdditiveExpression(bind, part, assigned)
-	}
-}
-
-func collectAssignedSymbolsInAdditiveExpression(bind bindResult, expr additiveExpression, assigned map[int]bool) {
-	collectAssignedSymbolsInMultiplicativeExpression(bind, expr.first, assigned)
-	for _, part := range expr.rest {
-		collectAssignedSymbolsInMultiplicativeExpression(bind, part.value, assigned)
-	}
-}
-
-func collectAssignedSymbolsInMultiplicativeExpression(bind bindResult, expr multiplicativeExpression, assigned map[int]bool) {
-	collectAssignedSymbolsInTerm(bind, expr.first, assigned)
-	for _, part := range expr.rest {
-		collectAssignedSymbolsInTerm(bind, part.value, assigned)
-	}
-}
-
-func collectAssignedSymbolsInTerm(bind bindResult, term term, assigned map[int]bool) {
-	if term.table != nil {
-		collectAssignedSymbolsInTableExpression(bind, *term.table, assigned)
-	}
-	if term.function != nil {
-		collectAssignedSymbols(bind, term.function.statements, assigned)
-	}
-	if term.ifExpr != nil {
-		collectAssignedSymbolsInExpression(bind, term.ifExpr.condition, assigned)
-		collectAssignedSymbolsInExpression(bind, term.ifExpr.thenValue, assigned)
-		collectAssignedSymbolsInExpression(bind, term.ifExpr.elseValue, assigned)
-	}
-	if term.call != nil {
-		collectAssignedSymbolsInCallExpression(bind, *term.call, assigned)
-	}
-	if term.unaryNot != nil {
-		collectAssignedSymbolsInTerm(bind, *term.unaryNot, assigned)
-	}
-	if term.unaryMinus != nil {
-		collectAssignedSymbolsInTerm(bind, *term.unaryMinus, assigned)
-	}
-	if term.unaryLen != nil {
-		collectAssignedSymbolsInTerm(bind, *term.unaryLen, assigned)
-	}
-	if term.power != nil {
-		collectAssignedSymbolsInTerm(bind, term.power.base, assigned)
-		collectAssignedSymbolsInTerm(bind, term.power.exponent, assigned)
-	}
-	if term.group != nil {
-		collectAssignedSymbolsInExpression(bind, *term.group, assigned)
-	}
-	for _, selector := range term.selectors {
-		if selector.index != nil {
-			collectAssignedSymbolsInExpression(bind, *selector.index, assigned)
-		}
-	}
-}
-
-func collectAssignedSymbolsInTableExpression(bind bindResult, table tableExpression, assigned map[int]bool) {
-	for _, field := range table.fields {
-		if field.key != nil {
-			collectAssignedSymbolsInExpression(bind, *field.key, assigned)
-		}
-		collectAssignedSymbolsInExpression(bind, field.value, assigned)
-	}
-}
-
-func collectAssignedSymbolsInCallExpression(bind bindResult, call callExpression, assigned map[int]bool) {
-	collectAssignedSymbolsInTerm(bind, call.target, assigned)
-	if call.receiver != nil {
-		collectAssignedSymbolsInTerm(bind, *call.receiver, assigned)
-	}
-	for _, arg := range call.args {
-		collectAssignedSymbolsInExpression(bind, arg, assigned)
-	}
 }
 
 func copyLocalStringSlots(slots map[int]map[string]int) map[int]map[string]int {
