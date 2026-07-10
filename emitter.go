@@ -25,7 +25,6 @@ type compiler struct {
 	upvaluesByID             map[int]int
 	upvalueDescs             []upvalueDesc
 	assignedSymbols          map[int]bool
-	stringSymbols            map[string]int
 	loops                    []loopContext
 	prototypeDrafts          []*functionDraft
 	nextReg                  int
@@ -70,7 +69,6 @@ func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (
 		localArrayElemFieldSlots: make(map[int]map[string]map[string]int),
 		selfFunctionSymbol:       -1,
 		assignedSymbols:          assignedSymbolsInStatements(source.bind, source.program.statements),
-		stringSymbols:            make(map[string]int),
 		options:                  options,
 	}
 	c.sourceText = source.source.Text
@@ -270,22 +268,7 @@ func compactedCompiledRegisterCount(code []instruction, children []*functionDraf
 }
 
 func (c *compiler) addConstant(value Value) int {
-	symbol := 0
-	if value.kind == StringKind && c.stringSymbols != nil {
-		symbol = c.stringSymbol(value.stringText())
-	}
-	index := c.bytecodeBuilder.addConstant(value)
-	c.bytecodeBuilder.setConstantStringSymbol(index, symbol)
-	return index
-}
-
-func (c *compiler) stringSymbol(value string) int {
-	if symbol, ok := c.stringSymbols[value]; ok {
-		return symbol
-	}
-	symbol := len(c.stringSymbols) + 1
-	c.stringSymbols[value] = symbol
-	return symbol
+	return c.bytecodeBuilder.addConstant(value)
 }
 
 func (c *compiler) compileStatements(statements []statement) error {
@@ -537,7 +520,6 @@ func (c *compiler) compileFunctionDraft(closure loweredClosure, selfFunctionSymb
 		upvalues:                 make(map[string]int),
 		upvaluesByID:             make(map[int]int),
 		assignedSymbols:          assignedSymbolsInStatements(c.bind, closure.body),
-		stringSymbols:            c.stringSymbols,
 		nextReg:                  len(closure.params),
 		options:                  c.options,
 	}

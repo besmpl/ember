@@ -3,28 +3,26 @@ package ember
 import "fmt"
 
 type functionDraft struct {
-	constants             []Value
-	constantStringSymbols []int
-	code                  []instruction
-	children              []*functionDraft
-	upvalues              []upvalueDesc
-	lines                 []int
-	registers             int
-	params                int
-	variadic              bool
+	constants []Value
+	code      []instruction
+	children  []*functionDraft
+	upvalues  []upvalueDesc
+	lines     []int
+	registers int
+	params    int
+	variadic  bool
 }
 
 func newFunctionDraft(builder *bytecodeBuilder, children []*functionDraft, upvalues []upvalueDesc, registers int, params int, variadic bool) *functionDraft {
 	return &functionDraft{
-		constants:             builder.constants,
-		constantStringSymbols: copyConstantStringSymbols(builder.constantStringSymbols, len(builder.constants)),
-		code:                  builder.assembledCode(),
-		children:              children,
-		upvalues:              upvalues,
-		lines:                 bytecodeIRLines(builder.sourceText, builder.ir),
-		registers:             registers,
-		params:                params,
-		variadic:              variadic,
+		constants: builder.constants,
+		code:      builder.assembledCode(),
+		children:  children,
+		upvalues:  upvalues,
+		lines:     bytecodeIRLines(builder.sourceText, builder.ir),
+		registers: registers,
+		params:    params,
+		variadic:  variadic,
 	}
 }
 
@@ -78,15 +76,14 @@ func sealFunctionDraft(draft *functionDraft) (*Proto, error) {
 	}
 
 	proto := &Proto{
-		constants:             draft.constants,
-		constantStringSymbols: draft.constantStringSymbols,
-		code:                  draft.code,
-		prototypes:            children,
-		upvalues:              draft.upvalues,
-		lines:                 draft.lines,
-		registers:             draft.registers,
-		params:                draft.params,
-		variadic:              draft.variadic,
+		constants:  draft.constants,
+		code:       draft.code,
+		prototypes: children,
+		upvalues:   draft.upvalues,
+		lines:      draft.lines,
+		registers:  draft.registers,
+		params:     draft.params,
+		variadic:   draft.variadic,
 	}
 	if err := sealFunctionProto(proto); err != nil {
 		return nil, fmt.Errorf("invalid finalized prototype: %w", err)

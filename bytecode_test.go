@@ -81,13 +81,7 @@ func TestOpcodeCountBudget(t *testing.T) {
 
 func TestProtoSideTableBudget(t *testing.T) {
 	fields := []string{
-		"numericForLoops",
-		"intrinsicOps",
-		"constantKindFacts",
-		"registerKindFacts",
-		"numericOperandFacts",
 		"numericOperandFactPCs",
-		"slotKindFacts",
 		"entryNilRegisters",
 	}
 	protoType := reflect.TypeOf(Proto{})
@@ -96,7 +90,7 @@ func TestProtoSideTableBudget(t *testing.T) {
 			t.Fatalf("Proto side-table budget references missing field %q", field)
 		}
 	}
-	if got, want := len(fields), 8; got > want {
+	if got, want := len(fields), 2; got > want {
 		t.Fatalf("Proto side-table count is %d, want at most %d", got, want)
 	}
 }
@@ -485,10 +479,7 @@ func TestExecutionArtifactFinalizerRebuildsDerivedProtoFacts(t *testing.T) {
 	proto.constantKeyOK = nil
 	proto.constantNumbers = nil
 	proto.constantNumberOK = nil
-	proto.numericForLoops = []numericForLoopDesc{{checkPC: 99}}
-	proto.intrinsicOps = []intrinsicOpDesc{{pc: 99}}
 	proto.capturedLocals = []bool{true}
-	proto.directFrameDispatch = false
 	proto.entryNilRegisters = []int{99}
 	proto.verifyErr = fmt.Errorf("stale")
 
@@ -504,17 +495,8 @@ func TestExecutionArtifactFinalizerRebuildsDerivedProtoFacts(t *testing.T) {
 	if proto.constantNumbers == nil || proto.constantNumberOK == nil {
 		t.Fatal("finalized proto did not rebuild constant number facts")
 	}
-	if len(proto.numericForLoops) != 0 {
-		t.Fatalf("numericForLoops = %#v, want rebuilt empty facts", proto.numericForLoops)
-	}
-	if len(proto.intrinsicOps) != 0 {
-		t.Fatalf("intrinsicOps = %#v, want rebuilt empty facts", proto.intrinsicOps)
-	}
 	if len(proto.capturedLocals) != 0 {
 		t.Fatalf("capturedLocals = %#v, want rebuilt empty facts", proto.capturedLocals)
-	}
-	if !proto.directFrameDispatch {
-		t.Fatal("directFrameDispatch = false, want rebuilt true fact")
 	}
 	if len(proto.entryNilRegisters) != 0 {
 		t.Fatalf("entryNilRegisters = %#v, want rebuilt empty facts", proto.entryNilRegisters)
@@ -858,131 +840,6 @@ func TestBytecodeVerifierRejectsStaleEntryNilRegisters(t *testing.T) {
 	}
 }
 
-func TestBytecodeVerifierRejectsStaleNumericForDescriptors(t *testing.T) {
-	proto := newProto(
-		[]Value{NumberValue(0)},
-		[]instruction{
-			{op: opNumericForCheck, a: 0, b: 1, c: 2, d: 4},
-			{op: opAdd, a: 3, b: 3, c: 0},
-			{op: opAdd, a: 0, b: 0, c: 2},
-			{op: opJump, b: 0},
-			{op: opReturnOne, a: 3},
-		},
-		nil,
-		nil,
-		4,
-		0,
-		false,
-	)
-	proto.numericForLoops = nil
-
-	err := verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want stale numeric for descriptor error")
-	}
-	if !strings.Contains(err.Error(), "numeric for descriptors [] do not match finalized plan") {
-		t.Fatalf("verifyProto error is %q, want numeric for descriptor detail", err)
-	}
-}
-
-func TestBytecodeVerifierRejectsStaleIntrinsicDescriptors(t *testing.T) {
-	proto := newProto(
-		nil,
-		[]instruction{
-			{op: opFastCall, a: 0, b: int(nativeFuncTableInsert), c: 2, d: 1},
-			{op: opReturnOne, a: 0},
-		},
-		nil,
-		nil,
-		2,
-		0,
-		false,
-	)
-	proto.intrinsicOps = nil
-
-	err := verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want stale intrinsic descriptor error")
-	}
-	if !strings.Contains(err.Error(), "intrinsic descriptors [] do not match finalized plan") {
-		t.Fatalf("verifyProto error is %q, want intrinsic descriptor detail", err)
-	}
-}
-
-func TestBytecodeVerifierRejectsStaleConstantKindFacts(t *testing.T) {
-	proto := newProto(
-		[]Value{NumberValue(4)},
-		[]instruction{
-			{op: opLoadConst, a: 0, b: 0},
-			{op: opReturnOne, a: 0},
-		},
-		nil,
-		nil,
-		1,
-		0,
-		false,
-	)
-	proto.constantKindFacts = nil
-
-	err := verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want stale constant kind fact error")
-	}
-	if !strings.Contains(err.Error(), "constant kind facts [] do not match finalized plan") {
-		t.Fatalf("verifyProto error is %q, want constant kind fact detail", err)
-	}
-}
-
-func TestBytecodeVerifierRejectsStaleRegisterKindFacts(t *testing.T) {
-	proto := newProto(
-		[]Value{NumberValue(4)},
-		[]instruction{
-			{op: opLoadConst, a: 0, b: 0},
-			{op: opReturnOne, a: 0},
-		},
-		nil,
-		nil,
-		1,
-		0,
-		false,
-	)
-	proto.registerKindFacts = nil
-
-	err := verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want stale register kind fact error")
-	}
-	if !strings.Contains(err.Error(), "register kind facts [] do not match finalized plan") {
-		t.Fatalf("verifyProto error is %q, want register kind fact detail", err)
-	}
-}
-
-func TestBytecodeVerifierRejectsStaleNumericOperandFacts(t *testing.T) {
-	proto := newProto(
-		[]Value{NumberValue(4), NumberValue(2)},
-		[]instruction{
-			{op: opLoadConst, a: 0, b: 0},
-			{op: opLoadConst, a: 1, b: 1},
-			{op: opAdd, a: 2, b: 0, c: 1},
-			{op: opReturnOne, a: 2},
-		},
-		nil,
-		nil,
-		3,
-		0,
-		false,
-	)
-	proto.numericOperandFacts = nil
-
-	err := verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want stale numeric operand fact error")
-	}
-	if !strings.Contains(err.Error(), "numeric operand facts [] do not match finalized plan") {
-		t.Fatalf("verifyProto error is %q, want numeric operand fact detail", err)
-	}
-}
-
 func TestRunDirectFrameArrayNextJumpUsesInlineArrayIterator(t *testing.T) {
 	proto, err := Compile(`
 local values = {1, 2, 3, 4}
@@ -1042,32 +899,6 @@ return total
 	got, ok := results[0].Number()
 	if !ok || got != 3 {
 		t.Fatalf("thread.run result is %v (%t), want 3", got, ok)
-	}
-}
-
-func TestBytecodeVerifierRejectsStaleSlotKindFacts(t *testing.T) {
-	proto := newProto(
-		[]Value{StringValue("hp"), NumberValue(4)},
-		[]instruction{
-			{op: opNewTable, a: 0, c: 1},
-			{op: opLoadConst, a: 1, b: 1},
-			{op: opSetStringField, a: 0, b: 0, c: 1},
-			{op: opReturnOne, a: 0},
-		},
-		nil,
-		nil,
-		2,
-		0,
-		false,
-	)
-	proto.slotKindFacts = nil
-
-	err := verifyProto(proto)
-	if err == nil {
-		t.Fatal("verifyProto succeeded, want stale slot kind fact error")
-	}
-	if !strings.Contains(err.Error(), "slot kind facts [] do not match finalized plan") {
-		t.Fatalf("verifyProto error is %q, want slot kind fact detail", err)
 	}
 }
 
@@ -1897,7 +1728,7 @@ local total = 0
 	if err != nil {
 		t.Fatalf("Compile(%d reads) returned error: %v", reads, err)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled %d-read dynamic-index program is not direct-frame eligible:\n%s", reads, strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 	return proto
@@ -2890,7 +2721,7 @@ return total
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled budget program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -4129,7 +3960,7 @@ func TestFinalizedProtoMarksDirectFrameDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Compile direct returned error: %v", err)
 	}
-	if !direct.directFrameDispatch {
+	if !protoSupportsDirectFrame(direct) {
 		t.Fatal("direct prototype is not marked for direct-frame dispatch")
 	}
 
@@ -4143,10 +3974,10 @@ return get()
 	if err != nil {
 		t.Fatalf("Compile captured returned error: %v", err)
 	}
-	if !captured.directFrameDispatch {
+	if !protoSupportsDirectFrame(captured) {
 		t.Fatal("capturing parent prototype is not marked for direct-frame dispatch")
 	}
-	if !captured.prototypes[0].directFrameDispatch {
+	if !protoSupportsDirectFrame(captured.prototypes[0]) {
 		t.Fatal("non-capturing child frame should still use direct-frame dispatch")
 	}
 }
@@ -4162,7 +3993,7 @@ return total
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatal("compiled scalar loop is not marked for direct-frame dispatch")
 	}
 
@@ -4204,7 +4035,7 @@ return value + 2
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled scalar program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -4245,7 +4076,7 @@ return nextValue(), nextValue()
 		t.Fatalf("compiled %d child prototypes, want 1", len(proto.prototypes))
 	}
 	child := proto.prototypes[0]
-	if !child.directFrameDispatch {
+	if !protoSupportsDirectFrame(child) {
 		t.Fatalf("closure with upvalue reads/writes is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(child), "\n"))
 	}
 	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
@@ -4281,7 +4112,7 @@ return get(), value
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("capturing parent is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
@@ -4340,7 +4171,7 @@ return caller(41)
 	if callerProto == nil {
 		t.Fatalf("compiled program is missing CALL_UPVALUE_ONE:\n%s", dump.String())
 	}
-	if !callerProto.directFrameDispatch {
+	if !protoSupportsDirectFrame(callerProto) {
 		t.Fatalf("upvalue-call child is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(callerProto), "\n"))
 	}
 	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
@@ -4367,7 +4198,7 @@ return value, answer
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled global-write program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
@@ -4404,7 +4235,7 @@ return collect(7, 8, 9)
 		t.Fatalf("compiled %d child prototypes, want 1", len(proto.prototypes))
 	}
 	child := proto.prototypes[0]
-	if !child.directFrameDispatch {
+	if !protoSupportsDirectFrame(child) {
 		t.Fatalf("vararg child is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(child), "\n"))
 	}
 	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
@@ -4443,7 +4274,7 @@ return value
 	if !strings.Contains(joined, "CALL_METHOD_ONE") {
 		t.Fatalf("compiled method call is missing CALL_METHOD_ONE:\n%s", joined)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("method-call program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
@@ -4473,7 +4304,7 @@ return ok, value
 	if !strings.Contains(joined, "COROUTINE_RESUME") {
 		t.Fatalf("compiled coroutine resume is missing COROUTINE_RESUME:\n%s", joined)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("coroutine-resume program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -4517,7 +4348,7 @@ return 4
 	if !strings.Contains(strings.Join(disassembleProto(proto), "\n"), "NEW_TABLE") {
 		t.Fatalf("compiled setup program is missing NEW_TABLE:\n%s", strings.Join(disassembleProto(proto), "\n"))
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled setup program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -4550,7 +4381,7 @@ return 0
 	if !strings.Contains(joined, "GET_STRING_FIELD") {
 		t.Fatalf("compiled field access is missing GET_STRING_FIELD:\n%s", joined)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled field access program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -4583,7 +4414,7 @@ return 0
 	if !strings.Contains(joined, "GET_INDEX") {
 		t.Fatalf("compiled dynamic index program is missing GET_INDEX:\n%s", joined)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled dynamic index program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -4616,7 +4447,7 @@ return 0
 	if !strings.Contains(joined, "SET_INDEX") || !strings.Contains(joined, "GET_INDEX") {
 		t.Fatalf("compiled dynamic index store program is missing index opcodes:\n%s", joined)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled dynamic index store program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -4650,7 +4481,7 @@ return 0
 	if !strings.Contains(joined, "GET_INDEX") || !strings.Contains(joined, "SET_INDEX") {
 		t.Fatalf("compiled dynamic index accounting program is missing index opcodes:\n%s", joined)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled dynamic index accounting program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -4710,7 +4541,7 @@ return before, market.stock[good], market.stock.ore
 			t.Fatalf("compiled nested field-index program is missing %s:\n%s", want, joined)
 		}
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled nested field-index program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -4781,7 +4612,7 @@ return proxy.value + 3
 			t.Fatalf("compiled table island program is missing %s:\n%s", want, joined)
 		}
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled table island program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -4824,7 +4655,7 @@ return value + 2
 			t.Fatalf("compiled newindex island program is missing %s:\n%s", want, joined)
 		}
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled newindex island program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -4868,7 +4699,7 @@ return proxy[key] + 3
 			t.Fatalf("compiled dynamic index island program is missing %s:\n%s", want, joined)
 		}
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled dynamic index island program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -4912,7 +4743,7 @@ return value + 2
 			t.Fatalf("compiled dynamic newindex island program is missing %s:\n%s", want, joined)
 		}
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled dynamic newindex island program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -4955,7 +4786,7 @@ return math.min(5, 2) + 3
 			t.Fatalf("compiled intrinsic island program is missing %s:\n%s", want, joined)
 		}
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled intrinsic island program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -5037,7 +4868,7 @@ func TestRunDirectFrameHandlesDebugAndBudgetWithoutWholeFrameDemotion(t *testing
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled block counter program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -5095,7 +4926,7 @@ return total
 	if !strings.Contains(joined, "NEG") {
 		t.Fatalf("compiled unary negation program is missing NEG:\n%s", joined)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled unary negation program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -5125,7 +4956,7 @@ return removed, values[1], values[2]
 			t.Fatalf("compiled table intrinsic program is missing %s:\n%s", want, joined)
 		}
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled table intrinsic program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -5163,7 +4994,7 @@ return total
 			t.Fatalf("compiled mixed-table loop is missing %s:\n%s", want, joined)
 		}
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled mixed-table loop is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 }
@@ -5187,7 +5018,7 @@ return direct, viaPairs
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled mixed-table loop is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
@@ -5234,7 +5065,7 @@ return label, length, power
 			t.Fatalf("compiled raw fast-path program is missing %s:\n%s", want, joined)
 		}
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled raw fast-path program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
@@ -5304,7 +5135,7 @@ return "a" .. left .. right .. "d"
 	if joined := strings.Join(disassembleProto(proto), "\n"); !strings.Contains(joined, "CONCAT_CHAIN") {
 		t.Fatalf("compiled concat chain is missing CONCAT_CHAIN:\n%s", joined)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled concat chain is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -5362,7 +5193,7 @@ return #lenObject, concatObject .. "-vm", powObject ^ 3
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled metamethod side-exit program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 	lenObject := NewTable()
@@ -5423,7 +5254,7 @@ func TestFastLoopResumesAfterColdIsland(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled cold-island program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 	lenObject := NewTable()
@@ -5461,7 +5292,7 @@ return sum + 3
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled unsupported-op island program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 	left := NewTable()
@@ -5501,7 +5332,7 @@ return value + 3
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled host-call island program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -5538,7 +5369,7 @@ return a + b + c + d + e + f + g + 3
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled arithmetic-island program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -5603,7 +5434,7 @@ return 0
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled comparison-island program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -5657,7 +5488,7 @@ return score + 3
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled comparison-branch island program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -5710,7 +5541,7 @@ return total
 	if strings.Contains(joined, "LOAD_GLOBAL") || strings.Contains(joined, "CALL_ONE") {
 		t.Fatalf("compiled rawlen program still uses global call shape:\n%s", joined)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled rawlen program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -5746,7 +5577,7 @@ return total
 	if !strings.Contains(joined, "PREPARE_ITER") || !strings.Contains(joined, "ARRAY_NEXT") {
 		t.Fatalf("compiled array iteration is missing iterator setup/call:\n%s", joined)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled array iteration is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -5782,7 +5613,7 @@ return total
 	if strings.Contains(joined, "NOT_EQUAL") {
 		t.Fatalf("compiled two-result array iteration kept separate nil branch:\n%s", joined)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled two-result array iteration is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -5895,7 +5726,7 @@ return score
 			t.Fatalf("compiled branch program is missing %s:\n%s", want, joined)
 		}
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled branch program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -6048,7 +5879,7 @@ return total
 	if !strings.Contains(joined, "JUMP_IF_NOT_LESS") {
 		t.Fatalf("compiled numeric branch is missing register branch opcode:\n%s", joined)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled numeric branch program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -6107,7 +5938,7 @@ return best
 	if !strings.Contains(joined, "JUMP_IF_NOT_GREATER") {
 		t.Fatalf("compiled numeric greater branch is missing register branch opcode:\n%s", joined)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled numeric greater branch program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -6490,90 +6321,6 @@ return first, second, left + right
 	}
 }
 
-func TestCompilerSharesStringSymbolsAcrossChildProtos(t *testing.T) {
-	proto, err := Compile(`
-local function readFirst(row)
-	local noise = 17
-	return row.shared + noise
-end
-local function readSecond(row)
-	local noise = "other"
-	return row.shared, noise
-end
-local first = readFirst({shared = 2})
-local second, label = readSecond({shared = 5})
-return first, second, label
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	if len(proto.prototypes) != 2 {
-		t.Fatalf("compiled root has %d child prototypes, want 2", len(proto.prototypes))
-	}
-	firstSymbol := constantStringSymbolFor(t, proto.prototypes[0], "shared")
-	secondSymbol := constantStringSymbolFor(t, proto.prototypes[1], "shared")
-	if firstSymbol == 0 || secondSymbol == 0 {
-		t.Fatalf("shared string symbols are first=%d second=%d, want non-zero symbols", firstSymbol, secondSymbol)
-	}
-	if firstSymbol != secondSymbol {
-		t.Fatalf("shared string symbols are first=%d second=%d, want same compile-local symbol", firstSymbol, secondSymbol)
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 19 {
-		t.Fatalf("first result is %v (%t), want 19", results[0], ok)
-	}
-	if got, ok := results[1].Number(); !ok || got != 5 {
-		t.Fatalf("second result is %v (%t), want 5", results[1], ok)
-	}
-	if got, ok := results[2].String(); !ok || got != "other" {
-		t.Fatalf("third result is %v (%t), want other", results[2], ok)
-	}
-}
-
-func TestCompilerInternsFieldNameSymbols(t *testing.T) {
-	proto, err := Compile(`
-local row = {hp = 12, mana = 3}
-return row.hp + row.mana + row.hp
-`)
-	if err != nil {
-		t.Fatalf("Compile returned error: %v", err)
-	}
-	hpSymbol := constantStringSymbolFor(t, proto, "hp")
-	manaSymbol := constantStringSymbolFor(t, proto, "mana")
-	if hpSymbol == 0 || manaSymbol == 0 {
-		t.Fatalf("field symbols are hp=%d mana=%d, want non-zero symbols", hpSymbol, manaSymbol)
-	}
-	if hpSymbol == manaSymbol {
-		t.Fatalf("field symbols are both %d, want distinct symbols for distinct field names", hpSymbol)
-	}
-
-	results, err := Run(proto)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	if got, ok := results[0].Number(); !ok || got != 27 {
-		t.Fatalf("Run result is %v (%t), want number 27", results[0], ok)
-	}
-}
-
-func constantStringSymbolFor(t *testing.T, proto *Proto, value string) int {
-	t.Helper()
-	for i, constant := range proto.constants {
-		if got, ok := constant.String(); ok && got == value {
-			if i >= len(proto.constantStringSymbols) {
-				t.Fatalf("constantStringSymbols has length %d, want index %d", len(proto.constantStringSymbols), i)
-			}
-			return proto.constantStringSymbols[i]
-		}
-	}
-	t.Fatalf("compiled constants are %#v, want string %q", proto.constants, value)
-	return 0
-}
-
 func TestCompilerUsesConstantComparisonBranches(t *testing.T) {
 	proto, err := Compile(`
 local i = 0
@@ -6879,7 +6626,7 @@ return total
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled intrinsic guard program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -6912,13 +6659,14 @@ return values[1] + value
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if len(proto.intrinsicOps) != 2 {
-		t.Fatalf("intrinsic descriptor count = %d, want 2:\n%s", len(proto.intrinsicOps), strings.Join(disassembleProtoFacts(proto), "\n"))
+	intrinsics := deriveProtoDiagnosticFacts(proto).intrinsicOps
+	if len(intrinsics) != 2 {
+		t.Fatalf("intrinsic descriptor count = %d, want 2:\n%s", len(intrinsics), strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
 	var tableInsert intrinsicOpDesc
 	var mathMin intrinsicOpDesc
-	for _, desc := range proto.intrinsicOps {
+	for _, desc := range intrinsics {
 		switch desc.nativeID {
 		case nativeFuncTableInsert:
 			tableInsert = desc
@@ -7570,7 +7318,7 @@ return total
 	if !strings.Contains(joined, "JUMP_IF_STRING_FIELD_NIL") {
 		t.Fatalf("compiled field nil branch is missing JUMP_IF_STRING_FIELD_NIL:\n%s", joined)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled field nil branch program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -7609,7 +7357,7 @@ return total
 	if !strings.Contains(joined, "JUMP_IF_STRING_FIELD_TRUE") {
 		t.Fatalf("compiled field not branch is missing JUMP_IF_STRING_FIELD_TRUE:\n%s", joined)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled field not branch program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -7647,7 +7395,7 @@ return total
 	if !strings.Contains(joined, "JUMP_IF_STRING_FIELD_NOT_NIL") {
 		t.Fatalf("compiled field == nil branch is missing JUMP_IF_STRING_FIELD_NOT_NIL:\n%s", joined)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled field == nil branch program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 
@@ -8020,7 +7768,7 @@ return value
 	if strings.Contains(joined, "MOVE") && strings.Contains(joined, "CALL_ONE") {
 		t.Fatalf("compiled local call kept separate callee move and call:\n%s", joined)
 	}
-	if !proto.directFrameDispatch {
+	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled local call is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
 	}
 

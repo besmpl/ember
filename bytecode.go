@@ -667,12 +667,11 @@ type upvalueDesc struct {
 }
 
 type bytecodeBuilder struct {
-	constants             []Value
-	constantStringSymbols []int
-	ir                    []bytecodeIRInstruction
-	prototypes            []*Proto
-	source                sourceRange
-	sourceText            string
+	constants  []Value
+	ir         []bytecodeIRInstruction
+	prototypes []*Proto
+	source     sourceRange
+	sourceText string
 }
 
 func (b *bytecodeBuilder) addConstant(value Value) int {
@@ -684,16 +683,6 @@ func (b *bytecodeBuilder) addConstant(value Value) int {
 	index := len(b.constants)
 	b.constants = append(b.constants, value)
 	return index
-}
-
-func (b *bytecodeBuilder) setConstantStringSymbol(index int, symbol int) {
-	if index < 0 || symbol == 0 {
-		return
-	}
-	for len(b.constantStringSymbols) <= index {
-		b.constantStringSymbols = append(b.constantStringSymbols, 0)
-	}
-	b.constantStringSymbols[index] = symbol
 }
 
 func bytecodeConstantsEqual(left Value, right Value) bool {
@@ -800,19 +789,9 @@ func bytecodeBuilderCapturedRegisters(prototypes []*Proto) []bool {
 
 func (b *bytecodeBuilder) proto(upvalues []upvalueDesc, registers int, params int, variadic bool) *Proto {
 	proto := newProtoWithDescriptors(b.constants, b.assembledCode(), b.prototypes, upvalues, registers, params, variadic)
-	proto.constantStringSymbols = copyConstantStringSymbols(b.constantStringSymbols, len(proto.constants))
 	proto.lines = bytecodeIRLines(b.sourceText, b.ir)
 	_ = finalizeProtoExecutionArtifact(proto)
 	return proto
-}
-
-func copyConstantStringSymbols(symbols []int, count int) []int {
-	if count == 0 || len(symbols) == 0 {
-		return nil
-	}
-	copied := make([]int, count)
-	copy(copied, symbols)
-	return copied
 }
 
 func (b *bytecodeBuilder) finalizeProto(upvalues []upvalueDesc, registers int, params int, variadic bool) (*Proto, error) {
@@ -1589,7 +1568,6 @@ type Proto struct {
 	constants               []Value
 	constantKeys            []tableKey
 	constantKeyOK           []bool
-	constantStringSymbols   []int
 	constantNumbers         []float64
 	constantNumberOK        []bool
 	globalNames             []string
@@ -1597,32 +1575,17 @@ type Proto struct {
 	packedCode              []packedInstruction
 	lines                   []int
 	prototypes              []*Proto
-	numericForLoops         []numericForLoopDesc
-	intrinsicOps            []intrinsicOpDesc
-	constantKindFacts       []constantKindFactDesc
-	registerKindFacts       []registerKindFactDesc
-	numericOperandFacts     []numericOperandFactDesc
 	numericOperandFactPCs   []bool
-	slotKindFacts           []slotKindFactDesc
 	upvalues                []upvalueDesc
 	registers               int
 	params                  int
 	variadic                bool
 	capturedLocals          []bool
-	directFrameDispatch     bool
-	directFrameIndexCache   bool
 	directFrameIndexCaches  []dynamicStringIndexCache
 	entryNilRegisters       []int
 	reuseZeroCaptureClosure bool
 	canonicalClosure        *closure
 	verifyErr               error
-}
-
-func (proto *Proto) constantStringSymbol(index int) int {
-	if proto == nil || index < 0 || index >= len(proto.constantStringSymbols) {
-		return 0
-	}
-	return proto.constantStringSymbols[index]
 }
 
 func (proto *Proto) globalSlot(slot int, name string) int {
@@ -1694,16 +1657,8 @@ type executionArtifact struct {
 	constantKeyOK         []bool
 	constantNumbers       []float64
 	constantNumberOK      []bool
-	numericForLoops       []numericForLoopDesc
-	intrinsicOps          []intrinsicOpDesc
-	constantKindFacts     []constantKindFactDesc
-	registerKindFacts     []registerKindFactDesc
-	numericOperandFacts   []numericOperandFactDesc
 	numericOperandFactPCs []bool
-	slotKindFacts         []slotKindFactDesc
 	capturedLocals        []bool
-	directFrameDispatch   bool
-	directFrameIndexCache bool
 	entryNilRegisters     []int
 }
 
@@ -1800,25 +1755,13 @@ func buildExecutionArtifact(proto *Proto) executionArtifact {
 	constantKeys, constantKeyOK := protoConstantTableKeys(proto.constants)
 	constantNumbers, constantNumberOK := protoConstantNumbers(proto.constants)
 	capturedLocals := capturedLocalRegisters(proto)
-	directFrameDispatch := true
-	directFrameIndexCache := directFrameDispatch && codeUsesDirectFrameIndexCache(proto.code)
-	slotKindFacts := detectSlotKindFacts(proto)
-	numericOperandFacts := detectNumericOperandFacts(proto)
 	return executionArtifact{
 		constantKeys:          constantKeys,
 		constantKeyOK:         constantKeyOK,
 		constantNumbers:       constantNumbers,
 		constantNumberOK:      constantNumberOK,
-		numericForLoops:       detectNumericForLoops(proto.code),
-		intrinsicOps:          detectIntrinsicOps(proto.code),
-		constantKindFacts:     detectConstantKindFacts(proto.constants),
-		registerKindFacts:     detectRegisterKindFacts(proto),
-		numericOperandFacts:   numericOperandFacts,
-		numericOperandFactPCs: numericOperandFactPCs(len(proto.code), numericOperandFacts),
-		slotKindFacts:         slotKindFacts,
+		numericOperandFactPCs: detectNumericOperandFactPCs(proto),
 		capturedLocals:        capturedLocals,
-		directFrameDispatch:   directFrameDispatch,
-		directFrameIndexCache: directFrameIndexCache,
 		entryNilRegisters:     protoEntryNilRegisters(proto.code, proto.params, proto.registers),
 	}
 }
@@ -1828,17 +1771,9 @@ func (artifact executionArtifact) apply(proto *Proto) {
 	proto.constantKeyOK = artifact.constantKeyOK
 	proto.constantNumbers = artifact.constantNumbers
 	proto.constantNumberOK = artifact.constantNumberOK
-	proto.numericForLoops = artifact.numericForLoops
-	proto.intrinsicOps = artifact.intrinsicOps
-	proto.constantKindFacts = artifact.constantKindFacts
-	proto.registerKindFacts = artifact.registerKindFacts
-	proto.numericOperandFacts = artifact.numericOperandFacts
 	proto.numericOperandFactPCs = artifact.numericOperandFactPCs
-	proto.slotKindFacts = artifact.slotKindFacts
 	proto.capturedLocals = artifact.capturedLocals
-	proto.directFrameDispatch = artifact.directFrameDispatch
-	proto.directFrameIndexCache = artifact.directFrameIndexCache
-	if proto.directFrameIndexCache {
+	if codeUsesDirectFrameIndexCache(proto.code) {
 		if len(proto.directFrameIndexCaches) != len(proto.code) {
 			proto.directFrameIndexCaches = make([]dynamicStringIndexCache, len(proto.code))
 		} else {
@@ -2072,18 +2007,37 @@ func detectRegisterKindFacts(proto *Proto) []registerKindFactDesc {
 }
 
 func detectNumericOperandFacts(proto *Proto) []numericOperandFactDesc {
-	if proto == nil || len(proto.code) == 0 || proto.registers <= 0 {
+	var facts []numericOperandFactDesc
+	detectNumericOperandFactsInto(proto, &facts, nil)
+	return facts
+}
+
+func detectNumericOperandFactPCs(proto *Proto) []bool {
+	if proto == nil || len(proto.code) == 0 {
 		return nil
+	}
+	pcs := make([]bool, len(proto.code))
+	detectNumericOperandFactsInto(proto, nil, pcs)
+	return pcs
+}
+
+func detectNumericOperandFactsInto(proto *Proto, facts *[]numericOperandFactDesc, pcs []bool) {
+	if proto == nil || len(proto.code) == 0 || proto.registers <= 0 {
+		return
 	}
 	blockStarts := registerKindBlockStarts(proto.code)
 	state := make([]registerKindState, proto.registers)
-	var facts []numericOperandFactDesc
 	for pc, ins := range proto.code {
 		if pc > 0 && blockStarts[pc] {
 			clearRegisterKindState(state)
 		}
 		if fact, ok := numericOperandFactForInstruction(proto, state, pc, ins); ok {
-			facts = append(facts, fact)
+			if facts != nil {
+				*facts = append(*facts, fact)
+			}
+			if pc < len(pcs) {
+				pcs[pc] = true
+			}
 		}
 		fact, ok := registerKindFactForInstruction(proto, state, pc, ins)
 		clearInstructionRegisterKinds(state, ins)
@@ -2098,7 +2052,6 @@ func detectNumericOperandFacts(proto *Proto) []numericOperandFactDesc {
 			clearRegisterKindState(state)
 		}
 	}
-	return facts
 }
 
 func numericOperandFactForInstruction(proto *Proto, state []registerKindState, pc int, ins instruction) (numericOperandFactDesc, bool) {
@@ -2121,19 +2074,6 @@ func numericOperandFactForInstruction(proto *Proto, state []registerKindState, p
 		}
 	}
 	return numericOperandFactDesc{}, false
-}
-
-func numericOperandFactPCs(codeLen int, facts []numericOperandFactDesc) []bool {
-	if codeLen <= 0 {
-		return nil
-	}
-	pcs := make([]bool, codeLen)
-	for _, fact := range facts {
-		if fact.pc >= 0 && fact.pc < len(pcs) {
-			pcs[fact.pc] = true
-		}
-	}
-	return pcs
 }
 
 func (proto *Proto) numericOperandsProvenAt(pc int, _ instruction) bool {
@@ -2561,26 +2501,8 @@ func verifyProtoSeen(proto *Proto, seen map[*Proto]bool) error {
 	if want := protoEntryNilRegisters(proto.code, proto.params, proto.registers); !equalIntSlices(proto.entryNilRegisters, want) {
 		return fmt.Errorf("entry nil registers %v do not match finalized plan %v", proto.entryNilRegisters, want)
 	}
-	if want := detectNumericForLoops(proto.code); !equalNumericForLoopDescs(proto.numericForLoops, want) {
-		return fmt.Errorf("numeric for descriptors %v do not match finalized plan %v", proto.numericForLoops, want)
-	}
-	if want := detectIntrinsicOps(proto.code); !equalIntrinsicOpDescs(proto.intrinsicOps, want) {
-		return fmt.Errorf("intrinsic descriptors %v do not match finalized plan %v", proto.intrinsicOps, want)
-	}
-	if want := detectConstantKindFacts(proto.constants); !equalConstantKindFactDescs(proto.constantKindFacts, want) {
-		return fmt.Errorf("constant kind facts %v do not match finalized plan %v", proto.constantKindFacts, want)
-	}
-	if want := detectRegisterKindFacts(proto); !equalRegisterKindFactDescs(proto.registerKindFacts, want) {
-		return fmt.Errorf("register kind facts %v do not match finalized plan %v", proto.registerKindFacts, want)
-	}
-	if want := detectNumericOperandFacts(proto); !equalNumericOperandFactDescs(proto.numericOperandFacts, want) {
-		return fmt.Errorf("numeric operand facts %v do not match finalized plan %v", proto.numericOperandFacts, want)
-	}
-	if want := numericOperandFactPCs(len(proto.code), proto.numericOperandFacts); !equalBoolSlices(proto.numericOperandFactPCs, want) {
+	if want := detectNumericOperandFactPCs(proto); !equalBoolSlices(proto.numericOperandFactPCs, want) {
 		return fmt.Errorf("numeric operand fact pc map %v does not match finalized plan %v", proto.numericOperandFactPCs, want)
-	}
-	if want := detectSlotKindFacts(proto); !equalSlotKindFactDescs(proto.slotKindFacts, want) {
-		return fmt.Errorf("slot kind facts %v do not match finalized plan %v", proto.slotKindFacts, want)
 	}
 	for index, upvalue := range proto.upvalues {
 		if upvalue.index < 0 {
@@ -2607,7 +2529,7 @@ func verifyProtoSeen(proto *Proto, seen map[*Proto]bool) error {
 }
 
 func protoSupportsDirectFrame(proto *Proto) bool {
-	return proto != nil && proto.directFrameDispatch
+	return proto != nil
 }
 
 func protoDirectFrameRejection(proto *Proto) (directFrameRejection, bool) {
@@ -3238,8 +3160,9 @@ func disassembleProtoFacts(proto *Proto) []string {
 		return nil
 	}
 
+	facts := deriveProtoDiagnosticFacts(proto)
 	lines := []string{
-		fmt.Sprintf("direct_frame_dispatch %t", proto.directFrameDispatch),
+		fmt.Sprintf("direct_frame_dispatch %t", protoSupportsDirectFrame(proto)),
 		disassembleCapturedLocals(proto.capturedLocals),
 		disassembleEntryNilRegisters(proto.entryNilRegisters),
 	}
@@ -3265,7 +3188,7 @@ func disassembleProtoFacts(proto *Proto) []string {
 			lines = append(lines, fmt.Sprintf("constant_number k%d %g", index, proto.constantNumbers[index]))
 		}
 	}
-	for _, loop := range proto.numericForLoops {
+	for _, loop := range facts.numericForLoops {
 		lines = append(lines, fmt.Sprintf(
 			"numeric_for pc%d r%d limit r%d step r%d exit %d increment %d",
 			loop.checkPC,
@@ -3276,7 +3199,7 @@ func disassembleProtoFacts(proto *Proto) []string {
 			loop.incrementPC,
 		))
 	}
-	for _, intrinsic := range proto.intrinsicOps {
+	for _, intrinsic := range facts.intrinsicOps {
 		line := fmt.Sprintf(
 			"intrinsic pc%d %s r%d args %d results %d",
 			intrinsic.pc,
@@ -3296,14 +3219,14 @@ func disassembleProtoFacts(proto *Proto) []string {
 		}
 		lines = append(lines, line)
 	}
-	for _, fact := range proto.constantKindFacts {
+	for _, fact := range facts.constantKindFacts {
 		lines = append(lines, fmt.Sprintf(
 			"constant_kind k%d %s",
 			fact.constant,
 			fact.kind.String(),
 		))
 	}
-	for _, fact := range proto.registerKindFacts {
+	for _, fact := range facts.registerKindFacts {
 		line := fmt.Sprintf(
 			"register_kind pc%d r%d %s source %s",
 			fact.pc,
@@ -3316,7 +3239,7 @@ func disassembleProtoFacts(proto *Proto) []string {
 		}
 		lines = append(lines, line)
 	}
-	for _, fact := range proto.numericOperandFacts {
+	for _, fact := range facts.numericOperandFacts {
 		right := fmt.Sprintf("right r%d", fact.right)
 		if fact.rightConstant {
 			right = fmt.Sprintf("right k%d", fact.right)
@@ -3329,7 +3252,7 @@ func disassembleProtoFacts(proto *Proto) []string {
 			right,
 		))
 	}
-	for _, fact := range proto.slotKindFacts {
+	for _, fact := range facts.slotKindFacts {
 		field := fmt.Sprintf("k%d", fact.field)
 		if text, ok := stringConstantText(proto, fact.field); ok {
 			field = text

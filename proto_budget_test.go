@@ -10,7 +10,6 @@ func TestProtoFieldClassificationBudget(t *testing.T) {
 		"constants":               {},
 		"constantKeys":            {},
 		"constantKeyOK":           {},
-		"constantStringSymbols":   {},
 		"constantNumbers":         {},
 		"constantNumberOK":        {},
 		"globalNames":             {},
@@ -24,21 +23,13 @@ func TestProtoFieldClassificationBudget(t *testing.T) {
 		"params":                  {},
 		"variadic":                {},
 		"capturedLocals":          {},
-		"directFrameDispatch":     {},
-		"directFrameIndexCache":   {},
 		"directFrameIndexCaches":  {},
 		"reuseZeroCaptureClosure": {},
 		"canonicalClosure":        {},
 		"verifyErr":               {},
 	}
 	runtimeSideTables := map[string]struct{}{
-		"numericForLoops":       {},
-		"intrinsicOps":          {},
-		"constantKindFacts":     {},
-		"registerKindFacts":     {},
-		"numericOperandFacts":   {},
 		"numericOperandFactPCs": {},
-		"slotKindFacts":         {},
 		"entryNilRegisters":     {},
 	}
 
@@ -56,7 +47,7 @@ func TestProtoFieldClassificationBudget(t *testing.T) {
 		}
 	}
 
-	if sideTableCount > 8 {
-		t.Fatalf("Proto has %d runtime side tables, want at most 8", sideTableCount)
+	if sideTableCount > 2 {
+		t.Fatalf("Proto has %d runtime side tables, want at most 2", sideTableCount)
 	}
 }

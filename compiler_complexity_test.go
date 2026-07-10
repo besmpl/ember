@@ -143,7 +143,7 @@ func TestCompileNestedClosuresAllocationBudget(t *testing.T) {
 	}
 }
 
-func TestCompileNestedClosurePreservesChildMetadata(t *testing.T) {
+func TestCompileNestedClosurePreservesChildLineMetadata(t *testing.T) {
 	proto, err := Compile(`local function read(row)
     return row.hp
 end
@@ -157,9 +157,6 @@ return read({hp = 7})`)
 	child := proto.prototypes[0]
 	if len(child.lines) != len(child.code) {
 		t.Fatalf("child line table has %d entries for %d instructions", len(child.lines), len(child.code))
-	}
-	if symbol := constantStringSymbolFor(t, child, "hp"); symbol == 0 {
-		t.Fatal("child field name symbol is zero, want interned symbol")
 	}
 
 	results, err := Run(proto)
