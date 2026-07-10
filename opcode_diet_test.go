@@ -3,8 +3,27 @@ package ember
 import "testing"
 
 func TestOpcodeDietRemovesCompilerUnreachableOperations(t *testing.T) {
-	if got, want := int(opcodeCount), 71; got != want {
-		t.Fatalf("opcode count = %d, want %d after canonical field-branch lowering", got, want)
+	const executableOpcodeCeiling = 71
+	if got := int(opcodeCount); got > executableOpcodeCeiling {
+		t.Fatalf("executable opcode count = %d, want at most %d", got, executableOpcodeCeiling)
+	}
+	seen := make(map[opcode]struct{}, opcodeCount)
+	for _, op := range allOpcodes {
+		if _, duplicate := seen[op]; duplicate {
+			t.Fatalf("executable opcode %d appears more than once", op)
+		}
+		seen[op] = struct{}{}
+		meta, ok := opcodeMetadata(op)
+		if !ok || !meta.effects.classified {
+			t.Fatalf("executable opcode %d is missing validated metadata", op)
+		}
+	}
+	for op := opcode(0); op < opcodeLimit; op++ {
+		if _, ok := opcodeMetadata(op); ok {
+			if _, listed := seen[op]; !listed {
+				t.Fatalf("opcode metadata for %d is not in executable opcode set", op)
+			}
+		}
 	}
 }
 

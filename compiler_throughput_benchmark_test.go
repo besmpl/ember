@@ -120,7 +120,10 @@ func constantsCompileBenchmarkSource(repeated bool) string {
 }
 
 func BenchmarkLoadProgramCompile(b *testing.B) {
-	for _, mode := range []string{"cold", "warm"} {
+	// loader_reused reuses the immutable loader only. Each public LoadProgram
+	// call still creates a fresh sourceArtifactStore, so this is not a compiler
+	// cache-hit benchmark.
+	for _, mode := range []string{"loader_fresh", "loader_reused"} {
 		b.Run(mode, func(b *testing.B) {
 			for _, check := range []bool{false, true} {
 				b.Run("check="+strconv.FormatBool(check), func(b *testing.B) {
@@ -160,9 +163,9 @@ func benchmarkLoadProgramCompile(b *testing.B, mode string, check bool, parallel
 		Check:       check,
 		Parallelism: parallelism,
 	}
-	warmLoader := &compileBenchmarkLoader{sources: compileBenchmarkProgramSources()}
-	validationLoader := ember.ModuleLoader(warmLoader)
-	if mode == "cold" {
+	reusedLoader := &compileBenchmarkLoader{sources: compileBenchmarkProgramSources()}
+	validationLoader := ember.ModuleLoader(reusedLoader)
+	if mode == "loader_fresh" {
 		validationLoader = &compileBenchmarkLoader{sources: compileBenchmarkProgramSources()}
 	}
 	program, report, err := ember.LoadProgram(context.Background(), validationLoader, options)
@@ -175,8 +178,8 @@ func benchmarkLoadProgramCompile(b *testing.B, mode string, check bool, parallel
 	b.SetBytes(int64(compileBenchmarkProgramSourceBytes()))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		loader := ember.ModuleLoader(warmLoader)
-		if mode == "cold" {
+		loader := ember.ModuleLoader(reusedLoader)
+		if mode == "loader_fresh" {
 			loader = &compileBenchmarkLoader{sources: compileBenchmarkProgramSources()}
 		}
 		loaded, _, err := ember.LoadProgram(context.Background(), loader, options)
@@ -249,4 +252,5 @@ func reportCompilerBenchmarkMetrics(b *testing.B, metrics ember.CompilerBenchmar
 	b.ReportMetric(float64(metrics.ChildProtos), "child_protos/op")
 	b.ReportMetric(float64(metrics.PackedBytes), "packed_B/op")
 	b.ReportMetric(float64(metrics.ProtoOwnedBytes), "proto_owned_B/op")
+	b.ReportMetric(float64(metrics.RetainedStringBytes), "retained_string_B/op")
 }

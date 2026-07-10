@@ -6,10 +6,107 @@ cd "$(dirname "$0")/.."
 benchtime="${BENCHTIME:-300ms}"
 count="${COUNT:-1}"
 pkg="${PKG:-.}"
-bench='^(BenchmarkTop10Luau|BenchmarkClassicLuau|BenchmarkScenarioLuau)/.*/ember_run$'
+bench="${BENCH:-^(BenchmarkTop10Luau|BenchmarkClassicLuau|BenchmarkScenarioLuau)/.*/ember_run$}"
+before_file="${BEFORE_RAW:-${BEFORE_FILE:-${BEFORE:-}}}"
+after_file="${AFTER_RAW:-${AFTER_FILE:-${AFTER:-}}}"
+save_before="${SAVE_BEFORE_RAW:-}"
+save_after="${SAVE_AFTER_RAW:-}"
 
-go test -run '^$' -bench "$bench" -benchtime="$benchtime" -count="$count" -benchmem "$pkg" |
-awk '
+usage() {
+	cat >&2 <<'EOF'
+usage: scripts/bench-summary [options]
+
+Without options, run the default runtime benchmark and print its table.
+Comparison options read or create distinct raw benchmark runs:
+  --before PATH       read the before raw benchmark output
+  --after PATH        read the after raw benchmark output
+  --save-before PATH  run the benchmark and save its raw output as before
+  --save-after PATH   run the benchmark and save its raw output as after
+
+BENCH, BENCHTIME, COUNT, and PKG select the benchmark command. BEFORE_RAW and
+AFTER_RAW are aliases for --before and --after. Set REQUIRE_FIXED_CORE=1 to
+fail when the fixed cold-Compile aggregate is incomplete.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+	--before)
+		[ "$#" -ge 2 ] || { usage; exit 2; }
+		before_file=$2
+		shift 2
+		;;
+	--after)
+		[ "$#" -ge 2 ] || { usage; exit 2; }
+		after_file=$2
+		shift 2
+		;;
+	--save-before)
+		[ "$#" -ge 2 ] || { usage; exit 2; }
+		save_before=$2
+		shift 2
+		;;
+	--save-after)
+		[ "$#" -ge 2 ] || { usage; exit 2; }
+		save_after=$2
+		shift 2
+		;;
+	-h|--help)
+		usage
+		exit 0
+		;;
+	*)
+		usage
+		exit 2
+		;;
+	esac
+done
+
+run_benchmark() {
+	go test -run '^$' -bench "$bench" -benchtime="$benchtime" -count="$count" -benchmem "$pkg"
+}
+
+tmp_before=
+tmp_after=
+cleanup() {
+	if [ -n "$tmp_before" ]; then
+		rm -f "$tmp_before"
+	fi
+	if [ -n "$tmp_after" ]; then
+		rm -f "$tmp_after"
+	fi
+}
+trap cleanup EXIT HUP INT TERM
+
+save_raw() {
+	target=$1
+	tmp="${target}.tmp.$$"
+	if [ "$target" = "$save_before" ]; then
+		tmp_before=$tmp
+	else
+		tmp_after=$tmp
+	fi
+	run_benchmark >"$tmp"
+	mv "$tmp" "$target"
+	if [ "$target" = "$save_before" ]; then
+		tmp_before=
+	else
+		tmp_after=
+	fi
+}
+
+if [ -n "$save_before" ]; then
+	save_raw "$save_before"
+	before_file=$save_before
+fi
+if [ -n "$save_after" ]; then
+	save_raw "$save_after"
+	after_file=$save_after
+fi
+
+if [ -z "$before_file" ] && [ -z "$after_file" ]; then
+	run_benchmark |
+	awk '
 BEGIN {
     print "| Suite | Case | ns/op | B/op | allocs/op |"
     print "| --- | --- | ---: | ---: | ---: |"
@@ -34,3 +131,315 @@ BEGIN {
     }
     print "| " suite " | " name " | " ns " | " bytes " | " allocs " |"
 }'
+	exit 0
+fi
+
+if [ -z "$before_file" ] || [ -z "$after_file" ]; then
+	if [ -n "$save_before" ] || [ -n "$save_after" ]; then
+		printf 'saved raw benchmark output; provide both before and after runs to compare\n'
+		exit 0
+	fi
+	printf '%s\n' 'bench-summary: --before and --after must be provided together' >&2
+	exit 2
+fi
+
+if [ "$before_file" = "$after_file" ]; then
+	printf '%s\n' 'bench-summary: before and after raw runs must be distinct files' >&2
+	exit 2
+fi
+
+[ -r "$before_file" ] || { printf 'bench-summary: cannot read before raw run %s\n' "$before_file" >&2; exit 2; }
+[ -r "$after_file" ] || { printf 'bench-summary: cannot read after raw run %s\n' "$after_file" >&2; exit 2; }
+
+awk -v before="$before_file" -v after="$after_file" \
+	-v require_fixed_core="${REQUIRE_FIXED_CORE:-0}" \
+	-v scaling_max_ratio="${SCALING_MAX_RATIO:-15}" \
+	-v scaling_max_time_ns="${SCALING_MAX_TIME_NS:-100000000}" \
+	-v branch_max_time_ns="${BRANCH_MAX_TIME_NS:-5000000}" \
+	-v branch_max_registers="${BRANCH_MAX_REGISTERS:-2}" '
+function metric(label, i) {
+    for (i = 2; i <= NF; i++) {
+        if ($(i + 1) == label) {
+            return $i + 0
+        }
+    }
+    return -1
+}
+
+function normalized_name(raw) {
+    sub(/-[0-9]+$/, "", raw)
+    return raw
+}
+
+function add_sample(which, name, ns, bytes, allocs, instructions, registers, packed) {
+    if (which == "before") {
+        if (ns >= 0) { b_ns_count[name]++; b_ns_values[name, b_ns_count[name]] = ns }
+        if (bytes >= 0) { b_bytes_count[name]++; b_bytes_values[name, b_bytes_count[name]] = bytes }
+        if (allocs >= 0) { b_allocs_count[name]++; b_allocs_values[name, b_allocs_count[name]] = allocs }
+        if (instructions >= 0) { b_instructions_count[name]++; b_instructions_values[name, b_instructions_count[name]] = instructions }
+        if (registers >= 0) { b_registers_count[name]++; b_registers_values[name, b_registers_count[name]] = registers }
+        if (packed >= 0) { b_packed_count[name]++; b_packed_values[name, b_packed_count[name]] = packed }
+    } else {
+        if (ns >= 0) { a_ns_count[name]++; a_ns_values[name, a_ns_count[name]] = ns }
+        if (bytes >= 0) { a_bytes_count[name]++; a_bytes_values[name, a_bytes_count[name]] = bytes }
+        if (allocs >= 0) { a_allocs_count[name]++; a_allocs_values[name, a_allocs_count[name]] = allocs }
+        if (instructions >= 0) { a_instructions_count[name]++; a_instructions_values[name, a_instructions_count[name]] = instructions }
+        if (registers >= 0) { a_registers_count[name]++; a_registers_values[name, a_registers_count[name]] = registers }
+        if (packed >= 0) { a_packed_count[name]++; a_packed_values[name, a_packed_count[name]] = packed }
+    }
+}
+
+function process_sample(which, name) {
+    if ($1 !~ /^Benchmark/) {
+        return
+    }
+    name = normalized_name($1)
+    if (which == "before") {
+        before_rows[name] = 1
+    } else {
+        after_rows[name] = 1
+    }
+    add_sample(which, name, metric("ns/op"), metric("B/op"), metric("allocs/op"), metric("instructions/op"), metric("register_slots/op"), metric("packed_B/op"))
+}
+
+function median(values, count, name, i, j, value) {
+    if (count <= 0) {
+        return -1
+    }
+    for (i in median_values) {
+        delete median_values[i]
+    }
+    for (i = 1; i <= count; i++) {
+        median_values[i] = values[name, i]
+    }
+    for (i = 2; i <= count; i++) {
+        value = median_values[i]
+        j = i - 1
+        while (j >= 1 && median_values[j] > value) {
+            median_values[j + 1] = median_values[j]
+            j--
+        }
+        median_values[j + 1] = value
+    }
+    if (count % 2 == 1) {
+        return median_values[(count + 1) / 2]
+    }
+    return (median_values[count / 2] + median_values[count / 2 + 1]) / 2
+}
+
+function sample_median(which, metric_name, name) {
+    if (which == "before") {
+        if (metric_name == "ns") { return median(b_ns_values, b_ns_count[name], name) }
+        if (metric_name == "bytes") { return median(b_bytes_values, b_bytes_count[name], name) }
+        if (metric_name == "allocs") { return median(b_allocs_values, b_allocs_count[name], name) }
+        if (metric_name == "instructions") { return median(b_instructions_values, b_instructions_count[name], name) }
+        if (metric_name == "registers") { return median(b_registers_values, b_registers_count[name], name) }
+        if (metric_name == "packed") { return median(b_packed_values, b_packed_count[name], name) }
+    } else {
+        if (metric_name == "ns") { return median(a_ns_values, a_ns_count[name], name) }
+        if (metric_name == "bytes") { return median(a_bytes_values, a_bytes_count[name], name) }
+        if (metric_name == "allocs") { return median(a_allocs_values, a_allocs_count[name], name) }
+        if (metric_name == "instructions") { return median(a_instructions_values, a_instructions_count[name], name) }
+        if (metric_name == "registers") { return median(a_registers_values, a_registers_count[name], name) }
+        if (metric_name == "packed") { return median(a_packed_values, a_packed_count[name], name) }
+    }
+    return -1
+}
+
+function cold_case(name) {
+    return name in cold
+}
+
+function set_name(name) {
+    if (cold_case(name)) { return "cold-core" }
+    if (name ~ /^BenchmarkCompileMatrix\/straight_line\//) { return "scaling" }
+    if (name ~ /^Benchmark(LoadProgramCompile|CompilerGraphMatrix)\//) { return "graph" }
+    if (name ~ /^Benchmark(Top10Luau|ClassicLuau|ScenarioLuau)\/.*\/ember_run$/) { return "runtime" }
+    if (name ~ /^Benchmark[^\/]*Stage[^\/]*\//) { return "stage" }
+    if (name ~ /^BenchmarkSourceArtifactStoreHits\//) { return "artifact-hit" }
+    if (name ~ /^BenchmarkCompileMatrix\//) { return "compile-other" }
+    return "other"
+}
+
+function remember_rows(which, name, set) {
+    if (which == "before") {
+        before_rows[name] = 1
+    } else {
+        after_rows[name] = 1
+    }
+    if (set != "other") {
+        rows[set, name] = 1
+    }
+}
+
+function add_metric_ratio(set, metric_name, name, b, a, ratio, key) {
+    b = sample_median("before", metric_name, name)
+    a = sample_median("after", metric_name, name)
+    if (b <= 0 || a <= 0) {
+        return
+    }
+    ratio = a / b
+    key = set SUBSEP metric_name
+    ratio_log[key] += log(ratio)
+    ratio_count[key]++
+}
+
+function emit_ratio(set, metric_name, key) {
+    key = set SUBSEP metric_name
+    if (ratio_count[key] == 0) {
+        return "missing"
+    }
+    return sprintf("%.4fx", exp(ratio_log[key] / ratio_count[key]))
+}
+
+function emit_set(set, label, name) {
+    row_count = 0
+    for (name in rows) {
+        split(name, parts, SUBSEP)
+        if (parts[1] == set) {
+            row_count++
+        }
+    }
+    printf "| %s | %d | %s | %s | %s |\n", label, row_count, emit_ratio(set, "ns"), emit_ratio(set, "bytes"), emit_ratio(set, "allocs")
+}
+
+function average_after(metric_name, unused, name) {
+    return sample_median("after", metric_name, name)
+}
+
+function print_scaling_pair(label, left, right, left_value, right_value, left_bytes, right_bytes, left_allocs, right_allocs, ratio, bytes_ratio, allocs_ratio, status) {
+    left_value = average_after("ns", "", left)
+    right_value = average_after("ns", "", right)
+    left_bytes = average_after("bytes", "", left)
+    right_bytes = average_after("bytes", "", right)
+    left_allocs = average_after("allocs", "", left)
+    right_allocs = average_after("allocs", "", right)
+    if (left_value <= 0 || right_value <= 0 || left_bytes <= 0 || right_bytes <= 0 || left_allocs <= 0 || right_allocs <= 0) {
+        printf "| %s | missing | missing | missing | missing |\n", label
+        return
+    }
+    ratio = right_value / left_value
+    bytes_ratio = right_bytes / left_bytes
+    allocs_ratio = right_allocs / left_allocs
+    status = ratio <= scaling_max_ratio ? "pass" : "fail"
+    if (bytes_ratio > scaling_max_ratio || allocs_ratio > scaling_max_ratio) { status = "fail" }
+    if (status == "fail") { failures++ }
+    printf "| %s | %.4fx | %.4fx | %.4fx | %s |\n", label, ratio, bytes_ratio, allocs_ratio, status
+}
+
+BEGIN {
+    cold["BenchmarkCompileMatrix/tiny_arithmetic"] = 1
+    cold["BenchmarkCompileMatrix/branch_dense_cfg"] = 1
+    cold["BenchmarkCompileMatrix/constants/unique"] = 1
+    cold["BenchmarkCompileMatrix/constants/repeated"] = 1
+    cold["BenchmarkCompileMatrix/closures_upvalues"] = 1
+    cold["BenchmarkCompileMatrix/varargs_multi_return"] = 1
+    cold["BenchmarkCompileMatrix/table_string_fields"] = 1
+    cold["BenchmarkCompileMatrix/top10/arithmetic_for"] = 1
+    cold["BenchmarkCompileMatrix/top10/while_branching"] = 1
+    cold["BenchmarkCompileMatrix/top10/table_fields"] = 1
+    cold["BenchmarkCompileMatrix/top10/array_ops"] = 1
+    cold["BenchmarkCompileMatrix/top10/generic_iteration"] = 1
+    cold["BenchmarkCompileMatrix/top10/closures_upvalues"] = 1
+    cold["BenchmarkCompileMatrix/top10/method_calls"] = 1
+    cold["BenchmarkCompileMatrix/top10/metatable_index"] = 1
+    cold["BenchmarkCompileMatrix/top10/varargs_select"] = 1
+    cold["BenchmarkCompileMatrix/top10/coroutine_yield"] = 1
+    cold["BenchmarkCompileMatrix/top10/recursive_fibonacci"] = 1
+    cold["BenchmarkCompileMatrix/top10/iterative_fibonacci"] = 1
+    cold["BenchmarkCompileMatrix/scenario/combat_tick"] = 1
+    cold["BenchmarkCompileMatrix/scenario/inventory_value"] = 1
+    cold["BenchmarkCompileMatrix/scenario/event_dispatch"] = 1
+    cold["BenchmarkCompileMatrix/scenario/buff_stack_tick"] = 1
+    cold["BenchmarkCompileMatrix/scenario/ability_resolution"] = 1
+    cold["BenchmarkCompileMatrix/scenario/ai_utility_scoring"] = 1
+    cold["BenchmarkCompileMatrix/scenario/cooldown_scheduler"] = 1
+    cold["BenchmarkCompileMatrix/scenario/projectile_sweep"] = 1
+    cold["BenchmarkCompileMatrix/scenario/quest_progress_update"] = 1
+    cold["BenchmarkCompileMatrix/scenario/behavior_tree_tick"] = 1
+    cold["BenchmarkCompileMatrix/scenario/threat_aggro_table"] = 1
+    cold["BenchmarkCompileMatrix/scenario/economy_market_tick"] = 1
+    cold["BenchmarkCompileMatrix/scenario/formation_layout_score"] = 1
+    cold["BenchmarkCompileMatrix/scenario/dialogue_condition_eval"] = 1
+    cold["BenchmarkCompileMatrix/scenario/procgen_room_scoring"] = 1
+    cold["BenchmarkCompileMatrix/scenario/save_state_diff"] = 1
+    cold["BenchmarkCompileMatrix/scenario/path_relaxation"] = 1
+    cold["BenchmarkCompileMatrix/scenario/component_churn"] = 1
+    cold["BenchmarkCompileMatrix/scenario/prototype_fallback"] = 1
+    cold["BenchmarkCompileMatrix/scenario/signal_bus_callbacks"] = 1
+    cold["BenchmarkCompileMatrix/scenario/state_machine_transitions"] = 1
+    cold["BenchmarkCompileMatrix/scenario/sparse_grid_neighbors"] = 1
+    cold["BenchmarkCompileMatrix/scenario/dirty_metatable_writes"] = 1
+    cold["BenchmarkCompileMatrix/scenario/array_hole_compaction"] = 1
+    cold["BenchmarkCompileMatrix/scenario/command_vararg_router"] = 1
+    for (name in cold) { expected_cold++ }
+}
+
+FILENAME == before { process_sample("before"); next }
+FILENAME == after { process_sample("after"); next }
+
+END {
+    for (name in before_rows) {
+        set = set_name(name)
+        remember_rows("before", name, set)
+        if (!(name in after_rows)) { continue }
+        add_metric_ratio(set, "ns", name)
+        add_metric_ratio(set, "bytes", name)
+        add_metric_ratio(set, "allocs", name)
+    }
+    for (name in after_rows) {
+        remember_rows("after", name, set_name(name))
+    }
+
+    printf "Raw before: %s\n", before
+    printf "Raw after: %s\n", after
+    print ""
+    print "Fixed cold-core aggregate (each row has equal weight; ratios are after/before geometric means):"
+    print "| Set | Rows | ns/op ratio | B/op ratio | allocs/op ratio |"
+    print "| --- | ---: | ---: | ---: | ---: |"
+    emit_set("cold-core", "cold-core")
+    emit_set("scaling", "scaling")
+    emit_set("stage", "stage")
+    emit_set("graph", "graph")
+    emit_set("runtime", "runtime")
+    emit_set("artifact-hit", "artifact-hit")
+    emit_set("compile-other", "compile-other")
+
+    missing = 0
+    for (name in cold) {
+        if (!(name in before_rows) || !(name in after_rows)) {
+            missing++
+            printf "missing fixed cold-core row: %s\n", name
+        }
+    }
+    if (missing > 0 && require_fixed_core != 0) { failures++ }
+
+    print ""
+    print "Scaling gates (after run; thresholds belong to this tool, not unit tests):"
+    print "| Transition | ns/op ratio | B/op ratio | allocs/op ratio | Status |"
+    print "| --- | ---: | ---: | ---: | --- |"
+    print_scaling_pair("straight_line/100 -> 1000", "BenchmarkCompileMatrix/straight_line/100", "BenchmarkCompileMatrix/straight_line/1000")
+    print_scaling_pair("straight_line/1000 -> 10000", "BenchmarkCompileMatrix/straight_line/1000", "BenchmarkCompileMatrix/straight_line/10000")
+
+    ten_k = average_after("ns", "", "BenchmarkCompileMatrix/straight_line/10000")
+    if (ten_k > 0) {
+        status = ten_k <= scaling_max_time_ns ? "pass" : "fail"
+        if (status == "fail") { failures++ }
+        printf "| straight_line/10000 absolute | %.0f ns/op | <= %.0f | %s |\n", ten_k, scaling_max_time_ns, status
+    } else {
+        print "| straight_line/10000 absolute | missing | missing | missing |"
+    }
+
+    branch_time = average_after("ns", "", "BenchmarkCompileMatrix/branch_dense_cfg")
+    branch_registers = average_after("registers", "", "BenchmarkCompileMatrix/branch_dense_cfg")
+    if (branch_time > 0 && branch_registers >= 0) {
+        status = (branch_time <= branch_max_time_ns && branch_registers <= branch_max_registers) ? "pass" : "fail"
+        if (status == "fail") { failures++ }
+        printf "| branch_dense_cfg absolute | %.0f ns/op, %.0f registers | <= %.0f ns/op, <= %.0f | %s |\n", branch_time, branch_registers, branch_max_time_ns, branch_max_registers, status
+    } else {
+        print "| branch_dense_cfg absolute | missing | missing | missing |"
+    }
+
+    if (failures > 0) { exit 1 }
+}
+' "$before_file" "$after_file"

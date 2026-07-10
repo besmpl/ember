@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+cd "$(dirname "$0")/.."
+
+fixture_dir=$(mktemp -d "${TMPDIR:-/tmp}/ember-bench-summary.XXXXXX")
+cleanup() {
+	rm -rf "$fixture_dir"
+}
+trap cleanup EXIT HUP INT TERM
+
+before="$fixture_dir/before.txt"
+after="$fixture_dir/after.txt"
+bad_after="$fixture_dir/after-bad.txt"
+
+cat >"$before" <<'EOF'
+BenchmarkCompileMatrix/tiny_arithmetic-8 100 ns/op 100 B/op 10 allocs/op
+BenchmarkCompileMatrix/tiny_arithmetic-8 100 ns/op 100 B/op 10 allocs/op
+BenchmarkCompileMatrix/tiny_arithmetic-8 10000 ns/op 100 B/op 10 allocs/op
+BenchmarkCompileMatrix/straight_line/100-8 100 ns/op 100 B/op 10 allocs/op
+BenchmarkCompileMatrix/straight_line/1000-8 1000 ns/op 1000 B/op 100 allocs/op
+BenchmarkCompileMatrix/straight_line/10000-8 10000 ns/op 10000 B/op 1000 allocs/op
+BenchmarkCompilerStageMatrix/parse/1K-8 20 ns/op 20 B/op 2 allocs/op
+BenchmarkTop10Luau/arithmetic_for/ember_run-8 50 ns/op 20 B/op 2 allocs/op
+BenchmarkLoadProgramCompile/cold/check=false/parallelism=1-8 100 ns/op 10 B/op 1 allocs/op
+BenchmarkCompilerGraphMatrix/modules_10/private_store_unchanged_repeats-8 200 ns/op 20 B/op 2 allocs/op
+BenchmarkSourceArtifactStoreHits/compile-8 30 ns/op 4 B/op 1 allocs/op
+EOF
+
+cat >"$after" <<'EOF'
+BenchmarkCompileMatrix/tiny_arithmetic-8 50 ns/op 50 B/op 5 allocs/op
+BenchmarkCompileMatrix/tiny_arithmetic-8 50 ns/op 50 B/op 5 allocs/op
+BenchmarkCompileMatrix/tiny_arithmetic-8 10000 ns/op 10000 B/op 50 allocs/op
+BenchmarkCompileMatrix/straight_line/100-8 100 ns/op 100 B/op 10 allocs/op
+BenchmarkCompileMatrix/straight_line/1000-8 1200 ns/op 1200 B/op 120 allocs/op
+BenchmarkCompileMatrix/straight_line/10000-8 12000 ns/op 12000 B/op 1200 allocs/op
+BenchmarkCompilerStageMatrix/parse/1K-8 10 ns/op 10 B/op 1 allocs/op
+BenchmarkTop10Luau/arithmetic_for/ember_run-8 40 ns/op 10 B/op 1 allocs/op
+BenchmarkLoadProgramCompile/cold/check=false/parallelism=1-8 80 ns/op 8 B/op 1 allocs/op
+BenchmarkCompilerGraphMatrix/modules_10/private_store_unchanged_repeats-8 100 ns/op 10 B/op 1 allocs/op
+BenchmarkSourceArtifactStoreHits/compile-8 20 ns/op 2 B/op 1 allocs/op
+EOF
+
+summary=$(REQUIRE_FIXED_CORE=0 scripts/bench-summary --before "$before" --after "$after")
+printf '%s\n' "$summary" | grep -F '| cold-core | 1 | 0.5000x | 0.5000x | 0.5000x |' >/dev/null
+printf '%s\n' "$summary" | grep -F '| scaling | 3 |' >/dev/null
+printf '%s\n' "$summary" | grep -F '| stage | 1 |' >/dev/null
+printf '%s\n' "$summary" | grep -F '| graph | 2 |' >/dev/null
+printf '%s\n' "$summary" | grep -F '| runtime | 1 |' >/dev/null
+printf '%s\n' "$summary" | grep -F '| artifact-hit | 1 |' >/dev/null
+printf '%s\n' "$summary" | grep -F 'straight_line/100 -> 1000 | 12.0000x' >/dev/null
+
+sed 's#straight_line/1000-8 1200#straight_line/1000-8 2000#' "$after" >"$bad_after"
+if REQUIRE_FIXED_CORE=0 scripts/bench-summary --before "$before" --after "$bad_after" >"$fixture_dir/bad-output"; then
+	printf '%s\n' 'bench-summary-test: scaling regression unexpectedly passed' >&2
+	exit 1
+fi
+
+if scripts/bench-summary --before "$before" --after "$before" >"$fixture_dir/same-output" 2>&1; then
+	printf '%s\n' 'bench-summary-test: identical before/after files unexpectedly accepted' >&2
+	exit 1
+fi
+
+printf '%s\n' 'bench-summary-test: ok'

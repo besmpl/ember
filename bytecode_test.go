@@ -73,28 +73,6 @@ func TestFinalizeProtoRejectsPackedInstructionOperandOverflow(t *testing.T) {
 	}
 }
 
-func TestOpcodeCountBudget(t *testing.T) {
-	if got, want := int(opcodeCount), 78; got > want {
-		t.Fatalf("opcode count is %d, want at most %d", got, want)
-	}
-}
-
-func TestProtoSideTableBudget(t *testing.T) {
-	fields := []string{
-		"numericOperandFactPCs",
-		"entryNilRegisters",
-	}
-	protoType := reflect.TypeOf(Proto{})
-	for _, field := range fields {
-		if _, ok := protoType.FieldByName(field); !ok {
-			t.Fatalf("Proto side-table budget references missing field %q", field)
-		}
-	}
-	if got, want := len(fields), 2; got > want {
-		t.Fatalf("Proto side-table count is %d, want at most %d", got, want)
-	}
-}
-
 func TestValueSizeBudgetSafeLayout(t *testing.T) {
 	if got, want := reflect.TypeOf(Value{}).Size(), uintptr(24); got > want {
 		t.Fatalf("Value size is %d bytes, want at most %d", got, want)

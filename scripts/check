@@ -17,6 +17,8 @@ for script in scripts/*; do
     sh -n "$script"
 done
 
+scripts/bench-summary-test
+
 go test -vet=off -count=1 ./...
 
 scripts/check-purego
