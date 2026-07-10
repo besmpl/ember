@@ -374,7 +374,6 @@ func emitCompilerStage(artifact sourceArtifact) (compilerStageEmission, error) {
 		bind:               artifact.bind,
 		sourceLines:        newSourceLineMap(artifact.source.Text),
 		symbolRegisters:    newDenseSymbolSlots(len(artifact.bind.symbols)),
-		locals:             make(map[string]int),
 		selfFunctionSymbol: -1,
 		options:            defaultCompilerOptions(),
 	}

@@ -10,11 +10,10 @@ type compiler struct {
 	bind               bindResult
 	sourceLines        sourceLineMap
 	symbolRegisters    []int
-	locals             map[string]int
+	localRegisters     registerSet
 	parent             *compiler
 	selfFunctionSymbol int
 	variadic           bool
-	upvalues           map[string]int
 	upvaluesByID       []int
 	upvalueDescs       []upvalueDesc
 	loops              []loopContext
@@ -67,7 +66,6 @@ func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (
 		bind:               source.bind,
 		sourceLines:        newSourceLineMap(source.source.Text),
 		symbolRegisters:    newDenseSymbolSlots(len(source.bind.symbols)),
-		locals:             make(map[string]int),
 		selfFunctionSymbol: -1,
 		options:            options,
 	}
@@ -336,10 +334,9 @@ func (c *compiler) compileLocal(stmt localStatement) error {
 	if err := c.compileValueListTo(plan, targets); err != nil {
 		return err
 	}
-	for i, name := range stmt.names {
-		c.locals[name] = targets[i]
-		if symbol, ok := c.claimSymbol(syntaxNameID(stmt.nameID, i), symbolLocal); ok {
-			c.symbolRegisters[symbol.id] = targets[i]
+	for i := range stmt.names {
+		if err := c.assignDefinition(syntaxNameID(stmt.nameID, i), symbolLocal, targets[i]); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -445,12 +442,15 @@ func (c *compiler) compileNilTo(target int) {
 func (c *compiler) compileLocalFunction(stmt localFunctionStatement) error {
 	closure := planLocalFunction(stmt)
 	target := c.allocReg()
-	c.locals[stmt.name] = target
 	selfFunctionSymbol := -1
-	if symbol, ok := c.claimSymbol(stmt.nameID, symbolLocalFunction); ok {
-		c.symbolRegisters[symbol.id] = target
-		selfFunctionSymbol = symbol.id
+	symbol, err := c.claimSymbol(stmt.nameID, symbolLocalFunction)
+	if err != nil {
+		return err
 	}
+	if err := c.assignSymbolRegister(symbol.id, target); err != nil {
+		return err
+	}
+	selfFunctionSymbol = symbol.id
 	if err := c.compileClosureToSelf(closure, target, selfFunctionSymbol); err != nil {
 		return err
 	}
@@ -472,7 +472,6 @@ func (c *compiler) compileFunctionDraft(closure closurePlan, selfFunctionSymbol 
 		bind:               c.bind,
 		sourceLines:        c.sourceLines,
 		symbolRegisters:    newDenseSymbolSlots(len(c.bind.symbols)),
-		locals:             make(map[string]int),
 		parent:             c,
 		selfFunctionSymbol: selfFunctionSymbol,
 		variadic:           closure.variadic,
@@ -482,10 +481,9 @@ func (c *compiler) compileFunctionDraft(closure closurePlan, selfFunctionSymbol 
 	}
 	fn.sourceText = c.sourceText
 	for i := 0; i < closure.paramCount(); i++ {
-		param, paramID := closure.param(i)
-		fn.locals[param] = i
-		if symbol, ok := fn.claimSymbol(paramID, symbolParameter); ok {
-			fn.symbolRegisters[symbol.id] = i
+		_, paramID := closure.param(i)
+		if err := fn.assignDefinition(paramID, symbolParameter, i); err != nil {
+			return nil, err
 		}
 	}
 	if err := fn.compileStatements(closure.body); err != nil {
@@ -1446,8 +1444,11 @@ func (c *compiler) compileSubStringFieldAssignment(subField subStringFieldAssign
 
 func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value int) error {
 	if len(target.selectors) == 0 {
-		ref, ok := c.resolveAssignTarget(target)
-		if !ok {
+		ref, bound, err := c.resolveBoundUse(target.id)
+		if err != nil {
+			return err
+		}
+		if !bound {
 			name := c.addStringConstant(target.name)
 			c.emit(instruction{op: opSetGlobal, a: name, b: value})
 			return nil
@@ -1557,11 +1558,9 @@ func (c *compiler) compileIfDefault(branch ifStatement) error {
 		c.releaseTemp(condition)
 	}
 
-	outerLocals := copyLocals(c.locals)
 	if err := c.compileStatements(branch.thenStatements); err != nil {
 		return err
 	}
-	c.locals = copyLocals(outerLocals)
 
 	jumpEnd := c.emitJump()
 
@@ -1572,7 +1571,6 @@ func (c *compiler) compileIfDefault(branch ifStatement) error {
 		if err := c.compileStatements(branch.elseStatements); err != nil {
 			return err
 		}
-		c.locals = copyLocals(outerLocals)
 	}
 
 	c.patchJump(jumpEnd, c.pc())
@@ -1598,7 +1596,6 @@ func (c *compiler) compileStringTagElseIfChain(branch ifStatement) (bool, error)
 		return false, nil
 	}
 
-	outerLocals := copyLocals(c.locals)
 	metatableJump := c.emit(instruction{op: opJumpIfTableHasMetatable, a: chain.table})
 	tag := c.allocTemp()
 	field := c.addStringConstant(chain.field)
@@ -1633,7 +1630,6 @@ func (c *compiler) compileStringTagElseIfChain(branch ifStatement) (bool, error)
 			c.releaseTemp(tag)
 			return true, err
 		}
-		c.locals = copyLocals(outerLocals)
 		endJumps = append(endJumps, c.emitJump())
 		nextArm := c.pc()
 		for _, jump := range nextArmJumps {
@@ -1645,7 +1641,6 @@ func (c *compiler) compileStringTagElseIfChain(branch ifStatement) (bool, error)
 			c.releaseTemp(tag)
 			return true, err
 		}
-		c.locals = copyLocals(outerLocals)
 	}
 	endJumps = append(endJumps, c.emitJump())
 
@@ -1659,7 +1654,6 @@ func (c *compiler) compileStringTagElseIfChain(branch ifStatement) (bool, error)
 	for _, jump := range endJumps {
 		c.patchJump(jump, end)
 	}
-	c.locals = copyLocals(outerLocals)
 	return true, nil
 }
 
@@ -2290,12 +2284,7 @@ func (c *compiler) concatLocalRef(expr concatExpression) (variableRef, bool) {
 	if !isNamedTerm(term) {
 		return variableRef{}, false
 	}
-	if use, ok := c.bind.use(term.id); ok {
-		if ref, ok := c.resolveSymbol(use.symbol); ok && ref.kind == variableLocal {
-			return ref, true
-		}
-	}
-	ref, ok := c.resolveVariable(term.name)
+	ref, ok := c.resolveBoundUseNoError(term.id)
 	return ref, ok && ref.kind == variableLocal
 }
 
@@ -2356,14 +2345,12 @@ func (c *compiler) compileWhile(stmt whileStatement) error {
 		c.releaseTemp(condition)
 	}
 
-	outerLocals := copyLocals(c.locals)
 	c.loops = append(c.loops, loopContext{continueTarget: conditionStart})
 	if err := c.compileStatements(stmt.statements); err != nil {
 		return err
 	}
 	loop := c.loops[len(c.loops)-1]
 	c.loops = c.loops[:len(c.loops)-1]
-	c.locals = copyLocals(outerLocals)
 
 	c.emit(instruction{op: opJump, b: conditionStart})
 	c.patchJump(jumpIfFalse, c.pc())
@@ -2400,15 +2387,15 @@ func (c *compiler) compileFor(stmt forStatement) error {
 	conditionStart := c.pc()
 	jumpExit := c.emit(instruction{op: opNumericForCheck, a: loopVar, b: limit, c: step})
 
-	outerLocals := copyLocals(c.locals)
-	c.locals[stmt.name] = loopVar
+	if err := c.assignDefinition(stmt.nameID, symbolLocal, loopVar); err != nil {
+		return err
+	}
 	c.loops = append(c.loops, loopContext{continueTarget: -1})
 	if err := c.compileStatements(stmt.statements); err != nil {
 		return err
 	}
 	loop := c.loops[len(c.loops)-1]
 	c.loops = c.loops[:len(c.loops)-1]
-	c.locals = copyLocals(outerLocals)
 
 	incrementStart := c.pc()
 	for _, jump := range loop.continueJumps {
@@ -2458,10 +2445,11 @@ func (c *compiler) compileGenericFor(stmt genericForStatement) error {
 		jumpExit = c.emitJumpIfFalse(condition)
 	}
 
-	outerLocals := copyLocals(c.locals)
-	for i, name := range stmt.names {
+	for i := range stmt.names {
 		register := resultStart + i
-		c.locals[name] = register
+		if err := c.assignDefinition(syntaxNameID(stmt.nameID, i), symbolLocal, register); err != nil {
+			return err
+		}
 	}
 	c.loops = append(c.loops, loopContext{continueTarget: loopStart})
 	if err := c.compileStatements(stmt.statements); err != nil {
@@ -2469,7 +2457,6 @@ func (c *compiler) compileGenericFor(stmt genericForStatement) error {
 	}
 	loop := c.loops[len(c.loops)-1]
 	c.loops = c.loops[:len(c.loops)-1]
-	c.locals = copyLocals(outerLocals)
 
 	c.emit(instruction{op: opJump, b: loopStart})
 	exit := c.pc()
@@ -2483,7 +2470,6 @@ func (c *compiler) compileGenericFor(stmt genericForStatement) error {
 func (c *compiler) compileRepeat(stmt repeatStatement) error {
 	bodyStart := c.pc()
 
-	outerLocals := copyLocals(c.locals)
 	c.loops = append(c.loops, loopContext{continueTarget: -1})
 	if err := c.compileStatements(stmt.statements); err != nil {
 		return err
@@ -2500,8 +2486,6 @@ func (c *compiler) compileRepeat(stmt repeatStatement) error {
 	if err != nil {
 		return err
 	}
-	c.locals = copyLocals(outerLocals)
-
 	c.emit(instruction{op: opJumpIfFalse, a: condition, b: bodyStart})
 	c.releaseTemp(condition)
 	exit := c.pc()
@@ -2512,11 +2496,9 @@ func (c *compiler) compileRepeat(stmt repeatStatement) error {
 }
 
 func (c *compiler) compileBlock(stmt blockStatement) error {
-	outerLocals := copyLocals(c.locals)
 	if err := c.compileStatements(stmt.statements); err != nil {
 		return err
 	}
-	c.locals = copyLocals(outerLocals)
 	return nil
 }
 
@@ -2570,54 +2552,47 @@ func tableCapacity(table tableExpression) (int, int) {
 	return arrayCapacity, fieldCapacity
 }
 
-func (c *compiler) compileNamedValueTo(name string, target int) error {
-	if ref, ok := c.resolveVariable(name); ok {
-		return c.compileVariableRefTo(ref, target)
-	}
-
+func (c *compiler) compileGlobalNameTo(name string, target int) {
 	constant := c.addStringConstant(name)
 	c.emit(instruction{op: opLoadGlobal, a: target, b: constant})
-	return nil
 }
 
 func (c *compiler) compileNamedTermTo(term term, target int) error {
-	if use, ok := c.bind.use(term.id); ok {
-		if ref, ok := c.resolveSymbol(use.symbol); ok {
-			return c.compileVariableRefTo(ref, target)
-		}
+	ref, bound, err := c.resolveBoundUse(term.id)
+	if err != nil {
+		return err
 	}
-	return c.compileNamedValueTo(term.name, target)
+	if bound {
+		return c.compileVariableRefTo(ref, target)
+	}
+	c.compileGlobalNameTo(term.name, target)
+	return nil
 }
 
 func (c *compiler) termLocalRef(term term) (variableRef, bool) {
 	if !isNamedTerm(term) {
 		return variableRef{}, false
 	}
-	if use, ok := c.bind.use(term.id); ok {
-		if ref, ok := c.resolveSymbol(use.symbol); ok && ref.kind == variableLocal {
-			return ref, true
-		}
+	if ref, ok := c.resolveBoundUseNoError(term.id); ok && ref.kind == variableLocal {
+		return ref, true
 	}
-	ref, ok := c.resolveVariable(term.name)
-	return ref, ok && ref.kind == variableLocal
+	return variableRef{}, false
 }
 
 func (c *compiler) compileAssignTargetBaseTo(target assignTarget, register int) error {
-	if use, ok := c.bind.use(target.id); ok {
-		if ref, ok := c.resolveSymbol(use.symbol); ok {
-			return c.compileVariableRefTo(ref, register)
-		}
+	ref, bound, err := c.resolveBoundUse(target.id)
+	if err != nil {
+		return err
 	}
-	return c.compileNamedValueTo(target.name, register)
+	if bound {
+		return c.compileVariableRefTo(ref, register)
+	}
+	c.compileGlobalNameTo(target.name, register)
+	return nil
 }
 
 func (c *compiler) resolveAssignTarget(target assignTarget) (variableRef, bool) {
-	if use, ok := c.bind.use(target.id); ok {
-		if ref, ok := c.resolveSymbol(use.symbol); ok {
-			return ref, true
-		}
-	}
-	return c.resolveVariable(target.name)
+	return c.resolveBoundUseNoError(target.id)
 }
 
 func (c *compiler) compileVariableRefTo(ref variableRef, target int) error {
@@ -2635,18 +2610,10 @@ func (c *compiler) compileVariableRefTo(ref variableRef, target int) error {
 	return nil
 }
 
-func (c *compiler) resolveVariable(name string) (variableRef, bool) {
-	if register, ok := c.locals[name]; ok {
-		return variableRef{kind: variableLocal, index: register}, true
-	}
-	upvalue, ok := c.resolveUpvalue(name)
-	if !ok {
+func (c *compiler) resolveSymbol(symbolID int) (variableRef, bool) {
+	if symbolID < 0 || symbolID >= len(c.bind.symbols) {
 		return variableRef{}, false
 	}
-	return variableRef{kind: variableUpvalue, index: upvalue}, true
-}
-
-func (c *compiler) resolveSymbol(symbolID int) (variableRef, bool) {
 	if register, ok := denseSymbolSlot(c.symbolRegisters, symbolID); ok {
 		return variableRef{kind: variableLocal, index: register}, true
 	}
@@ -2673,36 +2640,6 @@ func (c *compiler) resolveSymbolUpvalue(symbolID int) (int, bool) {
 		return 0, false
 	}
 	return c.addSymbolUpvalue(symbolID, upvalueDesc{local: false, index: parentUpvalue}), true
-}
-
-func (c *compiler) resolveUpvalue(name string) (int, bool) {
-	if c.upvalues != nil {
-		if upvalue, ok := c.upvalues[name]; ok {
-			return upvalue, true
-		}
-	}
-	if c.parent == nil {
-		return 0, false
-	}
-
-	if register, ok := c.parent.locals[name]; ok {
-		return c.addUpvalue(name, upvalueDesc{local: true, index: register}), true
-	}
-	parentUpvalue, ok := c.parent.resolveUpvalue(name)
-	if !ok {
-		return 0, false
-	}
-	return c.addUpvalue(name, upvalueDesc{local: false, index: parentUpvalue}), true
-}
-
-func (c *compiler) addUpvalue(name string, desc upvalueDesc) int {
-	if c.upvalues == nil {
-		c.upvalues = make(map[string]int)
-	}
-	upvalue := len(c.upvalueDescs)
-	c.upvalues[name] = upvalue
-	c.upvalueDescs = append(c.upvalueDescs, desc)
-	return upvalue
 }
 
 func (c *compiler) addSymbolUpvalue(symbolID int, desc upvalueDesc) int {
@@ -2736,9 +2673,60 @@ func (c *compiler) bindSymbol(symbolID int) (boundSymbol, bool) {
 	return c.bind.symbols[symbolID], true
 }
 
-func (c *compiler) claimSymbol(node syntaxID, kind symbolKind) (boundSymbol, bool) {
+func (c *compiler) claimSymbol(node syntaxID, kind symbolKind) (boundSymbol, error) {
 	symbol, ok := c.bind.definition(node)
-	return symbol, ok && symbol.kind == kind
+	if !ok {
+		return boundSymbol{}, fmt.Errorf("compile: missing binding definition for node %d", node)
+	}
+	if symbol.kind != kind {
+		return boundSymbol{}, fmt.Errorf("compile: binding definition for node %d is %s, want %s", node, symbol.kind, kind)
+	}
+	return symbol, nil
+}
+
+func (c *compiler) assignDefinition(node syntaxID, kind symbolKind, register int) error {
+	symbol, err := c.claimSymbol(node, kind)
+	if err != nil {
+		return err
+	}
+	return c.assignSymbolRegister(symbol.id, register)
+}
+
+func (c *compiler) assignSymbolRegister(symbolID int, register int) error {
+	if symbolID < 0 || symbolID >= len(c.symbolRegisters) {
+		return fmt.Errorf("compile: invalid binding symbol %d for register %d", symbolID, register)
+	}
+	c.symbolRegisters[symbolID] = register
+	c.localRegisters.add(register)
+	return nil
+}
+
+// resolveBoundUse is the strict emitter seam for identifier binding. A valid
+// global is deliberately distinct from an unvisited node: only the former is
+// allowed to fall through to a host/global load.
+func (c *compiler) resolveBoundUse(node syntaxID) (variableRef, bool, error) {
+	classification := c.bind.useClassification(node)
+	switch {
+	case classification == boundUseGlobal:
+		return variableRef{}, false, nil
+	case classification == boundUseUnvisited:
+		return variableRef{}, false, fmt.Errorf("compile: missing binding fact for node %d", node)
+	case classification < 0:
+		return variableRef{}, false, fmt.Errorf("compile: invalid binding classification %d for node %d", classification, node)
+	}
+	ref, ok := c.resolveSymbol(int(classification))
+	if !ok {
+		return variableRef{}, false, fmt.Errorf("compile: missing bound symbol %d for node %d", classification, node)
+	}
+	return ref, true, nil
+}
+
+func (c *compiler) resolveBoundUseNoError(node syntaxID) (variableRef, bool) {
+	ref, bound, err := c.resolveBoundUse(node)
+	if err != nil || !bound {
+		return variableRef{}, false
+	}
+	return ref, true
 }
 
 func (c *compiler) compileCallTo(call callExpression, target int) error {
@@ -2776,12 +2764,7 @@ func (c *compiler) callNeedsScratch(target int, resultCount int) bool {
 }
 
 func (c *compiler) registerIsLocal(register int) bool {
-	for _, local := range c.locals {
-		if local == register {
-			return true
-		}
-	}
-	return false
+	return c.localRegisters.contains(register)
 }
 
 func (c *compiler) compilePlannedCallToResultsDirect(lowered callPlan, args []expression, target int, resultCount int) error {
@@ -2905,15 +2888,7 @@ func (c *compiler) isUnboundGlobalName(term term, name string) bool {
 	if !isNamedTerm(term) || term.name != name {
 		return false
 	}
-	if use, ok := c.bind.use(term.id); ok {
-		if _, resolved := c.resolveSymbol(use.symbol); resolved {
-			return false
-		}
-	}
-	if _, ok := c.resolveVariable(term.name); ok {
-		return false
-	}
-	return true
+	return c.bind.useClassification(term.id) == boundUseGlobal
 }
 
 func expressionStringLiteral(expr expression) (string, bool) {
@@ -2937,11 +2912,7 @@ func (c *compiler) upvalueOneResultCall(lowered callPlan, resultCount int) (int,
 			return 0, false
 		}
 	}
-	if use, ok := c.bind.use(target.id); ok {
-		ref, ok := c.resolveSymbol(use.symbol)
-		return ref.index, ok && ref.kind == variableUpvalue
-	}
-	ref, ok := c.resolveVariable(target.name)
+	ref, ok := c.resolveBoundUseNoError(target.id)
 	return ref.index, ok && ref.kind == variableUpvalue
 }
 
@@ -2958,11 +2929,11 @@ func (c *compiler) selfUpvalueOneResultCall(lowered callPlan, resultCount int) (
 			return 0, false
 		}
 	}
-	use, ok := c.bind.use(target.id)
-	if !ok || use.symbol != c.selfFunctionSymbol {
+	classification := c.bind.useClassification(target.id)
+	if classification != boundUseClassification(c.selfFunctionSymbol) {
 		return 0, false
 	}
-	ref, ok := c.resolveSymbol(use.symbol)
+	ref, ok := c.resolveSymbol(int(classification))
 	return ref.index, ok && ref.kind == variableUpvalue
 }
 
@@ -2979,11 +2950,7 @@ func (c *compiler) localOneResultCall(lowered callPlan, resultCount int) (int, b
 			return 0, false
 		}
 	}
-	if use, ok := c.bind.use(target.id); ok {
-		ref, ok := c.resolveSymbol(use.symbol)
-		return ref.index, ok && ref.kind == variableLocal
-	}
-	ref, ok := c.resolveVariable(target.name)
+	ref, ok := c.resolveBoundUseNoError(target.id)
 	return ref.index, ok && ref.kind == variableLocal
 }
 
@@ -3111,15 +3078,7 @@ func (c *compiler) isUnboundBaseField(term term, name string) bool {
 		term.selectors[0].index != nil {
 		return false
 	}
-	if use, ok := c.bind.use(term.id); ok {
-		if _, resolved := c.resolveSymbol(use.symbol); resolved {
-			return false
-		}
-	}
-	if _, ok := c.resolveVariable(base.name); ok {
-		return false
-	}
-	return true
+	return c.bind.useClassification(term.id) == boundUseGlobal
 }
 
 func (c *compiler) compileBaseIntrinsicCallToResults(
@@ -3281,12 +3240,4 @@ func (c *compiler) reserveRegistersThrough(nextReg int) {
 	if c.nextReg < nextReg {
 		c.nextReg = nextReg
 	}
-}
-
-func copyLocals(locals map[string]int) map[string]int {
-	copied := make(map[string]int, len(locals))
-	for name, register := range locals {
-		copied[name] = register
-	}
-	return copied
 }

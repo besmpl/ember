@@ -9622,7 +9622,6 @@ func compilerForBytecodeIRTest(artifact sourceArtifact, options compilerOptions)
 	return compiler{
 		bind:            artifact.bind,
 		symbolRegisters: newDenseSymbolSlots(len(artifact.bind.symbols)),
-		locals:          make(map[string]int),
 		options:         options,
 	}
 }

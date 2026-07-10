@@ -144,7 +144,18 @@ func (r bindResult) useClassification(node syntaxID) boundUseClassification {
 	if node <= 0 || int(node) >= len(r.nodeFacts) {
 		return boundUseUnvisited
 	}
-	return boundUseClassification(r.nodeFacts[node].use)
+	facts := r.nodeFacts[node]
+	if facts.flags&boundNodeUseValid == 0 {
+		return boundUseUnvisited
+	}
+	classification := boundUseClassification(facts.use)
+	if classification >= 0 && int(classification) >= len(r.symbols) {
+		return boundUseUnvisited
+	}
+	if classification < 0 && classification != boundUseGlobal {
+		return boundUseUnvisited
+	}
+	return classification
 }
 
 func (r bindResult) expressionFact(node syntaxID) (boundExpressionFact, bool) {
