@@ -1354,6 +1354,11 @@ func bytecodeIRJumpTarget(ins bytecodeIRInstruction) (int, bool) {
 
 func bytecodeIRLiveness(ir []bytecodeIRInstruction) []bytecodeIRLivenessBlock {
 	blocks := bytecodeIRBlockOrder(ir)
+	successors := bytecodeIRBlockSuccessors(ir, blocks)
+	return bytecodeIRLivenessForGraph(ir, blocks, successors)
+}
+
+func bytecodeIRLivenessForGraph(ir []bytecodeIRInstruction, blocks []bytecodeIRBlock, successors [][]int) []bytecodeIRLivenessBlock {
 	liveness := make([]bytecodeIRLivenessBlock, len(blocks))
 	for i, block := range blocks {
 		use, def := bytecodeIRBlockUseDef(ir, block)
@@ -1366,7 +1371,6 @@ func bytecodeIRLiveness(ir []bytecodeIRInstruction) []bytecodeIRLivenessBlock {
 		}
 	}
 
-	successors := bytecodeIRBlockSuccessors(ir, blocks)
 	var out registerSet
 	var in registerSet
 	var outWithoutDefs registerSet

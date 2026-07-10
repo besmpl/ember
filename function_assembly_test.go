@@ -88,7 +88,7 @@ func TestCompileFinalAssemblyAllocationBudget(t *testing.T) {
 			source: `local x = 1
 local y = 2
 return (x + y) * 3 - 4 / 2`,
-			maxAllocs: 165,
+			maxAllocs: 158,
 		},
 		{
 			name: "closure_upvalue",
@@ -97,7 +97,7 @@ local function add(x)
     return base + x
 end
 return add(3)`,
-			maxAllocs: 210,
+			maxAllocs: 205,
 		},
 	}
 

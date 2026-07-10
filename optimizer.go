@@ -46,16 +46,22 @@ func optimizeBytecodeIRWithFacts(ir []bytecodeIRInstruction, facts bytecodeIROpt
 	if !options.enabled(optimizationBytecodePeephole) {
 		return append([]bytecodeIRInstruction(nil), ir...)
 	}
-	optimized := append([]bytecodeIRInstruction(nil), ir...)
-	optimized = applyBytecodeIRRemovalSet(optimized, bytecodeIRPeepholeRemovalSet(optimized, assembleBytecodeIRRaw(optimized)))
-	optimized = simplifyBytecodeIRControlFlow(optimized, facts)
-	optimized = fuseBytecodeIRRowFieldArrayIndex(optimized)
-	optimized = propagateBytecodeIRSingleUseMoves(optimized)
-	optimized = coalesceBytecodeIRMoveProducers(optimized, facts.capturedRegisters)
-	optimized = hoistBytecodeIRLoopInvariantHeaderLoads(optimized)
-	optimized = applyBytecodeIRRemovalSet(optimized, bytecodeIRDeadCodeRemovalSet(optimized, facts))
-	optimized = simplifyBytecodeIRControlFlow(optimized, facts)
-	return optimized
+	function := newFunctionIR(append([]bytecodeIRInstruction(nil), ir...))
+	function.replace(applyBytecodeIRRemovalSet(
+		function.instructions,
+		bytecodeIRPeepholeRemovalSet(function.instructions, assembleBytecodeIRRaw(function.instructions), function.currentAnalysis()),
+	))
+	function.replace(simplifyBytecodeIRControlFlow(function.instructions, facts))
+	function.replace(fuseBytecodeIRRowFieldArrayIndex(function.instructions))
+	function.replace(propagateBytecodeIRSingleUseMoves(function.instructions, function.currentAnalysis()))
+	function.replace(coalesceBytecodeIRMoveProducers(function.instructions, facts.capturedRegisters, function.currentAnalysis()))
+	function.replace(hoistBytecodeIRLoopInvariantHeaderLoads(function.instructions))
+	function.replace(applyBytecodeIRRemovalSet(
+		function.instructions,
+		bytecodeIRDeadCodeRemovalSet(function.instructions, facts, function.currentAnalysis()),
+	))
+	function.replace(simplifyBytecodeIRControlFlow(function.instructions, facts))
+	return function.instructions
 }
 
 func applyBytecodeIRRemovalSet(ir []bytecodeIRInstruction, remove []bool) []bytecodeIRInstruction {
@@ -77,12 +83,11 @@ func fuseBytecodeIRRowFieldArrayIndex(ir []bytecodeIRInstruction) []bytecodeIRIn
 	return ir
 }
 
-func bytecodeIRDeadCodeRemovalSet(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts) []bool {
+func bytecodeIRDeadCodeRemovalSet(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts, analysis *functionAnalysis) []bool {
 	code := assembleBytecodeIRRaw(ir)
 	remove := make([]bool, len(ir))
-	numberFacts := bytecodeIRNumberFactsBefore(code, facts, bytecodeIRBlockOrder(ir))
-	liveness := bytecodeIRLiveness(ir)
-	for _, live := range liveness {
+	numberFacts := bytecodeIRNumberFactsBefore(code, facts, analysis.blocks)
+	for _, live := range analysis.liveness {
 		if !bytecodeIRBlockAllowsDeadCodeCleanup(code, live.block) {
 			continue
 		}
@@ -236,10 +241,9 @@ func constantIsNumber(facts bytecodeIROptimizationFacts, index int) bool {
 	return index >= 0 && index < len(facts.constants) && facts.constants[index].kind == NumberKind
 }
 
-func bytecodeIRPeepholeRemovalSet(ir []bytecodeIRInstruction, code []instruction) []bool {
+func bytecodeIRPeepholeRemovalSet(ir []bytecodeIRInstruction, code []instruction, analysis *functionAnalysis) []bool {
 	remove := make([]bool, len(ir))
-	liveness := bytecodeIRLiveness(ir)
-	for _, live := range liveness {
+	for _, live := range analysis.liveness {
 		block := live.block
 		for pc := block.start; pc < block.end; pc++ {
 			ins := code[pc]
@@ -470,15 +474,14 @@ func setBytecodeIRJumpTarget(ins *bytecodeIRInstruction, target int) bool {
 	}
 }
 
-func propagateBytecodeIRSingleUseMoves(ir []bytecodeIRInstruction) []bytecodeIRInstruction {
+func propagateBytecodeIRSingleUseMoves(ir []bytecodeIRInstruction, analysis *functionAnalysis) []bytecodeIRInstruction {
 	if len(ir) == 0 {
 		return ir
 	}
 	optimized := append([]bytecodeIRInstruction(nil), ir...)
 	code := assembleBytecodeIRRaw(optimized)
 	remove := make([]bool, len(ir))
-	liveness := bytecodeIRLiveness(optimized)
-	for _, live := range liveness {
+	for _, live := range analysis.liveness {
 		block := live.block
 		for pc := block.start; pc < block.end; pc++ {
 			move := code[pc]
@@ -567,15 +570,14 @@ func replaceInstructionReadRegister(ins instruction, from int, to int) (instruct
 	return ins, true
 }
 
-func coalesceBytecodeIRMoveProducers(ir []bytecodeIRInstruction, capturedRegisters []bool) []bytecodeIRInstruction {
+func coalesceBytecodeIRMoveProducers(ir []bytecodeIRInstruction, capturedRegisters []bool, analysis *functionAnalysis) []bytecodeIRInstruction {
 	if len(ir) < 2 {
 		return ir
 	}
 	optimized := append([]bytecodeIRInstruction(nil), ir...)
 	code := assembleBytecodeIRRaw(optimized)
 	remove := make([]bool, len(ir))
-	liveness := bytecodeIRLiveness(optimized)
-	for _, live := range liveness {
+	for _, live := range analysis.liveness {
 		block := live.block
 		for pc := block.start + 1; pc < block.end; pc++ {
 			move := code[pc]
