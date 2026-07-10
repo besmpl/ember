@@ -499,9 +499,10 @@ func (c *compiler) compileFunctionDraft(closure closurePlan, selfFunctionSymbol 
 	return fn.buildFunctionDraft(fn.upvalueDescs, closure.paramCount(), closure.variadic), nil
 }
 
-func (c *compiler) compileExpression(expr expression) (int, error) {
-	target := c.allocReg()
+func (c *compiler) compileTempExpression(expr expression) (int, error) {
+	target := c.allocTemp()
 	if err := c.compileExpressionTo(expr, target); err != nil {
+		c.releaseTemp(target)
 		return 0, err
 	}
 	return target, nil
@@ -1548,7 +1549,7 @@ func (c *compiler) compileIfDefault(branch ifStatement) error {
 		return err
 	}
 	if !ok {
-		condition, err := c.compileExpression(branch.condition)
+		condition, err := c.compileTempExpression(branch.condition)
 		if err != nil {
 			return err
 		}
@@ -1616,7 +1617,7 @@ func (c *compiler) compileStringTagElseIfChain(branch ifStatement) (bool, error)
 				return true, err
 			}
 			if !ok {
-				guardCondition, err := c.compileExpression(expression{
+				guardCondition, err := c.compileTempExpression(expression{
 					terms: []andExpression{{terms: arm.guards}},
 				})
 				if err != nil {
@@ -1732,7 +1733,7 @@ func (c *compiler) compileIfExpressionTo(expr ifExpression, target int) error {
 		return err
 	}
 	if !ok {
-		condition, err := c.compileExpression(expr.condition)
+		condition, err := c.compileTempExpression(expr.condition)
 		if err != nil {
 			return err
 		}
@@ -2347,7 +2348,7 @@ func (c *compiler) compileWhile(stmt whileStatement) error {
 		return err
 	}
 	if !ok {
-		condition, err := c.compileExpression(stmt.condition)
+		condition, err := c.compileTempExpression(stmt.condition)
 		if err != nil {
 			return err
 		}
@@ -2495,7 +2496,7 @@ func (c *compiler) compileRepeat(stmt repeatStatement) error {
 		c.patchJump(jump, conditionStart)
 	}
 
-	condition, err := c.compileExpression(stmt.condition)
+	condition, err := c.compileTempExpression(stmt.condition)
 	if err != nil {
 		return err
 	}

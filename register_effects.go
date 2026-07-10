@@ -1,5 +1,7 @@
 package ember
 
+import "fmt"
+
 type instructionRegisterAccess uint8
 
 const (
@@ -25,208 +27,398 @@ func (access instructionRegisterAccess) String() string {
 	}
 }
 
-type instructionRegisterIterator struct {
-	ins      instruction
-	access   instructionRegisterAccess
-	nextReg  int
-	limitReg int
+type registerEffectSlot uint8
+
+const (
+	registerEffectSlotA registerEffectSlot = iota
+	registerEffectSlotB
+	registerEffectSlotC
+	registerEffectSlotD
+)
+
+type registerEffectSpanMode uint8
+
+const (
+	registerEffectSpanPositiveCount registerEffectSpanMode = iota
+	registerEffectSpanSignedCount
+	registerEffectSpanOpenOrOne
+)
+
+type opcodeRegisterEffect struct {
+	slot   registerEffectSlot
+	offset int8
+	access instructionRegisterAccess
 }
 
+type opcodeRegisterSpan struct {
+	start  registerEffectSlot
+	offset int8
+	count  registerEffectSlot
+	mode   registerEffectSpanMode
+	access instructionRegisterAccess
+}
+
+type opcodeRegisterEffects struct {
+	classified bool
+	fixedCount uint8
+	fixed      [4]opcodeRegisterEffect
+	spanCount  uint8
+	spans      [4]opcodeRegisterSpan
+}
+
+func registerEffect(slot registerEffectSlot, offset int8, access instructionRegisterAccess) opcodeRegisterEffect {
+	return opcodeRegisterEffect{slot: slot, offset: offset, access: access}
+}
+
+func registerSpan(start registerEffectSlot, offset int8, count registerEffectSlot, mode registerEffectSpanMode, access instructionRegisterAccess) opcodeRegisterSpan {
+	return opcodeRegisterSpan{start: start, offset: offset, count: count, mode: mode, access: access}
+}
+
+func newOpcodeRegisterEffects(fixed []opcodeRegisterEffect, spans []opcodeRegisterSpan) opcodeRegisterEffects {
+	var effects opcodeRegisterEffects
+	effects.classified = true
+	for _, effect := range fixed {
+		for index := 0; index < int(effects.fixedCount); index++ {
+			if effects.fixed[index].slot != effect.slot || effects.fixed[index].offset != effect.offset {
+				continue
+			}
+			effects.fixed[index].access |= effect.access
+			effect = opcodeRegisterEffect{}
+			break
+		}
+		if effect.access == 0 {
+			continue
+		}
+		if effects.fixedCount >= uint8(len(effects.fixed)) {
+			panic("too many fixed register effects")
+		}
+		effects.fixed[effects.fixedCount] = effect
+		effects.fixedCount++
+	}
+	if len(spans) > len(effects.spans) {
+		panic("too many register effect spans")
+	}
+	copy(effects.spans[:], spans)
+	effects.spanCount = uint8(len(spans))
+	return effects
+}
+
+func validateOpcodeRegisterEffects(effects opcodeRegisterEffects) error {
+	if !effects.classified {
+		return fmt.Errorf("register effects are unclassified")
+	}
+	if effects.fixedCount > uint8(len(effects.fixed)) {
+		return fmt.Errorf("too many fixed register effects")
+	}
+	for index := 0; index < int(effects.fixedCount); index++ {
+		effect := effects.fixed[index]
+		if effect.slot > registerEffectSlotD || effect.access == 0 {
+			return fmt.Errorf("invalid fixed register effect %d", index)
+		}
+		for previous := 0; previous < index; previous++ {
+			if effects.fixed[previous].slot == effect.slot && effects.fixed[previous].offset == effect.offset {
+				return fmt.Errorf("duplicate fixed register effect %d", index)
+			}
+		}
+	}
+	if effects.spanCount > uint8(len(effects.spans)) {
+		return fmt.Errorf("too many register effect spans")
+	}
+	for index := 0; index < int(effects.spanCount); index++ {
+		span := effects.spans[index]
+		if span.start > registerEffectSlotD || span.count > registerEffectSlotD || span.access == 0 {
+			return fmt.Errorf("invalid register effect span %d", index)
+		}
+		if span.mode > registerEffectSpanOpenOrOne {
+			return fmt.Errorf("invalid register effect span mode %d", span.mode)
+		}
+	}
+	return nil
+}
+
+func registerEffectSlotValue(ins instruction, slot registerEffectSlot) int {
+	switch slot {
+	case registerEffectSlotA:
+		return ins.a
+	case registerEffectSlotB:
+		return ins.b
+	case registerEffectSlotC:
+		return ins.c
+	case registerEffectSlotD:
+		return ins.d
+	default:
+		return 0
+	}
+}
+
+func registerEffectAccessMatches(effect instructionRegisterAccess, requested instructionRegisterAccess) bool {
+	return effect&requested != 0
+}
+
+func registerEffectSpanBounds(ins instruction, span opcodeRegisterSpan, bound int, clamp bool) (start int, end int, ok bool) {
+	start = registerEffectSlotValue(ins, span.start) + int(span.offset)
+	count := registerEffectSlotValue(ins, span.count)
+	open := false
+	switch span.mode {
+	case registerEffectSpanPositiveCount:
+		if count <= 0 {
+			return 0, 0, false
+		}
+	case registerEffectSpanSignedCount:
+		if count < 0 {
+			count = -count - 1
+		}
+		if count <= 0 {
+			return 0, 0, false
+		}
+	case registerEffectSpanOpenOrOne:
+		if count < 0 {
+			open = true
+			count = 0
+		} else if count == 0 {
+			count = 1
+		}
+	default:
+		return 0, 0, false
+	}
+	if start < 0 {
+		start = 0
+	}
+	if open {
+		if !clamp {
+			return start, 0, true
+		}
+		end = bound
+	} else {
+		end = registerEffectAddCount(start, count)
+		if clamp && end > bound {
+			end = bound
+		}
+	}
+	return start, end, end > start
+}
+
+func registerEffectAddCount(start int, count int) int {
+	if count <= 0 {
+		return start
+	}
+	maxInt := int(^uint(0) >> 1)
+	if start > maxInt-count {
+		return maxInt
+	}
+	return start + count
+}
+
+func opcodeRegisterEffectsPtr(op opcode) *opcodeRegisterEffects {
+	if op >= opcodeLimit {
+		return nil
+	}
+	meta := &opcodeMetadataTable[op]
+	if meta.name == "" {
+		return nil
+	}
+	return &meta.registerEffects
+}
+
+func instructionHasRegisterEffect(ins instruction, register int, access instructionRegisterAccess) bool {
+	if register < 0 || access == 0 {
+		return false
+	}
+	effects := opcodeRegisterEffectsPtr(ins.op)
+	if effects == nil {
+		return false
+	}
+	for index := 0; index < int(effects.fixedCount); index++ {
+		effect := effects.fixed[index]
+		if registerEffectAccessMatches(effect.access, access) && registerEffectAddCount(registerEffectSlotValue(ins, effect.slot), int(effect.offset)) == register {
+			return true
+		}
+	}
+	for index := 0; index < int(effects.spanCount); index++ {
+		span := effects.spans[index]
+		if !registerEffectAccessMatches(span.access, access) {
+			continue
+		}
+		start, end, ok := registerEffectSpanBounds(ins, span, 0, false)
+		if !ok {
+			continue
+		}
+		if end == 0 {
+			return register >= start
+		}
+		if register >= start && register < end {
+			return true
+		}
+	}
+	return false
+}
+
+type instructionRegisterIterator struct {
+	ins         instruction
+	effects     *opcodeRegisterEffects
+	bound       int
+	spanCurrent int
+	spanEnd     int
+	access      instructionRegisterAccess
+	fixedIndex  uint8
+	spanIndex   uint8
+	spanActive  bool
+}
+
+// instructionRegisters enumerates the statically named portion of an effect.
+// Callers that own a frame or state bound should use instructionRegistersBounded
+// so open call and vararg spans cover the complete bounded register window.
 func instructionRegisters(ins instruction, access instructionRegisterAccess) instructionRegisterIterator {
 	return instructionRegisterIterator{
-		ins:      ins,
-		access:   access,
-		limitReg: instructionRegisterLimit(ins),
+		ins:     ins,
+		access:  access,
+		effects: opcodeRegisterEffectsPtr(ins.op),
+		bound:   -1,
+	}
+}
+
+func instructionRegistersBounded(ins instruction, access instructionRegisterAccess, bound int) instructionRegisterIterator {
+	return instructionRegisterIterator{
+		ins:     ins,
+		access:  access,
+		effects: opcodeRegisterEffectsPtr(ins.op),
+		bound:   bound,
 	}
 }
 
 func (iterator *instructionRegisterIterator) next() (int, bool) {
-	for iterator.nextReg < iterator.limitReg {
-		register := iterator.nextReg
-		iterator.nextReg++
-		if iterator.access.matches(
-			instructionReadsRegister(iterator.ins, register),
-			instructionWritesRegister(iterator.ins, register),
-		) {
-			return register, true
-		}
+	if iterator.effects == nil || iterator.access == 0 {
+		return 0, false
 	}
-	return 0, false
+	for iterator.fixedIndex < iterator.effects.fixedCount {
+		index := iterator.fixedIndex
+		effect := iterator.effects.fixed[index]
+		iterator.fixedIndex++
+		if !registerEffectAccessMatches(effect.access, iterator.access) {
+			continue
+		}
+		register := registerEffectAddCount(registerEffectSlotValue(iterator.ins, effect.slot), int(effect.offset))
+		if register < 0 || (iterator.bound >= 0 && register >= iterator.bound) || iterator.fixedEffectBefore(register, index) {
+			continue
+		}
+		return register, true
+	}
+	return iterator.nextSpan()
 }
 
-func instructionRegisterLimit(ins instruction) int {
-	limit := 0
-	if meta, ok := opcodeMetadata(ins.op); ok {
-		operands := [...]struct {
-			kind  bytecodeOperandKind
-			value int
-		}{
-			{kind: meta.operands.a, value: ins.a},
-			{kind: meta.operands.b, value: ins.b},
-			{kind: meta.operands.c, value: ins.c},
-			{kind: meta.operands.d, value: ins.d},
-		}
-		for _, operand := range operands {
-			if operand.kind == bytecodeOperandRegister {
-				limit = maxRegisterLimit(limit, operand.value+1)
+func (iterator *instructionRegisterIterator) nextSpan() (int, bool) {
+	for {
+		if iterator.spanActive {
+			for iterator.spanCurrent < iterator.spanEnd {
+				register := iterator.spanCurrent
+				iterator.spanCurrent++
+				current := int(iterator.spanIndex) - 1
+				if iterator.fixedEffectContains(register) || iterator.spanEffectBefore(register, current) {
+					continue
+				}
+				return register, true
 			}
+			iterator.spanActive = false
+		}
+		if iterator.spanIndex >= iterator.effects.spanCount {
+			return 0, false
+		}
+
+		span := iterator.effects.spans[iterator.spanIndex]
+		iterator.spanIndex++
+		if !registerEffectAccessMatches(span.access, iterator.access) {
+			continue
+		}
+		if iterator.bound < 0 && span.mode == registerEffectSpanOpenOrOne && registerEffectSlotValue(iterator.ins, span.count) < 0 {
+			iterator.bound = instructionRegisterStaticBound(iterator.ins)
+		}
+		clamp := iterator.bound >= 0
+		start, end, ok := registerEffectSpanBounds(iterator.ins, span, iterator.bound, clamp)
+		if !ok || (clamp && iterator.bound <= start) {
+			continue
+		}
+		iterator.spanCurrent = start
+		iterator.spanEnd = end
+		iterator.spanActive = true
+	}
+}
+
+func (iterator *instructionRegisterIterator) fixedEffectBefore(register int, current uint8) bool {
+	for index := uint8(0); index < current; index++ {
+		effect := iterator.effects.fixed[index]
+		if registerEffectAccessMatches(effect.access, iterator.access) && registerEffectAddCount(registerEffectSlotValue(iterator.ins, effect.slot), int(effect.offset)) == register {
+			return true
 		}
 	}
+	return false
+}
 
-	switch ins.op {
-	case opCall, opCallOne:
-		argumentCount := ins.c
-		if argumentCount < 0 {
-			argumentCount = -argumentCount - 1
+func (iterator *instructionRegisterIterator) fixedEffectContains(register int) bool {
+	for index := uint8(0); index < iterator.effects.fixedCount; index++ {
+		effect := iterator.effects.fixed[index]
+		if registerEffectAccessMatches(effect.access, iterator.access) && registerEffectAddCount(registerEffectSlotValue(iterator.ins, effect.slot), int(effect.offset)) == register {
+			return true
 		}
-		limit = maxRegisterLimit(limit, ins.b+argumentCount+1)
-		if ins.d > 0 {
-			limit = maxRegisterLimit(limit, ins.a+ins.d)
+	}
+	return false
+}
+
+func (iterator *instructionRegisterIterator) spanEffectBefore(register int, current int) bool {
+	for index := 0; index < current; index++ {
+		span := iterator.effects.spans[index]
+		if !registerEffectAccessMatches(span.access, iterator.access) {
+			continue
 		}
-	case opCallLocalOne, opCallUpvalueOne:
-		limit = maxRegisterLimit(limit, ins.c+ins.d)
-	case opCallMethodOne:
-		limit = maxRegisterLimit(limit, ins.a+ins.d+2)
-	case opFastCall:
-		limit = maxRegisterLimit(limit, ins.a+maxRegisterLimit(ins.c, ins.d))
-	case opArrayNext:
-		limit = maxRegisterLimit(limit, ins.a+ins.d)
-	case opArrayNextJump2:
-		limit = maxRegisterLimit(limit, ins.a+2)
-	case opVararg:
-		if ins.b > 0 {
-			limit = maxRegisterLimit(limit, ins.a+ins.b)
+		start, end, ok := registerEffectSpanBounds(iterator.ins, span, iterator.bound, iterator.bound >= 0)
+		if ok && register >= start && register < end {
+			return true
 		}
-	case opConcatChain:
-		limit = maxRegisterLimit(limit, ins.b+ins.c)
-	case opReturn:
-		count := ins.b
-		if count < 0 {
-			count = -count - 1
+	}
+	return false
+}
+
+func instructionRegisterStaticBound(ins instruction) int {
+	if ins.op >= opcodeLimit {
+		return 0
+	}
+	meta := &opcodeMetadataTable[ins.op]
+	if meta.name == "" {
+		return 0
+	}
+
+	limit := 0
+	operands := [...]struct {
+		kind  bytecodeOperandKind
+		value int
+	}{
+		{kind: meta.operands.a, value: ins.a},
+		{kind: meta.operands.b, value: ins.b},
+		{kind: meta.operands.c, value: ins.c},
+		{kind: meta.operands.d, value: ins.d},
+	}
+	for _, operand := range operands {
+		if operand.kind == bytecodeOperandRegister {
+			limit = maxRegisterBound(limit, operand.value+1)
 		}
-		limit = maxRegisterLimit(limit, ins.a+count)
+	}
+	for index := 0; index < int(meta.registerEffects.fixedCount); index++ {
+		effect := meta.registerEffects.fixed[index]
+		register := registerEffectAddCount(registerEffectSlotValue(ins, effect.slot), int(effect.offset))
+		limit = maxRegisterBound(limit, register+1)
+	}
+	for index := 0; index < int(meta.registerEffects.spanCount); index++ {
+		span := meta.registerEffects.spans[index]
+		_, end, bounded := registerEffectSpanBounds(ins, span, 0, false)
+		if bounded && end > 0 {
+			limit = maxRegisterBound(limit, end)
+		}
 	}
 	return limit
 }
 
-func maxRegisterLimit(current int, candidate int) int {
+func maxRegisterBound(current int, candidate int) int {
 	if candidate > current {
 		return candidate
 	}
 	return current
-}
-
-func instructionReadsRegister(ins instruction, register int) bool {
-	switch ins.op {
-	case opMove:
-		return ins.b == register
-	case opSetGlobal:
-		return ins.b == register
-	case opSetField, opSetStringField:
-		return ins.a == register || ins.c == register
-	case opGetStringField:
-		return ins.b == register
-	case opSetStringFieldIndex:
-		return ins.a == register || ins.c == register || ins.d == register
-	case opGetStringFieldIndex:
-		return ins.b == register || ins.d == register
-	case opAddStringField, opSubStringField:
-		return ins.a == register || ins.c == register
-	case opSetIndex:
-		return ins.a == register || ins.b == register || ins.c == register
-	case opGetIndex:
-		return ins.b == register || ins.c == register
-	case opSetUpvalue:
-		return ins.b == register
-	case opPrepareIter:
-		return ins.a == register
-	case opArrayNext, opArrayNextJump2:
-		return ins.a == register || ins.b == register || ins.c == register
-	case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow, opConcat,
-		opEqual, opNotEqual, opLess, opLessEqual, opGreater, opGreaterEqual:
-		return ins.b == register || ins.c == register
-	case opConcatChain:
-		return register >= ins.b && register < ins.b+ins.c
-	case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
-		return ins.b == register
-	case opNumericForCheck:
-		return ins.a == register || ins.b == register || ins.c == register
-	case opNumericForLoop:
-		return ins.a == register || ins.b == register
-	case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
-		return ins.a == register || ins.b == register
-	case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK,
-		opJumpIfModKNotEqualK,
-		opJumpIfTableHasMetatable,
-		opJumpIfStringFieldNotEqualK, opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK:
-		return ins.a == register
-	case opJumpIfStringFieldNotGreaterR:
-		return ins.a == register || ins.c == register
-	case opNeg, opLen:
-		return ins.b == register
-	case opFastCall:
-		return register >= ins.a && register < ins.a+ins.c
-	case opCall, opCallOne:
-		if ins.b == register {
-			return true
-		}
-		if ins.c < 0 {
-			prefixCount := -ins.c - 1
-			return register > ins.b && register <= ins.b+prefixCount
-		}
-		return register > ins.b && register <= ins.b+ins.c
-	case opCallLocalOne:
-		return ins.b == register || register >= ins.c && register < ins.c+ins.d
-	case opCallUpvalueOne:
-		return register >= ins.c && register < ins.c+ins.d
-	case opCallMethodOne:
-		return ins.b == register || register >= ins.a+2 && register <= ins.a+1+ins.d
-	case opJumpIfFalse, opReturnOne:
-		return ins.a == register
-	case opReturn:
-		if ins.b < 0 {
-			prefixCount := -ins.b - 1
-			return register >= ins.a && register < ins.a+prefixCount
-		}
-		return register >= ins.a && register < ins.a+ins.b
-	default:
-		return false
-	}
-}
-
-func instructionWritesRegister(ins instruction, register int) bool {
-	switch ins.op {
-	case opLoadConst, opLoadGlobal, opMove, opNewTable, opGetStringField, opGetStringFieldIndex,
-		opClosure, opGetUpvalue, opVararg, opAdd, opSub, opMul, opDiv, opMod,
-		opIDiv, opPow, opNeg, opLen, opConcat, opConcatChain, opEqual, opNotEqual, opLess,
-		opLessEqual, opGreater, opGreaterEqual, opAddK, opSubK, opMulK,
-		opDivK, opModK, opIDivK, opFastCall:
-		if ins.op == opVararg && ins.b > 0 {
-			return register >= ins.a && register < ins.a+ins.b
-		}
-		return ins.a == register
-	case opNumericForLoop:
-		return register == ins.a
-	case opPrepareIter:
-		return ins.a == register || ins.b == register || ins.c == register
-	case opArrayNext:
-		return register >= ins.a && register < ins.a+ins.d
-	case opArrayNextJump2:
-		return register == ins.a || register == ins.a+1
-	case opCall:
-		resultCount := ins.d
-		if resultCount == 0 {
-			resultCount = 1
-		}
-		if resultCount < 0 {
-			return register >= ins.a
-		}
-		return register >= ins.a && register < ins.a+resultCount
-	case opCallOne, opCallLocalOne, opCallUpvalueOne:
-		return register == ins.a
-	case opCallMethodOne:
-		return register == ins.a || register == ins.a+1
-	default:
-		return false
-	}
 }

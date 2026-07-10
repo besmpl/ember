@@ -741,7 +741,7 @@ func bytecodeIRScalarRegisterCount(ir []bytecodeIRInstruction, minimum int) int 
 	count := minimum
 	for _, raw := range ir {
 		ins := assembleBytecodeIRInstruction(raw)
-		if limit := instructionRegisterLimit(ins); limit > count {
+		if limit := instructionRegisterStaticBound(ins); limit > count {
 			count = limit
 		}
 	}
@@ -829,45 +829,8 @@ func applyBytecodeIRScalarTransfer(state []scalarLatticeValue, ins instruction, 
 }
 
 func markBytecodeIRScalarWritesVarying(state []scalarLatticeValue, ins instruction) {
-	switch ins.op {
-	case opLoadConst, opLoadGlobal, opMove, opNewTable, opGetStringField, opGetStringFieldIndex,
-		opClosure, opGetUpvalue, opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow,
-		opNeg, opLen, opConcat, opConcatChain, opEqual, opNotEqual, opLess, opLessEqual,
-		opGreater, opGreaterEqual, opAddK, opSubK, opMulK, opDivK, opModK, opIDivK,
-		opFastCall, opNumericForLoop, opCallOne, opCallLocalOne, opCallUpvalueOne:
-		markBytecodeIRScalarRegisterVarying(state, ins.a)
-	case opPrepareIter:
-		markBytecodeIRScalarRegisterVarying(state, ins.a)
-		markBytecodeIRScalarRegisterVarying(state, ins.b)
-		markBytecodeIRScalarRegisterVarying(state, ins.c)
-	case opArrayNext:
-		markBytecodeIRScalarRegisterRangeVarying(state, ins.a, ins.d)
-	case opArrayNextJump2:
-		markBytecodeIRScalarRegisterRangeVarying(state, ins.a, 2)
-	case opVararg:
-		markBytecodeIRScalarRegisterRangeVarying(state, ins.a, ins.b)
-	case opCall:
-		count := ins.d
-		if count == 0 {
-			count = 1
-		}
-		markBytecodeIRScalarRegisterRangeVarying(state, ins.a, count)
-	case opCallMethodOne:
-		markBytecodeIRScalarRegisterRangeVarying(state, ins.a, 2)
-	}
-}
-
-func markBytecodeIRScalarRegisterVarying(state []scalarLatticeValue, register int) {
-	if register >= 0 && register < len(state) {
-		state[register] = scalarVarying
-	}
-}
-
-func markBytecodeIRScalarRegisterRangeVarying(state []scalarLatticeValue, start int, count int) {
-	if count < 0 {
-		count = len(state) - start
-	}
-	for register := max(start, 0); register < start+count && register < len(state); register++ {
+	writes := instructionRegistersBounded(ins, instructionRegisterWrite, len(state))
+	for register, ok := writes.next(); ok; register, ok = writes.next() {
 		state[register] = scalarVarying
 	}
 }
@@ -1167,16 +1130,16 @@ func singleUseMoveReadPC(code []instruction, start int, end int, liveOut registe
 	usePC := -1
 	for pc := start; pc < end; pc++ {
 		ins := code[pc]
-		if usePC < 0 && instructionWritesRegister(ins, source) {
+		if usePC < 0 && instructionHasRegisterEffect(ins, source, instructionRegisterWrite) {
 			return -1, false
 		}
-		if instructionReadsRegister(ins, target) {
+		if instructionHasRegisterEffect(ins, target, instructionRegisterRead) {
 			if usePC >= 0 {
 				return -1, false
 			}
 			usePC = pc
 		}
-		if instructionWritesRegister(ins, target) {
+		if instructionHasRegisterEffect(ins, target, instructionRegisterWrite) {
 			if usePC < 0 {
 				return -1, false
 			}
@@ -1251,7 +1214,7 @@ func coalesceBytecodeIRMoveProducers(ir []bytecodeIRInstruction, capturedRegiste
 			}
 			producerPC := pc - 1
 			producer := code[producerPC]
-			if instructionReadsRegister(producer, move.a) || instructionWritesRegister(producer, move.a) {
+			if instructionHasRegisterEffect(producer, move.a, instructionRegisterRead) || instructionHasRegisterEffect(producer, move.a, instructionRegisterWrite) {
 				continue
 			}
 			rewritten, ok := replaceInstructionWrittenRegister(producer, move.b, move.a)
@@ -1280,7 +1243,7 @@ func replaceInstructionWrittenRegister(ins instruction, from int, to int) (instr
 	if !singleResultProducerCanRetarget(ins) || ins.a != from {
 		return ins, false
 	}
-	if instructionReadsRegister(ins, to) {
+	if instructionHasRegisterEffect(ins, to, instructionRegisterRead) {
 		return ins, false
 	}
 	ins.a = to
@@ -1376,7 +1339,7 @@ func loopHasInvariantHeaderLoadBarrier(code []instruction, loopStart int, loopEn
 		if effect.readsTables {
 			return true
 		}
-		if instructionWritesRegister(ins, load.a) || instructionWritesRegister(ins, load.b) {
+		if instructionHasRegisterEffect(ins, load.a, instructionRegisterWrite) || instructionHasRegisterEffect(ins, load.b, instructionRegisterWrite) {
 			return true
 		}
 	}
@@ -1442,10 +1405,10 @@ func isDeadMoveRoundTripPair(left instruction, right instruction) bool {
 
 func registerKilledBeforeRead(code []instruction, register int) (bool, bool) {
 	for _, ins := range code {
-		if instructionReadsRegister(ins, register) {
+		if instructionHasRegisterEffect(ins, register, instructionRegisterRead) {
 			return false, true
 		}
-		if instructionWritesRegister(ins, register) {
+		if instructionHasRegisterEffect(ins, register, instructionRegisterWrite) {
 			return true, true
 		}
 	}
@@ -1750,10 +1713,10 @@ func foldNumberTerm(expr term) (float64, bool) {
 
 func registerDeadAfter(code []instruction, register int) bool {
 	for _, ins := range code {
-		if instructionReadsRegister(ins, register) {
+		if instructionHasRegisterEffect(ins, register, instructionRegisterRead) {
 			return false
 		}
-		if instructionWritesRegister(ins, register) {
+		if instructionHasRegisterEffect(ins, register, instructionRegisterWrite) {
 			return true
 		}
 	}

@@ -348,12 +348,26 @@ type selector struct {
 	index *expression
 }
 
+type parserCheckpoint struct {
+	pos        int
+	tokenIndex int
+}
+
 type parser struct {
 	source     string
 	pos        int
 	mode       sourceMode
 	tokens     []sourceToken
 	tokenIndex int
+}
+
+func (p *parser) mark() parserCheckpoint {
+	return parserCheckpoint{pos: p.pos, tokenIndex: p.tokenIndex}
+}
+
+func (p *parser) restore(checkpoint parserCheckpoint) {
+	p.pos = checkpoint.pos
+	p.tokenIndex = checkpoint.tokenIndex
 }
 
 func (p *parser) parse() (program, error) {
@@ -500,33 +514,20 @@ func (p *parser) parseStatement() (statement, error) {
 	}
 
 	if p.currentIdentifier() {
-		start := p.pos
-		call, err := p.parseCallStatement()
-		if err != nil {
-			return statement{}, err
-		}
-		if call != nil {
-			return statement{call: call}, nil
-		}
-		p.pos = start
-
-		stmt, err := p.parseAssignStatement()
-		if err != nil {
-			return statement{}, err
-		}
-		return statement{assign: &stmt}, nil
+		return p.parseIdentifierStatement()
 	}
 
 	return statement{}, p.errorf("expected statement")
 }
 
 func (p *parser) tryParseTypeAliasStatement() (*typeAliasStatement, bool, error) {
-	start := p.pos
+	checkpoint := p.mark()
+	start := checkpoint.pos
 	exported := false
 	if p.consumeKeyword("export") {
 		p.skipSpace()
 		if !p.consumeKeyword("type") {
-			p.pos = start
+			p.restore(checkpoint)
 			return nil, false, nil
 		}
 		exported = true
@@ -536,7 +537,7 @@ func (p *parser) tryParseTypeAliasStatement() (*typeAliasStatement, bool, error)
 
 	p.skipSpace()
 	if !p.currentIdentifier() {
-		p.pos = start
+		p.restore(checkpoint)
 		return nil, false, nil
 	}
 	nameStart := p.pos
@@ -552,7 +553,7 @@ func (p *parser) tryParseTypeAliasStatement() (*typeAliasStatement, bool, error)
 
 	p.skipSpace()
 	if !p.consumeByte('=') {
-		p.pos = start
+		p.restore(checkpoint)
 		return nil, false, nil
 	}
 
@@ -736,16 +737,52 @@ func (p *parser) parseParameterList() ([]string, []*typeExpression, bool, *typeE
 	}
 }
 
-func (p *parser) parseCallStatement() (*term, error) {
-	value, err := p.parseTerm()
+func (p *parser) parseIdentifierStatement() (statement, error) {
+	value, err := p.parseIdentifierStatementTerm()
 	if err != nil {
-		return nil, err
+		return statement{}, err
 	}
-	p.skipSpace()
-	if value.call == nil {
-		return nil, nil
+	if value.call != nil {
+		return identifierCallStatement(value), nil
 	}
-	return &value, nil
+
+	target := assignTargetFromIdentifierTerm(value)
+	targets := []assignTarget{target}
+	for {
+		p.skipSpace()
+		if !p.consumeByte(',') {
+			break
+		}
+		p.skipSpace()
+		target, err := p.parseAssignTarget()
+		if err != nil {
+			return statement{}, err
+		}
+		targets = append(targets, target)
+	}
+
+	if !p.consumeByte('=') {
+		return statement{}, p.errorf("expected =")
+	}
+	values, err := p.parseExpressionList()
+	if err != nil {
+		return statement{}, err
+	}
+	return statement{assign: &assignStatement{targets: targets, values: values}}, nil
+}
+
+// Keep call-term address-taking out of the assignment path so ordinary terms stay stack-allocated.
+func identifierCallStatement(value term) statement {
+	return statement{call: &value}
+}
+
+func assignTargetFromIdentifierTerm(value term) assignTarget {
+	return assignTarget{
+		start:     value.start,
+		end:       value.end,
+		name:      value.name,
+		selectors: value.selectors,
+	}
 }
 
 func (p *parser) parseReturnStatement() (returnStatement, error) {
@@ -1208,14 +1245,15 @@ func (p *parser) parsePrimaryType() (*typeExpression, error) {
 }
 
 func (p *parser) tryParseTypeofType() (*typeExpression, bool, error) {
-	start := p.pos
+	checkpoint := p.mark()
+	start := checkpoint.pos
 	if !p.consumeKeyword("typeof") {
 		return nil, false, nil
 	}
 
 	p.skipSpace()
 	if !p.consumeByte('(') {
-		p.pos = start
+		p.restore(checkpoint)
 		return nil, false, nil
 	}
 
@@ -1315,7 +1353,7 @@ func (p *parser) parseFunctionTypeArgument() (typeFunctionParam, error) {
 	}
 
 	if p.currentIdentifier() {
-		start := p.pos
+		checkpoint := p.mark()
 		name, err := p.parseIdentifier()
 		if err != nil {
 			return typeFunctionParam{}, err
@@ -1329,7 +1367,7 @@ func (p *parser) parseFunctionTypeArgument() (typeFunctionParam, error) {
 			}
 			return typeFunctionParam{name: name, value: value}, nil
 		}
-		p.pos = start
+		p.restore(checkpoint)
 	}
 
 	value, err := p.parseType()
@@ -1369,7 +1407,7 @@ func (p *parser) parseTableTypeBody(start int) (*typeExpression, error) {
 			}
 			fields = append(fields, typeField{access: access, key: key, value: value})
 		} else if p.currentIdentifier() {
-			fieldStart := p.pos
+			fieldCheckpoint := p.mark()
 			name, err := p.parseIdentifier()
 			if err != nil {
 				return nil, err
@@ -1386,7 +1424,7 @@ func (p *parser) parseTableTypeBody(start int) (*typeExpression, error) {
 				if access != "" {
 					return nil, p.errorf("expected :")
 				}
-				p.pos = fieldStart
+				p.restore(fieldCheckpoint)
 				value, err := p.parseType()
 				if err != nil {
 					return nil, err
@@ -1419,7 +1457,7 @@ func (p *parser) parseTableTypeBody(start int) (*typeExpression, error) {
 }
 
 func (p *parser) parseOptionalTableFieldAccess() string {
-	start := p.pos
+	checkpoint := p.mark()
 	var access string
 	if p.consumeKeyword("read") {
 		access = "read"
@@ -1434,7 +1472,7 @@ func (p *parser) parseOptionalTableFieldAccess() string {
 		return access
 	}
 
-	p.pos = start
+	p.restore(checkpoint)
 	return ""
 }
 
@@ -1535,38 +1573,6 @@ func (p *parser) parseOptionalTypeArguments() ([]*typeExpression, error) {
 			return nil, p.errorf("expected , or >")
 		}
 	}
-}
-
-func (p *parser) parseAssignStatement() (assignStatement, error) {
-	target, err := p.parseAssignTarget()
-	if err != nil {
-		return assignStatement{}, err
-	}
-	targets := []assignTarget{target}
-
-	for {
-		p.skipSpace()
-		if !p.consumeByte(',') {
-			break
-		}
-		p.skipSpace()
-		target, err := p.parseAssignTarget()
-		if err != nil {
-			return assignStatement{}, err
-		}
-		targets = append(targets, target)
-	}
-
-	if !p.consumeByte('=') {
-		return assignStatement{}, p.errorf("expected =")
-	}
-
-	values, err := p.parseExpressionList()
-	if err != nil {
-		return assignStatement{}, err
-	}
-
-	return assignStatement{targets: targets, values: values}, nil
 }
 
 func (p *parser) parseAssignTarget() (assignTarget, error) {
@@ -1829,6 +1835,17 @@ func (p *parser) parseTerm() (term, error) {
 	return value, nil
 }
 
+func (p *parser) parseIdentifierStatementTerm() (term, error) {
+	p.skipSpace()
+	start := p.pos
+	name, err := p.parseIdentifier()
+	if err != nil {
+		return term{}, err
+	}
+	value := term{start: start, end: p.pos, name: name}
+	return p.parseTermSuffixesWithCasts(value, false)
+}
+
 func (p *parser) parsePrimaryTerm() (term, error) {
 	p.skipSpace()
 	start := p.pos
@@ -1967,12 +1984,16 @@ func expressionFromTerm(value term) expression {
 }
 
 func (p *parser) parseTermSuffixes(value term) (term, error) {
+	return p.parseTermSuffixesWithCasts(value, true)
+}
+
+func (p *parser) parseTermSuffixesWithCasts(value term, allowCasts bool) (term, error) {
 	for {
 		p.skipSpace()
 		if p.currentSymbol("..") {
 			return value, nil
 		}
-		if p.consumeString("::") {
+		if allowCasts && p.consumeString("::") {
 			p.skipSpace()
 			cast, err := p.parseType()
 			if err != nil {
@@ -1981,6 +2002,9 @@ func (p *parser) parseTermSuffixes(value term) (term, error) {
 			value.cast = cast
 			value.end = cast.end
 			continue
+		}
+		if !allowCasts && p.currentSymbol("::") {
+			return value, nil
 		}
 		if p.consumeByte('.') {
 			field, err := p.parseIdentifier()
@@ -2124,7 +2148,7 @@ func (p *parser) parseTable() (tableExpression, error) {
 		}
 
 		if p.currentIdentifier() {
-			start := p.pos
+			fieldCheckpoint := p.mark()
 			name, err := p.parseIdentifier()
 			if err != nil {
 				return tableExpression{}, err
@@ -2146,7 +2170,7 @@ func (p *parser) parseTable() (tableExpression, error) {
 				}
 				continue
 			}
-			p.pos = start
+			p.restore(fieldCheckpoint)
 		}
 
 		value, err := p.parseExpression()
@@ -2349,9 +2373,6 @@ func (p *parser) currentDoubleQuotedString() bool {
 }
 
 func (p *parser) advanceTokenIndex() {
-	if p.tokenIndex < len(p.tokens) && p.tokens[p.tokenIndex].start > p.pos {
-		p.tokenIndex = 0
-	}
 	for p.tokenIndex < len(p.tokens) && p.tokens[p.tokenIndex].end <= p.pos {
 		p.tokenIndex++
 	}

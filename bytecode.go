@@ -174,6 +174,7 @@ type opcodeMetadataEntry struct {
 	controlFlow                  opcodeControlFlowKind
 	jumpTarget                   opcodeJumpTargetSlot
 	operands                     opcodeOperandShape
+	registerEffects              opcodeRegisterEffects
 	effects                      opcodeEffects
 	directFrameUnsupportedReason string
 }
@@ -205,6 +206,7 @@ var opcodeMetadataTable = func() [opcodeLimit]opcodeMetadataEntry {
 	var table [opcodeLimit]opcodeMetadataEntry
 	for _, op := range allOpcodes {
 		table[op].name = opcodeName(op)
+		table[op].registerEffects.classified = true
 		table[op].effects.classified = true
 	}
 	for _, op := range allOpcodes {
@@ -454,6 +456,132 @@ var opcodeMetadataTable = func() [opcodeLimit]opcodeMetadataEntry {
 	setOperands(opJump, unused, jumpTarget, unused, unused)
 	setOperands(opReturnOne, register, unused, unused, unused)
 	setOperands(opReturn, register, count, unused, unused)
+	setRegisterEffects := func(op opcode, fixed []opcodeRegisterEffect, spans []opcodeRegisterSpan) {
+		table[op].registerEffects = newOpcodeRegisterEffects(fixed, spans)
+	}
+	read := instructionRegisterRead
+	write := instructionRegisterWrite
+	readWrite := instructionRegisterReadWrite
+	setRegisterEffects(opLoadConst, []opcodeRegisterEffect{registerEffect(registerEffectSlotA, 0, write)}, nil)
+	setRegisterEffects(opLoadGlobal, []opcodeRegisterEffect{registerEffect(registerEffectSlotA, 0, write)}, nil)
+	setRegisterEffects(opSetGlobal, []opcodeRegisterEffect{registerEffect(registerEffectSlotB, 0, read)}, nil)
+	setRegisterEffects(opMove, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, write), registerEffect(registerEffectSlotB, 0, read),
+	}, nil)
+	setRegisterEffects(opNewTable, []opcodeRegisterEffect{registerEffect(registerEffectSlotA, 0, write)}, nil)
+	setRegisterEffects(opSetField, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, read), registerEffect(registerEffectSlotC, 0, read),
+	}, nil)
+	setRegisterEffects(opSetStringField, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, read), registerEffect(registerEffectSlotC, 0, read),
+	}, nil)
+	setRegisterEffects(opSetStringFieldIndex, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, read), registerEffect(registerEffectSlotC, 0, read), registerEffect(registerEffectSlotD, 0, read),
+	}, nil)
+	setRegisterEffects(opGetStringField, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, write), registerEffect(registerEffectSlotB, 0, read),
+	}, nil)
+	setRegisterEffects(opGetStringFieldIndex, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, write), registerEffect(registerEffectSlotB, 0, read), registerEffect(registerEffectSlotD, 0, read),
+	}, nil)
+	setRegisterEffects(opAddStringField, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, read), registerEffect(registerEffectSlotC, 0, read),
+	}, nil)
+	setRegisterEffects(opSubStringField, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, read), registerEffect(registerEffectSlotC, 0, read),
+	}, nil)
+	setRegisterEffects(opSetIndex, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, read), registerEffect(registerEffectSlotB, 0, read), registerEffect(registerEffectSlotC, 0, read),
+	}, nil)
+	setRegisterEffects(opGetIndex, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, write), registerEffect(registerEffectSlotB, 0, read), registerEffect(registerEffectSlotC, 0, read),
+	}, nil)
+	setRegisterEffects(opClosure, []opcodeRegisterEffect{registerEffect(registerEffectSlotA, 0, write)}, nil)
+	setRegisterEffects(opGetUpvalue, []opcodeRegisterEffect{registerEffect(registerEffectSlotA, 0, write)}, nil)
+	setRegisterEffects(opSetUpvalue, []opcodeRegisterEffect{registerEffect(registerEffectSlotB, 0, read)}, nil)
+	setRegisterEffects(opVararg, nil, []opcodeRegisterSpan{
+		registerSpan(registerEffectSlotA, 0, registerEffectSlotB, registerEffectSpanOpenOrOne, write),
+	})
+	setRegisterEffects(opPrepareIter, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, readWrite), registerEffect(registerEffectSlotB, 0, write), registerEffect(registerEffectSlotC, 0, write),
+	}, nil)
+	setRegisterEffects(opArrayNext, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, read), registerEffect(registerEffectSlotB, 0, read), registerEffect(registerEffectSlotC, 0, read),
+	}, []opcodeRegisterSpan{
+		registerSpan(registerEffectSlotA, 0, registerEffectSlotD, registerEffectSpanPositiveCount, write),
+	})
+	setRegisterEffects(opArrayNextJump2, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, read), registerEffect(registerEffectSlotB, 0, read), registerEffect(registerEffectSlotC, 0, read),
+		registerEffect(registerEffectSlotA, 0, write), registerEffect(registerEffectSlotA, 1, write),
+	}, nil)
+	for _, op := range []opcode{opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow, opConcat, opEqual, opNotEqual, opLess, opLessEqual, opGreater, opGreaterEqual} {
+		setRegisterEffects(op, []opcodeRegisterEffect{
+			registerEffect(registerEffectSlotA, 0, write), registerEffect(registerEffectSlotB, 0, read), registerEffect(registerEffectSlotC, 0, read),
+		}, nil)
+	}
+	setRegisterEffects(opConcatChain, []opcodeRegisterEffect{registerEffect(registerEffectSlotA, 0, write)}, []opcodeRegisterSpan{
+		registerSpan(registerEffectSlotB, 0, registerEffectSlotC, registerEffectSpanPositiveCount, read),
+	})
+	for _, op := range []opcode{opAddK, opSubK, opMulK, opDivK, opModK, opIDivK} {
+		setRegisterEffects(op, []opcodeRegisterEffect{
+			registerEffect(registerEffectSlotA, 0, write), registerEffect(registerEffectSlotB, 0, read),
+		}, nil)
+	}
+	for _, op := range []opcode{opNeg, opLen} {
+		setRegisterEffects(op, []opcodeRegisterEffect{
+			registerEffect(registerEffectSlotA, 0, write), registerEffect(registerEffectSlotB, 0, read),
+		}, nil)
+	}
+	setRegisterEffects(opNumericForCheck, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, read), registerEffect(registerEffectSlotB, 0, read), registerEffect(registerEffectSlotC, 0, read),
+	}, nil)
+	setRegisterEffects(opNumericForLoop, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, readWrite), registerEffect(registerEffectSlotB, 0, read),
+	}, nil)
+	for _, op := range []opcode{opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK, opJumpIfModKNotEqualK, opJumpIfTableHasMetatable, opJumpIfStringFieldNotEqualK, opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK} {
+		setRegisterEffects(op, []opcodeRegisterEffect{registerEffect(registerEffectSlotA, 0, read)}, nil)
+	}
+	for _, op := range []opcode{opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater} {
+		setRegisterEffects(op, []opcodeRegisterEffect{
+			registerEffect(registerEffectSlotA, 0, read), registerEffect(registerEffectSlotB, 0, read),
+		}, nil)
+	}
+	setRegisterEffects(opJumpIfStringFieldNotGreaterR, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, read), registerEffect(registerEffectSlotC, 0, read),
+	}, nil)
+	setRegisterEffects(opFastCall, []opcodeRegisterEffect{registerEffect(registerEffectSlotA, 0, write)}, []opcodeRegisterSpan{
+		registerSpan(registerEffectSlotA, 0, registerEffectSlotC, registerEffectSpanPositiveCount, read),
+		registerSpan(registerEffectSlotA, 0, registerEffectSlotD, registerEffectSpanPositiveCount, write),
+	})
+	setRegisterEffects(opCall, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, write), registerEffect(registerEffectSlotB, 0, read),
+	}, []opcodeRegisterSpan{
+		registerSpan(registerEffectSlotB, 1, registerEffectSlotC, registerEffectSpanSignedCount, read),
+		registerSpan(registerEffectSlotA, 0, registerEffectSlotD, registerEffectSpanOpenOrOne, write),
+	})
+	setRegisterEffects(opCallOne, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, write), registerEffect(registerEffectSlotB, 0, read),
+	}, []opcodeRegisterSpan{
+		registerSpan(registerEffectSlotB, 1, registerEffectSlotC, registerEffectSpanSignedCount, read),
+	})
+	setRegisterEffects(opCallLocalOne, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, write), registerEffect(registerEffectSlotB, 0, read),
+	}, []opcodeRegisterSpan{
+		registerSpan(registerEffectSlotC, 0, registerEffectSlotD, registerEffectSpanPositiveCount, read),
+	})
+	setRegisterEffects(opCallUpvalueOne, []opcodeRegisterEffect{registerEffect(registerEffectSlotA, 0, write)}, []opcodeRegisterSpan{
+		registerSpan(registerEffectSlotC, 0, registerEffectSlotD, registerEffectSpanPositiveCount, read),
+	})
+	setRegisterEffects(opCallMethodOne, []opcodeRegisterEffect{
+		registerEffect(registerEffectSlotA, 0, write), registerEffect(registerEffectSlotA, 1, write), registerEffect(registerEffectSlotB, 0, read),
+	}, []opcodeRegisterSpan{
+		registerSpan(registerEffectSlotA, 2, registerEffectSlotD, registerEffectSpanPositiveCount, read),
+	})
+	setRegisterEffects(opJumpIfFalse, []opcodeRegisterEffect{registerEffect(registerEffectSlotA, 0, read)}, nil)
+	setRegisterEffects(opReturnOne, []opcodeRegisterEffect{registerEffect(registerEffectSlotA, 0, read)}, nil)
+	setRegisterEffects(opReturn, nil, []opcodeRegisterSpan{
+		registerSpan(registerEffectSlotA, 0, registerEffectSlotB, registerEffectSpanSignedCount, read),
+	})
 	return table
 }()
 
@@ -479,6 +607,9 @@ func validateOpcodeMetadataTable(table [opcodeLimit]opcodeMetadataEntry) error {
 		}
 		if !meta.effects.classified {
 			return fmt.Errorf("%s effects are unclassified", opcodeName(op))
+		}
+		if err := validateOpcodeRegisterEffects(meta.registerEffects); err != nil {
+			return fmt.Errorf("%s %w", opcodeName(op), err)
 		}
 		if meta.directFrame && meta.directFrameUnsupportedReason != "" {
 			return fmt.Errorf("%s direct-frame metadata has unsupported reason", opcodeName(op))
@@ -2095,10 +2226,9 @@ func registerKindBlockStarts(code []instruction) []bool {
 }
 
 func clearInstructionRegisterKinds(state []registerKindState, ins instruction) {
-	for register := range state {
-		if instructionWritesRegister(ins, register) {
-			state[register] = registerKindState{}
-		}
+	writes := instructionRegistersBounded(ins, instructionRegisterWrite, len(state))
+	for register, ok := writes.next(); ok; register, ok = writes.next() {
+		state[register] = registerKindState{}
 	}
 }
 
@@ -2259,10 +2389,9 @@ func literalSlotForField(slots []slotKindLiteralState, register int, field strin
 }
 
 func clearInstructionSlotKindLiterals(slots []slotKindLiteralState, ins instruction) {
-	for register := range slots {
-		if instructionWritesRegister(ins, register) {
-			slots[register] = slotKindLiteralState{}
-		}
+	writes := instructionRegistersBounded(ins, instructionRegisterWrite, len(slots))
+	for register, ok := writes.next(); ok; register, ok = writes.next() {
+		slots[register] = slotKindLiteralState{}
 	}
 }
 
@@ -2324,20 +2453,24 @@ func protoEntryMissingRegisterMask(code []instruction, registers int, start uint
 
 func instructionReadMask(ins instruction, registers int) uint64 {
 	mask := uint64(0)
-	for register := 0; register < registers; register++ {
-		if instructionReadsRegister(ins, register) {
-			mask |= uint64(1) << register
-		}
+	if registers > 64 {
+		registers = 64
+	}
+	reads := instructionRegistersBounded(ins, instructionRegisterRead, registers)
+	for register, ok := reads.next(); ok; register, ok = reads.next() {
+		mask |= uint64(1) << register
 	}
 	return mask
 }
 
 func instructionWriteMask(ins instruction, registers int) uint64 {
 	mask := uint64(0)
-	for register := 0; register < registers; register++ {
-		if instructionWritesRegister(ins, register) {
-			mask |= uint64(1) << register
-		}
+	if registers > 64 {
+		registers = 64
+	}
+	writes := instructionRegistersBounded(ins, instructionRegisterWrite, registers)
+	for register, ok := writes.next(); ok; register, ok = writes.next() {
+		mask |= uint64(1) << register
 	}
 	return mask
 }
