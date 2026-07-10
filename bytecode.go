@@ -3,6 +3,7 @@ package ember
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 type opcode uint8
@@ -1133,8 +1134,29 @@ func registerOperands(values ...int) bytecodeOperands {
 }
 
 type assembledBytecodeIR struct {
-	code    []instruction
-	sources []sourceRange
+	code       []instruction
+	oldToNew   []int
+	sources    []sourceRange
+	lines      []int
+	packedCode []packedInstruction
+}
+
+func assembleFunctionBytecode(lines sourceLineMap, ir []bytecodeIRInstruction) assembledBytecodeIR {
+	assembled := assembleBytecodeIRResult(ir)
+	assembled.lines = sourceRangesLines(lines, assembled.sources)
+	return assembled
+}
+
+func (assembled *assembledBytecodeIR) pack() error {
+	if assembled == nil {
+		return nil
+	}
+	packed, err := packInstructions(assembled.code)
+	if err != nil {
+		return err
+	}
+	assembled.packedCode = packed
+	return nil
 }
 
 func assembleBytecodeIR(ir []bytecodeIRInstruction) []instruction {
@@ -1165,8 +1187,9 @@ func assembleBytecodeIRResult(ir []bytecodeIRInstruction) assembledBytecodeIR {
 	oldToNew[len(ir)] = kept
 
 	assembled := assembledBytecodeIR{
-		code:    make([]instruction, 0, kept),
-		sources: make([]sourceRange, 0, kept),
+		code:     make([]instruction, 0, kept),
+		oldToNew: oldToNew,
+		sources:  make([]sourceRange, 0, kept),
 	}
 	for pc, ins := range ir {
 		if drop[pc] {
@@ -1233,17 +1256,44 @@ func disassembleBytecodeIRWithSource(constants []Value, ir []bytecodeIRInstructi
 }
 
 func bytecodeIRLines(source string, ir []bytecodeIRInstruction) []int {
-	if source == "" || len(ir) == 0 {
+	return assembleFunctionBytecode(newSourceLineMap(source), ir).lines
+}
+
+type sourceLineMap struct {
+	sourceLen      int
+	newlineOffsets []int
+}
+
+func newSourceLineMap(source string) sourceLineMap {
+	lines := sourceLineMap{
+		sourceLen:      len(source),
+		newlineOffsets: make([]int, 0, strings.Count(source, "\n")),
+	}
+	for offset := 0; offset < len(source); offset++ {
+		if source[offset] == '\n' {
+			lines.newlineOffsets = append(lines.newlineOffsets, offset)
+		}
+	}
+	return lines
+}
+
+func (lines sourceLineMap) line(span sourceRange) int {
+	if span.end <= span.start || span.start < 0 || span.start >= lines.sourceLen {
+		return -1
+	}
+	return sort.Search(len(lines.newlineOffsets), func(index int) bool {
+		return lines.newlineOffsets[index] >= span.start
+	}) + 1
+}
+
+func sourceRangesLines(lineMap sourceLineMap, sources []sourceRange) []int {
+	if lineMap.sourceLen == 0 || len(sources) == 0 {
 		return nil
 	}
-	assembled := assembleBytecodeIRResult(ir)
-	if len(assembled.sources) == 0 {
-		return nil
-	}
-	lines := make([]int, len(assembled.sources))
+	lines := make([]int, len(sources))
 	hasLine := false
-	for i, sourceRange := range assembled.sources {
-		line := sourceRangeLine(source, sourceRange)
+	for i, sourceRange := range sources {
+		line := lineMap.line(sourceRange)
 		lines[i] = line
 		if line > 0 {
 			hasLine = true
@@ -1256,16 +1306,7 @@ func bytecodeIRLines(source string, ir []bytecodeIRInstruction) []int {
 }
 
 func sourceRangeLine(source string, span sourceRange) int {
-	if span.end <= span.start || span.start < 0 || span.start >= len(source) {
-		return -1
-	}
-	line := 1
-	for index := 0; index < span.start; index++ {
-		if source[index] == '\n' {
-			line++
-		}
-	}
-	return line
+	return newSourceLineMap(source).line(span)
 }
 
 func bytecodeIRBlockOrder(ir []bytecodeIRInstruction) []bytecodeIRBlock {
@@ -1739,16 +1780,24 @@ func packProtoCode(proto *Proto) error {
 	if proto == nil {
 		return nil
 	}
-	packed := make([]packedInstruction, len(proto.code))
-	for pc, ins := range proto.code {
-		packedIns, err := packInstruction(ins)
-		if err != nil {
-			return fmt.Errorf("instruction %d %s: %w", pc, opcodeName(ins.op), err)
-		}
-		packed[pc] = packedIns
+	packed, err := packInstructions(proto.code)
+	if err != nil {
+		return err
 	}
 	proto.packedCode = packed
 	return nil
+}
+
+func packInstructions(code []instruction) ([]packedInstruction, error) {
+	packed := make([]packedInstruction, len(code))
+	for pc, ins := range code {
+		packedIns, err := packInstruction(ins)
+		if err != nil {
+			return nil, fmt.Errorf("instruction %d %s: %w", pc, opcodeName(ins.op), err)
+		}
+		packed[pc] = packedIns
+	}
+	return packed, nil
 }
 
 func buildExecutionArtifact(proto *Proto) executionArtifact {

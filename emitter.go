@@ -9,6 +9,7 @@ type compiler struct {
 	bytecodeBuilder
 	bind                     bindResult
 	bindCursor               *int
+	sourceLines              sourceLineMap
 	symbolRegisters          map[int]int
 	locals                   map[string]int
 	localStringSlots         map[int]map[string]int
@@ -60,6 +61,7 @@ func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (
 	c := compiler{
 		bind:                     source.bind,
 		bindCursor:               &bindCursor,
+		sourceLines:              newSourceLineMap(source.source.Text),
 		symbolRegisters:          make(map[int]int),
 		locals:                   make(map[string]int),
 		localStringSlots:         make(map[int]map[string]int),
@@ -87,8 +89,9 @@ func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (
 
 func (c *compiler) buildFunctionDraft(upvalues []upvalueDesc, params int, variadic bool) *functionDraft {
 	c.shrinkCompiledFrameRegisters(params, variadic)
-	registers := compactedCompiledRegisterCount(c.assembledCode(), c.prototypeDrafts, c.nextReg, params)
-	return newFunctionDraft(&c.bytecodeBuilder, c.prototypeDrafts, upvalues, registers, params, variadic)
+	assembly := assembleFunctionBytecode(c.sourceLines, c.ir)
+	registers := compactedCompiledRegisterCount(assembly.code, c.prototypeDrafts, c.nextReg, params)
+	return newFunctionDraft(c.constants, assembly, c.prototypeDrafts, upvalues, registers, params, variadic)
 }
 
 func (c *compiler) shrinkCompiledFrameRegisters(params int, variadic bool) {
@@ -505,6 +508,7 @@ func (c *compiler) compileFunctionDraft(closure loweredClosure, selfFunctionSymb
 	fn := compiler{
 		bind:                     c.bind,
 		bindCursor:               c.bindCursor,
+		sourceLines:              c.sourceLines,
 		symbolRegisters:          make(map[int]int),
 		locals:                   make(map[string]int),
 		localStringSlots:         make(map[int]map[string]int),

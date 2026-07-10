@@ -3,12 +3,11 @@ package ember
 import "sync"
 
 type sourceArtifact struct {
-	identity sourceIdentity
-	source   Source
-	program  program
-	bind     bindResult
-	proto    *Proto
-	check    *checkArtifact
+	source  Source
+	program program
+	bind    bindResult
+	proto   *Proto
+	check   *checkArtifact
 }
 
 type sourceArtifactStore struct {
@@ -25,17 +24,15 @@ type sourceArtifactPreparation struct {
 }
 
 func parseSource(source Source) (sourceArtifact, error) {
-	identity := identifyModuleSource(source)
 	p := parser{source: source.Text}
 	prog, err := p.parse()
 	if err != nil {
 		return sourceArtifact{}, err
 	}
 	return sourceArtifact{
-		identity: identity,
-		source:   source,
-		program:  prog,
-		bind:     bindProgram(prog),
+		source:  source,
+		program: prog,
+		bind:    bindProgram(prog),
 	}, nil
 }
 
@@ -71,9 +68,6 @@ func (s *sourceArtifactStore) parse(source Source, identity sourceIdentity) (sou
 	s.mu.Unlock()
 
 	artifact, err := s.prepare(source)
-	if err == nil {
-		artifact.identity = identity
-	}
 
 	s.mu.Lock()
 	if err == nil {
@@ -144,7 +138,6 @@ func (s *sourceArtifactStore) storeCompiled(identity sourceIdentity, artifact so
 		}
 		artifact = stored
 	}
-	artifact.identity = identity
 	artifact.proto = proto
 	s.artifacts[identity] = artifact
 	return proto
@@ -159,7 +152,6 @@ func (s *sourceArtifactStore) storeChecked(identity sourceIdentity, artifact sou
 		}
 		artifact = stored
 	}
-	artifact.identity = identity
 	artifact.check = &check
 	s.artifacts[identity] = artifact
 	return check

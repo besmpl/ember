@@ -4,22 +4,20 @@ import "fmt"
 
 type functionDraft struct {
 	constants []Value
-	code      []instruction
+	assembly  assembledBytecodeIR
 	children  []*functionDraft
 	upvalues  []upvalueDesc
-	lines     []int
 	registers int
 	params    int
 	variadic  bool
 }
 
-func newFunctionDraft(builder *bytecodeBuilder, children []*functionDraft, upvalues []upvalueDesc, registers int, params int, variadic bool) *functionDraft {
+func newFunctionDraft(constants []Value, assembly assembledBytecodeIR, children []*functionDraft, upvalues []upvalueDesc, registers int, params int, variadic bool) *functionDraft {
 	return &functionDraft{
-		constants: builder.constants,
-		code:      builder.assembledCode(),
+		constants: constants,
+		assembly:  assembly,
 		children:  children,
 		upvalues:  upvalues,
-		lines:     bytecodeIRLines(builder.sourceText, builder.ir),
 		registers: registers,
 		params:    params,
 		variadic:  variadic,
@@ -77,29 +75,30 @@ func sealFunctionDraft(draft *functionDraft) (*Proto, error) {
 
 	proto := &Proto{
 		constants:  draft.constants,
-		code:       draft.code,
+		code:       draft.assembly.code,
 		prototypes: children,
 		upvalues:   draft.upvalues,
-		lines:      draft.lines,
+		lines:      draft.assembly.lines,
 		registers:  draft.registers,
 		params:     draft.params,
 		variadic:   draft.variadic,
 	}
-	if err := sealFunctionProto(proto); err != nil {
+	if err := sealFunctionProto(proto, &draft.assembly); err != nil {
 		return nil, fmt.Errorf("invalid finalized prototype: %w", err)
 	}
 	return proto, nil
 }
 
-func sealFunctionProto(proto *Proto) error {
+func sealFunctionProto(proto *Proto, assembly *assembledBytecodeIR) error {
 	assignProtoGlobalSlots(proto)
 	artifact := buildExecutionArtifact(proto)
 	artifact.apply(proto)
 	markReusableZeroCaptureClosures(proto)
-	if err := packProtoCode(proto); err != nil {
+	if err := assembly.pack(); err != nil {
 		proto.verifyErr = err
 		return err
 	}
+	proto.packedCode = assembly.packedCode
 	proto.verifyErr = verifyFunctionProto(proto)
 	return proto.verifyErr
 }
