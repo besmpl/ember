@@ -61,7 +61,7 @@ func baseFieldIntrinsics() []baseFieldIntrinsicDefinition {
 		baseFieldIntrinsicsCache = []baseFieldIntrinsicDefinition{
 			{globalName: "table", field: "insert", op: opFastCall, nativeID: nativeFuncTableInsert, nativeName: "TABLE_INSERT"},
 			{globalName: "table", field: "remove", op: opFastCall, nativeID: nativeFuncTableRemove, nativeName: "TABLE_REMOVE"},
-			{globalName: "coroutine", field: "resume", op: opCoroutineResume, nativeID: nativeFuncCoroutineResume, nativeName: "COROUTINE_RESUME"},
+			{globalName: "coroutine", field: "resume", op: opFastCall, nativeID: nativeFuncCoroutineResume, nativeName: "COROUTINE_RESUME"},
 			{globalName: "math", field: "min", op: opFastCall, nativeID: nativeFuncMathMin, nativeName: "MATH_MIN"},
 		}
 		nativeFuncDefinitionsCache = []nativeFuncDefinition{
@@ -94,15 +94,6 @@ func baseGlobalDefinitionFor(name string) (baseGlobalDefinition, bool) {
 func baseFieldIntrinsic(globalName string, field string) (baseFieldIntrinsicDefinition, bool) {
 	for _, intrinsic := range baseFieldIntrinsics() {
 		if intrinsic.globalName == globalName && intrinsic.field == field {
-			return intrinsic, true
-		}
-	}
-	return baseFieldIntrinsicDefinition{}, false
-}
-
-func baseFieldIntrinsicForOpcode(op opcode) (baseFieldIntrinsicDefinition, bool) {
-	for _, intrinsic := range baseFieldIntrinsics() {
-		if intrinsic.op == op {
 			return intrinsic, true
 		}
 	}

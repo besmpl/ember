@@ -52,7 +52,6 @@ func optimizeBytecodeIRWithFacts(ir []bytecodeIRInstruction, facts bytecodeIROpt
 		bytecodeIRPeepholeRemovalSet(function.instructions, assembleBytecodeIRRaw(function.instructions), function.currentAnalysis()),
 	))
 	function.replace(simplifyBytecodeIRControlFlow(function.instructions, facts))
-	function.replace(fuseBytecodeIRRowFieldArrayIndex(function.instructions))
 	function.replace(propagateBytecodeIRSingleUseMoves(function.instructions, function.currentAnalysis()))
 	function.replace(coalesceBytecodeIRMoveProducers(function.instructions, facts.capturedRegisters, function.currentAnalysis()))
 	function.replace(hoistBytecodeIRLoopInvariantHeaderLoads(function.instructions))
@@ -77,10 +76,6 @@ func applyBytecodeIRRemovalSet(ir []bytecodeIRInstruction, remove []bool) []byte
 	}
 	remapBytecodeIRJumpTargets(optimized, oldPCToNewPC(remove))
 	return optimized
-}
-
-func fuseBytecodeIRRowFieldArrayIndex(ir []bytecodeIRInstruction) []bytecodeIRInstruction {
-	return ir
 }
 
 func bytecodeIRDeadCodeRemovalSet(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts, analysis *functionAnalysis) []bool {
@@ -125,16 +120,14 @@ func instructionAllowsDeadCodeCleanupInBlock(ins instruction) bool {
 	case opLoadConst, opMove, opJumpIfFalse, opJump, opReturnOne, opReturn,
 		opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow, opNeg,
 		opAddK, opSubK, opMulK, opDivK, opModK, opIDivK,
-		opCoroutineResume, opFastCall,
+		opFastCall,
 		opPrepareIter, opArrayNext, opArrayNextJump2,
 		opNumericForCheck, opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK,
 		opJumpIfLessK, opJumpIfGreaterK, opJumpIfNotLess, opJumpIfNotGreater,
 		opJumpIfLess, opJumpIfGreater, opJumpIfModKNotEqualK,
 		opJumpIfTableHasMetatable,
 		opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK,
-		opJumpIfStringFieldFalse, opJumpIfStringFieldNil,
-		opJumpIfStringFieldTrue, opJumpIfStringFieldNotNil,
-		opGetField, opSetField, opGetIndex, opSetIndex, opGetStringField, opSetStringField,
+		opSetField, opGetIndex, opSetIndex, opGetStringField, opSetStringField,
 		opGetStringFieldIndex, opSetStringFieldIndex,
 		opAddStringField, opSubStringField:
 		return true

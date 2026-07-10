@@ -40,7 +40,7 @@ func TestInstructionSizeBudget(t *testing.T) {
 }
 
 func TestPackedInstructionRoundTripsAllOpcodes(t *testing.T) {
-	for op := opcode(0); op < opcodeCount; op++ {
+	for _, op := range allOpcodes {
 		ins := instruction{op: op, a: 1, b: 2, c: 3, d: 4}
 		packed, err := packInstruction(ins)
 		if err != nil {
@@ -587,20 +587,6 @@ func TestBytecodeFinalizerRejectsInvalidStringFieldNumericBranchConstants(t *tes
 			t.Fatalf("finalizeProto error is %q, want non-number value detail", err)
 		}
 	})
-}
-
-func TestBytecodeFinalizerRejectsInvalidStringFieldTruthyBranchConstant(t *testing.T) {
-	var builder bytecodeBuilder
-	field := builder.addConstant(NumberValue(1))
-	builder.emit(instruction{op: opJumpIfStringFieldFalse, a: 0, b: field, d: 1})
-
-	_, err := builder.finalizeProto(nil, 1, 0, false)
-	if err == nil {
-		t.Fatal("finalizeProto succeeded, want non-string field error")
-	}
-	if !strings.Contains(err.Error(), "constant index 0 is number, want string") {
-		t.Fatalf("finalizeProto error is %q, want non-string field detail", err)
-	}
 }
 
 func TestBytecodeFinalizerRejectsInvalidSubStringFieldConstant(t *testing.T) {
@@ -5717,7 +5703,8 @@ return score
 	}
 	joined := strings.Join(disassembleProto(proto), "\n")
 	for _, want := range []string{
-		"JUMP_IF_STRING_FIELD_FALSE",
+		"GET_STRING_FIELD",
+		"JUMP_IF_FALSE",
 		"JUMP_IF_STRING_FIELD_NOT_EQUAL_K",
 		"JUMP_IF_STRING_FIELD_NOT_GREATER_K",
 		"JUMP_IF_STRING_FIELD_GREATER_K",
@@ -7294,7 +7281,7 @@ return total
 	}
 }
 
-func TestCompilerUsesStringFieldNilBranchOpcode(t *testing.T) {
+func TestCompilerUsesCanonicalStringFieldNilBranch(t *testing.T) {
 	proto, err := Compile(`
 local checks = {
 	{key = false, score = 10},
@@ -7315,8 +7302,10 @@ return total
 	}
 
 	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_STRING_FIELD_NIL") {
-		t.Fatalf("compiled field nil branch is missing JUMP_IF_STRING_FIELD_NIL:\n%s", joined)
+	for _, want := range []string{"GET_STRING_FIELD", "NOT_EQUAL", "JUMP_IF_FALSE"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("compiled field nil branch is missing %s:\n%s", want, joined)
+		}
 	}
 	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled field nil branch program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
@@ -7332,7 +7321,7 @@ return total
 	}
 }
 
-func TestCompilerUsesStringFieldNotBranchOpcode(t *testing.T) {
+func TestCompilerUsesCanonicalStringFieldNotBranch(t *testing.T) {
 	proto, err := Compile(`
 local nodes = {
 	{blocked = false, cost = 5},
@@ -7354,8 +7343,10 @@ return total
 	}
 
 	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_STRING_FIELD_TRUE") {
-		t.Fatalf("compiled field not branch is missing JUMP_IF_STRING_FIELD_TRUE:\n%s", joined)
+	for _, want := range []string{"GET_STRING_FIELD", "JUMP_IF_FALSE"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("compiled field not branch is missing %s:\n%s", want, joined)
+		}
 	}
 	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled field not branch program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
@@ -7371,7 +7362,7 @@ return total
 	}
 }
 
-func TestCompilerUsesStringFieldEqualNilBranchOpcode(t *testing.T) {
+func TestCompilerUsesCanonicalStringFieldEqualNilBranch(t *testing.T) {
 	proto, err := Compile(`
 local checks = {
 	{flag = false, score = 100},
@@ -7392,8 +7383,10 @@ return total
 	}
 
 	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_STRING_FIELD_NOT_NIL") {
-		t.Fatalf("compiled field == nil branch is missing JUMP_IF_STRING_FIELD_NOT_NIL:\n%s", joined)
+	for _, want := range []string{"GET_STRING_FIELD", "EQUAL", "JUMP_IF_FALSE"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("compiled field == nil branch is missing %s:\n%s", want, joined)
+		}
 	}
 	if !protoSupportsDirectFrame(proto) {
 		t.Fatalf("compiled field == nil branch program is not direct-frame eligible:\n%s", strings.Join(disassembleProtoFacts(proto), "\n"))
@@ -7481,7 +7474,7 @@ return score
 	}
 }
 
-func TestCompilerUsesStringFieldTruthyBranchOpcode(t *testing.T) {
+func TestCompilerUsesCanonicalStringFieldTruthyBranch(t *testing.T) {
 	proto, err := Compile(`
 local entity = {alive = true, hp = 3}
 local score = 0
@@ -7495,12 +7488,14 @@ return score
 	}
 
 	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_STRING_FIELD_FALSE") {
-		t.Fatalf("compiled truthy field branch is missing JUMP_IF_STRING_FIELD_FALSE:\n%s", joined)
+	for _, want := range []string{"GET_STRING_FIELD", "JUMP_IF_FALSE"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("compiled truthy field branch is missing %s:\n%s", want, joined)
+		}
 	}
 }
 
-func TestCompilerUsesRowStringFieldTruthyInAndBranch(t *testing.T) {
+func TestCompilerUsesCanonicalRowStringFieldTruthyInAndBranch(t *testing.T) {
 	proto, err := Compile(`
 local actors = {
 	{alive = true, score = 5},
@@ -7524,19 +7519,13 @@ return total
 	}
 
 	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_STRING_FIELD_FALSE") {
-		t.Fatalf("compiled row boolean and branch is missing JUMP_IF_STRING_FIELD_FALSE:\n%s", joined)
-	}
-	if !strings.Contains(joined, "slot 0") {
-		t.Fatalf("compiled row boolean and branch is missing propagated alive slot:\n%s", joined)
-	}
-	if !strings.Contains(joined, "JUMP_IF_NOT_GREATER") {
-		t.Fatalf("compiled row boolean and branch is missing register numeric branch:\n%s", joined)
-	}
-	for _, line := range disassembleProto(proto) {
-		if strings.Contains(line, "GET_ROW_STRING_FIELD") && strings.Contains(line, `"alive"`) {
-			t.Fatalf("compiled row boolean and branch should not materialize actor.alive:\n%s", joined)
+	for _, want := range []string{"GET_STRING_FIELD", "JUMP_IF_FALSE"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("compiled row boolean and branch is missing %s:\n%s", want, joined)
 		}
+	}
+	if !strings.Contains(joined, "GREATER") {
+		t.Fatalf("compiled row boolean and branch is missing numeric comparison:\n%s", joined)
 	}
 
 	results, err := Run(proto)
@@ -7549,7 +7538,7 @@ return total
 	}
 }
 
-func TestCompilerUsesRowStringFieldNilInAndBranch(t *testing.T) {
+func TestCompilerUsesCanonicalRowStringFieldNilInAndBranch(t *testing.T) {
 	proto, err := Compile(`
 local checks = {
 	{key = "met_guard", score = 5},
@@ -7573,16 +7562,13 @@ return total
 	}
 
 	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_STRING_FIELD_NIL") {
-		t.Fatalf("compiled row nil and branch is missing JUMP_IF_STRING_FIELD_NIL:\n%s", joined)
-	}
-	if !strings.Contains(joined, "JUMP_IF_NOT_GREATER") {
-		t.Fatalf("compiled row nil and branch is missing register numeric branch:\n%s", joined)
-	}
-	for _, line := range disassembleProto(proto) {
-		if strings.Contains(line, "GET_ROW_STRING_FIELD") && strings.Contains(line, `"key"`) {
-			t.Fatalf("compiled row nil and branch should not materialize check.key:\n%s", joined)
+	for _, want := range []string{"GET_STRING_FIELD", "NOT_EQUAL", "JUMP_IF_FALSE"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("compiled row nil and branch is missing %s:\n%s", want, joined)
 		}
+	}
+	if !strings.Contains(joined, "GREATER") {
+		t.Fatalf("compiled row nil and branch is missing numeric comparison:\n%s", joined)
 	}
 
 	results, err := Run(proto)
@@ -7595,7 +7581,7 @@ return total
 	}
 }
 
-func TestRunStringFieldTruthyBranchOpcode(t *testing.T) {
+func TestRunCanonicalStringFieldTruthyBranch(t *testing.T) {
 	proto, err := Compile(`
 local direct = {alive = true}
 local dead = {alive = false}
@@ -7620,8 +7606,10 @@ return score
 		t.Fatalf("Compile returned error: %v", err)
 	}
 	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_STRING_FIELD_FALSE") {
-		t.Fatalf("compiled truthy field branch is missing JUMP_IF_STRING_FIELD_FALSE:\n%s", joined)
+	for _, want := range []string{"GET_STRING_FIELD", "JUMP_IF_FALSE"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("compiled truthy field branch is missing %s:\n%s", want, joined)
+		}
 	}
 
 	results, err := Run(proto)
@@ -8058,34 +8046,6 @@ func TestOptimizerDoesNotHoistFieldLoadAcrossMutation(t *testing.T) {
 	}
 }
 
-func TestOptimizeBytecodeIRRemapsSpecializedBranchDTarget(t *testing.T) {
-	var builder bytecodeBuilder
-	field := builder.addConstant(StringValue("alive"))
-	jumpElse := builder.emit(instruction{op: opJumpIfStringFieldFalse, a: 0, b: field, d: 0})
-	builder.emitLoadConst(1, NumberValue(1))
-	jumpEnd := builder.emitJump()
-	elseStart := builder.pc()
-	builder.patchJumpD(jumpElse, elseStart)
-	builder.emit(instruction{op: opMove, a: 2, b: 2})
-	builder.emitLoadConst(1, NumberValue(2))
-	end := builder.pc()
-	builder.patchJump(jumpEnd, end)
-	builder.emit(instruction{op: opReturnOne, a: 1})
-
-	optimized := optimizeBytecodeIR(builder.ir, optimizationOptions{})
-	got := assembleBytecodeIR(optimized)
-	want := []instruction{
-		{op: opJumpIfStringFieldFalse, a: 0, b: field, d: 3},
-		{op: opLoadConst, a: 1, b: 1},
-		{op: opJump, b: 4},
-		{op: opLoadConst, a: 1, b: 2},
-		{op: opReturnOne, a: 1},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("optimized bytecode = %#v, want %#v", got, want)
-	}
-}
-
 func TestOptimizeBytecodeIRRemapsBackwardJumpTarget(t *testing.T) {
 	var builder bytecodeBuilder
 	loopStart := builder.pc()
@@ -8223,7 +8183,6 @@ func TestInstructionReadModelCoversIntrinsicArgumentWindows(t *testing.T) {
 	}{
 		{name: "table insert", ins: instruction{op: opFastCall, a: 4, b: int(nativeFuncTableInsert), c: 2, d: 1}, want: []int{4, 5}},
 		{name: "table remove", ins: instruction{op: opFastCall, a: 4, b: int(nativeFuncTableRemove), c: 1, d: 1}, want: []int{4}},
-		{name: "coroutine resume", ins: instruction{op: opCoroutineResume, a: 4, b: 2, d: 2}, want: []int{4, 5, 6}},
 		{name: "math min", ins: instruction{op: opFastCall, a: 4, b: int(nativeFuncMathMin), c: 2, d: 1}, want: []int{4, 5}},
 	}
 
@@ -8312,7 +8271,6 @@ func TestInstructionReadModelCoversTableFieldAndIndexOperands(t *testing.T) {
 		ins  instruction
 		want []int
 	}{
-		{name: "get field", ins: instruction{op: opGetField, a: 8, b: 4, c: 0}, want: []int{4}},
 		{name: "set field", ins: instruction{op: opSetField, a: 4, b: 0, c: 6}, want: []int{4, 6}},
 		{name: "get index", ins: instruction{op: opGetIndex, a: 8, b: 4, c: 6}, want: []int{4, 6}},
 		{name: "set index", ins: instruction{op: opSetIndex, a: 4, b: 5, c: 6}, want: []int{4, 5, 6}},
@@ -8421,10 +8379,6 @@ func TestInstructionReadModelCoversTablePredicateBranchOperands(t *testing.T) {
 		{name: "string field not greater constant", ins: instruction{op: opJumpIfStringFieldNotGreaterK, a: 8, b: 1, c: 2, d: 20}, want: []int{8}},
 		{name: "string field greater constant", ins: instruction{op: opJumpIfStringFieldGreaterK, a: 8, b: 1, c: 2, d: 20}, want: []int{8}},
 		{name: "string field not greater register", ins: instruction{op: opJumpIfStringFieldNotGreaterR, a: 8, b: 1, c: 2, d: 20}, want: []int{2, 8}},
-		{name: "string field false", ins: instruction{op: opJumpIfStringFieldFalse, a: 8, b: 1, c: 2, d: 20}, want: []int{8}},
-		{name: "string field nil", ins: instruction{op: opJumpIfStringFieldNil, a: 8, b: 1, c: 2, d: 20}, want: []int{8}},
-		{name: "string field true", ins: instruction{op: opJumpIfStringFieldTrue, a: 8, b: 1, c: 2, d: 20}, want: []int{8}},
-		{name: "string field not nil", ins: instruction{op: opJumpIfStringFieldNotNil, a: 8, b: 1, c: 2, d: 20}, want: []int{8}},
 	}
 
 	for _, tt := range tests {
@@ -8501,26 +8455,6 @@ func TestOptimizeBytecodeIRRemovesDeadLoadAroundComparisonBranch(t *testing.T) {
 		{op: opLoadConst, a: 2, b: 2},
 		{op: opJumpIfNotLess, a: 1, b: 2, d: 4},
 		{op: opReturnOne, a: 1},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("optimized bytecode = %#v, want %#v", got, want)
-	}
-}
-
-func TestOptimizeBytecodeIRRemovesDeadLoadAroundTablePredicateBranch(t *testing.T) {
-	var builder bytecodeBuilder
-	field := builder.addConstant(StringValue("alive"))
-	builder.emitLoadConst(9, NumberValue(99))
-	jumpEnd := builder.emit(instruction{op: opJumpIfStringFieldFalse, a: 0, b: field, c: 0})
-	builder.emit(instruction{op: opReturnOne, a: 0})
-	end := builder.pc()
-	builder.patchJumpD(jumpEnd, end)
-
-	optimized := optimizeBytecodeIR(builder.ir, optimizationOptions{})
-	got := assembleBytecodeIR(optimized)
-	want := []instruction{
-		{op: opJumpIfStringFieldFalse, a: 0, b: field, c: 0, d: 2},
-		{op: opReturnOne, a: 0},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("optimized bytecode = %#v, want %#v", got, want)
@@ -8706,24 +8640,6 @@ func TestOptimizeBytecodeIRKeepsOpenReturnPrefixRegisters(t *testing.T) {
 	}
 }
 
-func TestOptimizeBytecodeIRRemovesDeadLoadAroundTableFieldRead(t *testing.T) {
-	var builder bytecodeBuilder
-	field := builder.addConstant(StringValue("hp"))
-	builder.emitLoadConst(9, NumberValue(99))
-	builder.emit(instruction{op: opGetField, a: 1, b: 0, c: field})
-	builder.emit(instruction{op: opReturnOne, a: 1})
-
-	optimized := optimizeBytecodeIR(builder.ir, optimizationOptions{})
-	got := assembleBytecodeIR(optimized)
-	want := []instruction{
-		{op: opGetField, a: 1, b: 0, c: field},
-		{op: opReturnOne, a: 1},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("optimized bytecode = %#v, want %#v", got, want)
-	}
-}
-
 func TestOptimizeBytecodeIRRemovesDeadLoadAroundTableFieldWrite(t *testing.T) {
 	var builder bytecodeBuilder
 	field := builder.addConstant(StringValue("hp"))
@@ -8777,8 +8693,10 @@ return row.value
 		t.Fatalf("Compile returned error: %v", err)
 	}
 	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_STRING_FIELD_FALSE") {
-		t.Fatalf("compiled table predicate program is missing field predicate branch:\n%s", joined)
+	for _, want := range []string{"GET_STRING_FIELD", "JUMP_IF_FALSE"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("compiled table predicate program is missing %s:\n%s", want, joined)
+		}
 	}
 	results, err := Run(proto)
 	if err != nil {
@@ -9252,7 +9170,7 @@ return {
 }
 
 func TestOpcodeMetadataCoversEveryOpcode(t *testing.T) {
-	for op := opcode(0); op < opcodeCount; op++ {
+	for _, op := range allOpcodes {
 		meta, ok := opcodeMetadata(op)
 		if !ok {
 			t.Fatalf("missing opcode metadata for %s (%d)", opcodeName(op), op)
@@ -9303,47 +9221,47 @@ func TestOpcodeMetadataCoversEveryOpcode(t *testing.T) {
 func TestOpcodeMetadataValidationRejectsMalformedEntries(t *testing.T) {
 	tests := []struct {
 		name   string
-		mutate func(*[opcodeCount]opcodeMetadataEntry)
+		mutate func(*[opcodeLimit]opcodeMetadataEntry)
 		want   string
 	}{
 		{
 			name: "empty name",
-			mutate: func(table *[opcodeCount]opcodeMetadataEntry) {
+			mutate: func(table *[opcodeLimit]opcodeMetadataEntry) {
 				table[opAdd].name = ""
 			},
 			want: "missing name",
 		},
 		{
 			name: "unclassified effects",
-			mutate: func(table *[opcodeCount]opcodeMetadataEntry) {
+			mutate: func(table *[opcodeLimit]opcodeMetadataEntry) {
 				table[opAdd].effects.classified = false
 			},
 			want: "effects are unclassified",
 		},
 		{
 			name: "empty operands",
-			mutate: func(table *[opcodeCount]opcodeMetadataEntry) {
+			mutate: func(table *[opcodeLimit]opcodeMetadataEntry) {
 				table[opAdd].operands = opcodeOperandShape{}
 			},
 			want: "missing operand shape",
 		},
 		{
 			name: "branch without jump target",
-			mutate: func(table *[opcodeCount]opcodeMetadataEntry) {
+			mutate: func(table *[opcodeLimit]opcodeMetadataEntry) {
 				table[opJumpIfFalse].jumpTarget = opcodeJumpTargetNone
 			},
 			want: "control flow without jump target",
 		},
 		{
 			name: "yield without invocation",
-			mutate: func(table *[opcodeCount]opcodeMetadataEntry) {
+			mutate: func(table *[opcodeLimit]opcodeMetadataEntry) {
 				table[opCall].effects.invokesScriptOrHostCode = false
 			},
 			want: "may yield without invoking script or host code",
 		},
 		{
 			name: "jump slot without operand",
-			mutate: func(table *[opcodeCount]opcodeMetadataEntry) {
+			mutate: func(table *[opcodeLimit]opcodeMetadataEntry) {
 				table[opJump].operands.b = bytecodeOperandRegister
 			},
 			want: "jump target metadata does not match operand shape",
@@ -9366,7 +9284,7 @@ func TestOpcodeMetadataValidationRejectsMalformedEntries(t *testing.T) {
 }
 
 func wantOpcodeEffects(op opcode) opcodeEffects {
-	effects := opcodeEffects{classified: op < opcodeCount}
+	effects := opcodeEffects{classified: true}
 	if wantOpcodeCallbackMask(op) {
 		return opcodeEffects{
 			classified:                  true,
@@ -9408,8 +9326,7 @@ func wantOpcodeEffects(op opcode) opcodeEffects {
 
 func wantOpcodeCallbackMask(op opcode) bool {
 	switch op {
-	case opGetField,
-		opSetField,
+	case opSetField,
 		opGetStringField,
 		opSetStringField,
 		opGetStringFieldIndex,
@@ -9458,11 +9375,6 @@ func wantOpcodeCallbackMask(op opcode) bool {
 		opJumpIfStringFieldNotGreaterK,
 		opJumpIfStringFieldGreaterK,
 		opJumpIfStringFieldNotGreaterR,
-		opJumpIfStringFieldFalse,
-		opJumpIfStringFieldNil,
-		opJumpIfStringFieldTrue,
-		opJumpIfStringFieldNotNil,
-		opCoroutineResume,
 		opFastCall,
 		opCall,
 		opCallOne,
@@ -9482,7 +9394,6 @@ func wantDirectFrameOpcodeSupported(op opcode) bool {
 		opSetGlobal,
 		opNewTable,
 		opSetField,
-		opGetField,
 		opSetStringField,
 		opSetStringFieldIndex,
 		opGetStringField,
@@ -9539,11 +9450,6 @@ func wantDirectFrameOpcodeSupported(op opcode) bool {
 		opJumpIfStringFieldNotGreaterK,
 		opJumpIfStringFieldGreaterK,
 		opJumpIfStringFieldNotGreaterR,
-		opJumpIfStringFieldFalse,
-		opJumpIfStringFieldNil,
-		opJumpIfStringFieldTrue,
-		opJumpIfStringFieldNotNil,
-		opCoroutineResume,
 		opFastCall,
 		opJumpIfFalse,
 		opCall,
@@ -9582,10 +9488,6 @@ func wantOpcodeControlFlow(op opcode) opcodeControlFlowKind {
 		opJumpIfStringFieldNotGreaterK,
 		opJumpIfStringFieldGreaterK,
 		opJumpIfStringFieldNotGreaterR,
-		opJumpIfStringFieldFalse,
-		opJumpIfStringFieldNil,
-		opJumpIfStringFieldTrue,
-		opJumpIfStringFieldNotNil,
 		opJumpIfFalse:
 		return opcodeControlBranch
 	case opReturnOne, opReturn:

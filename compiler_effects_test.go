@@ -6,13 +6,13 @@ import (
 )
 
 func TestOpcodeEffectsCoverEveryOpcode(t *testing.T) {
-	for op := opcode(0); op < opcodeCount; op++ {
+	for _, op := range allOpcodes {
 		if effect := opcodeEffect(op); !effect.classified {
 			t.Fatalf("opcode effect for %s (%d) is not classified", opcodeName(op), op)
 		}
 	}
 
-	for _, op := range []opcode{opcodeCount, opcode(^uint8(0))} {
+	for _, op := range []opcode{0, 7, 67, opcodeLimit, opcode(^uint8(0))} {
 		if effect := opcodeEffect(op); effect != (opcodeEffects{}) {
 			t.Fatalf("invalid opcode %d has effects %#v, want unclassified zero value", op, effect)
 		}
@@ -42,7 +42,7 @@ func TestMetamethodCapableOpcodeEffects(t *testing.T) {
 		{
 			name: "table reads writes and iteration",
 			ops: []opcode{
-				opGetField, opSetField, opGetStringField, opSetStringField,
+				opSetField, opGetStringField, opSetStringField,
 				opGetStringFieldIndex, opSetStringFieldIndex, opAddStringField, opSubStringField,
 				opGetIndex, opSetIndex, opPrepareIter, opArrayNext, opArrayNextJump2,
 			},
@@ -75,14 +75,12 @@ func TestMetamethodCapableOpcodeEffects(t *testing.T) {
 				opJumpIfLess, opJumpIfGreater, opJumpIfModKNotEqualK,
 				opJumpIfStringFieldNotEqualK, opJumpIfStringFieldNotGreaterK,
 				opJumpIfStringFieldGreaterK, opJumpIfStringFieldNotGreaterR,
-				opJumpIfStringFieldFalse, opJumpIfStringFieldNil,
-				opJumpIfStringFieldTrue, opJumpIfStringFieldNotNil,
 			},
 		},
 		{
 			name: "script and host calls",
 			ops: []opcode{
-				opCoroutineResume, opFastCall, opCall, opCallOne,
+				opFastCall, opCall, opCallOne,
 				opCallLocalOne, opCallUpvalueOne, opCallMethodOne,
 			},
 		},
@@ -124,7 +122,7 @@ func TestMetamethodCapableOpcodeEffects(t *testing.T) {
 		{
 			name: "otherwise pure",
 			ops: []opcode{
-				opNoop, opLoadConst, opMove, opNumericForLoop,
+				opLoadConst, opMove, opNumericForLoop,
 				opJumpIfFalse, opJump, opReturnOne, opReturn,
 			},
 			want: opcodeEffects{classified: true},
@@ -144,7 +142,7 @@ func TestMetamethodCapableOpcodeEffects(t *testing.T) {
 			}
 		})
 	}
-	for op := opcode(0); op < opcodeCount; op++ {
+	for _, op := range allOpcodes {
 		if _, ok := covered[op]; !ok {
 			t.Errorf("%s is missing from the exact callback/direct effect groups", opcodeName(op))
 		}

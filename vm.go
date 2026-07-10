@@ -2836,8 +2836,6 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 		ins := code[frame.pc].unpack()
 		trace.countInstruction(proto, frame.pc, ins.op, len(code))
 		switch ins.op {
-		case opNoop:
-
 		case opLoadConst:
 			registers[ins.a] = constants[ins.b]
 
@@ -3009,36 +3007,6 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 			if err := nextTable.rawSet(key, registers[ins.d]); err != nil {
 				return directFrameFail(fmt.Errorf("run: set index failed: %w", err))
 			}
-
-		case opGetField:
-			base := registers[ins.b]
-			table := base.tableRef()
-			if table == nil {
-				return directFrameFail(fmt.Errorf("run: get field target is %s, want table", base.Kind()))
-			}
-			if table.metatable != nil {
-				picCounts.addSideExit(directFrameSideExitReasonTable)
-				value, ok, err := directFrameTableGetIsland(thread.globals, table, constants[ins.c])
-				if err != nil {
-					return directFrameFail(fmt.Errorf("run: get field failed: %w", err))
-				}
-				if !ok {
-					return directFrameEnterGenericFrame()
-				}
-				registers[ins.a] = value
-				break
-			}
-			var value Value
-			var err error
-			if constantKeyOK[ins.c] {
-				value, err = table.rawGetKey(constantKeys[ins.c])
-			} else {
-				value, err = table.rawGet(constants[ins.c])
-			}
-			if err != nil {
-				return directFrameFail(fmt.Errorf("run: get field failed: %w", err))
-			}
-			registers[ins.a] = value
 
 		case opGetStringField:
 			base := registers[ins.b]
@@ -4171,86 +4139,6 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 				continue
 			}
 
-		case opJumpIfStringFieldFalse:
-			base := registers[ins.a]
-			table := base.tableRef()
-			if table == nil {
-				return directFrameFail(fmt.Errorf("run: get field target is %s, want table", base.Kind()))
-			}
-			key := constantKeys[ins.b].str
-			value := NilValue()
-			if !table.hasStringOverflow() && ins.c >= 0 && ins.c < len(table.stringFields) && table.stringFields[ins.c].key == key {
-				value = table.stringFields[ins.c].value
-			} else if field, ok := table.rawStringField(key); ok {
-				value = field
-			} else if table.metatable != nil {
-				return directFrameEnterGenericFrame()
-			}
-			if !value.truthy() {
-				frame.pc = ins.d
-				continue
-			}
-
-		case opJumpIfStringFieldNil:
-			base := registers[ins.a]
-			table := base.tableRef()
-			if table == nil {
-				return directFrameFail(fmt.Errorf("run: get field target is %s, want table", base.Kind()))
-			}
-			key := constantKeys[ins.b].str
-			value := NilValue()
-			if !table.hasStringOverflow() && ins.c >= 0 && ins.c < len(table.stringFields) && table.stringFields[ins.c].key == key {
-				value = table.stringFields[ins.c].value
-			} else if field, ok := table.rawStringField(key); ok {
-				value = field
-			} else if table.metatable != nil {
-				return directFrameEnterGenericFrame()
-			}
-			if value.IsNil() {
-				frame.pc = ins.d
-				continue
-			}
-
-		case opJumpIfStringFieldNotNil:
-			base := registers[ins.a]
-			table := base.tableRef()
-			if table == nil {
-				return directFrameFail(fmt.Errorf("run: get field target is %s, want table", base.Kind()))
-			}
-			key := constantKeys[ins.b].str
-			value := NilValue()
-			if !table.hasStringOverflow() && ins.c >= 0 && ins.c < len(table.stringFields) && table.stringFields[ins.c].key == key {
-				value = table.stringFields[ins.c].value
-			} else if field, ok := table.rawStringField(key); ok {
-				value = field
-			} else if table.metatable != nil {
-				return directFrameEnterGenericFrame()
-			}
-			if !value.IsNil() {
-				frame.pc = ins.d
-				continue
-			}
-
-		case opJumpIfStringFieldTrue:
-			base := registers[ins.a]
-			table := base.tableRef()
-			if table == nil {
-				return directFrameFail(fmt.Errorf("run: get field target is %s, want table", base.Kind()))
-			}
-			key := constantKeys[ins.b].str
-			value := NilValue()
-			if !table.hasStringOverflow() && ins.c >= 0 && ins.c < len(table.stringFields) && table.stringFields[ins.c].key == key {
-				value = table.stringFields[ins.c].value
-			} else if field, ok := table.rawStringField(key); ok {
-				value = field
-			} else if table.metatable != nil {
-				return directFrameEnterGenericFrame()
-			}
-			if value.truthy() {
-				frame.pc = ins.d
-				continue
-			}
-
 		case opJumpIfFalse:
 			if !registers[ins.a].truthy() {
 				frame.pc = ins.b
@@ -4880,40 +4768,6 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			if err := access.set(nextTable, frame.register(ins.c), frame.register(ins.d)); err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: set index failed: %w", err)
 			}
-
-		case opGetField:
-			if true {
-				base := frame.registers[ins.b]
-				table := base.tableRef()
-				if table == nil {
-					return vmFrameResult{}, fmt.Errorf("run: get field target is %s, want table", base.Kind())
-				}
-				if proto.constantKeyOK[ins.c] && table.metatable == nil {
-					value, err := table.rawGetKey(proto.constantKeys[ins.c])
-					if err != nil {
-						return vmFrameResult{}, fmt.Errorf("run: get field failed: %w", err)
-					}
-					frame.registers[ins.a] = value
-					break
-				}
-			}
-			table, ok := frame.register(ins.b).Table()
-			if !ok {
-				return vmFrameResult{}, fmt.Errorf("run: get field target is %s, want table", frame.register(ins.b).Kind())
-			}
-			if table.metatable == nil && proto.constantKeyOK[ins.c] {
-				value, err := table.rawGetKey(proto.constantKeys[ins.c])
-				if err != nil {
-					return vmFrameResult{}, fmt.Errorf("run: get field failed: %w", err)
-				}
-				frame.setRegister(ins.a, value)
-				break
-			}
-			value, err := runtimeTableAccess(globals).get(table, proto.constants[ins.c])
-			if err != nil {
-				return vmFrameResult{}, fmt.Errorf("run: get field failed: %w", err)
-			}
-			frame.setRegister(ins.a, value)
 
 		case opGetStringField:
 			key := proto.constantKeys[ins.c].str
@@ -6442,46 +6296,6 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 		case opJump:
 			frame.pc = ins.b
 			continue
-
-		case opJumpIfStringFieldFalse, opJumpIfStringFieldNil, opJumpIfStringFieldNotNil, opJumpIfStringFieldTrue:
-			var base Value
-			if true {
-				base = frame.registers[ins.a]
-			} else {
-				base = frame.register(ins.a)
-			}
-			table := base.tableRef()
-			if table == nil {
-				return vmFrameResult{}, fmt.Errorf("run: get field target is %s, want table", base.Kind())
-			}
-			key := proto.constants[ins.b]
-			var value Value
-			if raw, ok := table.rawStringField(proto.constantKeys[ins.b].str); ok {
-				value = raw
-			} else if table.metatable != nil {
-				field, err := runtimeTableAccess(globals).get(table, key)
-				if err != nil {
-					return vmFrameResult{}, fmt.Errorf("run: get field failed: %w", err)
-				}
-				value = field
-			} else {
-				value = NilValue()
-			}
-			jump := false
-			switch ins.op {
-			case opJumpIfStringFieldFalse:
-				jump = !value.truthy()
-			case opJumpIfStringFieldNil:
-				jump = value.IsNil()
-			case opJumpIfStringFieldNotNil:
-				jump = !value.IsNil()
-			case opJumpIfStringFieldTrue:
-				jump = value.truthy()
-			}
-			if jump {
-				frame.pc = ins.d
-				continue
-			}
 
 		case opReturnOne:
 			if true {

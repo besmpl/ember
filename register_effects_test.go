@@ -6,7 +6,7 @@ import (
 )
 
 func TestInstructionRegisterIteratorMatchesPredicatesForEveryOpcode(t *testing.T) {
-	for op := opcode(0); op < opcodeCount; op++ {
+	for _, op := range allOpcodes {
 		ins := instruction{op: op, a: 67, b: 71, c: 3, d: 2}
 		for _, access := range []instructionRegisterAccess{instructionRegisterRead, instructionRegisterWrite, instructionRegisterReadWrite} {
 			got := collectInstructionRegistersForTest(ins, access)

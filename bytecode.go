@@ -11,14 +11,14 @@ import (
 type opcode uint8
 
 const (
-	opNoop opcode = iota
+	_ opcode = iota
 	opLoadConst
 	opLoadGlobal
 	opSetGlobal
 	opMove
 	opNewTable
 	opSetField
-	opGetField
+	_
 	opSetStringField
 	opSetStringFieldIndex
 	opGetStringField
@@ -74,11 +74,11 @@ const (
 	opJumpIfStringFieldNotGreaterK
 	opJumpIfStringFieldGreaterK
 	opJumpIfStringFieldNotGreaterR
-	opJumpIfStringFieldFalse
-	opJumpIfStringFieldNil
-	opJumpIfStringFieldTrue
-	opJumpIfStringFieldNotNil
-	opCoroutineResume
+	_
+	_
+	_
+	_
+	_
 	opFastCall
 	opCall
 	opCallOne
@@ -89,8 +89,84 @@ const (
 	opJump
 	opReturnOne
 	opReturn
-	opcodeCount
+	opcodeLimit
 )
+
+var allOpcodes = [...]opcode{
+	opLoadConst,
+	opLoadGlobal,
+	opSetGlobal,
+	opNewTable,
+	opSetField,
+	opSetStringField,
+	opSetStringFieldIndex,
+	opGetStringField,
+	opGetStringFieldIndex,
+	opAddStringField,
+	opSubStringField,
+	opSetIndex,
+	opGetIndex,
+	opClosure,
+	opGetUpvalue,
+	opSetUpvalue,
+	opVararg,
+	opPrepareIter,
+	opArrayNext,
+	opArrayNextJump2,
+	opMove,
+	opAdd,
+	opSub,
+	opMul,
+	opDiv,
+	opMod,
+	opIDiv,
+	opAddK,
+	opSubK,
+	opMulK,
+	opDivK,
+	opModK,
+	opIDivK,
+	opPow,
+	opNeg,
+	opLen,
+	opConcat,
+	opConcatChain,
+	opEqual,
+	opNotEqual,
+	opLess,
+	opLessEqual,
+	opGreater,
+	opGreaterEqual,
+	opNumericForCheck,
+	opNumericForLoop,
+	opJumpIfNotEqualK,
+	opJumpIfNotLessK,
+	opJumpIfNotGreaterK,
+	opJumpIfLessK,
+	opJumpIfGreaterK,
+	opJumpIfNotLess,
+	opJumpIfNotGreater,
+	opJumpIfLess,
+	opJumpIfGreater,
+	opJumpIfModKNotEqualK,
+	opJumpIfTableHasMetatable,
+	opJumpIfStringFieldNotEqualK,
+	opJumpIfStringFieldNotGreaterK,
+	opJumpIfStringFieldGreaterK,
+	opJumpIfStringFieldNotGreaterR,
+	opFastCall,
+	opJumpIfFalse,
+	opCall,
+	opCallOne,
+	opCallLocalOne,
+	opCallUpvalueOne,
+	opCallMethodOne,
+	opJump,
+	opReturnOne,
+	opReturn,
+}
+
+const opcodeCount = len(allOpcodes)
 
 type opcodeMetadataEntry struct {
 	name                         string
@@ -125,94 +201,16 @@ type opcodeOperandShape struct {
 	d bytecodeOperandKind
 }
 
-var opcodeMetadataTable = func() [opcodeCount]opcodeMetadataEntry {
-	var table [opcodeCount]opcodeMetadataEntry
-	for op := opcode(0); op < opcodeCount; op++ {
+var opcodeMetadataTable = func() [opcodeLimit]opcodeMetadataEntry {
+	var table [opcodeLimit]opcodeMetadataEntry
+	for _, op := range allOpcodes {
 		table[op].name = opcodeName(op)
 		table[op].effects.classified = true
 	}
-	for _, op := range []opcode{
-		opLoadConst,
-		opLoadGlobal,
-		opSetGlobal,
-		opNewTable,
-		opSetField,
-		opGetField,
-		opSetStringField,
-		opSetStringFieldIndex,
-		opGetStringField,
-		opGetStringFieldIndex,
-		opAddStringField,
-		opSubStringField,
-		opSetIndex,
-		opGetIndex,
-		opClosure,
-		opGetUpvalue,
-		opSetUpvalue,
-		opVararg,
-		opPrepareIter,
-		opArrayNext,
-		opArrayNextJump2,
-		opMove,
-		opAdd,
-		opSub,
-		opMul,
-		opDiv,
-		opMod,
-		opIDiv,
-		opAddK,
-		opSubK,
-		opMulK,
-		opDivK,
-		opModK,
-		opIDivK,
-		opPow,
-		opNeg,
-		opLen,
-		opConcat,
-		opConcatChain,
-		opEqual,
-		opNotEqual,
-		opLess,
-		opLessEqual,
-		opGreater,
-		opGreaterEqual,
-		opNumericForCheck,
-		opNumericForLoop,
-		opJumpIfNotEqualK,
-		opJumpIfNotLessK,
-		opJumpIfNotGreaterK,
-		opJumpIfLessK,
-		opJumpIfGreaterK,
-		opJumpIfNotLess,
-		opJumpIfNotGreater,
-		opJumpIfLess,
-		opJumpIfGreater,
-		opJumpIfModKNotEqualK,
-		opJumpIfTableHasMetatable,
-		opJumpIfStringFieldNotEqualK,
-		opJumpIfStringFieldNotGreaterK,
-		opJumpIfStringFieldGreaterK,
-		opJumpIfStringFieldNotGreaterR,
-		opJumpIfStringFieldFalse,
-		opJumpIfStringFieldNil,
-		opJumpIfStringFieldTrue,
-		opJumpIfStringFieldNotNil,
-		opCoroutineResume,
-		opFastCall,
-		opJumpIfFalse,
-		opCall,
-		opCallOne,
-		opCallLocalOne,
-		opCallUpvalueOne,
-		opCallMethodOne,
-		opJump,
-		opReturnOne,
-		opReturn,
-	} {
+	for _, op := range allOpcodes {
 		table[op].directFrame = true
 	}
-	for op := opcode(0); op < opcodeCount; op++ {
+	for _, op := range allOpcodes {
 		if !table[op].directFrame {
 			table[op].directFrameUnsupportedReason = "opcode is not handled by the direct-frame runner"
 		}
@@ -249,10 +247,6 @@ var opcodeMetadataTable = func() [opcodeCount]opcodeMetadataEntry {
 		opJumpIfStringFieldNotGreaterK,
 		opJumpIfStringFieldGreaterK,
 		opJumpIfStringFieldNotGreaterR,
-		opJumpIfStringFieldFalse,
-		opJumpIfStringFieldNil,
-		opJumpIfStringFieldTrue,
-		opJumpIfStringFieldNotNil,
 	} {
 		table[op].controlFlow = opcodeControlBranch
 		table[op].jumpTarget = opcodeJumpTargetD
@@ -276,7 +270,6 @@ var opcodeMetadataTable = func() [opcodeCount]opcodeMetadataEntry {
 		writesUnknownHeap:           true,
 	}
 	for _, op := range []opcode{
-		opGetField,
 		opSetField,
 		opGetStringField,
 		opSetStringField,
@@ -326,11 +319,6 @@ var opcodeMetadataTable = func() [opcodeCount]opcodeMetadataEntry {
 		opJumpIfStringFieldNotGreaterK,
 		opJumpIfStringFieldGreaterK,
 		opJumpIfStringFieldNotGreaterR,
-		opJumpIfStringFieldFalse,
-		opJumpIfStringFieldNil,
-		opJumpIfStringFieldTrue,
-		opJumpIfStringFieldNotNil,
-		opCoroutineResume,
 		opFastCall,
 		opCall,
 		opCallOne,
@@ -347,7 +335,6 @@ var opcodeMetadataTable = func() [opcodeCount]opcodeMetadataEntry {
 	}
 	table[opSetUpvalue].effects.writesUpvalues = true
 	for _, op := range []opcode{
-		opGetField,
 		opGetStringField,
 		opGetStringFieldIndex,
 		opAddStringField,
@@ -361,10 +348,6 @@ var opcodeMetadataTable = func() [opcodeCount]opcodeMetadataEntry {
 		opJumpIfStringFieldNotGreaterK,
 		opJumpIfStringFieldGreaterK,
 		opJumpIfStringFieldNotGreaterR,
-		opJumpIfStringFieldFalse,
-		opJumpIfStringFieldNil,
-		opJumpIfStringFieldTrue,
-		opJumpIfStringFieldNotNil,
 		opFastCall,
 		opCallMethodOne,
 	} {
@@ -400,14 +383,12 @@ var opcodeMetadataTable = func() [opcodeCount]opcodeMetadataEntry {
 	setOperands := func(op opcode, a, b, c, d bytecodeOperandKind) {
 		table[op].operands = opcodeOperandShape{a: a, b: b, c: c, d: d}
 	}
-	setOperands(opNoop, count, unused, unused, unused)
 	setOperands(opLoadConst, register, constant, unused, unused)
 	setOperands(opLoadGlobal, register, constant, unused, unused)
 	setOperands(opSetGlobal, constant, register, unused, unused)
 	setOperands(opMove, register, register, unused, unused)
 	setOperands(opNewTable, register, count, count, unused)
 	setOperands(opSetField, register, constant, register, unused)
-	setOperands(opGetField, register, register, constant, unused)
 	setOperands(opSetStringField, register, constant, register, unused)
 	setOperands(opSetStringFieldIndex, register, constant, register, register)
 	setOperands(opGetStringField, register, register, constant, unused)
@@ -463,11 +444,6 @@ var opcodeMetadataTable = func() [opcodeCount]opcodeMetadataEntry {
 	setOperands(opJumpIfStringFieldNotGreaterK, register, constant, constant, jumpTarget)
 	setOperands(opJumpIfStringFieldGreaterK, register, constant, constant, jumpTarget)
 	setOperands(opJumpIfStringFieldNotGreaterR, register, constant, register, jumpTarget)
-	setOperands(opJumpIfStringFieldFalse, register, constant, count, jumpTarget)
-	setOperands(opJumpIfStringFieldNil, register, constant, count, jumpTarget)
-	setOperands(opJumpIfStringFieldTrue, register, constant, count, jumpTarget)
-	setOperands(opJumpIfStringFieldNotNil, register, constant, count, jumpTarget)
-	setOperands(opCoroutineResume, register, count, unused, count)
 	setOperands(opFastCall, register, count, count, count)
 	setOperands(opCall, register, register, count, count)
 	setOperands(opCallOne, register, register, count, count)
@@ -488,15 +464,15 @@ func init() {
 }
 
 func opcodeMetadata(op opcode) (opcodeMetadataEntry, bool) {
-	if op >= opcodeCount {
+	if op >= opcodeLimit {
 		return opcodeMetadataEntry{}, false
 	}
 	meta := opcodeMetadataTable[op]
 	return meta, meta.name != ""
 }
 
-func validateOpcodeMetadataTable(table [opcodeCount]opcodeMetadataEntry) error {
-	for op := opcode(0); op < opcodeCount; op++ {
+func validateOpcodeMetadataTable(table [opcodeLimit]opcodeMetadataEntry) error {
+	for _, op := range allOpcodes {
 		meta := table[op]
 		if meta.name == "" {
 			return fmt.Errorf("%s metadata missing name", opcodeName(op))
@@ -510,7 +486,7 @@ func validateOpcodeMetadataTable(table [opcodeCount]opcodeMetadataEntry) error {
 		if !meta.directFrame && meta.directFrameUnsupportedReason == "" {
 			return fmt.Errorf("%s direct-frame metadata missing unsupported reason", opcodeName(op))
 		}
-		if op != opNoop && meta.operands == (opcodeOperandShape{}) {
+		if meta.operands == (opcodeOperandShape{}) {
 			return fmt.Errorf("%s metadata missing operand shape", opcodeName(op))
 		}
 		if (meta.controlFlow == opcodeControlJump || meta.controlFlow == opcodeControlBranch) && meta.jumpTarget == opcodeJumpTargetNone {
@@ -601,20 +577,6 @@ func (ins packedInstruction) unpack() instruction {
 		c:  int(ins.c),
 		d:  int(ins.d),
 	}
-}
-
-const tableFieldKeyCallArgMask = 1<<16 - 1
-
-func encodeTableFieldKeyCall(argCount int, keySlot int) int {
-	return argCount | ((keySlot + 1) << 16)
-}
-
-func tableFieldKeyCallArgCount(encoded int) int {
-	return encoded & tableFieldKeyCallArgMask
-}
-
-func tableFieldKeyCallKeySlot(encoded int) int {
-	return (encoded >> 16) - 1
 }
 
 type bytecodeOperandKind int
@@ -928,10 +890,6 @@ func classifyInstructionOperands(ins instruction) bytecodeOperands {
 	}
 
 	switch ins.op {
-	case opNoop:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandCount, value: ins.a},
-		}
 	case opLoadConst:
 		return bytecodeOperands{
 			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
@@ -960,12 +918,6 @@ func classifyInstructionOperands(ins instruction) bytecodeOperands {
 			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
 			b: bytecodeOperand{kind: bytecodeOperandConstant, value: ins.b},
 			c: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.c},
-		}
-	case opGetField:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandConstant, value: ins.c},
 		}
 	case opSetStringField:
 		return bytecodeOperands{
@@ -1128,19 +1080,6 @@ func classifyInstructionOperands(ins instruction) bytecodeOperands {
 			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
 			b: bytecodeOperand{kind: bytecodeOperandCount, value: ins.b},
 			d: bytecodeOperand{kind: bytecodeOperandJumpTarget, value: ins.d},
-		}
-	case opJumpIfStringFieldFalse, opJumpIfStringFieldNil, opJumpIfStringFieldTrue, opJumpIfStringFieldNotNil:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandConstant, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandCount, value: ins.c},
-			d: bytecodeOperand{kind: bytecodeOperandJumpTarget, value: ins.d},
-		}
-	case opCoroutineResume:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandCount, value: ins.b},
-			d: bytecodeOperand{kind: bytecodeOperandCount, value: ins.d},
 		}
 	case opFastCall:
 		return bytecodeOperands{
@@ -1916,21 +1855,6 @@ func detectIntrinsicOps(code []instruction) []intrinsicOpDesc {
 	var ops []intrinsicOpDesc
 	for pc, ins := range code {
 		switch ins.op {
-		case opCoroutineResume:
-			intrinsic, ok := baseFieldIntrinsicForOpcode(ins.op)
-			if !ok {
-				continue
-			}
-			ops = append(ops, intrinsicOpDesc{
-				pc:         pc,
-				op:         ins.op,
-				base:       ins.a,
-				args:       ins.b,
-				results:    ins.d,
-				globalName: intrinsic.globalName,
-				field:      intrinsic.field,
-				nativeID:   intrinsic.nativeID,
-			})
 		case opFastCall:
 			nativeID := nativeFuncID(ins.b)
 			globalName, field := fastCallIntrinsicNames(nativeID)
@@ -2715,11 +2639,6 @@ func verifyInstruction(proto *Proto, pc int, ins instruction) error {
 			return err
 		}
 		return verifyConstant(proto, ins.b)
-	case opGetField:
-		if err := verifyRegisters(proto, ins.a, ins.b); err != nil {
-			return err
-		}
-		return verifyConstant(proto, ins.c)
 	case opSetStringField:
 		if err := verifyRegisters(proto, ins.a, ins.c); err != nil {
 			return err
@@ -2919,35 +2838,6 @@ func verifyInstruction(proto *Proto, pc int, ins instruction) error {
 			return err
 		}
 		return verifyJumpTarget(proto, ins.d)
-	case opJumpIfStringFieldFalse, opJumpIfStringFieldNil, opJumpIfStringFieldTrue, opJumpIfStringFieldNotNil:
-		if err := verifyRegister(proto, ins.a); err != nil {
-			return err
-		}
-		if err := verifyConstant(proto, ins.b); err != nil {
-			return err
-		}
-		if err := verifyStringConstant(proto, ins.b); err != nil {
-			return err
-		}
-		if ins.c < -1 {
-			return fmt.Errorf("negative string field slot %d", ins.c)
-		}
-		return verifyJumpTarget(proto, ins.d)
-	case opCoroutineResume:
-		if ins.b < 0 {
-			return fmt.Errorf("negative intrinsic argument count %d", ins.b)
-		}
-		if ins.b > 0 {
-			if err := verifyRegisterSpan(proto, ins.a, ins.b); err != nil {
-				return err
-			}
-		} else if err := verifyRegister(proto, ins.a); err != nil {
-			return err
-		}
-		if ins.d > 0 {
-			return verifyRegisterSpan(proto, ins.a, ins.d)
-		}
-		return verifyRegister(proto, ins.a)
 	case opFastCall:
 		nativeID := nativeFuncID(ins.b)
 		if _, ok := nativeFuncByID(nativeID); !ok {
@@ -3322,8 +3212,6 @@ func nativeFuncName(nativeID nativeFuncID) string {
 
 func opcodeName(op opcode) string {
 	switch op {
-	case opNoop:
-		return "NOOP"
 	case opLoadConst:
 		return "LOAD_CONST"
 	case opLoadGlobal:
@@ -3336,8 +3224,6 @@ func opcodeName(op opcode) string {
 		return "NEW_TABLE"
 	case opSetField:
 		return "SET_FIELD"
-	case opGetField:
-		return "GET_FIELD"
 	case opSetStringField:
 		return "SET_STRING_FIELD"
 	case opSetStringFieldIndex:
@@ -3455,16 +3341,6 @@ func opcodeName(op opcode) string {
 		return "JUMP_IF_STRING_FIELD_NOT_GREATER_R"
 		return "JUMP_IF_ROW_STRING_FIELD_NOT_GREATER_R"
 		return "JUMP_IF_ROW_STRING_FIELD_NOT_LESS_FIELD"
-	case opJumpIfStringFieldFalse:
-		return "JUMP_IF_STRING_FIELD_FALSE"
-	case opJumpIfStringFieldNil:
-		return "JUMP_IF_STRING_FIELD_NIL"
-	case opJumpIfStringFieldTrue:
-		return "JUMP_IF_STRING_FIELD_TRUE"
-	case opJumpIfStringFieldNotNil:
-		return "JUMP_IF_STRING_FIELD_NOT_NIL"
-	case opCoroutineResume:
-		return "COROUTINE_RESUME"
 	case opFastCall:
 		return "FAST_CALL"
 	case opCall:
@@ -3535,8 +3411,6 @@ func disassembleTableKey(key tableKey) string {
 
 func disassembleInstruction(proto *Proto, ins instruction) string {
 	switch ins.op {
-	case opNoop:
-		return "NOOP"
 	case opLoadConst:
 		return fmt.Sprintf("LOAD_CONST r%d %s", ins.a, disassembleConstant(proto, ins.b))
 	case opLoadGlobal:
@@ -3549,8 +3423,6 @@ func disassembleInstruction(proto *Proto, ins instruction) string {
 		return fmt.Sprintf("NEW_TABLE r%d %d %d", ins.a, ins.b, ins.c)
 	case opSetField:
 		return fmt.Sprintf("SET_FIELD r%d %s r%d", ins.a, disassembleConstant(proto, ins.b), ins.c)
-	case opGetField:
-		return fmt.Sprintf("GET_FIELD r%d r%d %s", ins.a, ins.b, disassembleConstant(proto, ins.c))
 	case opSetStringField:
 		return fmt.Sprintf("SET_STRING_FIELD r%d %s r%d", ins.a, disassembleConstant(proto, ins.b), ins.c)
 	case opSetStringFieldIndex:
@@ -3669,16 +3541,6 @@ func disassembleInstruction(proto *Proto, ins instruction) string {
 		return fmt.Sprintf("JUMP_IF_STRING_FIELD_GREATER_K r%d %s %s %d", ins.a, disassembleConstant(proto, ins.b), disassembleConstant(proto, ins.c), ins.d)
 	case opJumpIfStringFieldNotGreaterR:
 		return fmt.Sprintf("JUMP_IF_STRING_FIELD_NOT_GREATER_R r%d %s r%d %d", ins.a, disassembleConstant(proto, ins.b), ins.c, ins.d)
-	case opJumpIfStringFieldFalse:
-		return fmt.Sprintf("JUMP_IF_STRING_FIELD_FALSE r%d %s slot %d %d", ins.a, disassembleConstant(proto, ins.b), ins.c, ins.d)
-	case opJumpIfStringFieldNil:
-		return fmt.Sprintf("JUMP_IF_STRING_FIELD_NIL r%d %s slot %d %d", ins.a, disassembleConstant(proto, ins.b), ins.c, ins.d)
-	case opJumpIfStringFieldTrue:
-		return fmt.Sprintf("JUMP_IF_STRING_FIELD_TRUE r%d %s slot %d %d", ins.a, disassembleConstant(proto, ins.b), ins.c, ins.d)
-	case opJumpIfStringFieldNotNil:
-		return fmt.Sprintf("JUMP_IF_STRING_FIELD_NOT_NIL r%d %s slot %d %d", ins.a, disassembleConstant(proto, ins.b), ins.c, ins.d)
-	case opCoroutineResume:
-		return fmt.Sprintf("COROUTINE_RESUME r%d %d %d", ins.a, ins.b, ins.d)
 	case opFastCall:
 		return fmt.Sprintf("FAST_CALL r%d %s args %d results %d", ins.a, nativeFuncName(nativeFuncID(ins.b)), ins.c, ins.d)
 	case opCall:

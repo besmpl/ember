@@ -87,8 +87,6 @@ func instructionRegisterLimit(ins instruction) int {
 		limit = maxRegisterLimit(limit, ins.c+ins.d)
 	case opCallMethodOne:
 		limit = maxRegisterLimit(limit, ins.a+ins.d+2)
-	case opCoroutineResume:
-		limit = maxRegisterLimit(limit, ins.a+ins.b+1)
 	case opFastCall:
 		limit = maxRegisterLimit(limit, ins.a+maxRegisterLimit(ins.c, ins.d))
 	case opArrayNext:
@@ -126,7 +124,7 @@ func instructionReadsRegister(ins instruction, register int) bool {
 		return ins.b == register
 	case opSetField, opSetStringField:
 		return ins.a == register || ins.c == register
-	case opGetField, opGetStringField:
+	case opGetStringField:
 		return ins.b == register
 	case opSetStringFieldIndex:
 		return ins.a == register || ins.c == register || ins.d == register
@@ -160,15 +158,12 @@ func instructionReadsRegister(ins instruction, register int) bool {
 	case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK,
 		opJumpIfModKNotEqualK,
 		opJumpIfTableHasMetatable,
-		opJumpIfStringFieldNotEqualK, opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK,
-		opJumpIfStringFieldFalse, opJumpIfStringFieldNil, opJumpIfStringFieldTrue, opJumpIfStringFieldNotNil:
+		opJumpIfStringFieldNotEqualK, opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK:
 		return ins.a == register
 	case opJumpIfStringFieldNotGreaterR:
 		return ins.a == register || ins.c == register
 	case opNeg, opLen:
 		return ins.b == register
-	case opCoroutineResume:
-		return register >= ins.a && register <= ins.a+ins.b
 	case opFastCall:
 		return register >= ins.a && register < ins.a+ins.c
 	case opCall, opCallOne:
@@ -201,11 +196,11 @@ func instructionReadsRegister(ins instruction, register int) bool {
 
 func instructionWritesRegister(ins instruction, register int) bool {
 	switch ins.op {
-	case opLoadConst, opLoadGlobal, opMove, opNewTable, opGetField, opGetStringField, opGetStringFieldIndex,
+	case opLoadConst, opLoadGlobal, opMove, opNewTable, opGetStringField, opGetStringFieldIndex,
 		opClosure, opGetUpvalue, opVararg, opAdd, opSub, opMul, opDiv, opMod,
 		opIDiv, opPow, opNeg, opLen, opConcat, opConcatChain, opEqual, opNotEqual, opLess,
 		opLessEqual, opGreater, opGreaterEqual, opAddK, opSubK, opMulK,
-		opDivK, opModK, opIDivK, opCoroutineResume, opFastCall:
+		opDivK, opModK, opIDivK, opFastCall:
 		if ins.op == opVararg && ins.b > 0 {
 			return register >= ins.a && register < ins.a+ins.b
 		}
