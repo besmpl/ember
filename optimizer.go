@@ -269,24 +269,12 @@ func simplifyBytecodeIRControlFlow(ir []bytecodeIRInstruction, facts bytecodeIRO
 		return ir
 	}
 	optimized := append([]bytecodeIRInstruction(nil), ir...)
-	for pass := 0; pass <= len(ir); pass++ {
-		changed := threadBytecodeIRJumpTargets(optimized)
-		if foldBytecodeIRConstantBranches(optimized, facts) {
-			changed = true
-		}
-		remove := bytecodeIRUnreachableRemovalSet(optimized)
-		if hasRemovedInstructions(remove) {
-			optimized = applyBytecodeIRRemovalSet(optimized, remove)
-			changed = true
-		}
-		remove = bytecodeIRJumpToNextInstructions(optimized)
-		if hasRemovedInstructions(remove) {
-			optimized = applyBytecodeIRRemovalSet(optimized, remove)
-			changed = true
-		}
-		if !changed {
-			return optimized
-		}
+	foldBytecodeIRConstantBranches(optimized, facts)
+	threadBytecodeIRJumpTargetsMemoized(optimized)
+	remove := bytecodeIRReachabilityRemovalSet(optimized)
+	markBytecodeIRJumpsToNextSurvivor(optimized, remove)
+	if hasRemovedInstructions(remove) {
+		return applyBytecodeIRRemovalSet(optimized, remove)
 	}
 	return optimized
 }
@@ -305,38 +293,57 @@ func bytecodeIRHasControlFlowSimplificationWork(ir []bytecodeIRInstruction) bool
 	return false
 }
 
-func threadBytecodeIRJumpTargets(ir []bytecodeIRInstruction) bool {
-	changed := false
+func threadBytecodeIRJumpTargetsMemoized(ir []bytecodeIRInstruction) {
+	resolver := bytecodeIRJumpResolver{
+		ir:      ir,
+		state:   make([]byte, len(ir)),
+		targets: make([]int, len(ir)),
+		valid:   make([]bool, len(ir)),
+	}
 	for pc := range ir {
 		target, ok := bytecodeIRJumpTarget(ir[pc])
 		if !ok {
 			continue
 		}
-		threaded, ok := bytecodeIRThreadedJumpTarget(ir, target)
-		if ok && threaded != target && setBytecodeIRJumpTarget(&ir[pc], threaded) {
-			changed = true
+		threaded, ok := resolver.resolve(target)
+		if ok && threaded != target {
+			setBytecodeIRJumpTarget(&ir[pc], threaded)
 		}
 	}
-	return changed
 }
 
-func bytecodeIRThreadedJumpTarget(ir []bytecodeIRInstruction, target int) (int, bool) {
-	if target < 0 || target >= len(ir) {
-		return target, false
+type bytecodeIRJumpResolver struct {
+	ir      []bytecodeIRInstruction
+	state   []byte
+	targets []int
+	valid   []bool
+}
+
+func (resolver *bytecodeIRJumpResolver) resolve(pc int) (int, bool) {
+	if pc < 0 || pc >= len(resolver.ir) {
+		return pc, false
 	}
-	seen := make([]bool, len(ir))
-	for target >= 0 && target < len(ir) && ir[target].op == opJump {
-		if seen[target] {
-			return target, false
-		}
-		seen[target] = true
-		next, ok := bytecodeIRJumpTarget(ir[target])
-		if !ok || next < 0 || next >= len(ir) {
-			return target, false
-		}
-		target = next
+	switch resolver.state[pc] {
+	case 1:
+		return pc, false
+	case 2:
+		return resolver.targets[pc], resolver.valid[pc]
 	}
-	return target, true
+	resolver.state[pc] = 1
+	target := pc
+	valid := true
+	if resolver.ir[pc].op == opJump {
+		next, ok := bytecodeIRJumpTarget(resolver.ir[pc])
+		if !ok {
+			valid = false
+		} else {
+			target, valid = resolver.resolve(next)
+		}
+	}
+	resolver.state[pc] = 2
+	resolver.targets[pc] = target
+	resolver.valid[pc] = valid
+	return target, valid
 }
 
 func foldBytecodeIRConstantBranches(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts) bool {
@@ -428,31 +435,61 @@ func copyRegisterConstants(registerConstants map[int]int) map[int]int {
 	return copied
 }
 
-func bytecodeIRUnreachableRemovalSet(ir []bytecodeIRInstruction) []bool {
+func bytecodeIRReachabilityRemovalSet(ir []bytecodeIRInstruction) []bool {
 	remove := make([]bool, len(ir))
 	if len(ir) == 0 {
 		return remove
 	}
-	code := assembleBytecodeIRRaw(ir)
-	reachable := make([]bool, len(ir))
-	work := []int{0}
-	for len(work) > 0 {
-		pc := work[len(work)-1]
-		work = work[:len(work)-1]
-		if pc < 0 || pc >= len(ir) || reachable[pc] {
+	for pc := range remove {
+		remove[pc] = true
+	}
+	worklist := make([]int, 1, len(ir))
+	worklist[0] = 0
+	for len(worklist) != 0 {
+		last := len(worklist) - 1
+		pc := worklist[last]
+		worklist = worklist[:last]
+		if pc < 0 || pc >= len(ir) || !remove[pc] {
 			continue
 		}
-		reachable[pc] = true
-		for _, successor := range instructionSuccessors(code, pc) {
-			if successor >= 0 && successor < len(ir) && !reachable[successor] {
-				work = append(work, successor)
+		remove[pc] = false
+		ins := ir[pc]
+		target, hasTarget := bytecodeIRJumpTarget(ins)
+		switch opcodeControlFlow(ins.op) {
+		case opcodeControlJump:
+			if hasTarget {
+				worklist = append(worklist, target)
 			}
+		case opcodeControlBranch:
+			if hasTarget {
+				worklist = append(worklist, target)
+			}
+			worklist = append(worklist, pc+1)
+		case opcodeControlReturn:
+		default:
+			worklist = append(worklist, pc+1)
 		}
 	}
-	for pc := range remove {
-		remove[pc] = !reachable[pc]
-	}
 	return remove
+}
+
+func markBytecodeIRJumpsToNextSurvivor(ir []bytecodeIRInstruction, remove []bool) {
+	if len(ir) == 0 || len(remove) != len(ir) {
+		return
+	}
+	oldToNew := oldPCToNewPC(remove)
+	for pc, ins := range ir {
+		if remove[pc] || ins.op != opJump {
+			continue
+		}
+		target, ok := bytecodeIRJumpTarget(ins)
+		if !ok || target < 0 || target >= len(oldToNew) {
+			continue
+		}
+		if oldToNew[target] == oldToNew[pc]+1 {
+			remove[pc] = true
+		}
+	}
 }
 
 func setBytecodeIRJumpTarget(ins *bytecodeIRInstruction, target int) bool {
