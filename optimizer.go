@@ -95,7 +95,7 @@ func bytecodeIRDeadCodeRemovalSet(ir []bytecodeIRInstruction, facts bytecodeIROp
 			}
 			writes := instructionRegisters(ins, instructionRegisterWrite)
 			for register, ok := writes.next(); ok; register, ok = writes.next() {
-				delete(liveRegisters, register)
+				liveRegisters.remove(register)
 			}
 			reads := instructionRegisters(ins, instructionRegisterRead)
 			for register, ok := reads.next(); ok; register, ok = reads.next() {
@@ -149,7 +149,7 @@ func instructionWritesOnlyDeadRegisters(ins instruction, liveRegisters registerS
 	writes := instructionRegisters(ins, instructionRegisterWrite)
 	for register, ok := writes.next(); ok; register, ok = writes.next() {
 		hasWrite = true
-		if liveRegisters[register] {
+		if liveRegisters.contains(register) {
 			return false
 		}
 	}
@@ -174,11 +174,11 @@ func instructionCanRemoveWhenResultDead(ins instruction, numberFacts registerSet
 	case opLoadConst, opMove:
 		return true
 	case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow:
-		return numberFacts[ins.b] && numberFacts[ins.c]
+		return numberFacts.contains(ins.b) && numberFacts.contains(ins.c)
 	case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
-		return numberFacts[ins.b] && constantIsNumber(facts, ins.c)
+		return numberFacts.contains(ins.b) && constantIsNumber(facts, ins.c)
 	case opNeg:
-		return numberFacts[ins.b]
+		return numberFacts.contains(ins.b)
 	default:
 		return false
 	}
@@ -187,15 +187,10 @@ func instructionCanRemoveWhenResultDead(ins instruction, numberFacts registerSet
 func bytecodeIRNumberFactsBefore(code []instruction, facts bytecodeIROptimizationFacts, blocks []bytecodeIRBlock) []registerSet {
 	factsBefore := make([]registerSet, len(code))
 	for _, block := range blocks {
-		numberFacts := make(registerSet)
+		numberFacts := registerSet{}
 		for pc := block.start; pc < block.end; pc++ {
 			factsBefore[pc] = numberFacts.copy()
 			applyInstructionNumberFacts(numberFacts, code[pc], facts)
-		}
-	}
-	for pc := range factsBefore {
-		if factsBefore[pc] == nil {
-			factsBefore[pc] = make(registerSet)
 		}
 	}
 	return factsBefore
@@ -203,15 +198,13 @@ func bytecodeIRNumberFactsBefore(code []instruction, facts bytecodeIROptimizatio
 
 func applyInstructionNumberFacts(numberFacts registerSet, ins instruction, facts bytecodeIROptimizationFacts) {
 	if instructionClearsAllNumberFacts(ins) {
-		for register := range numberFacts {
-			delete(numberFacts, register)
-		}
+		numberFacts.clear()
 		return
 	}
 	producesNumber := instructionProducesNumber(ins, numberFacts, facts)
 	writes := instructionRegisters(ins, instructionRegisterWrite)
 	for register, ok := writes.next(); ok; register, ok = writes.next() {
-		delete(numberFacts, register)
+		numberFacts.remove(register)
 	}
 	if producesNumber {
 		numberFacts.add(ins.a)
@@ -227,13 +220,13 @@ func instructionProducesNumber(ins instruction, numberFacts registerSet, facts b
 	case opLoadConst:
 		return constantIsNumber(facts, ins.b)
 	case opMove:
-		return numberFacts[ins.b]
+		return numberFacts.contains(ins.b)
 	case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow:
-		return numberFacts[ins.b] && numberFacts[ins.c]
+		return numberFacts.contains(ins.b) && numberFacts.contains(ins.c)
 	case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
-		return numberFacts[ins.b] && constantIsNumber(facts, ins.c)
+		return numberFacts.contains(ins.b) && constantIsNumber(facts, ins.c)
 	case opNeg:
-		return numberFacts[ins.b]
+		return numberFacts.contains(ins.b)
 	default:
 		return false
 	}
@@ -528,7 +521,7 @@ func singleUseMoveReadPC(code []instruction, start int, end int, liveOut registe
 			return usePC, true
 		}
 	}
-	if usePC < 0 || liveOut[target] {
+	if usePC < 0 || liveOut.contains(target) {
 		return -1, false
 	}
 	return usePC, true
@@ -616,7 +609,7 @@ func registerDeadAfterMoveInBlock(code []instruction, movePC int, blockEnd int, 
 	if killed, known := registerKilledBeforeRead(code[movePC+1:blockEnd], register); known {
 		return killed
 	}
-	return !liveOut[register]
+	return !liveOut.contains(register)
 }
 
 func replaceInstructionWrittenRegister(ins instruction, from int, to int) (instruction, bool) {
@@ -776,7 +769,7 @@ func isDeadMoveRoundTripInBlock(code []instruction, first int, blockEnd int, liv
 	if killed, known := registerKilledBeforeRead(code[first+2:blockEnd], register); known {
 		return killed
 	}
-	return !liveOut[register]
+	return !liveOut.contains(register)
 }
 
 func isDeadMoveRoundTripPair(left instruction, right instruction) bool {

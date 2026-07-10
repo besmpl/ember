@@ -659,8 +659,6 @@ type bytecodeIRLivenessBlock struct {
 	liveOut registerSet
 }
 
-type registerSet map[int]bool
-
 type upvalueDesc struct {
 	local bool
 	index int
@@ -1363,29 +1361,32 @@ func bytecodeIRLiveness(ir []bytecodeIRInstruction) []bytecodeIRLivenessBlock {
 			block:   block,
 			use:     use,
 			def:     def,
-			liveIn:  make(registerSet),
-			liveOut: make(registerSet),
+			liveIn:  registerSet{},
+			liveOut: registerSet{},
 		}
 	}
 
 	successors := bytecodeIRBlockSuccessors(ir, blocks)
+	var out registerSet
+	var in registerSet
+	var outWithoutDefs registerSet
 	changed := true
 	for changed {
 		changed = false
 		for i := len(liveness) - 1; i >= 0; i-- {
-			out := make(registerSet)
+			out.clear()
 			for _, successor := range successors[i] {
 				out.addAll(liveness[successor].liveIn)
 			}
 
-			in := liveness[i].use.copy()
-			outWithoutDefs := out.copy()
+			in.assign(liveness[i].use)
+			outWithoutDefs.assign(out)
 			outWithoutDefs.removeAll(liveness[i].def)
 			in.addAll(outWithoutDefs)
 
 			if !liveness[i].liveOut.equal(out) || !liveness[i].liveIn.equal(in) {
-				liveness[i].liveOut = out
-				liveness[i].liveIn = in
+				liveness[i].liveOut.assign(out)
+				liveness[i].liveIn.assign(in)
 				changed = true
 			}
 		}
@@ -1394,13 +1395,13 @@ func bytecodeIRLiveness(ir []bytecodeIRInstruction) []bytecodeIRLivenessBlock {
 }
 
 func bytecodeIRBlockUseDef(ir []bytecodeIRInstruction, block bytecodeIRBlock) (registerSet, registerSet) {
-	use := make(registerSet)
-	def := make(registerSet)
+	use := registerSet{}
+	def := registerSet{}
 	for pc := block.start; pc < block.end; pc++ {
 		raw := assembleBytecodeIRInstruction(ir[pc])
 		reads := instructionRegisters(raw, instructionRegisterRead)
 		for register, ok := reads.next(); ok; register, ok = reads.next() {
-			if !def[register] {
+			if !def.contains(register) {
 				use.add(register)
 			}
 		}
@@ -1447,49 +1448,6 @@ func bytecodeIRBlockSuccessors(ir []bytecodeIRInstruction, blocks []bytecodeIRBl
 		}
 	}
 	return successors
-}
-
-func (s registerSet) add(register int) {
-	s[register] = true
-}
-
-func (s registerSet) addAll(other registerSet) {
-	for register := range other {
-		s.add(register)
-	}
-}
-
-func (s registerSet) removeAll(other registerSet) {
-	for register := range other {
-		delete(s, register)
-	}
-}
-
-func (s registerSet) copy() registerSet {
-	copied := make(registerSet, len(s))
-	copied.addAll(s)
-	return copied
-}
-
-func (s registerSet) equal(other registerSet) bool {
-	if len(s) != len(other) {
-		return false
-	}
-	for register := range s {
-		if !other[register] {
-			return false
-		}
-	}
-	return true
-}
-
-func (s registerSet) values() []int {
-	values := make([]int, 0, len(s))
-	for register := range s {
-		values = append(values, register)
-	}
-	sort.Ints(values)
-	return values
 }
 
 // Proto is an executable Ember function prototype.
