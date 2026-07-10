@@ -291,6 +291,10 @@ func (c *compiler) addConstant(value Value) int {
 	return c.bytecodeBuilder.addConstant(value)
 }
 
+func (c *compiler) addStringConstant(value string) int {
+	return c.bytecodeBuilder.addStringConstant(value)
+}
+
 func (c *compiler) compileStatements(statements []statement) error {
 	for _, stmt := range statements {
 		if err := c.compileStatement(stmt); err != nil {
@@ -891,15 +895,15 @@ func (c *compiler) compileClosureToSelf(closure loweredClosure, target int, self
 func (c *compiler) compileSelectorsTo(selectors []selector, target int) error {
 	for len(selectors) > 0 {
 		if len(selectors) >= 2 && selectors[0].field != "" && selectors[1].field != "" {
-			firstKey := c.addConstant(StringValue(selectors[0].field))
-			secondKey := c.addConstant(StringValue(selectors[1].field))
+			firstKey := c.addStringConstant(selectors[0].field)
+			secondKey := c.addStringConstant(selectors[1].field)
 			c.emit(instruction{op: opGetStringField, a: target, b: target, c: firstKey})
 			c.emit(instruction{op: opGetStringField, a: target, b: target, c: secondKey})
 			selectors = selectors[2:]
 			continue
 		}
 		if len(selectors) >= 2 && selectors[0].field != "" && selectors[1].index != nil {
-			firstKey := c.addConstant(StringValue(selectors[0].field))
+			firstKey := c.addStringConstant(selectors[0].field)
 			key := c.allocReg()
 			if err := c.compileExpressionTo(*selectors[1].index, key); err != nil {
 				return err
@@ -911,7 +915,7 @@ func (c *compiler) compileSelectorsTo(selectors []selector, target int) error {
 
 		selector := selectors[0]
 		if selector.field != "" {
-			key := c.addConstant(StringValue(selector.field))
+			key := c.addStringConstant(selector.field)
 			c.emit(instruction{op: opGetStringField, a: target, b: target, c: key})
 			selectors = selectors[1:]
 			continue
@@ -936,14 +940,14 @@ func (c *compiler) compileSelectorsFromBaseTo(base int, selectors []selector, ta
 	}
 	first := selectors[0]
 	if len(selectors) >= 2 && first.field != "" && selectors[1].field != "" {
-		firstKey := c.addConstant(StringValue(first.field))
-		secondKey := c.addConstant(StringValue(selectors[1].field))
+		firstKey := c.addStringConstant(first.field)
+		secondKey := c.addStringConstant(selectors[1].field)
 		c.emit(instruction{op: opGetStringField, a: target, b: base, c: firstKey})
 		c.emit(instruction{op: opGetStringField, a: target, b: target, c: secondKey})
 		return c.compileSelectorsTo(selectors[2:], target)
 	}
 	if len(selectors) >= 2 && first.field != "" && selectors[1].index != nil {
-		firstKey := c.addConstant(StringValue(first.field))
+		firstKey := c.addStringConstant(first.field)
 		key := c.allocReg()
 		if err := c.compileExpressionTo(*selectors[1].index, key); err != nil {
 			return err
@@ -952,7 +956,7 @@ func (c *compiler) compileSelectorsFromBaseTo(base int, selectors []selector, ta
 		return c.compileSelectorsTo(selectors[2:], target)
 	}
 	if first.field != "" {
-		key := c.addConstant(StringValue(first.field))
+		key := c.addStringConstant(first.field)
 		c.emit(instruction{op: opGetStringField, a: target, b: base, c: key})
 		return c.compileSelectorsTo(selectors[1:], target)
 	}
@@ -1725,7 +1729,7 @@ func (c *compiler) compileAddStringFieldAssignment(addField addStringFieldAssign
 		c.releaseTemp(operand)
 		return err
 	}
-	key := c.addConstant(StringValue(addField.field))
+	key := c.addStringConstant(addField.field)
 	c.emit(instruction{op: opAddStringField, a: addField.table, b: key, c: operand, d: addField.slot})
 	c.releaseTemp(operand)
 	return nil
@@ -1737,7 +1741,7 @@ func (c *compiler) compileSubStringFieldAssignment(subField subStringFieldAssign
 		c.releaseTemp(operand)
 		return err
 	}
-	key := c.addConstant(StringValue(subField.field))
+	key := c.addStringConstant(subField.field)
 	c.emit(instruction{op: opSubStringField, a: subField.table, b: key, c: operand, d: subField.slot})
 	c.releaseTemp(operand)
 	return nil
@@ -1747,7 +1751,7 @@ func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value in
 	if len(target.selectors) == 0 {
 		ref, ok := c.resolveAssignTarget(target)
 		if !ok {
-			name := c.addConstant(StringValue(target.name))
+			name := c.addStringConstant(target.name)
 			c.emit(instruction{op: opSetGlobal, a: name, b: value})
 			return nil
 		}
@@ -1763,7 +1767,7 @@ func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value in
 	if ref, ok := c.resolveAssignTarget(target); ok && ref.kind == variableLocal && len(target.selectors) == 1 {
 		last := target.selectors[0]
 		if last.field != "" {
-			key := c.addConstant(StringValue(last.field))
+			key := c.addStringConstant(last.field)
 			c.emit(instruction{op: opSetStringField, a: ref.index, b: key, c: value})
 			return nil
 		}
@@ -1779,8 +1783,8 @@ func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value in
 		first := target.selectors[0]
 		second := target.selectors[1]
 		if first.field != "" && second.field != "" {
-			firstKey := c.addConstant(StringValue(first.field))
-			secondKey := c.addConstant(StringValue(second.field))
+			firstKey := c.addStringConstant(first.field)
+			secondKey := c.addStringConstant(second.field)
 			table := c.allocTemp()
 			c.emit(instruction{op: opGetStringField, a: table, b: ref.index, c: firstKey})
 			c.emit(instruction{op: opSetStringField, a: table, b: secondKey, c: value})
@@ -1788,7 +1792,7 @@ func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value in
 			return nil
 		}
 		if first.field != "" && second.index != nil {
-			firstKey := c.addConstant(StringValue(first.field))
+			firstKey := c.addStringConstant(first.field)
 			key := c.allocReg()
 			if err := c.compileExpressionTo(*second.index, key); err != nil {
 				return err
@@ -1810,7 +1814,7 @@ func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value in
 
 	last := target.selectors[len(target.selectors)-1]
 	if last.field != "" {
-		key := c.addConstant(StringValue(last.field))
+		key := c.addStringConstant(last.field)
 		c.emit(instruction{op: opSetStringField, a: table, b: key, c: value})
 		return nil
 	}
@@ -1904,12 +1908,12 @@ func (c *compiler) compileStringTagElseIfChain(branch loweredIfStatement) (bool,
 	outerLocals := copyLocals(c.locals)
 	metatableJump := c.emit(instruction{op: opJumpIfTableHasMetatable, a: chain.table})
 	tag := c.allocTemp()
-	field := c.addConstant(StringValue(chain.field))
+	field := c.addStringConstant(chain.field)
 	c.emit(instruction{op: opGetStringField, a: tag, b: chain.table, c: field})
 
 	endJumps := make([]int, 0, len(chain.arms)+1)
 	for _, arm := range chain.arms {
-		value := c.addConstant(StringValue(arm.value))
+		value := c.addStringConstant(arm.value)
 		nextArmJumps := []int{c.emit(instruction{op: opJumpIfNotEqualK, a: tag, b: value})}
 		if len(arm.guards) > 0 {
 			guardJump, ok, err := c.compileConditionJumpIfFalse(expression{
@@ -2202,7 +2206,7 @@ func (c *compiler) compileAndChainJumpIfFalse(expr expression) (int, bool, error
 	for _, plan := range plans {
 		switch plan.op {
 		case opJumpIfStringFieldFalse, opJumpIfStringFieldTrue, opJumpIfStringFieldNil, opJumpIfStringFieldNotNil:
-			field := c.addConstant(StringValue(plan.field))
+			field := c.addStringConstant(plan.field)
 			falseJumps = append(falseJumps, c.emit(instruction{
 				op: plan.op,
 				a:  plan.a,
@@ -2227,7 +2231,7 @@ func (c *compiler) compileAndChainJumpIfFalse(expr expression) (int, bool, error
 				b:  constant,
 			}))
 		case opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK:
-			field := c.addConstant(StringValue(plan.field))
+			field := c.addStringConstant(plan.field)
 			value := c.addConstant(NumberValue(plan.constant))
 			falseJumps = append(falseJumps, c.emit(instruction{
 				op: plan.op,
@@ -2356,7 +2360,7 @@ func (c *compiler) emitAndChainFieldPairBranch(plan andChainBranchPlan) int {
 
 func (c *compiler) emitLocalStringFieldLoad(target int, table int, field string, slot int) {
 	_ = slot
-	key := c.addConstant(StringValue(field))
+	key := c.addStringConstant(field)
 	c.emit(instruction{op: opGetStringField, a: target, b: table, c: key})
 }
 
@@ -2511,7 +2515,7 @@ func (c *compiler) compileStringFieldEqualityJumpIfFalse(expr expression) (int, 
 }
 
 func (c *compiler) emitStringFieldEqualityJump(condition stringFieldEqualityCondition) int {
-	field := c.addConstant(StringValue(condition.field))
+	field := c.addStringConstant(condition.field)
 	value := c.addConstant(condition.value)
 	return c.emit(instruction{op: opJumpIfStringFieldNotEqualK, a: condition.table, b: field, c: value})
 }
@@ -2669,7 +2673,7 @@ func (c *compiler) compileStringFieldNumericJumpIfFalse(expr expression) (int, b
 	if !ok {
 		return 0, false, nil
 	}
-	fieldConstant := c.addConstant(StringValue(field))
+	fieldConstant := c.addStringConstant(field)
 	valueConstant := c.addConstant(NumberValue(right))
 	switch comparison.op {
 	case comparisonGreater:
@@ -2699,7 +2703,7 @@ func (c *compiler) compileRegisterStringFieldNumericJumpIfFalse(expr expression)
 	if err != nil {
 		return 0, false, err
 	}
-	fieldConstant := c.addConstant(StringValue(field))
+	fieldConstant := c.addStringConstant(field)
 	jump := c.emit(instruction{op: opJumpIfStringFieldNotGreaterR, a: table.index, b: fieldConstant, c: left})
 	releaseLeft()
 	return jump, true, nil
@@ -2727,7 +2731,7 @@ func (c *compiler) compileStringFieldTruthyJumpIfFalse(expr expression) (int, bo
 	if !ok {
 		return 0, false, nil
 	}
-	fieldConstant := c.addConstant(StringValue(field))
+	fieldConstant := c.addStringConstant(field)
 	slot := -1
 	if slots, ok := c.localRowStringSlots[table.index]; ok {
 		if fieldSlot, ok := slots[field]; ok {
@@ -2750,7 +2754,7 @@ func (c *compiler) compileStringFieldNotJumpIfFalse(expr expression) (int, bool,
 	if !ok {
 		return 0, false, nil
 	}
-	fieldConstant := c.addConstant(StringValue(field))
+	fieldConstant := c.addStringConstant(field)
 	slot := -1
 	if slots, ok := c.localRowStringSlots[table.index]; ok {
 		if fieldSlot, ok := slots[field]; ok {
@@ -2791,7 +2795,7 @@ func (c *compiler) compileStringFieldNilJumpIfFalse(expr expression) (int, bool,
 	if !ok || !concatNilLiteral(*comparison.right) {
 		return 0, false, nil
 	}
-	fieldConstant := c.addConstant(StringValue(field))
+	fieldConstant := c.addStringConstant(field)
 	slot := -1
 	if slots, ok := c.localRowStringSlots[table.index]; ok {
 		if fieldSlot, ok := slots[field]; ok {
@@ -3128,7 +3132,7 @@ func (c *compiler) compileTableTo(table tableExpression, target int) error {
 			key := c.addConstant(NumberValue(float64(field.arrayIndex)))
 			c.emit(instruction{op: opSetField, a: target, b: key, c: value})
 		case loweredTableFieldNamed:
-			key := c.addConstant(StringValue(field.name))
+			key := c.addStringConstant(field.name)
 			c.emit(instruction{op: opSetStringField, a: target, b: key, c: value})
 		default:
 			c.releaseTemp(value)
@@ -3160,7 +3164,7 @@ func (c *compiler) compileNamedValueTo(name string, target int) error {
 		return c.compileVariableRefTo(ref, target)
 	}
 
-	constant := c.addConstant(StringValue(name))
+	constant := c.addStringConstant(name)
 	c.emit(instruction{op: opLoadGlobal, a: target, b: constant})
 	return nil
 }
@@ -3454,7 +3458,7 @@ func (c *compiler) compileMethodOneResultCallToResults(
 		}
 	}
 	c.claimRegister(target)
-	key := c.addConstant(StringValue(method.field))
+	key := c.addStringConstant(method.field)
 	c.emit(instruction{op: opCallMethodOne, a: target, b: method.receiver, c: key, d: len(args)})
 	return nil
 }
@@ -3525,7 +3529,7 @@ func (c *compiler) compileTableFieldKeyOneResultCallToResults(
 		return err
 	}
 	c.claimRegister(target)
-	key := c.addConstant(StringValue(call.keyField))
+	key := c.addStringConstant(call.keyField)
 	c.emit(instruction{op: opGetStringField, a: keySource, b: keySource, c: key})
 	c.emit(instruction{op: opGetIndex, a: target, b: call.table, c: keySource})
 	c.emit(instruction{op: opCallOne, a: target, b: target, c: argCount})

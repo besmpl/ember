@@ -2,7 +2,9 @@ package ember
 
 import (
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -666,36 +668,139 @@ type upvalueDesc struct {
 }
 
 type bytecodeBuilder struct {
-	constants  []Value
-	ir         []bytecodeIRInstruction
-	prototypes []*Proto
-	source     sourceRange
-	sourceText string
+	constants         []Value
+	constantIndices   map[constantPoolKey]int
+	constantStrings   map[string]constantStringIntern
+	constantShapes    map[string]uint32
+	nextConstantShape uint32
+	ir                []bytecodeIRInstruction
+	prototypes        []*Proto
+	source            sourceRange
+	sourceText        string
+}
+
+type constantPoolKey struct {
+	kind ValueKind
+	bits uint64
+}
+
+type constantStringIntern struct {
+	id  uint32
+	box *stringBox
 }
 
 func (b *bytecodeBuilder) addConstant(value Value) int {
-	for index, existing := range b.constants {
-		if bytecodeConstantsEqual(existing, value) {
+	if value.kind == StringKind {
+		return b.addInternedStringConstant(value.stringText(), value.stringBox())
+	}
+	key, keyed := b.constantKey(value)
+	return b.addKeyedConstant(value, key, keyed)
+}
+
+func (b *bytecodeBuilder) addStringConstant(text string) int {
+	return b.addInternedStringConstant(text, nil)
+}
+
+func (b *bytecodeBuilder) addInternedStringConstant(text string, candidate *stringBox) int {
+	intern := b.internConstantString(text, candidate)
+	return b.addKeyedConstant(stringValueFromBox(intern.box), constantPoolKey{kind: StringKind, bits: uint64(intern.id)}, true)
+}
+
+func (b *bytecodeBuilder) addKeyedConstant(value Value, key constantPoolKey, keyed bool) int {
+	if keyed && b.constantIndices != nil {
+		if index, ok := b.constantIndices[key]; ok {
 			return index
 		}
 	}
 	index := len(b.constants)
 	b.constants = append(b.constants, value)
+	if keyed {
+		if b.constantIndices == nil {
+			b.constantIndices = make(map[constantPoolKey]int)
+		}
+		b.constantIndices[key] = index
+	}
 	return index
 }
 
-func bytecodeConstantsEqual(left Value, right Value) bool {
-	if left.kind != right.kind {
-		return false
-	}
-	switch left.kind {
-	case NilKind, BoolKind, NumberKind, StringKind, TableKind, UserDataKind, FunctionKind:
-		return valuesEqual(left, right)
+func (b *bytecodeBuilder) constantKey(value Value) (constantPoolKey, bool) {
+	key := constantPoolKey{kind: value.kind}
+	switch value.kind {
+	case NilKind:
+		return key, true
+	case BoolKind:
+		if value.bool {
+			key.bits = 1
+		}
+		return key, true
+	case NumberKind:
+		key.bits = math.Float64bits(value.number)
+		return key, true
 	case HostFuncKind:
-		return left.nativeID != nativeFuncUnknown && left.nativeID == right.nativeID
+		if value.nativeID == nativeFuncUnknown {
+			return constantPoolKey{}, false
+		}
+		key.bits = uint64(value.nativeID)
+		return key, true
+	case TableKind:
+		shapeID, ok := b.internConstantTableShape(value.tableRef())
+		if !ok {
+			return constantPoolKey{}, false
+		}
+		key.bits = uint64(shapeID)
+		return key, true
 	default:
-		return false
+		return constantPoolKey{}, false
 	}
+}
+
+func (b *bytecodeBuilder) internConstantString(text string, candidate *stringBox) constantStringIntern {
+	if intern, ok := b.constantStrings[text]; ok {
+		return intern
+	}
+	if b.constantStrings == nil {
+		b.constantStrings = make(map[string]constantStringIntern)
+	}
+	if candidate == nil {
+		candidate = newStringBox(text)
+	}
+	intern := constantStringIntern{id: uint32(len(b.constantStrings) + 1), box: candidate}
+	b.constantStrings[text] = intern
+	return intern
+}
+
+func (b *bytecodeBuilder) internConstantTableShape(table *Table) (uint32, bool) {
+	shape, ok := constantTableShapeKey(table)
+	if !ok {
+		return 0, false
+	}
+	if id, ok := b.constantShapes[shape]; ok {
+		return id, true
+	}
+	if b.constantShapes == nil {
+		b.constantShapes = make(map[string]uint32)
+	}
+	b.nextConstantShape++
+	b.constantShapes[shape] = b.nextConstantShape
+	return b.nextConstantShape, true
+}
+
+func constantTableShapeKey(table *Table) (string, bool) {
+	if table == nil || len(table.array) != 0 || table.metatable != nil || table.iteration != nil || table.cold != nil {
+		return "", false
+	}
+	var shape strings.Builder
+	shape.WriteString(strconv.Itoa(cap(table.array)))
+	shape.WriteByte(':')
+	for _, field := range table.stringFields {
+		if field.key == "" || !field.value.IsNil() {
+			return "", false
+		}
+		shape.WriteString(strconv.Itoa(len(field.key)))
+		shape.WriteByte(':')
+		shape.WriteString(field.key)
+	}
+	return shape.String(), true
 }
 
 func (b *bytecodeBuilder) addPrototype(proto *Proto) int {
