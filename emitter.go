@@ -9,7 +9,7 @@ type compiler struct {
 	bytecodeBuilder
 	bind                     bindResult
 	sourceLines              sourceLineMap
-	symbolRegisters          map[int]int
+	symbolRegisters          []int
 	locals                   map[string]int
 	localStringSlots         map[int]map[string]int
 	localRowStringSlots      map[int]map[string]int
@@ -22,7 +22,7 @@ type compiler struct {
 	selfNumericPairBase      float64
 	variadic                 bool
 	upvalues                 map[string]int
-	upvaluesByID             map[int]int
+	upvaluesByID             []int
 	upvalueDescs             []upvalueDesc
 	loops                    []loopContext
 	prototypeDrafts          []*functionDraft
@@ -44,6 +44,35 @@ type variableRef struct {
 	index int
 }
 
+func newDenseSymbolSlots(count int) []int {
+	slots := make([]int, count)
+	for i := range slots {
+		slots[i] = -1
+	}
+	return slots
+}
+
+func denseSymbolSlot(slots []int, symbolID int) (int, bool) {
+	if symbolID < 0 || symbolID >= len(slots) || slots[symbolID] < 0 {
+		return 0, false
+	}
+	return slots[symbolID], true
+}
+
+func setLocalSlots(slots *map[int]map[string]int, register int, values map[string]int) {
+	if *slots == nil {
+		*slots = make(map[int]map[string]int)
+	}
+	(*slots)[register] = values
+}
+
+func setLocalNestedSlots(slots *map[int]map[string]map[string]int, register int, values map[string]map[string]int) {
+	if *slots == nil {
+		*slots = make(map[int]map[string]map[string]int)
+	}
+	(*slots)[register] = values
+}
+
 type loopContext struct {
 	breakJumps     []int
 	continueTarget int
@@ -56,17 +85,12 @@ func compileProgram(source sourceArtifact) (*Proto, error) {
 
 func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (*Proto, error) {
 	c := compiler{
-		bind:                     source.bind,
-		sourceLines:              newSourceLineMap(source.source.Text),
-		symbolRegisters:          make(map[int]int),
-		locals:                   make(map[string]int),
-		localStringSlots:         make(map[int]map[string]int),
-		localRowStringSlots:      make(map[int]map[string]int),
-		localArrayElemSlots:      make(map[int]map[string]int),
-		localFieldArrayElemSlots: make(map[int]map[string]map[string]int),
-		localArrayElemFieldSlots: make(map[int]map[string]map[string]int),
-		selfFunctionSymbol:       -1,
-		options:                  options,
+		bind:               source.bind,
+		sourceLines:        newSourceLineMap(source.source.Text),
+		symbolRegisters:    newDenseSymbolSlots(len(source.bind.symbols)),
+		locals:             make(map[string]int),
+		selfFunctionSymbol: -1,
+		options:            options,
 	}
 	c.sourceText = source.source.Text
 
@@ -344,23 +368,23 @@ func (c *compiler) compileLoweredLocal(lowered loweredLocal) error {
 			item := lowered.values.items[i]
 			if item.kind == loweredValueSingle && item.source >= 0 {
 				if slots, ok := expressionNamedTableFieldSlots(lowered.sources[item.source]); ok {
-					c.localStringSlots[targets[i]] = slots
+					setLocalSlots(&c.localStringSlots, targets[i], slots)
 				}
 				if slots, ok := expressionArrayElementNamedTableFieldSlots(lowered.sources[item.source]); ok {
-					c.localArrayElemSlots[targets[i]] = slots
+					setLocalSlots(&c.localArrayElemSlots, targets[i], slots)
 				}
 				if slots, ok := expressionArrayElementFieldArrayElementSlots(lowered.sources[item.source]); ok {
-					c.localArrayElemFieldSlots[targets[i]] = slots
+					setLocalNestedSlots(&c.localArrayElemFieldSlots, targets[i], slots)
 				}
 				if slots, ok := c.expressionIndexedLocalArrayElementSlots(lowered.sources[item.source]); ok {
-					c.localStringSlots[targets[i]] = slots
-					c.localRowStringSlots[targets[i]] = slots
+					setLocalSlots(&c.localStringSlots, targets[i], slots)
+					setLocalSlots(&c.localRowStringSlots, targets[i], slots)
 				}
 				if slots, ok := c.expressionIndexedLocalArrayElementFieldSlots(lowered.sources[item.source]); ok {
-					c.localFieldArrayElemSlots[targets[i]] = slots
+					setLocalNestedSlots(&c.localFieldArrayElemSlots, targets[i], slots)
 				}
 				if slots, ok := c.expressionLocalFieldArrayElementSlots(lowered.sources[item.source]); ok {
-					c.localArrayElemSlots[targets[i]] = slots
+					setLocalSlots(&c.localArrayElemSlots, targets[i], slots)
 				}
 			}
 		}
@@ -499,24 +523,18 @@ func (c *compiler) compileFunctionDeclaration(stmt functionDeclarationStatement)
 func (c *compiler) compileFunctionDraft(closure loweredClosure, selfFunctionSymbol int) (*functionDraft, error) {
 	selfNumericPairBase, selfNumericPairAdd := selfNumericPairAddClosureBase(closure)
 	fn := compiler{
-		bind:                     c.bind,
-		sourceLines:              c.sourceLines,
-		symbolRegisters:          make(map[int]int),
-		locals:                   make(map[string]int),
-		localStringSlots:         make(map[int]map[string]int),
-		localRowStringSlots:      make(map[int]map[string]int),
-		localArrayElemSlots:      make(map[int]map[string]int),
-		localFieldArrayElemSlots: make(map[int]map[string]map[string]int),
-		localArrayElemFieldSlots: make(map[int]map[string]map[string]int),
-		parent:                   c,
-		selfFunctionSymbol:       selfFunctionSymbol,
-		selfNumericPairAdd:       selfNumericPairAdd,
-		selfNumericPairBase:      selfNumericPairBase,
-		variadic:                 closure.variadic,
-		upvalues:                 make(map[string]int),
-		upvaluesByID:             make(map[int]int),
-		nextReg:                  len(closure.params),
-		options:                  c.options,
+		bind:                c.bind,
+		sourceLines:         c.sourceLines,
+		symbolRegisters:     newDenseSymbolSlots(len(c.bind.symbols)),
+		locals:              make(map[string]int),
+		parent:              c,
+		selfFunctionSymbol:  selfFunctionSymbol,
+		selfNumericPairAdd:  selfNumericPairAdd,
+		selfNumericPairBase: selfNumericPairBase,
+		variadic:            closure.variadic,
+		upvaluesByID:        newDenseSymbolSlots(len(c.bind.symbols)),
+		nextReg:             len(closure.params),
+		options:             c.options,
 	}
 	fn.sourceText = c.sourceText
 	for i, param := range closure.params {
@@ -3005,11 +3023,11 @@ func (c *compiler) compileGenericFor(stmt genericForStatement) error {
 		c.locals[name] = register
 		if i == 1 && len(loopShape.values) == 1 {
 			if slots, ok := c.expressionArrayElementSlots(loopShape.values[0]); ok {
-				c.localStringSlots[register] = slots
-				c.localRowStringSlots[register] = slots
+				setLocalSlots(&c.localStringSlots, register, slots)
+				setLocalSlots(&c.localRowStringSlots, register, slots)
 			}
 			if slots, ok := c.expressionArrayElementFieldSlots(loopShape.values[0]); ok {
-				c.localFieldArrayElemSlots[register] = slots
+				setLocalNestedSlots(&c.localFieldArrayElemSlots, register, slots)
 			}
 		}
 	}
@@ -3214,7 +3232,7 @@ func (c *compiler) resolveVariable(name string) (variableRef, bool) {
 }
 
 func (c *compiler) resolveSymbol(symbolID int) (variableRef, bool) {
-	if register, ok := c.symbolRegisters[symbolID]; ok {
+	if register, ok := denseSymbolSlot(c.symbolRegisters, symbolID); ok {
 		return variableRef{kind: variableLocal, index: register}, true
 	}
 	upvalue, ok := c.resolveSymbolUpvalue(symbolID)
@@ -3225,16 +3243,14 @@ func (c *compiler) resolveSymbol(symbolID int) (variableRef, bool) {
 }
 
 func (c *compiler) resolveSymbolUpvalue(symbolID int) (int, bool) {
-	if c.upvaluesByID != nil {
-		if upvalue, ok := c.upvaluesByID[symbolID]; ok {
-			return upvalue, true
-		}
+	if upvalue, ok := denseSymbolSlot(c.upvaluesByID, symbolID); ok {
+		return upvalue, true
 	}
 	if c.parent == nil {
 		return 0, false
 	}
 
-	if register, ok := c.parent.symbolRegisters[symbolID]; ok {
+	if register, ok := denseSymbolSlot(c.parent.symbolRegisters, symbolID); ok {
 		return c.addSymbolUpvalue(symbolID, upvalueDesc{local: true, index: register, copy: c.canCopyParentLocalUpvalue(symbolID)}), true
 	}
 	parentUpvalue, ok := c.parent.resolveSymbolUpvalue(symbolID)
@@ -3275,8 +3291,8 @@ func (c *compiler) addUpvalue(name string, desc upvalueDesc) int {
 }
 
 func (c *compiler) addSymbolUpvalue(symbolID int, desc upvalueDesc) int {
-	if c.upvaluesByID == nil {
-		c.upvaluesByID = make(map[int]int)
+	if len(c.upvaluesByID) < len(c.bind.symbols) {
+		c.upvaluesByID = newDenseSymbolSlots(len(c.bind.symbols))
 	}
 	upvalue := len(c.upvalueDescs)
 	c.upvaluesByID[symbolID] = upvalue
@@ -4070,6 +4086,9 @@ func copyLocals(locals map[string]int) map[string]int {
 }
 
 func copyLocalStringSlots(slots map[int]map[string]int) map[int]map[string]int {
+	if len(slots) == 0 {
+		return nil
+	}
 	copied := make(map[int]map[string]int, len(slots))
 	for register, registerSlots := range slots {
 		slotCopy := make(map[string]int, len(registerSlots))
@@ -4082,6 +4101,9 @@ func copyLocalStringSlots(slots map[int]map[string]int) map[int]map[string]int {
 }
 
 func copyLocalFieldArrayElemSlots(slots map[int]map[string]map[string]int) map[int]map[string]map[string]int {
+	if len(slots) == 0 {
+		return nil
+	}
 	copied := make(map[int]map[string]map[string]int, len(slots))
 	for register, fieldSlots := range slots {
 		fieldCopy := make(map[string]map[string]int, len(fieldSlots))

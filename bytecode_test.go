@@ -9733,7 +9733,7 @@ func parseSourceForBytecodeIRTest(t *testing.T, source string) sourceArtifact {
 func compilerForBytecodeIRTest(artifact sourceArtifact, options compilerOptions) compiler {
 	return compiler{
 		bind:            artifact.bind,
-		symbolRegisters: make(map[int]int),
+		symbolRegisters: newDenseSymbolSlots(len(artifact.bind.symbols)),
 		locals:          make(map[string]int),
 		options:         options,
 	}
