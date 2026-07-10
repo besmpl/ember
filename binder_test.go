@@ -1,9 +1,6 @@
 package ember
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 func TestBindProgramRecordsLexicalSymbolsAndScopes(t *testing.T) {
 	prog := parseSourceForBindTest(t, `
@@ -96,16 +93,8 @@ return add(2)
 	outerUse := result.mustUse(t, "outer", outer.id, true)
 	result.mustUse(t, "inner", inner.id, false)
 	result.mustCapture(t, outer.id, 1)
-
-	resolved, ok := result.findUseAtRange(outerUse.start, outerUse.end)
-	if !ok {
-		t.Fatalf("range lookup (%d, %d) did not find outer use", outerUse.start, outerUse.end)
-	}
-	if resolved.symbol != outer.id {
-		t.Fatalf("range lookup resolved symbol %d, want outer %d", resolved.symbol, outer.id)
-	}
-	if got := source[outerUse.start:outerUse.end]; got != "outer" {
-		t.Fatalf("outer use range contains %q, want outer", got)
+	if outerUse.symbol != outer.id || !outerUse.captured {
+		t.Fatalf("outer use = %#v, want captured symbol %d", outerUse, outer.id)
 	}
 }
 
@@ -119,13 +108,10 @@ return value
 	result := bindProgram(prog)
 	value := result.mustSymbol(t, "value", symbolLocal, 0)
 
-	targetStart := strings.Index(source, "value = value")
-	if targetStart < 0 {
-		t.Fatalf("test source missing assignment target")
-	}
-	targetUse, ok := result.findUseAtRange(targetStart, targetStart+len("value"))
+	targetID := prog.statements[1].assign.targets[0].id
+	targetUse, ok := result.use(targetID)
 	if !ok {
-		t.Fatalf("range lookup did not find assignment target at %d", targetStart)
+		t.Fatalf("assignment target use(%d) was not resolved", targetID)
 	}
 	if targetUse.symbol != value.id {
 		t.Fatalf("assignment target resolved symbol %d, want %d", targetUse.symbol, value.id)
@@ -148,11 +134,12 @@ return convert(value)
 	alias := result.mustSymbol(t, "Alias", symbolTypeAlias, 0)
 	typeParam := result.mustSymbol(t, "T", symbolTypeParameter, 2)
 
-	result.mustUseAtText(t, source, "value: T", "T", typeParam.id)
-	result.mustUseAtText(t, source, "other: Alias", "Alias", alias.id)
-	result.mustUseAtText(t, source, "value: Alias", "Alias", alias.id)
-	result.mustUseAtText(t, source, "param: Alias", "Alias", alias.id)
-	result.mustUseAtText(t, source, "): Alias", "Alias", alias.id)
+	if got := result.countUses(typeParam.id); got != 1 {
+		t.Fatalf("type parameter T use count = %d, want 1", got)
+	}
+	if got := result.countUses(alias.id); got != 4 {
+		t.Fatalf("Alias use count = %d, want 4", got)
+	}
 }
 
 func TestBindProgramIndexesUsesAndDefinitionsByStableSyntaxID(t *testing.T) {
@@ -261,55 +248,34 @@ func parseSourceForBindTest(t *testing.T, source string) program {
 func (r bindResult) mustUse(t *testing.T, name string, symbolID int, captured bool) boundUse {
 	t.Helper()
 	for _, facts := range r.nodeFacts {
-		use := facts.use
-		if use.name == name && use.symbol == symbolID && use.captured == captured {
-			return use
+		if facts.flags&boundNodeUseValid != 0 && facts.use == int32(symbolID) && (facts.flags&boundNodeCaptured != 0) == captured {
+			return boundUse{symbol: symbolID, captured: captured}
 		}
 	}
 	t.Fatalf("missing use %q -> %d captured=%t; node facts: %#v", name, symbolID, captured, r.nodeFacts)
 	return boundUse{}
 }
 
-func (r bindResult) mustUseAtText(t *testing.T, source string, context string, name string, symbolID int) boundUse {
-	t.Helper()
-	contextStart := strings.Index(source, context)
-	if contextStart < 0 {
-		t.Fatalf("test source missing context %q", context)
-	}
-	nameStart := strings.Index(context, name)
-	if nameStart < 0 {
-		t.Fatalf("context %q missing name %q", context, name)
-	}
-	start := contextStart + nameStart
-	use, ok := r.findUseAtRange(start, start+len(name))
-	if !ok {
-		t.Fatalf("missing use for %q at [%d,%d); node facts: %#v", name, start, start+len(name), r.nodeFacts)
-	}
-	if use.symbol != symbolID {
-		t.Fatalf("use %q at [%d,%d) resolved symbol %d, want %d", name, start, start+len(name), use.symbol, symbolID)
-	}
-	return use
-}
-
-func (r bindResult) findUseAtRange(start int, end int) (boundUse, bool) {
+func (r bindResult) countUses(symbolID int) int {
+	count := 0
 	for _, facts := range r.nodeFacts {
-		use := facts.use
-		if use.start == start && use.end == end {
-			return use, true
+		if facts.flags&boundNodeUseValid != 0 && facts.use == int32(symbolID) {
+			count++
 		}
 	}
-	return boundUse{}, false
+	return count
 }
 
-func (r bindResult) mustCapture(t *testing.T, symbolID int, scope int) boundCapture {
+func (r bindResult) mustCapture(t *testing.T, symbolID int, scope int) {
 	t.Helper()
-	for _, capture := range r.captures {
-		if capture.symbol == symbolID && capture.scope == scope {
-			return capture
+	if scope >= 0 && scope < len(r.scopes) {
+		for _, captured := range r.scopes[scope].capturedSymbols {
+			if captured == int32(symbolID) {
+				return
+			}
 		}
 	}
-	t.Fatalf("missing capture symbol %d in scope %d; captures: %#v", symbolID, scope, r.captures)
-	return boundCapture{}
+	t.Fatalf("missing capture symbol %d in scope %d; scopes: %#v", symbolID, scope, r.scopes)
 }
 
 func (r bindResult) mustSymbol(t *testing.T, name string, kind symbolKind, scope int) boundSymbol {

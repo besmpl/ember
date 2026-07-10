@@ -1,15 +1,51 @@
 package ember
 
-type symbolKind string
+type symbolKind uint8
 
 const (
-	symbolLocal         symbolKind = "local"
-	symbolLocalFunction symbolKind = "localFunction"
-	symbolParameter     symbolKind = "parameter"
-	symbolTypeAlias     symbolKind = "typeAlias"
-	symbolTypeParameter symbolKind = "typeParameter"
-	symbolTypePack      symbolKind = "typePack"
+	symbolInvalid symbolKind = iota
+	symbolLocal
+	symbolLocalFunction
+	symbolParameter
+	symbolTypeAlias
+	symbolTypeParameter
+	symbolTypePack
 )
+
+func (kind symbolKind) String() string {
+	switch kind {
+	case symbolLocal:
+		return "local"
+	case symbolLocalFunction:
+		return "localFunction"
+	case symbolParameter:
+		return "parameter"
+	case symbolTypeAlias:
+		return "typeAlias"
+	case symbolTypeParameter:
+		return "typeParameter"
+	case symbolTypePack:
+		return "typePack"
+	default:
+		return "invalid"
+	}
+}
+
+type symbolNamespace uint8
+
+const (
+	valueNamespace symbolNamespace = iota
+	typeNamespace
+)
+
+func (kind symbolKind) namespace() symbolNamespace {
+	switch kind {
+	case symbolTypeAlias, symbolTypeParameter, symbolTypePack:
+		return typeNamespace
+	default:
+		return valueNamespace
+	}
+}
 
 type boundSymbol struct {
 	id       int
@@ -23,26 +59,35 @@ type boundSymbol struct {
 }
 
 type boundUse struct {
-	node     syntaxID
-	name     string
 	symbol   int
-	scope    int
-	start    int
-	end      int
 	captured bool
 }
 
-type boundCapture struct {
-	symbol int
-	scope  int
-}
+// boundUseClassification is stored directly in boundNodeFacts.use. A
+// nonnegative value is a bound symbol id; negative values distinguish an
+// identifier the binder has not visited from a valid unresolved global.
+type boundUseClassification int32
+
+const (
+	boundUseUnvisited boundUseClassification = -1
+	boundUseGlobal    boundUseClassification = -2
+)
+
+type boundNodeFlags uint8
+
+const (
+	boundNodeUseValid boundNodeFlags = 1 << iota
+	boundNodeCaptured
+	boundNodeExpressionValid
+	boundNodeMultiret
+)
 
 type bindScope struct {
-	id              int
 	parent          int
 	funcID          int
-	names           map[string]int
-	capturedSymbols []bool
+	symbolStart     int
+	symbolCount     int
+	capturedSymbols []int32
 }
 
 type boundSymbolFacts struct {
@@ -59,23 +104,24 @@ type boundExpressionFact struct {
 }
 
 type boundNodeFacts struct {
-	definition int
-	use        boundUse
-	expression boundExpressionFact
+	definition      int32
+	use             int32
+	expressionArity int32
+	flags           boundNodeFlags
 }
 
 type bindResult struct {
-	scopes    []bindScope
-	symbols   []boundSymbol
-	captures  []boundCapture
-	nodeFacts []boundNodeFacts
+	scopes       []bindScope
+	scopeSymbols []int32
+	symbols      []boundSymbol
+	nodeFacts    []boundNodeFacts
 }
 
 func (r bindResult) definition(node syntaxID) (boundSymbol, bool) {
 	if node <= 0 || int(node) >= len(r.nodeFacts) {
 		return boundSymbol{}, false
 	}
-	symbolID := r.nodeFacts[node].definition
+	symbolID := int(r.nodeFacts[node].definition)
 	if symbolID < 0 || symbolID >= len(r.symbols) {
 		return boundSymbol{}, false
 	}
@@ -86,22 +132,42 @@ func (r bindResult) use(node syntaxID) (boundUse, bool) {
 	if node <= 0 || int(node) >= len(r.nodeFacts) {
 		return boundUse{}, false
 	}
-	use := r.nodeFacts[node].use
-	return use, use.symbol >= 0
+	facts := r.nodeFacts[node]
+	use := boundUse{
+		symbol:   int(facts.use),
+		captured: facts.flags&boundNodeCaptured != 0,
+	}
+	return use, facts.flags&boundNodeUseValid != 0 && facts.use >= 0
+}
+
+func (r bindResult) useClassification(node syntaxID) boundUseClassification {
+	if node <= 0 || int(node) >= len(r.nodeFacts) {
+		return boundUseUnvisited
+	}
+	return boundUseClassification(r.nodeFacts[node].use)
 }
 
 func (r bindResult) expressionFact(node syntaxID) (boundExpressionFact, bool) {
 	if node <= 0 || int(node) >= len(r.nodeFacts) {
 		return boundExpressionFact{}, false
 	}
-	fact := r.nodeFacts[node].expression
+	facts := r.nodeFacts[node]
+	fact := boundExpressionFact{
+		valid:    facts.flags&boundNodeExpressionValid != 0,
+		arity:    int(facts.expressionArity),
+		multiret: facts.flags&boundNodeMultiret != 0,
+	}
 	return fact, fact.valid
 }
 
 type binder struct {
-	result      bindResult
-	scopes      []int
-	activeNames map[string]int
+	result           bindResult
+	scopes           []int
+	scopeLastSymbols []int32
+	symbolPrevious   []int32
+	captureSets      []map[int]struct{}
+	activeValueNames map[string]int
+	activeTypeNames  map[string]int
 }
 
 func bindProgram(prog program) bindResult {
@@ -111,13 +177,14 @@ func bindProgram(prog program) bindResult {
 	nodeFacts := make([]boundNodeFacts, prog.nodeCount+1)
 	for i := range nodeFacts {
 		nodeFacts[i].definition = -1
-		nodeFacts[i].use.symbol = -1
+		nodeFacts[i].use = int32(boundUseUnvisited)
 	}
 	b := binder{
 		result: bindResult{
 			nodeFacts: nodeFacts,
 		},
-		activeNames: make(map[string]int),
+		activeValueNames: make(map[string]int),
+		activeTypeNames:  make(map[string]int),
 	}
 	b.pushScopeForFunction(0)
 	b.bindStatements(prog.statements)
@@ -247,7 +314,12 @@ func (b *binder) bindExpression(expr expression) {
 		if multiret {
 			arity = -1
 		}
-		b.result.nodeFacts[expr.id].expression = boundExpressionFact{valid: true, arity: arity, multiret: multiret}
+		facts := &b.result.nodeFacts[expr.id]
+		facts.expressionArity = int32(arity)
+		facts.flags |= boundNodeExpressionValid
+		if multiret {
+			facts.flags |= boundNodeMultiret
+		}
 	}
 	for _, and := range expr.terms {
 		for _, comparison := range and.terms {
@@ -318,7 +390,7 @@ func (b *binder) bindTerm(value term) {
 	}
 	b.bindTypeExpression(value.cast)
 	if value.name != "" {
-		b.recordUse(value.id, value.name, value.start, value.start+len(value.name))
+		b.recordUse(value.id, value.name, valueNamespace)
 	}
 	for _, selector := range value.selectors {
 		if selector.index != nil {
@@ -347,7 +419,14 @@ func (b *binder) bindTypeExpression(value *typeExpression) {
 	switch value.kind {
 	case typeKindName:
 		if len(value.name) > 0 {
-			b.recordUse(value.id, value.name[0], value.start, value.start+len(value.name[0]))
+			namespace := typeNamespace
+			// Qualified module types resolve their root through the value
+			// namespace (for example, Types.Count); the exported member is
+			// checked against the module summary rather than local type facts.
+			if len(value.name) > 1 {
+				namespace = valueNamespace
+			}
+			b.recordUse(value.id, value.name[0], namespace)
 		}
 		for _, arg := range value.typeArgs {
 			b.bindTypeExpression(arg)
@@ -390,7 +469,7 @@ func (b *binder) bindTypeFunction(value *typeExpression) {
 }
 
 func (b *binder) bindAssignTarget(target assignTarget, assignment bool) {
-	b.recordUse(target.id, target.name, target.start, target.end)
+	b.recordUse(target.id, target.name, valueNamespace)
 	if assignment && len(target.selectors) == 0 {
 		if use, ok := b.result.use(target.id); ok {
 			facts := &b.result.symbols[use.symbol].facts
@@ -424,35 +503,36 @@ func (b *binder) define(name string, kind symbolKind, node syntaxID) boundSymbol
 		funcID:   b.currentFunction(),
 		shadowed: -1,
 	}
-	if shadowed, ok := b.lookup(name); ok {
+	if shadowed, ok := b.lookup(name, kind.namespace()); ok {
 		symbol.shadowed = shadowed.id
 	}
 	b.result.symbols = append(b.result.symbols, symbol)
+	b.symbolPrevious = append(b.symbolPrevious, b.scopeLastSymbols[scope])
 	if node > 0 {
-		b.result.nodeFacts[node].definition = symbol.id
+		b.result.nodeFacts[node].definition = int32(symbol.id)
 	}
-	b.result.scopes[scope].names[name] = symbol.id
-	b.activeNames[name] = symbol.id
+	b.scopeLastSymbols[scope] = int32(symbol.id)
+	b.result.scopes[scope].symbolCount++
+	b.activeNames(kind.namespace())[name] = symbol.id
 	return symbol
 }
 
-func (b *binder) recordUse(node syntaxID, name string, start int, end int) {
-	symbol, ok := b.lookup(name)
+func (b *binder) recordUse(node syntaxID, name string, namespace symbolNamespace) {
+	if node <= 0 || int(node) >= len(b.result.nodeFacts) {
+		return
+	}
+	facts := &b.result.nodeFacts[node]
+	symbol, ok := b.lookup(name, namespace)
 	if !ok {
+		facts.use = int32(boundUseGlobal)
+		facts.flags |= boundNodeUseValid
 		return
 	}
 	captured := symbol.funcID != b.currentFunction()
-	use := boundUse{
-		node:     node,
-		name:     name,
-		symbol:   symbol.id,
-		scope:    b.currentScope(),
-		start:    start,
-		end:      end,
-		captured: captured,
-	}
-	if node > 0 {
-		b.result.nodeFacts[node].use = use
+	facts.use = int32(symbol.id)
+	facts.flags |= boundNodeUseValid
+	if captured {
+		facts.flags |= boundNodeCaptured
 	}
 	if captured {
 		b.capture(symbol.id, b.currentScope())
@@ -462,19 +542,41 @@ func (b *binder) recordUse(node syntaxID, name string, start int, end int) {
 func (b *binder) capture(symbolID int, scope int) {
 	facts := &b.result.symbols[symbolID].facts
 	facts.captured = true
-	scopeFacts := &b.result.scopes[scope]
-	if len(scopeFacts.capturedSymbols) <= symbolID {
-		scopeFacts.capturedSymbols = append(scopeFacts.capturedSymbols, make([]bool, symbolID-len(scopeFacts.capturedSymbols)+1)...)
+	capturedSymbols := &b.result.scopes[scope].capturedSymbols
+	capturedSet := b.captureSets[scope]
+	if capturedSet != nil {
+		if _, ok := capturedSet[symbolID]; ok {
+			return
+		}
+	} else {
+		for _, captured := range *capturedSymbols {
+			if captured == int32(symbolID) {
+				return
+			}
+		}
 	}
-	if scopeFacts.capturedSymbols[symbolID] {
-		return
+	if len(*capturedSymbols) >= 8 && capturedSet == nil {
+		capturedSet = make(map[int]struct{}, len(*capturedSymbols)+1)
+		for _, captured := range *capturedSymbols {
+			capturedSet[int(captured)] = struct{}{}
+		}
+		b.captureSets[scope] = capturedSet
 	}
-	scopeFacts.capturedSymbols[symbolID] = true
-	b.result.captures = append(b.result.captures, boundCapture{symbol: symbolID, scope: scope})
+	*capturedSymbols = append(*capturedSymbols, int32(symbolID))
+	if capturedSet != nil {
+		capturedSet[symbolID] = struct{}{}
+	}
 }
 
-func (b *binder) lookup(name string) (boundSymbol, bool) {
-	if symbolID, ok := b.activeNames[name]; ok {
+func (b *binder) activeNames(namespace symbolNamespace) map[string]int {
+	if namespace == typeNamespace {
+		return b.activeTypeNames
+	}
+	return b.activeValueNames
+}
+
+func (b *binder) lookup(name string, namespace symbolNamespace) (boundSymbol, bool) {
+	if symbolID, ok := b.activeNames(namespace)[name]; ok {
 		return b.result.symbols[symbolID], true
 	}
 	return boundSymbol{}, false
@@ -489,28 +591,40 @@ func (b *binder) pushScopeForFunction(funcID int) int {
 	if len(b.scopes) > 0 {
 		parent = b.scopes[len(b.scopes)-1]
 	}
+	scopeID := len(b.result.scopes)
 	scope := bindScope{
-		id:     len(b.result.scopes),
 		parent: parent,
 		funcID: funcID,
-		names:  make(map[string]int),
 	}
 	b.result.scopes = append(b.result.scopes, scope)
-	b.scopes = append(b.scopes, scope.id)
-	return scope.id
+	b.scopeLastSymbols = append(b.scopeLastSymbols, -1)
+	b.captureSets = append(b.captureSets, nil)
+	b.scopes = append(b.scopes, scopeID)
+	return scopeID
 }
 
 func (b *binder) popScope() {
-	scope := b.result.scopes[b.currentScope()]
-	for name, symbolID := range scope.names {
+	scopeID := b.currentScope()
+	scope := &b.result.scopes[scopeID]
+	if scope.symbolCount > 0 {
+		scope.symbolStart = len(b.result.scopeSymbols)
+		for symbolID := int(b.scopeLastSymbols[scopeID]); symbolID >= 0; symbolID = int(b.symbolPrevious[symbolID]) {
+			b.result.scopeSymbols = append(b.result.scopeSymbols, int32(symbolID))
+		}
+		b.scopeLastSymbols[scopeID] = -1
+	}
+	for i := scope.symbolStart; i < scope.symbolStart+scope.symbolCount; i++ {
+		symbolID := int(b.result.scopeSymbols[i])
+		name := b.result.symbols[symbolID].name
 		shadowed := b.result.symbols[symbolID].shadowed
-		for shadowed >= 0 && b.result.symbols[shadowed].scope == scope.id {
+		for shadowed >= 0 && b.result.symbols[shadowed].scope == scopeID {
 			shadowed = b.result.symbols[shadowed].shadowed
 		}
+		activeNames := b.activeNames(b.result.symbols[symbolID].kind.namespace())
 		if shadowed >= 0 {
-			b.activeNames[name] = shadowed
+			activeNames[name] = shadowed
 		} else {
-			delete(b.activeNames, name)
+			delete(activeNames, name)
 		}
 	}
 	b.scopes = b.scopes[:len(b.scopes)-1]
