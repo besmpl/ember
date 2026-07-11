@@ -5,7 +5,11 @@ import (
 	"go/ast"
 	goparser "go/parser"
 	"go/token"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -36,6 +40,233 @@ func TestDisassembleProtoNamesInstructions(t *testing.T) {
 func TestInstructionSizeBudget(t *testing.T) {
 	if got, want := reflect.TypeOf(packedInstruction{}).Size(), uintptr(16); got > want {
 		t.Fatalf("instruction size is %d bytes, want at most %d", got, want)
+	}
+}
+
+func TestRuntimeProductionDispatchBudgets(t *testing.T) {
+	if got, want := reflect.TypeOf(packedInstruction{}).Size(), uintptr(12); got != want {
+		t.Fatalf("packed instruction size is %d bytes, want exactly %d", got, want)
+	}
+
+	source, err := os.ReadFile("vm.go")
+	if err != nil {
+		t.Fatalf("ReadFile(vm.go) returned error: %v", err)
+	}
+	start := strings.Index(string(source), "func (thread *vmThread) runProductionFrame(")
+	endMarker := "\nfunc (thread *vmThread) runDirectFrame("
+	if start < 0 {
+		t.Fatal("vm.go is missing runProductionFrame")
+	}
+	end := strings.Index(string(source[start:]), endMarker)
+	if end < 0 {
+		t.Fatal("vm.go is missing runDirectFrame after runProductionFrame")
+	}
+	productionSource := string(source[start : start+end])
+	for _, forbidden := range []string{".unpack()", "trace.", "consumeInstruction", "runDebug", "directFrameOpcodeCounts"} {
+		if strings.Contains(productionSource, forbidden) {
+			t.Fatalf("production dispatch contains forbidden per-instruction mechanism %q", forbidden)
+		}
+	}
+
+	artifactDir := filepath.Join("tmp", "runtime-parity", "dispatch")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) returned error: %v", artifactDir, err)
+	}
+	binary := filepath.Join(artifactDir, "dispatch-budget.test")
+	compile := exec.Command("go", "test", "-c", "-o", binary, ".")
+	if output, err := compile.CombinedOutput(); err != nil {
+		t.Fatalf("go test -c returned error: %v\n%s", err, output)
+	}
+
+	const (
+		cleanSymbolBytes = int64(74704)
+		cleanStackBytes  = int64(9424)
+	)
+	symbolBytes := productionDispatchSymbolBytes(t, binary)
+	if symbolBytes > cleanSymbolBytes/2 {
+		t.Fatalf("production dispatch symbol is %d bytes, want at most %d", symbolBytes, cleanSymbolBytes/2)
+	}
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		stackBytes := productionDispatchStackBytes(t, binary)
+		if stackBytes > cleanStackBytes/2 {
+			t.Fatalf("production dispatch stack reservation is %d bytes, want at most %d", stackBytes, cleanStackBytes/2)
+		}
+		t.Logf("production symbol=%d bytes stack=%d bytes", symbolBytes, stackBytes)
+	} else {
+		t.Logf("production symbol=%d bytes; stack parsing is pinned to darwin/arm64", symbolBytes)
+	}
+}
+
+func productionDispatchSymbolBytes(t *testing.T, binary string) int64 {
+	t.Helper()
+	command := exec.Command("go", "tool", "nm", "-size", binary)
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("go tool nm returned error: %v", err)
+	}
+	want := "github.com/besmpl/ember.(*vmThread).runProductionFrame"
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 4 || fields[3] != want {
+			continue
+		}
+		size, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			t.Fatalf("parse production symbol size %q: %v", fields[1], err)
+		}
+		return size
+	}
+	t.Fatalf("go tool nm did not report %s", want)
+	return 0
+}
+
+func productionDispatchStackBytes(t *testing.T, binary string) int64 {
+	t.Helper()
+	symbol := `github.com/besmpl/ember\.\(\*vmThread\)\.runProductionFrame$`
+	command := exec.Command("go", "tool", "objdump", "-s", symbol, binary)
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("go tool objdump returned error: %v", err)
+	}
+	pattern := regexp.MustCompile(`SUB \$([0-9]+), RSP`)
+	var reservation int64
+	for _, match := range pattern.FindAllStringSubmatch(string(output), -1) {
+		value, err := strconv.ParseInt(match[1], 10, 64)
+		if err != nil {
+			t.Fatalf("parse production stack reservation %q: %v", match[1], err)
+		}
+		if value > reservation {
+			reservation = value
+		}
+	}
+	if reservation == 0 {
+		t.Fatal("go tool objdump did not report an arm64 stack reservation")
+	}
+	return reservation
+}
+
+func TestNumericForParity(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   float64
+	}{
+		{name: "positive", source: `
+local total = 0
+for i = 1, 3 do
+	total = total + i
+end
+return total
+`, want: 6},
+		{name: "negative", source: `
+local total = 0
+for i = 5, 1, -2 do
+	total = total + i
+end
+return total
+`, want: 9},
+		{name: "numeric strings", source: `
+local total = 0
+for i = "1", "3", "1" do
+	total = total + i
+end
+return total
+`, want: 6},
+		{name: "empty positive", source: `
+local total = 0
+for i = 3, 1 do
+	total = total + i
+end
+return total
+`, want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proto, err := Compile(tt.source)
+			if err != nil {
+				t.Fatalf("Compile returned error: %v", err)
+			}
+			results, err := Run(proto)
+			if err != nil {
+				t.Fatalf("Run returned error: %v", err)
+			}
+			got, ok := results[0].Number()
+			if !ok || got != tt.want {
+				t.Fatalf("Run result is %v (%t), want %g", results[0], ok, tt.want)
+			}
+		})
+	}
+
+	proto, err := Compile(`
+local total = 0
+for i = 1, 200 do
+	total = total + ((i * 3 - i // 2) % 17)
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile arithmetic fixture returned error: %v", err)
+	}
+	checkPC, loopPC := -1, -1
+	for pc, ins := range proto.code {
+		switch ins.op {
+		case opNumericForCheck:
+			checkPC = pc
+		case opNumericForLoop:
+			loopPC = pc
+		}
+	}
+	if checkPC < 0 || loopPC <= checkPC {
+		t.Fatalf("numeric-for instruction pair is check=%d loop=%d", checkPC, loopPC)
+	}
+	for pc := checkPC + 1; pc < loopPC; pc++ {
+		if proto.code[pc].op == opMove {
+			t.Fatalf("numeric-for body contains MOVE at pc %d: %s", pc, disassembleInstruction(proto, proto.code[pc]))
+		}
+	}
+	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
+	if err != nil {
+		t.Fatalf("instrumented arithmetic fixture returned error: %v", err)
+	}
+	if got, ok := results[0].Number(); !ok || got != 1595 {
+		t.Fatalf("arithmetic fixture result is %v (%t), want 1595", results[0], ok)
+	}
+	var instructionCount uint64
+	for _, count := range snapshot.opcodeCounts {
+		instructionCount += count
+	}
+	if instructionCount > 1206 {
+		t.Fatalf("arithmetic fixture executed %d instructions, want at most 1206", instructionCount)
+	}
+	if got := snapshot.opcodeCount(opNumericForCheck); got != 1 {
+		t.Fatalf("NUMERIC_FOR_CHECK executed %d times, want setup once", got)
+	}
+}
+
+func TestOpcodeCountBudget(t *testing.T) {
+	if opcodeCount != len(allOpcodes) {
+		t.Fatalf("opcodeCount is %d, allOpcodes has %d entries", opcodeCount, len(allOpcodes))
+	}
+	if opcodeCount > 71 {
+		t.Fatalf("executable opcode count is %d, want at most 71", opcodeCount)
+	}
+}
+
+func TestProtoSideTableBudget(t *testing.T) {
+	want := []string{
+		"constants", "constantKeys", "constantKeyOK", "constantNumbers", "constantNumberOK",
+		"globalNames", "code", "packedCode", "lines", "prototypes", "numericOperandFactPCs",
+		"upvalues", "registers", "params", "variadic", "capturedLocals", "directFrameIndexCaches",
+		"entryNilRegisters", "reuseZeroCaptureClosure", "canonicalClosure", "verifyErr",
+	}
+	typeOfProto := reflect.TypeOf(Proto{})
+	if typeOfProto.NumField() != len(want) {
+		t.Fatalf("Proto has %d fields, want frozen %d-field layout with no new side table", typeOfProto.NumField(), len(want))
+	}
+	for index, name := range want {
+		if got := typeOfProto.Field(index).Name; got != name {
+			t.Fatalf("Proto field %d is %q, want %q", index, got, name)
+		}
 	}
 }
 
@@ -9454,11 +9685,11 @@ func wantDirectFrameOpcodeSupported(op opcode) bool {
 
 func wantOpcodeControlFlow(op opcode) opcodeControlFlowKind {
 	switch op {
-	case opJump,
-		opNumericForLoop:
+	case opJump:
 		return opcodeControlJump
 	case opArrayNextJump2,
 		opNumericForCheck,
+		opNumericForLoop,
 		opJumpIfNotEqualK,
 		opJumpIfNotLessK,
 		opJumpIfNotGreaterK,

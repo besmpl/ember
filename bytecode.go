@@ -222,7 +222,7 @@ var opcodeMetadataTable = func() [opcodeLimit]opcodeMetadataEntry {
 		table[op].jumpTarget = opcodeJumpTargetB
 	}
 	for _, op := range []opcode{opNumericForLoop} {
-		table[op].controlFlow = opcodeControlJump
+		table[op].controlFlow = opcodeControlBranch
 		table[op].jumpTarget = opcodeJumpTargetD
 	}
 	for _, op := range []opcode{
@@ -430,7 +430,7 @@ var opcodeMetadataTable = func() [opcodeLimit]opcodeMetadataEntry {
 	setOperands(opGreater, register, register, register, unused)
 	setOperands(opGreaterEqual, register, register, register, unused)
 	setOperands(opNumericForCheck, register, register, register, jumpTarget)
-	setOperands(opNumericForLoop, register, register, unused, jumpTarget)
+	setOperands(opNumericForLoop, register, register, register, jumpTarget)
 	setOperands(opJumpIfNotEqualK, register, constant, unused, jumpTarget)
 	setOperands(opJumpIfNotLessK, register, constant, unused, jumpTarget)
 	setOperands(opJumpIfNotGreaterK, register, constant, unused, jumpTarget)
@@ -663,7 +663,6 @@ type packedInstruction struct {
 	b  int16
 	c  int16
 	d  int32
-	_  uint32
 }
 
 func packInstruction(ins instruction) (packedInstruction, error) {
@@ -1156,6 +1155,7 @@ func classifyInstructionOperands(ins instruction) bytecodeOperands {
 		return bytecodeOperands{
 			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
 			b: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.b},
+			c: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.c},
 			d: bytecodeOperand{kind: bytecodeOperandJumpTarget, value: ins.d},
 		}
 	case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
@@ -1973,22 +1973,16 @@ func detectNumericForLoops(code []instruction) []numericForLoopDesc {
 }
 
 func numericForIncrementPC(code []instruction, checkPC int, check instruction) int {
-	for pc, ins := range code {
+	for pc := checkPC + 1; pc < len(code); pc++ {
+		ins := code[pc]
 		if ins.op == opNumericForLoop &&
 			ins.a == check.a &&
 			ins.b == check.c &&
-			ins.d == checkPC {
+			ins.c == check.b {
 			return pc
 		}
-		if pc == 0 || ins.op != opJump || ins.b != checkPC {
-			continue
-		}
-		increment := code[pc-1]
-		if increment.op == opAdd &&
-			increment.a == check.a &&
-			increment.b == check.a &&
-			increment.c == check.c {
-			return pc - 1
+		if ins.op == opReturn || ins.op == opReturnOne {
+			break
 		}
 	}
 	return -1
@@ -2899,7 +2893,7 @@ func verifyInstruction(proto *Proto, pc int, ins instruction) error {
 		}
 		return verifyJumpTarget(proto, ins.d)
 	case opNumericForLoop:
-		if err := verifyRegisters(proto, ins.a, ins.b); err != nil {
+		if err := verifyRegisters(proto, ins.a, ins.b, ins.c); err != nil {
 			return err
 		}
 		return verifyJumpTarget(proto, ins.d)

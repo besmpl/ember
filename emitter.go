@@ -701,25 +701,36 @@ func multiplicativeSingleCall(expr multiplicativeExpression) (callExpression, bo
 }
 
 func (c *compiler) compileMultiplicativeExpressionTo(expr multiplicativeExpression, target int) error {
-	if err := c.compileTermTo(expr.first, target); err != nil {
+	firstTarget := target
+	if len(expr.rest) > 0 {
+		if ref, ok := c.termLocalRef(expr.first); ok {
+			firstTarget = ref.index
+		}
+	}
+	if err := c.compileTermTo(expr.first, firstTarget); err != nil {
 		return err
 	}
+	valueRegister := firstTarget
 
 	for _, part := range expr.rest {
 		if right, ok := foldNumberTerm(part.value); ok {
 			constant := c.addConstant(NumberValue(right))
 			switch part.op {
 			case multiplicativeMultiply:
-				c.emit(instruction{op: opMulK, a: target, b: target, c: constant})
+				c.emit(instruction{op: opMulK, a: target, b: valueRegister, c: constant})
+				valueRegister = target
 				continue
 			case multiplicativeDivide:
-				c.emit(instruction{op: opDivK, a: target, b: target, c: constant})
+				c.emit(instruction{op: opDivK, a: target, b: valueRegister, c: constant})
+				valueRegister = target
 				continue
 			case multiplicativeModulo:
-				c.emit(instruction{op: opModK, a: target, b: target, c: constant})
+				c.emit(instruction{op: opModK, a: target, b: valueRegister, c: constant})
+				valueRegister = target
 				continue
 			case multiplicativeFloorDiv:
-				c.emit(instruction{op: opIDivK, a: target, b: target, c: constant})
+				c.emit(instruction{op: opIDivK, a: target, b: valueRegister, c: constant})
+				valueRegister = target
 				continue
 			}
 		}
@@ -730,18 +741,19 @@ func (c *compiler) compileMultiplicativeExpressionTo(expr multiplicativeExpressi
 		}
 		switch part.op {
 		case multiplicativeMultiply:
-			c.emit(instruction{op: opMul, a: target, b: target, c: right})
+			c.emit(instruction{op: opMul, a: target, b: valueRegister, c: right})
 		case multiplicativeDivide:
-			c.emit(instruction{op: opDiv, a: target, b: target, c: right})
+			c.emit(instruction{op: opDiv, a: target, b: valueRegister, c: right})
 		case multiplicativeModulo:
-			c.emit(instruction{op: opMod, a: target, b: target, c: right})
+			c.emit(instruction{op: opMod, a: target, b: valueRegister, c: right})
 		case multiplicativeFloorDiv:
-			c.emit(instruction{op: opIDiv, a: target, b: target, c: right})
+			c.emit(instruction{op: opIDiv, a: target, b: valueRegister, c: right})
 		default:
 			c.releaseTemp(right)
 			return fmt.Errorf("compile: unsupported multiplicative operator %q", part.op)
 		}
 		c.releaseTemp(right)
+		valueRegister = target
 	}
 
 	return nil
@@ -2379,13 +2391,8 @@ func (c *compiler) compileFor(stmt forStatement) error {
 		c.emitLoadConst(step, NumberValue(1))
 	}
 
-	zero := c.addConstant(NumberValue(0))
-	c.emit(instruction{op: opAddK, a: loopVar, b: loopVar, c: zero})
-	c.emit(instruction{op: opAddK, a: limit, b: limit, c: zero})
-	c.emit(instruction{op: opAddK, a: step, b: step, c: zero})
-
-	conditionStart := c.pc()
 	jumpExit := c.emit(instruction{op: opNumericForCheck, a: loopVar, b: limit, c: step})
+	bodyStart := c.pc()
 
 	if err := c.assignDefinition(stmt.nameID, symbolLocal, loopVar); err != nil {
 		return err
@@ -2401,7 +2408,7 @@ func (c *compiler) compileFor(stmt forStatement) error {
 	for _, jump := range loop.continueJumps {
 		c.patchJump(jump, incrementStart)
 	}
-	c.emit(instruction{op: opNumericForLoop, a: loopVar, b: step, d: conditionStart})
+	c.emit(instruction{op: opNumericForLoop, a: loopVar, b: step, c: limit, d: bodyStart})
 
 	exit := c.pc()
 	c.patchJumpD(jumpExit, exit)

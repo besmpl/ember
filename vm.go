@@ -7,6 +7,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"unsafe"
 )
 
 // Run executes a compiled Ember prototype with Ember's base globals and returns
@@ -2116,6 +2117,53 @@ func (frame *vmFrame) applyInlineResultDestination(destination vmResultDestinati
 }
 
 func (thread *vmThread) runFrame(frame *vmFrame) (vmFrameResult, error) {
+	if !thread.directFrameInstrumented && thread.debugHook == nil && thread.instructionBudget < 0 &&
+		protoSupportsProductionFrame(frame.proto) {
+		return thread.runProductionFrameLoop(frame)
+	}
+	return thread.runCheckedFrame(frame)
+}
+
+func protoSupportsProductionFrame(proto *Proto) bool {
+	if proto == nil {
+		return false
+	}
+	for _, ins := range proto.packedCode {
+		switch ins.op {
+		case opLoadConst, opMove,
+			opAdd, opSub, opMul, opDiv, opMod, opIDiv,
+			opAddK, opSubK, opMulK, opDivK, opModK, opIDivK,
+			opNeg, opNumericForCheck, opNumericForLoop,
+			opJumpIfFalse, opJump, opReturnOne, opReturn:
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (thread *vmThread) runProductionFrameLoop(frame *vmFrame) (vmFrameResult, error) {
+	for {
+		exit := thread.runProductionFrame(frame)
+		if result, complete, err := exit.frameResult(); complete || err != nil {
+			return result, err
+		}
+		if exit.kind != directFrameSideExitGenericFrame {
+			break
+		}
+		result, complete, resumed, err := thread.runColdInstruction(frame)
+		if complete || err != nil {
+			return result, err
+		}
+		if !resumed {
+			break
+		}
+	}
+	return vmFrameResult{}, fmt.Errorf("run: production frame stopped without a result")
+}
+
+func (thread *vmThread) runCheckedFrame(frame *vmFrame) (vmFrameResult, error) {
 	for {
 		var exit directFrameSideExit
 		if thread.directFrameInstrumented {
@@ -2143,6 +2191,7 @@ func (thread *vmThread) runFrame(frame *vmFrame) (vmFrameResult, error) {
 	return vmFrameResult{}, fmt.Errorf("run: direct frame stopped without a result")
 }
 
+//go:noinline
 func (thread *vmThread) runColdInstruction(frame *vmFrame) (vmFrameResult, bool, bool, error) {
 	previousFrame := thread.coldInstructionFrame
 	previousRan := thread.coldInstructionRan
@@ -2792,6 +2841,286 @@ func directFrameValueHasMetatable(value Value) bool {
 	return table != nil && table.metatable != nil
 }
 
+// numericForOperand performs the coercion that Luau applies at numeric-for
+// setup. The converted values are written back by NUMERIC_FOR_CHECK so the
+// loop body and every backedge operate on numbers without repeating parsing.
+func numericForOperand(value Value, name string) (float64, error) {
+	number, ok := numericOperandValue(value)
+	if !ok {
+		return 0, fmt.Errorf("run: numeric for %s is %s, want number", name, value.Kind())
+	}
+	if math.IsNaN(number) {
+		return 0, fmt.Errorf("run: numeric for operand is NaN")
+	}
+	return number, nil
+}
+
+func productionInstructionAt(base *packedInstruction, index int) packedInstruction {
+	return *(*packedInstruction)(unsafe.Add(unsafe.Pointer(base), uintptr(index)*unsafe.Sizeof(packedInstruction{})))
+}
+
+func productionValueAt(base *Value, index int) *Value {
+	return (*Value)(unsafe.Add(unsafe.Pointer(base), uintptr(index)*unsafe.Sizeof(Value{})))
+}
+
+func productionFloatAt(base *float64, index int) float64 {
+	return *(*float64)(unsafe.Add(unsafe.Pointer(base), uintptr(index)*unsafe.Sizeof(float64(0))))
+}
+
+func productionBoolAt(base *bool, index int) bool {
+	return *(*bool)(unsafe.Add(unsafe.Pointer(base), uintptr(index)*unsafe.Sizeof(false)))
+}
+
+func setProductionNumber(registerBase *Value, index int, number float64) {
+	value := productionValueAt(registerBase, index)
+	if value.ref != nil {
+		value.ref = nil
+	}
+	value.number = number
+	value.kind = NumberKind
+	value.bool = false
+	value.nativeID = 0
+}
+
+func (thread *vmThread) runProductionFrame(frame *vmFrame) directFrameSideExit {
+	proto := frame.proto
+	code := proto.packedCode
+	constants := proto.constants
+	constantNumbers := proto.constantNumbers
+	constantNumberOK := proto.constantNumberOK
+	numericOperandFactPCs := proto.numericOperandFactPCs
+	registerBase := frame.registerBase
+	registers := frame.registers
+	if registerBase >= 0 && registerBase+frame.registerCount <= len(thread.stack) {
+		registers = thread.stack[registerBase : registerBase+frame.registerCount]
+	}
+	codeBase := unsafe.SliceData(code)
+	constantBase := unsafe.SliceData(constants)
+	constantNumberBase := unsafe.SliceData(constantNumbers)
+	constantNumberOKBase := unsafe.SliceData(constantNumberOK)
+	numericOperandFactBase := unsafe.SliceData(numericOperandFactPCs)
+	registerValueBase := unsafe.SliceData(registers)
+	pc := frame.pc
+
+	for pc < len(code) {
+		ins := productionInstructionAt(codeBase, pc)
+		switch ins.op {
+		case opLoadConst:
+			*productionValueAt(registerValueBase, int(ins.a)) = *productionValueAt(constantBase, int(ins.b))
+
+		case opMove:
+			*productionValueAt(registerValueBase, int(ins.a)) = *productionValueAt(registerValueBase, int(ins.b))
+
+		case opAdd:
+			a, b, c := int(ins.a), int(ins.b), int(ins.c)
+			left, right := productionValueAt(registerValueBase, b), productionValueAt(registerValueBase, c)
+			if !productionBoolAt(numericOperandFactBase, pc) &&
+				(left.kind != NumberKind || right.kind != NumberKind) {
+				frame.pc = pc
+				return directFrameEnterGenericFrame()
+			}
+			setProductionNumber(registerValueBase, a, left.number+right.number)
+
+		case opSub:
+			a, b, c := int(ins.a), int(ins.b), int(ins.c)
+			left, right := productionValueAt(registerValueBase, b), productionValueAt(registerValueBase, c)
+			if !productionBoolAt(numericOperandFactBase, pc) &&
+				(left.kind != NumberKind || right.kind != NumberKind) {
+				frame.pc = pc
+				return directFrameEnterGenericFrame()
+			}
+			setProductionNumber(registerValueBase, a, left.number-right.number)
+
+		case opMul:
+			a, b, c := int(ins.a), int(ins.b), int(ins.c)
+			left, right := productionValueAt(registerValueBase, b), productionValueAt(registerValueBase, c)
+			if !productionBoolAt(numericOperandFactBase, pc) &&
+				(left.kind != NumberKind || right.kind != NumberKind) {
+				frame.pc = pc
+				return directFrameEnterGenericFrame()
+			}
+			setProductionNumber(registerValueBase, a, left.number*right.number)
+
+		case opDiv:
+			a, b, c := int(ins.a), int(ins.b), int(ins.c)
+			left, right := productionValueAt(registerValueBase, b), productionValueAt(registerValueBase, c)
+			if !productionBoolAt(numericOperandFactBase, pc) &&
+				(left.kind != NumberKind || right.kind != NumberKind) {
+				frame.pc = pc
+				return directFrameEnterGenericFrame()
+			}
+			setProductionNumber(registerValueBase, a, left.number/right.number)
+
+		case opMod:
+			a, b, c := int(ins.a), int(ins.b), int(ins.c)
+			left, right := productionValueAt(registerValueBase, b), productionValueAt(registerValueBase, c)
+			if !productionBoolAt(numericOperandFactBase, pc) &&
+				(left.kind != NumberKind || right.kind != NumberKind) {
+				frame.pc = pc
+				return directFrameEnterGenericFrame()
+			}
+			setProductionNumber(registerValueBase, a, left.number-math.Floor(left.number/right.number)*right.number)
+
+		case opIDiv:
+			a, b, c := int(ins.a), int(ins.b), int(ins.c)
+			left, right := productionValueAt(registerValueBase, b), productionValueAt(registerValueBase, c)
+			if !productionBoolAt(numericOperandFactBase, pc) &&
+				(left.kind != NumberKind || right.kind != NumberKind) {
+				frame.pc = pc
+				return directFrameEnterGenericFrame()
+			}
+			setProductionNumber(registerValueBase, a, math.Floor(left.number/right.number))
+
+		case opAddK:
+			a, b, c := int(ins.a), int(ins.b), int(ins.c)
+			left := productionValueAt(registerValueBase, b)
+			if !productionBoolAt(constantNumberOKBase, c) ||
+				(!productionBoolAt(numericOperandFactBase, pc) && left.kind != NumberKind) {
+				frame.pc = pc
+				return directFrameEnterGenericFrame()
+			}
+			setProductionNumber(registerValueBase, a, left.number+productionFloatAt(constantNumberBase, c))
+
+		case opSubK:
+			a, b, c := int(ins.a), int(ins.b), int(ins.c)
+			left := productionValueAt(registerValueBase, b)
+			if !productionBoolAt(constantNumberOKBase, c) ||
+				(!productionBoolAt(numericOperandFactBase, pc) && left.kind != NumberKind) {
+				frame.pc = pc
+				return directFrameEnterGenericFrame()
+			}
+			setProductionNumber(registerValueBase, a, left.number-productionFloatAt(constantNumberBase, c))
+
+		case opMulK:
+			a, b, c := int(ins.a), int(ins.b), int(ins.c)
+			left := productionValueAt(registerValueBase, b)
+			if !productionBoolAt(constantNumberOKBase, c) ||
+				(!productionBoolAt(numericOperandFactBase, pc) && left.kind != NumberKind) {
+				frame.pc = pc
+				return directFrameEnterGenericFrame()
+			}
+			setProductionNumber(registerValueBase, a, left.number*productionFloatAt(constantNumberBase, c))
+
+		case opDivK:
+			a, b, c := int(ins.a), int(ins.b), int(ins.c)
+			left := productionValueAt(registerValueBase, b)
+			if !productionBoolAt(constantNumberOKBase, c) ||
+				(!productionBoolAt(numericOperandFactBase, pc) && left.kind != NumberKind) {
+				frame.pc = pc
+				return directFrameEnterGenericFrame()
+			}
+			setProductionNumber(registerValueBase, a, left.number/productionFloatAt(constantNumberBase, c))
+
+		case opModK:
+			a, b, c := int(ins.a), int(ins.b), int(ins.c)
+			left := productionValueAt(registerValueBase, b)
+			if !productionBoolAt(constantNumberOKBase, c) ||
+				(!productionBoolAt(numericOperandFactBase, pc) && left.kind != NumberKind) {
+				frame.pc = pc
+				return directFrameEnterGenericFrame()
+			}
+			right := productionFloatAt(constantNumberBase, c)
+			setProductionNumber(registerValueBase, a, left.number-math.Floor(left.number/right)*right)
+
+		case opIDivK:
+			a, b, c := int(ins.a), int(ins.b), int(ins.c)
+			left := productionValueAt(registerValueBase, b)
+			if !productionBoolAt(constantNumberOKBase, c) ||
+				(!productionBoolAt(numericOperandFactBase, pc) && left.kind != NumberKind) {
+				frame.pc = pc
+				return directFrameEnterGenericFrame()
+			}
+			setProductionNumber(registerValueBase, a, math.Floor(left.number/productionFloatAt(constantNumberBase, c)))
+
+		case opNeg:
+			a, b := int(ins.a), int(ins.b)
+			value := productionValueAt(registerValueBase, b)
+			if value.kind != NumberKind {
+				frame.pc = pc
+				return directFrameEnterGenericFrame()
+			}
+			setProductionNumber(registerValueBase, a, -value.number)
+
+		case opNumericForCheck:
+			a, b, c := int(ins.a), int(ins.b), int(ins.c)
+			loop, err := numericForOperand(*productionValueAt(registerValueBase, a), "loop value")
+			if err != nil {
+				frame.pc = pc
+				return directFrameFail(err)
+			}
+			limit, err := numericForOperand(*productionValueAt(registerValueBase, b), "limit")
+			if err != nil {
+				frame.pc = pc
+				return directFrameFail(err)
+			}
+			step, err := numericForOperand(*productionValueAt(registerValueBase, c), "step")
+			if err != nil {
+				frame.pc = pc
+				return directFrameFail(err)
+			}
+			setProductionNumber(registerValueBase, a, loop)
+			setProductionNumber(registerValueBase, b, limit)
+			setProductionNumber(registerValueBase, c, step)
+			if (step > 0 && loop > limit) || (step <= 0 && loop < limit) {
+				pc = int(ins.d)
+				continue
+			}
+
+		case opNumericForLoop:
+			a, b, c := int(ins.a), int(ins.b), int(ins.c)
+			loop := productionValueAt(registerValueBase, a)
+			step := productionValueAt(registerValueBase, b)
+			limit := productionValueAt(registerValueBase, c)
+			next := loop.number + step.number
+			setProductionNumber(registerValueBase, a, next)
+			if (step.number > 0 && next <= limit.number) || (step.number <= 0 && next >= limit.number) {
+				pc = int(ins.d)
+				continue
+			}
+
+		case opJumpIfFalse:
+			if !productionValueAt(registerValueBase, int(ins.a)).truthy() {
+				pc = int(ins.b)
+				continue
+			}
+
+		case opJump:
+			pc = int(ins.b)
+			continue
+
+		case opReturnOne:
+			frame.pc = pc
+			return directFrameReturn(vmReturnedValue(*productionValueAt(registerValueBase, int(ins.a))))
+
+		case opReturn:
+			a, count := int(ins.a), int(ins.b)
+			frame.pc = pc
+			if count < 0 {
+				prefixCount := -count - 1
+				if frame.openResultStart == a+prefixCount {
+					return directFrameReturn(vmReturnedPrefixAndWindow(registers[a:a+prefixCount], frame.openResults))
+				}
+				return directFrameReturn(vmReturnedValue(registers[a]))
+			}
+			if count == 0 {
+				return directFrameReturn(vmReturnedValues(nil))
+			}
+			if count == 1 {
+				return directFrameReturn(vmReturnedValue(registers[a]))
+			}
+			return directFrameReturn(vmReturnedBorrowedValues(registers[a : a+count]))
+
+		default:
+			frame.pc = pc
+			return directFrameEnterGenericFrame()
+		}
+		pc++
+	}
+
+	frame.pc = pc
+	return directFrameReturn(vmReturnedValues(nil))
+}
+
 func (thread *vmThread) runDirectFrame(frame *vmFrame) directFrameSideExit {
 	return runDirectFrameCore(thread, frame, directFrameNoTrace{})
 }
@@ -2814,14 +3143,19 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 	constantNumberOK := proto.constantNumberOK
 	numericOperandFactPCs := proto.numericOperandFactPCs
 	registers := frame.registers
+	pc := frame.pc
+	defer func() { frame.pc = pc }()
 	picCounts := trace.picCounts()
 	runLineHook := thread.debugHook != nil && thread.debugLineHook
 	runCountHook := thread.debugHook != nil && thread.debugCountInterval > 0
 	runInstructionBudget := thread.instructionBudget >= 0
 
-	for frame.pc < len(code) {
+	for pc < len(code) {
 		if runInstructionBudget && !thread.consumeInstruction() {
 			return directFrameReturn(vmFrameResult{state: vmCallStateHostInterrupt})
+		}
+		if runLineHook || runCountHook {
+			frame.pc = pc
 		}
 		if runLineHook {
 			if err := thread.runDebugLineHook(frame); err != nil {
@@ -2833,8 +3167,9 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 				return directFrameFail(err)
 			}
 		}
-		ins := code[frame.pc].unpack()
-		trace.countInstruction(proto, frame.pc, ins.op, len(code))
+		packed := code[pc]
+		ins := instruction{op: packed.op, a: int(packed.a), b: int(packed.b), c: int(packed.c), d: int(packed.d)}
+		trace.countInstruction(proto, pc, ins.op, len(code))
 		switch ins.op {
 		case opLoadConst:
 			registers[ins.a] = constants[ins.b]
@@ -2883,7 +3218,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 				frame.openResultStart = ins.a
 				frame.openResults = vmAdjustedBorrowedResultWindow(frame.varargs)
 				registers[ins.a] = frame.openResults.at(0)
-				frame.pc++
+				pc++
 				continue
 			}
 			frame.openResultStart = -1
@@ -2992,7 +3327,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 			}
 			key := registers[ins.c]
 			if key.kind == StringKind {
-				cache := proto.directFrameIndexCacheAt(frame.pc)
+				cache := proto.directFrameIndexCacheAt(pc)
 				value := registers[ins.d]
 				if cache.writeCounted(nextTable, key.stringText(), value, picCounts) {
 					break
@@ -3057,7 +3392,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 			}
 			key := registers[ins.d]
 			if key.kind == StringKind {
-				cache := proto.directFrameIndexCacheAt(frame.pc)
+				cache := proto.directFrameIndexCacheAt(pc)
 				if value, ok := cache.getCounted(nextTable, key.stringText(), picCounts); ok {
 					registers[ins.a] = value
 					break
@@ -3142,7 +3477,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 			}
 			key := registers[ins.b]
 			if key.kind == StringKind {
-				cache := proto.directFrameIndexCacheAt(frame.pc)
+				cache := proto.directFrameIndexCacheAt(pc)
 				value := registers[ins.c]
 				if cache.writeCounted(table, key.stringText(), value, picCounts) {
 					break
@@ -3179,7 +3514,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 			}
 			key := registers[ins.c]
 			if key.kind == StringKind {
-				cache := proto.directFrameIndexCacheAt(frame.pc)
+				cache := proto.directFrameIndexCacheAt(pc)
 				if value, ok := cache.getCounted(table, key.stringText(), picCounts); ok {
 					registers[ins.a] = value
 					break
@@ -3325,7 +3660,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 				if next < 1 || next > len(table.array) {
 					registers[ins.a] = NilValue()
 					registers[ins.a+1] = NilValue()
-					frame.pc = ins.d
+					pc = int(ins.d)
 					continue
 				}
 				registers[ins.a] = NumberValue(float64(next))
@@ -3344,7 +3679,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 			if count < 1 || first.IsNil() {
 				registers[ins.a] = NilValue()
 				registers[ins.a+1] = NilValue()
-				frame.pc = ins.d
+				pc = int(ins.d)
 				continue
 			}
 			registers[ins.a] = first
@@ -3357,7 +3692,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 		case opAdd:
 			left := registers[ins.b]
 			right := registers[ins.c]
-			if frame.pc < len(numericOperandFactPCs) && numericOperandFactPCs[frame.pc] {
+			if pc < len(numericOperandFactPCs) && numericOperandFactPCs[pc] {
 				registers[ins.a] = NumberValue(left.number + right.number)
 				break
 			}
@@ -3382,7 +3717,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 		case opSub:
 			left := registers[ins.b]
 			right := registers[ins.c]
-			if frame.pc < len(numericOperandFactPCs) && numericOperandFactPCs[frame.pc] {
+			if pc < len(numericOperandFactPCs) && numericOperandFactPCs[pc] {
 				registers[ins.a] = NumberValue(left.number - right.number)
 				break
 			}
@@ -3407,7 +3742,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 		case opMul:
 			left := registers[ins.b]
 			right := registers[ins.c]
-			if frame.pc < len(numericOperandFactPCs) && numericOperandFactPCs[frame.pc] {
+			if pc < len(numericOperandFactPCs) && numericOperandFactPCs[pc] {
 				registers[ins.a] = NumberValue(left.number * right.number)
 				break
 			}
@@ -3432,7 +3767,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 		case opDiv:
 			left := registers[ins.b]
 			right := registers[ins.c]
-			if frame.pc < len(numericOperandFactPCs) && numericOperandFactPCs[frame.pc] {
+			if pc < len(numericOperandFactPCs) && numericOperandFactPCs[pc] {
 				registers[ins.a] = NumberValue(left.number / right.number)
 				break
 			}
@@ -3457,7 +3792,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 		case opMod:
 			left := registers[ins.b]
 			right := registers[ins.c]
-			if frame.pc < len(numericOperandFactPCs) && numericOperandFactPCs[frame.pc] {
+			if pc < len(numericOperandFactPCs) && numericOperandFactPCs[pc] {
 				registers[ins.a] = NumberValue(left.number - math.Floor(left.number/right.number)*right.number)
 				break
 			}
@@ -3482,7 +3817,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 		case opIDiv:
 			left := registers[ins.b]
 			right := registers[ins.c]
-			if frame.pc < len(numericOperandFactPCs) && numericOperandFactPCs[frame.pc] {
+			if pc < len(numericOperandFactPCs) && numericOperandFactPCs[pc] {
 				registers[ins.a] = NumberValue(math.Floor(left.number / right.number))
 				break
 			}
@@ -3527,7 +3862,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 
 		case opAddK:
 			left := registers[ins.b]
-			if frame.pc < len(numericOperandFactPCs) && numericOperandFactPCs[frame.pc] && constantNumberOK[ins.c] {
+			if pc < len(numericOperandFactPCs) && numericOperandFactPCs[pc] && constantNumberOK[ins.c] {
 				registers[ins.a] = NumberValue(left.number + constantNumbers[ins.c])
 				break
 			}
@@ -3552,7 +3887,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 
 		case opSubK:
 			left := registers[ins.b]
-			if frame.pc < len(numericOperandFactPCs) && numericOperandFactPCs[frame.pc] && constantNumberOK[ins.c] {
+			if pc < len(numericOperandFactPCs) && numericOperandFactPCs[pc] && constantNumberOK[ins.c] {
 				registers[ins.a] = NumberValue(left.number - constantNumbers[ins.c])
 				break
 			}
@@ -3577,7 +3912,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 
 		case opMulK:
 			left := registers[ins.b]
-			if frame.pc < len(numericOperandFactPCs) && numericOperandFactPCs[frame.pc] && constantNumberOK[ins.c] {
+			if pc < len(numericOperandFactPCs) && numericOperandFactPCs[pc] && constantNumberOK[ins.c] {
 				registers[ins.a] = NumberValue(left.number * constantNumbers[ins.c])
 				break
 			}
@@ -3602,7 +3937,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 
 		case opDivK:
 			left := registers[ins.b]
-			if frame.pc < len(numericOperandFactPCs) && numericOperandFactPCs[frame.pc] && constantNumberOK[ins.c] {
+			if pc < len(numericOperandFactPCs) && numericOperandFactPCs[pc] && constantNumberOK[ins.c] {
 				registers[ins.a] = NumberValue(left.number / constantNumbers[ins.c])
 				break
 			}
@@ -3627,7 +3962,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 
 		case opModK:
 			left := registers[ins.b]
-			if frame.pc < len(numericOperandFactPCs) && numericOperandFactPCs[frame.pc] && constantNumberOK[ins.c] {
+			if pc < len(numericOperandFactPCs) && numericOperandFactPCs[pc] && constantNumberOK[ins.c] {
 				right := constantNumbers[ins.c]
 				registers[ins.a] = NumberValue(left.number - math.Floor(left.number/right)*right)
 				break
@@ -3654,7 +3989,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 
 		case opIDivK:
 			left := registers[ins.b]
-			if frame.pc < len(numericOperandFactPCs) && numericOperandFactPCs[frame.pc] && constantNumberOK[ins.c] {
+			if pc < len(numericOperandFactPCs) && numericOperandFactPCs[pc] && constantNumberOK[ins.c] {
 				registers[ins.a] = NumberValue(math.Floor(left.number / constantNumbers[ins.c]))
 				break
 			}
@@ -3679,7 +4014,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 
 		case opNeg:
 			operand := registers[ins.b]
-			if frame.pc < len(numericOperandFactPCs) && numericOperandFactPCs[frame.pc] {
+			if pc < len(numericOperandFactPCs) && numericOperandFactPCs[pc] {
 				registers[ins.a] = NumberValue(-operand.number)
 				break
 			}
@@ -3804,7 +4139,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 		case opLess:
 			left := registers[ins.b]
 			right := registers[ins.c]
-			if frame.pc < len(numericOperandFactPCs) && numericOperandFactPCs[frame.pc] {
+			if pc < len(numericOperandFactPCs) && numericOperandFactPCs[pc] {
 				if math.IsNaN(left.number) || math.IsNaN(right.number) {
 					return directFrameEnterGenericFrame()
 				}
@@ -3829,7 +4164,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 		case opLessEqual:
 			left := registers[ins.b]
 			right := registers[ins.c]
-			if frame.pc < len(numericOperandFactPCs) && numericOperandFactPCs[frame.pc] {
+			if pc < len(numericOperandFactPCs) && numericOperandFactPCs[pc] {
 				if math.IsNaN(left.number) || math.IsNaN(right.number) {
 					return directFrameEnterGenericFrame()
 				}
@@ -3854,7 +4189,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 		case opGreater:
 			left := registers[ins.b]
 			right := registers[ins.c]
-			if frame.pc < len(numericOperandFactPCs) && numericOperandFactPCs[frame.pc] {
+			if pc < len(numericOperandFactPCs) && numericOperandFactPCs[pc] {
 				if math.IsNaN(left.number) || math.IsNaN(right.number) {
 					return directFrameEnterGenericFrame()
 				}
@@ -3879,7 +4214,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 		case opGreaterEqual:
 			left := registers[ins.b]
 			right := registers[ins.c]
-			if frame.pc < len(numericOperandFactPCs) && numericOperandFactPCs[frame.pc] {
+			if pc < len(numericOperandFactPCs) && numericOperandFactPCs[pc] {
 				if math.IsNaN(left.number) || math.IsNaN(right.number) {
 					return directFrameEnterGenericFrame()
 				}
@@ -3902,55 +4237,53 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 			registers[ins.a] = BoolValue(left.number >= right.number)
 
 		case opNumericForCheck:
-			loopValue := registers[ins.a]
-			limitValue := registers[ins.b]
-			stepValue := registers[ins.c]
-			if loopValue.kind != NumberKind {
-				return directFrameFail(fmt.Errorf("run: numeric for loop value is %s, want number", loopValue.Kind()))
+			loop, err := numericForOperand(registers[ins.a], "loop value")
+			if err != nil {
+				return directFrameFail(err)
 			}
-			if limitValue.kind != NumberKind {
-				return directFrameFail(fmt.Errorf("run: numeric for limit is %s, want number", limitValue.Kind()))
+			limit, err := numericForOperand(registers[ins.b], "limit")
+			if err != nil {
+				return directFrameFail(err)
 			}
-			if stepValue.kind != NumberKind {
-				return directFrameFail(fmt.Errorf("run: numeric for step is %s, want number", stepValue.Kind()))
+			step, err := numericForOperand(registers[ins.c], "step")
+			if err != nil {
+				return directFrameFail(err)
 			}
-			if math.IsNaN(loopValue.number) || math.IsNaN(limitValue.number) || math.IsNaN(stepValue.number) {
-				return directFrameFail(fmt.Errorf("run: numeric for operand is NaN"))
-			}
-			if stepValue.number > 0 {
-				if loopValue.number > limitValue.number {
-					frame.pc = ins.d
-					continue
-				}
-				break
-			}
-			if loopValue.number < limitValue.number {
-				frame.pc = ins.d
+			registers[ins.a] = NumberValue(loop)
+			registers[ins.b] = NumberValue(limit)
+			registers[ins.c] = NumberValue(step)
+			if (step > 0 && loop > limit) || (step <= 0 && loop < limit) {
+				pc = ins.d
 				continue
 			}
 
 		case opNumericForLoop:
 			loopValue := registers[ins.a]
 			stepValue := registers[ins.b]
-			if loopValue.kind != NumberKind || stepValue.kind != NumberKind {
+			limitValue := registers[ins.c]
+			if loopValue.kind != NumberKind || stepValue.kind != NumberKind || limitValue.kind != NumberKind {
 				return directFrameEnterGenericFrame()
 			}
-			registers[ins.a] = NumberValue(loopValue.number + stepValue.number)
-			frame.pc = ins.d
-			continue
+			next := loopValue.number + stepValue.number
+			registers[ins.a] = NumberValue(next)
+			if (stepValue.number > 0 && next <= limitValue.number) ||
+				(stepValue.number <= 0 && next >= limitValue.number) {
+				pc = ins.d
+				continue
+			}
 
 		case opJumpIfNotEqualK:
 			left := registers[ins.a]
 			if left.kind == NumberKind && constantNumberOK[ins.b] {
 				if left.number != constantNumbers[ins.b] {
-					frame.pc = ins.d
+					pc = ins.d
 					continue
 				}
 				break
 			}
 			if left.kind == StringKind && constantKeyOK[ins.b] {
 				if left.stringText() != constantKeys[ins.b].str {
-					frame.pc = ins.d
+					pc = ins.d
 					continue
 				}
 				break
@@ -3964,14 +4297,14 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 				return directFrameFail(fmt.Errorf("run: equal failed: %w", err))
 			}
 			if !equal {
-				frame.pc = ins.d
+				pc = ins.d
 				continue
 			}
 
 		case opJumpIfTableHasMetatable:
 			base := registers[ins.a]
 			if table := base.tableRef(); table != nil && table.metatable != nil {
-				frame.pc = ins.d
+				pc = ins.d
 				continue
 			}
 
@@ -3982,7 +4315,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 				return directFrameFail(fmt.Errorf("run: less failed: %w", err))
 			}
 			if !less {
-				frame.pc = ins.d
+				pc = ins.d
 				continue
 			}
 
@@ -3993,7 +4326,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 				return directFrameFail(fmt.Errorf("run: greater failed: %w", err))
 			}
 			if !greater {
-				frame.pc = ins.d
+				pc = ins.d
 				continue
 			}
 
@@ -4004,7 +4337,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 				return directFrameFail(fmt.Errorf("run: less failed: %w", err))
 			}
 			if less {
-				frame.pc = ins.d
+				pc = ins.d
 				continue
 			}
 
@@ -4015,7 +4348,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 				return directFrameFail(fmt.Errorf("run: greater failed: %w", err))
 			}
 			if greater {
-				frame.pc = ins.d
+				pc = ins.d
 				continue
 			}
 
@@ -4027,7 +4360,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 				return directFrameFail(fmt.Errorf("run: less failed: %w", err))
 			}
 			if !less {
-				frame.pc = ins.d
+				pc = ins.d
 				continue
 			}
 
@@ -4039,7 +4372,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 				return directFrameFail(fmt.Errorf("run: greater failed: %w", err))
 			}
 			if !greater {
-				frame.pc = ins.d
+				pc = ins.d
 				continue
 			}
 
@@ -4051,7 +4384,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 				return directFrameFail(fmt.Errorf("run: less failed: %w", err))
 			}
 			if less {
-				frame.pc = ins.d
+				pc = ins.d
 				continue
 			}
 
@@ -4063,7 +4396,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 				return directFrameFail(fmt.Errorf("run: greater failed: %w", err))
 			}
 			if greater {
-				frame.pc = ins.d
+				pc = ins.d
 				continue
 			}
 
@@ -4076,7 +4409,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 			want := constantNumbers[ins.c]
 			got := left.number - math.Floor(left.number/modRight)*modRight
 			if got != want {
-				frame.pc = ins.d
+				pc = ins.d
 				continue
 			}
 
@@ -4095,13 +4428,13 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 			if equal, fast := directFrameScalarValuesEqual(left, right); fast {
 				picCounts.addScalarEqualityFastCheck()
 				if !equal {
-					frame.pc = ins.d
+					pc = ins.d
 					continue
 				}
 				break
 			}
 			if !valuesEqual(left, right) {
-				frame.pc = ins.d
+				pc = ins.d
 				continue
 			}
 
@@ -4120,7 +4453,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 			greater := left.number > right
 			if (ins.op == opJumpIfStringFieldNotGreaterK && !greater) ||
 				(ins.op == opJumpIfStringFieldGreaterK && greater) {
-				frame.pc = ins.d
+				pc = ins.d
 				continue
 			}
 
@@ -4135,18 +4468,18 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 				return directFrameEnterGenericFrame()
 			}
 			if !(left.number > right.number) {
-				frame.pc = ins.d
+				pc = ins.d
 				continue
 			}
 
 		case opJumpIfFalse:
 			if !registers[ins.a].truthy() {
-				frame.pc = ins.b
+				pc = ins.b
 				continue
 			}
 
 		case opJump:
-			frame.pc = ins.b
+			pc = ins.b
 			continue
 
 		case opCall:
@@ -4202,7 +4535,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 			if closure, ok := callee.scriptFunction(); ok && ins.c >= 0 {
 				destination := vmResultDestination{register: ins.a, count: ins.d}
 				args := registers[ins.b+1 : ins.b+1+ins.c]
-				frame.pc++
+				pc++
 				result, err := thread.runInlineScriptCall(closure, args)
 				if err != nil {
 					if yield, ok := err.(vmYieldRequest); ok {
@@ -4255,7 +4588,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 			if !ok {
 				return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
 			}
-			frame.pc++
+			pc++
 			var value Value
 			var callErr error
 			if ins.d <= 3 {
@@ -4291,7 +4624,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 			if !ok {
 				return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
 			}
-			frame.pc++
+			pc++
 			var value Value
 			var callErr error
 			if ins.d <= 3 {
@@ -4338,7 +4671,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 				return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
 			}
 			registers[ins.a+1] = receiver
-			frame.pc++
+			pc++
 			argCount := ins.d + 1
 			var value Value
 			var err error
@@ -4396,7 +4729,7 @@ func runDirectFrameCore[T directFrameTrace](thread *vmThread, frame *vmFrame, tr
 		default:
 			return directFrameEnterGenericFrame()
 		}
-		frame.pc++
+		pc++
 	}
 
 	return directFrameReturn(vmReturnedValues(nil))
@@ -5418,58 +5751,22 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			frame.setRegister(ins.a, BoolValue(value))
 
 		case opNumericForCheck:
-			if true {
-				loopValue := frame.registers[ins.a]
-				limitValue := frame.registers[ins.b]
-				stepValue := frame.registers[ins.c]
-				if loopValue.kind != NumberKind {
-					return vmFrameResult{}, fmt.Errorf("run: numeric for loop value is %s, want number", loopValue.Kind())
-				}
-				if limitValue.kind != NumberKind {
-					return vmFrameResult{}, fmt.Errorf("run: numeric for limit is %s, want number", limitValue.Kind())
-				}
-				if stepValue.kind != NumberKind {
-					return vmFrameResult{}, fmt.Errorf("run: numeric for step is %s, want number", stepValue.Kind())
-				}
-				if math.IsNaN(loopValue.number) || math.IsNaN(limitValue.number) || math.IsNaN(stepValue.number) {
-					return vmFrameResult{}, fmt.Errorf("run: numeric for operand is NaN")
-				}
-				if stepValue.number > 0 {
-					if loopValue.number > limitValue.number {
-						frame.pc = ins.d
-						continue
-					}
-					break
-				}
-				if loopValue.number < limitValue.number {
-					frame.pc = ins.d
-					continue
-				}
-				break
+			loop, err := numericForOperand(frame.register(ins.a), "loop value")
+			if err != nil {
+				return vmFrameResult{}, err
 			}
-			loopValue := frame.register(ins.a)
-			limitValue := frame.register(ins.b)
-			stepValue := frame.register(ins.c)
-			if loopValue.kind != NumberKind {
-				return vmFrameResult{}, fmt.Errorf("run: numeric for loop value is %s, want number", loopValue.Kind())
+			limit, err := numericForOperand(frame.register(ins.b), "limit")
+			if err != nil {
+				return vmFrameResult{}, err
 			}
-			if limitValue.kind != NumberKind {
-				return vmFrameResult{}, fmt.Errorf("run: numeric for limit is %s, want number", limitValue.Kind())
+			step, err := numericForOperand(frame.register(ins.c), "step")
+			if err != nil {
+				return vmFrameResult{}, err
 			}
-			if stepValue.kind != NumberKind {
-				return vmFrameResult{}, fmt.Errorf("run: numeric for step is %s, want number", stepValue.Kind())
-			}
-			if math.IsNaN(loopValue.number) || math.IsNaN(limitValue.number) || math.IsNaN(stepValue.number) {
-				return vmFrameResult{}, fmt.Errorf("run: numeric for operand is NaN")
-			}
-			if stepValue.number > 0 {
-				if loopValue.number > limitValue.number {
-					frame.pc = ins.d
-					continue
-				}
-				break
-			}
-			if loopValue.number < limitValue.number {
+			frame.setRegister(ins.a, NumberValue(loop))
+			frame.setRegister(ins.b, NumberValue(limit))
+			frame.setRegister(ins.c, NumberValue(step))
+			if (step > 0 && loop > limit) || (step <= 0 && loop < limit) {
 				frame.pc = ins.d
 				continue
 			}
@@ -5477,15 +5774,17 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 		case opNumericForLoop:
 			loopValue := frame.register(ins.a)
 			stepValue := frame.register(ins.b)
-			if loopValue.kind != NumberKind {
-				return vmFrameResult{}, fmt.Errorf("run: numeric for loop value is %s, want number", loopValue.Kind())
+			limitValue := frame.register(ins.c)
+			if loopValue.kind != NumberKind || stepValue.kind != NumberKind || limitValue.kind != NumberKind {
+				return vmFrameResult{}, fmt.Errorf("run: numeric for operand is not a number")
 			}
-			if stepValue.kind != NumberKind {
-				return vmFrameResult{}, fmt.Errorf("run: numeric for step is %s, want number", stepValue.Kind())
+			next := loopValue.number + stepValue.number
+			frame.setRegister(ins.a, NumberValue(next))
+			if (stepValue.number > 0 && next <= limitValue.number) ||
+				(stepValue.number <= 0 && next >= limitValue.number) {
+				frame.pc = ins.d
+				continue
 			}
-			frame.setRegister(ins.a, NumberValue(loopValue.number+stepValue.number))
-			frame.pc = ins.d
-			continue
 
 		case opJumpIfNotEqualK:
 			if true {
