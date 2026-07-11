@@ -1,0 +1,394 @@
+#!/bin/sh
+set -eu
+
+script_dir="${0%/*}"
+[ "$script_dir" = "$0" ] && script_dir=.
+cd "$script_dir/.."
+
+quiet_sample() {
+	if [ -n "$1" ]; then
+		awk -v line="$2" 'NR == line {print; exit}' "$1"
+		return
+	fi
+	load_one="$(sysctl -n vm.loadavg | awk '{print $2}')"
+	cpu_sum="$(LC_ALL=C ps -A -o %cpu= | awk '{sum += $1} END {printf "%.6f\n", sum + 0}')"
+	printf '%s %s\n' "$load_one" "$cpu_sum"
+}
+
+sample_is_quiet() {
+	awk -v load="$1" -v cpu="$2" 'BEGIN {
+		number = "^[0-9]+([.][0-9]+)?$"
+		exit !((load ~ number) && (cpu ~ number) && load <= 2.0 && cpu <= 100.0)
+	}'
+}
+
+wait_for_quiet() {
+	sample_file="$1"
+	max_samples="$2"
+	sleep_seconds="$3"
+	consecutive=0
+	sample_number=1
+	while [ "$sample_number" -le "$max_samples" ]; do
+		sample="$(quiet_sample "$sample_file" "$sample_number")"
+		load_one="$(printf '%s\n' "$sample" | awk '{print $1}')"
+		cpu_sum="$(printf '%s\n' "$sample" | awk '{print $2}')"
+		if sample_is_quiet "$load_one" "$cpu_sum"; then
+			consecutive=$((consecutive + 1))
+			if [ "$consecutive" -eq 3 ]; then
+				return 0
+			fi
+		else
+			consecutive=0
+		fi
+		if [ "$sample_number" -lt "$max_samples" ] && [ "$sleep_seconds" -gt 0 ]; then
+			sleep "$sleep_seconds"
+		fi
+		sample_number=$((sample_number + 1))
+	done
+	return 1
+}
+
+fingerprint_manifest() {
+	head="$(git rev-parse HEAD)"
+	printf 'HEAD\t%s\n' "$head"
+	{
+		find . -maxdepth 1 -type f -name '*.go' -print | awk '{sub(/^\.\//, ""); print}'
+		printf '%s\n' scripts/check-runtime-parity scripts/scenario-ratio-gate
+	} | LC_ALL=C sort | while IFS= read -r path; do
+		digest="$(shasum -a 256 "$path" | awk '{print $1}')"
+		printf '%s\t%s\n' "$path" "$digest"
+	done
+}
+
+current_fingerprint() {
+	fingerprint_manifest | shasum -a 256 | awk '{print $1}'
+}
+
+claim_attempt() {
+	attempt="$1"
+	if mkdir "$attempt" 2>/dev/null; then
+		claim_state="new"
+		return 0
+	fi
+	if [ -f "$attempt/acquisition.complete" ]; then
+		IFS= read -r completed_fingerprint <"$attempt/acquisition.complete" || completed_fingerprint=""
+		expected_fingerprint="${attempt##*/}"
+		if [ "$completed_fingerprint" = "$expected_fingerprint" ]; then
+			claim_state="reuse"
+			return 0
+		fi
+	fi
+	claim_state="incomplete"
+	return 1
+}
+
+mark_acquisition_complete() {
+	attempt="$1"
+	fingerprint="$2"
+	complete_tmp="$attempt/.acquisition.complete.$$"
+	printf '%s\n' "$fingerprint" >"$complete_tmp"
+	mv "$complete_tmp" "$attempt/acquisition.complete"
+}
+
+fingerprint_unchanged() {
+	[ "$1" = "$2" ]
+}
+
+self_test_fail() {
+	printf 'check-runtime-parity self-test: %s\n' "$1" >&2
+	exit 1
+}
+
+self_test_gate_failure() {
+	return 1
+}
+
+self_test_gate_rejects() {
+	fixture="$1"
+	label="$2"
+	output="$root/gate-$label.out"
+	if scripts/scenario-ratio-gate --median-max 0.95 --p90-max 1.00 --cases arithmetic_for "$fixture" >"$output" 2>&1; then
+		self_test_fail "$label parity fixture unexpectedly passed the gate"
+	fi
+}
+
+self_test_write_gate_fixture() {
+	fixture="$1"
+	awk -v path="$fixture" '
+	BEGIN {
+		print "# ember-runtime-parity raw/v1" > path
+		print "# luau_path=/opt/homebrew/bin/luau" >> path
+		print "# luau_sha256=c921fa51dbc0d81f9acbddcfa9208aa58f039388301f9fba77d2c5a324cb42bd" >> path
+		print "# luau_version=0.728" >> path
+		print "# platform=Darwin 24.6.0 arm64" >> path
+		print "# cpu=Apple M1" >> path
+		print "# cgo_enabled=0" >> path
+		print "# gomaxprocs=1" >> path
+		print "# iterations=1,10,100,1000" >> path
+		print "# pairs=9" >> path
+		print "case\tpair\torder\tengine\tn\telapsed_ns\tresult\texpected" >> path
+		for (pair = 1; pair <= 9; pair++) {
+			for (order = 1; order <= 8; order++) {
+				slot = order
+				if (slot > 4) slot -= 4
+				n = (slot == 1 ? 1 : slot == 2 ? 10 : slot == 3 ? 100 : 1000)
+				if (pair % 2 == 1) engine = (order <= 4 ? "ember" : "luau")
+				else engine = (order <= 4 ? "luau" : "ember")
+				inner = (engine == "ember" ? 5 : 10)
+				printf "arithmetic_for\t%d\t%d\t%s\t%d\t%d\t1595\t1595\n", pair, order, engine, n, 100 + inner * n >> path
+			}
+		}
+		close(path)
+	}
+'
+}
+
+run_self_test() {
+	self_test_base_created=0
+	if [ ! -d tmp/runtime-parity ]; then
+		mkdir -p tmp/runtime-parity
+		self_test_base_created=1
+	fi
+	root="tmp/runtime-parity/self-test.$$"
+	mkdir "$root" || self_test_fail "could not exclusively claim self-test directory"
+	trap 'rm -rf "$root"; if [ "$self_test_base_created" -eq 1 ]; then rm -rf tmp/runtime-parity; fi' EXIT HUP INT TERM
+
+	busy_samples="$root/busy.samples"
+	printf '%s\n' '3.0 20' '1.0 20' '3.0 20' '1.0 20' >"$busy_samples"
+	busy_attempts="$root/busy-attempts"
+	if wait_for_quiet "$busy_samples" 4 0; then
+		mkdir -p "$busy_attempts/unexpected"
+	fi
+	[ ! -e "$busy_attempts" ] || self_test_fail "busy samples created an attempt"
+
+	quiet_samples="$root/quiet.samples"
+	printf '%s\n' '1.0 50' '2.0 100' '0.5 0' >"$quiet_samples"
+	wait_for_quiet "$quiet_samples" 3 0 || self_test_fail "three quiet samples did not unlock"
+	quiet_phase="$root/quiet/dispatch"
+	mkdir -p "$quiet_phase"
+	quiet_attempt="$quiet_phase/fingerprint"
+	claim_attempt "$quiet_attempt" || self_test_fail "exclusive claim failed"
+	[ "$claim_state" = "new" ] || self_test_fail "first exclusive claim was not new"
+	if claim_attempt "$quiet_attempt"; then
+		self_test_fail "incomplete claim was resumed"
+	fi
+	[ "$claim_state" = "incomplete" ] || self_test_fail "incomplete claim did not fail closed"
+	claim_count=0
+	for claimed in "$quiet_phase"/*; do
+		[ -d "$claimed" ] || continue
+		claim_count=$((claim_count + 1))
+	done
+	[ "$claim_count" -eq 1 ] || self_test_fail "quiet samples created more than one claim"
+
+	concurrent="$root/concurrent/phase/fingerprint"
+	mkdir -p "$concurrent"
+	if claim_attempt "$concurrent"; then
+		self_test_fail "concurrent claim was accepted"
+	fi
+
+	reuse="$root/reuse/phase/fingerprint"
+	mkdir -p "$reuse"
+	printf '%s\n' retained >"$reuse/raw.tsv"
+	mark_acquisition_complete "$reuse" fingerprint
+	claim_attempt "$reuse" || self_test_fail "completed acquisition was not reusable"
+	[ "$claim_state" = "reuse" ] || self_test_fail "completed acquisition did not select re-gate"
+	if self_test_gate_failure; then
+		self_test_fail "failed-gate fixture unexpectedly passed"
+	fi
+	claim_attempt "$reuse" || self_test_fail "failed gate acquisition was not reusable"
+	[ "$claim_state" = "reuse" ] || self_test_fail "failed gate attempted measurement"
+	IFS= read -r retained_raw <"$reuse/raw.tsv" || retained_raw=""
+	[ "$retained_raw" = "retained" ] || self_test_fail "failed gate replaced retained raw data"
+
+	changed="$root/changed/phase/fingerprint"
+	mkdir -p "$changed"
+	printf '%s\n' captured >"$changed/.raw.tsv.$$"
+	mv "$changed/.raw.tsv.$$" "$changed/raw.tsv"
+	if fingerprint_unchanged before after; then
+		self_test_fail "changed post-capture fingerprint was accepted"
+	fi
+	[ ! -e "$changed/acquisition.complete" ] || self_test_fail "changed fingerprint was marked complete"
+
+	valid_gate="$root/gate-valid.tsv"
+	self_test_write_gate_fixture "$valid_gate"
+	if ! scripts/scenario-ratio-gate --median-max 0.95 --p90-max 1.00 --cases arithmetic_for "$valid_gate" >"$root/gate-valid.out" 2>&1; then
+		self_test_fail "valid parity fixture failed the gate"
+	fi
+
+	awk -F '\t' 'BEGIN {OFS = "\t"} {print; if ($1 == "arithmetic_for" && $2 == "1" && $3 == "1") print}' \
+		"$valid_gate" >"$root/gate-duplicate-order.tsv"
+	self_test_gate_rejects "$root/gate-duplicate-order.tsv" duplicate-order
+
+	awk -F '\t' 'BEGIN {OFS = "\t"} $1 == "arithmetic_for" && $2 == "1" && $3 == "1" {next} {print}' \
+		"$valid_gate" >"$root/gate-missing-order.tsv"
+	self_test_gate_rejects "$root/gate-missing-order.tsv" missing-order
+
+	awk -F '\t' 'BEGIN {OFS = "\t"} {if ($1 == "arithmetic_for" && $2 == "1" && $3 == "1") $4 = "luau"; print}' \
+		"$valid_gate" >"$root/gate-wrong-engine.tsv"
+	self_test_gate_rejects "$root/gate-wrong-engine.tsv" wrong-engine
+
+	awk -F '\t' 'BEGIN {OFS = "\t"} {if ($1 == "arithmetic_for" && $2 == "1" && $3 == "1") $5 = 10; print}' \
+		"$valid_gate" >"$root/gate-wrong-sample.tsv"
+	self_test_gate_rejects "$root/gate-wrong-sample.tsv" wrong-sample
+
+	awk -F '\t' 'BEGIN {OFS = "\t"} {if ($1 == "arithmetic_for" && $2 == "1" && $3 == "1") $7 = 1596; print}' \
+		"$valid_gate" >"$root/gate-wrong-result.tsv"
+	self_test_gate_rejects "$root/gate-wrong-result.tsv" wrong-result
+
+	sed 's/^# luau_sha256=.*/# luau_sha256=wrong/' "$valid_gate" >"$root/gate-wrong-fingerprint.tsv"
+	self_test_gate_rejects "$root/gate-wrong-fingerprint.tsv" wrong-fingerprint
+
+	printf 'runtime parity self-test: pass\n'
+}
+
+phase="full"
+self_test=0
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--phase)
+			[ "$#" -ge 2 ] || { printf 'check-runtime-parity: --phase needs a value\n' >&2; exit 2; }
+			phase="$2"
+			shift 2
+			;;
+		--self-test)
+			self_test=1
+			shift
+			;;
+		-h|--help)
+			printf '%s\n' \
+				'usage: scripts/check-runtime-parity [--phase dispatch|calls|data|canaries|full]' \
+				'       scripts/check-runtime-parity --self-test' \
+				'' \
+				'Run the pinned Ember/Luau paired harness and apply the slope-based ratio gate.' \
+				'Raw points and gate reports stay in fingerprinted tmp/runtime-parity attempts.'
+			exit 0
+			;;
+		*)
+			printf 'check-runtime-parity: unknown argument: %s\n' "$1" >&2
+			exit 2
+			;;
+	esac
+done
+
+if [ "$self_test" -eq 1 ]; then
+	[ "$phase" = "full" ] || self_test_fail "--self-test does not accept --phase"
+	run_self_test
+	exit 0
+fi
+
+case "$phase" in
+	dispatch)
+		case_list="arithmetic_for"
+		median_max="1.80"
+		p90_max="1.85"
+		;;
+	calls)
+		case_list="event_dispatch,signal_bus_callbacks,command_vararg_router"
+		median_max="1.25"
+		p90_max="1.50"
+		;;
+	data)
+		case_list="dirty_metatable_writes,array_hole_compaction"
+		median_max="1.10"
+		p90_max="1.25"
+		;;
+	canaries)
+		case_list="combat_tick,inventory_value,event_dispatch,buff_stack_tick,ability_resolution,dirty_metatable_writes,array_hole_compaction,command_vararg_router"
+		median_max="1.10"
+		p90_max="1.25"
+		;;
+	full)
+		case_list=""
+		median_max="0.95"
+		p90_max="1.00"
+		;;
+	*)
+		printf 'check-runtime-parity: invalid phase %s\n' "$phase" >&2
+		exit 2
+		;;
+esac
+
+if [ -z "${LUAU_BIN:-}" ]; then
+	printf 'check-runtime-parity: LUAU_BIN is required\n' >&2
+	exit 2
+fi
+[ -x "$LUAU_BIN" ] || { printf 'check-runtime-parity: Luau is not executable: %s\n' "$LUAU_BIN" >&2; exit 2; }
+[ "${CGO_ENABLED:-}" = "0" ] || { printf 'check-runtime-parity: CGO_ENABLED must be 0\n' >&2; exit 2; }
+[ "${GOMAXPROCS:-}" = "1" ] || { printf 'check-runtime-parity: GOMAXPROCS must be 1\n' >&2; exit 2; }
+[ "$(sysctl -n kern.ostype) $(sysctl -n kern.osrelease) $(sysctl -n hw.machine)" = "Darwin 24.6.0 arm64" ] || { printf 'check-runtime-parity: runner must be Darwin 24.6.0 arm64\n' >&2; exit 2; }
+[ "$(sysctl -n machdep.cpu.brand_string)" = "Apple M1" ] || { printf 'check-runtime-parity: runner CPU must be Apple M1\n' >&2; exit 2; }
+digest="$(shasum -a 256 "$LUAU_BIN" | awk '{print $1}')"
+[ "$digest" = "c921fa51dbc0d81f9acbddcfa9208aa58f039388301f9fba77d2c5a324cb42bd" ] || {
+	printf 'check-runtime-parity: Luau SHA-256 mismatch: %s\n' "$digest" >&2
+	exit 2
+}
+homebrew_version="$(find /opt/homebrew/Cellar/luau -mindepth 1 -maxdepth 1 -type d -name '0.728' -print | awk 'NR == 1 {print; found = 1} NR > 1 {duplicate = 1} END {if (!found || duplicate) exit 1}')" || {
+	printf 'check-runtime-parity: Homebrew Luau version must be 0.728\n' >&2
+	exit 2
+}
+[ "$homebrew_version" = "/opt/homebrew/Cellar/luau/0.728" ] || { printf 'check-runtime-parity: Homebrew Luau version must be 0.728\n' >&2; exit 2; }
+
+max_samples=60
+sleep_seconds=10
+if ! wait_for_quiet "" "$max_samples" "$sleep_seconds"; then
+	printf 'check-runtime-parity: runner-busy after 600 seconds; no attempt created\n' >&2
+	exit 75
+fi
+
+fingerprint="$(current_fingerprint)"
+phase_dir="tmp/runtime-parity/$phase"
+attempt="$phase_dir/$fingerprint"
+mkdir -p "$phase_dir"
+if ! claim_attempt "$attempt"; then
+	printf 'check-runtime-parity: incomplete or concurrent attempt exists: %s\n' "$attempt" >&2
+	exit 2
+fi
+
+raw_path="$attempt/raw.tsv"
+report_path="$attempt/ratio-report.md"
+if [ "$claim_state" = "new" ]; then
+	manifest_tmp="$attempt/.inputs.tsv.$$"
+	fingerprint_manifest >"$manifest_tmp"
+	mv "$manifest_tmp" "$attempt/inputs.tsv"
+
+	raw_tmp="$attempt/.raw.tsv.$$"
+	printf 'runtime parity phase: %s\n' "$phase"
+	printf 'input fingerprint: %s\n' "$fingerprint"
+	printf 'raw samples: %s\n' "$raw_path"
+	printf 'gate report: %s\n' "$report_path"
+
+	CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN="$LUAU_BIN" \
+		EMBER_RUNTIME_PARITY_LIVE=1 RUNTIME_PARITY_CASES="$case_list" \
+		RUNTIME_PARITY_RAW="$raw_tmp" \
+		go test -run '^TestRuntimeParityLive$' -count=1 .
+	mv "$raw_tmp" "$raw_path"
+
+	post_capture_fingerprint="$(current_fingerprint)"
+	if ! fingerprint_unchanged "$fingerprint" "$post_capture_fingerprint"; then
+		printf 'check-runtime-parity: inputs changed during capture; incomplete attempt retained: %s\n' "$attempt" >&2
+		exit 2
+	fi
+	mark_acquisition_complete "$attempt" "$fingerprint"
+else
+	[ -r "$raw_path" ] || { printf 'check-runtime-parity: completed attempt is missing raw data: %s\n' "$raw_path" >&2; exit 2; }
+	printf 'runtime parity phase: %s (re-gate retained acquisition)\n' "$phase"
+	printf 'input fingerprint: %s\n' "$fingerprint"
+	printf 'raw samples: %s\n' "$raw_path"
+	printf 'gate report: %s\n' "$report_path"
+fi
+
+report_tmp="$attempt/.ratio-report.md.$$"
+if SCENARIO_CASES="$case_list" SCENARIO_MEDIAN_MAX="$median_max" SCENARIO_P90_MAX="$p90_max" \
+	scripts/scenario-ratio-gate "$raw_path" >"$report_tmp"; then
+	gate_status=0
+else
+	gate_status=$?
+fi
+mv "$report_tmp" "$report_path"
+while IFS= read -r report_line || [ -n "$report_line" ]; do
+	printf '%s\n' "$report_line"
+done <"$report_path"
+if [ "$gate_status" -ne 0 ]; then
+	printf 'runtime parity gate failed; retained raw samples: %s; report: %s\n' "$raw_path" "$report_path" >&2
+	exit "$gate_status"
+fi

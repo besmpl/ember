@@ -1,10 +1,259 @@
 package ember_test
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/besmpl/ember"
 )
+
+const runtimeLaneArithmeticSource = `
+local x = 1
+local y = 2
+return (x + y) * 3 - 4 / 2
+`
+
+// BenchmarkRuntimeLaneCompileRun measures the cold compile-and-run lifecycle.
+// Compilation is intentionally inside the timed region; this is the lane a
+// script loader pays when it has no retained prototype.
+func BenchmarkRuntimeLaneCompileRun(b *testing.B) {
+	for b.Loop() {
+		proto, err := ember.Compile(runtimeLaneArithmeticSource)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, err := ember.Run(proto); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkRuntimeLaneProto measures the public Proto lifecycle with compile
+// outside timing. Run still includes public entry, globals, and root-frame
+// setup, so it is not a pure dispatcher measurement.
+func BenchmarkRuntimeLaneProto(b *testing.B) {
+	proto := benchmarkCompile(b, runtimeLaneArithmeticSource)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := ember.Run(proto); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkRuntimeLanePersistent measures repeated hooks on one Runtime. The
+// Program, Runtime, module graph, and startup state are all constructed before
+// timing, so update calls observe the same script-owned state.
+func BenchmarkRuntimeLanePersistent(b *testing.B) {
+	runtime := newRuntimeLane(b, `
+local state = {ready = false, frames = 0}
+return {
+    startup = function()
+        state.ready = true
+    end,
+    update = function(delta)
+        if state.ready then
+            state.frames = state.frames + delta
+        end
+    end,
+}
+`, nil)
+	defer runtime.Close()
+	if _, err := runtime.RunHook(context.Background(), "startup"); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := runtime.RunHook(context.Background(), "update", ember.NumberValue(1)); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkRuntimeLaneSteadyState measures a wrapper that invokes the same
+// case function N times inside one Ember execution. The sub-benchmarks retain
+// the four parity points used by runtime_parity_test.go.
+func BenchmarkRuntimeLaneSteadyState(b *testing.B) {
+	for _, iterations := range []int{1, 10, 100, 1000} {
+		b.Run(fmt.Sprintf("N=%d", iterations), func(b *testing.B) {
+			proto := benchmarkCompile(b, fmt.Sprintf(`
+local function caseFn()
+    local x = 1
+    local y = 2
+    return (x + y) * 3 - 4 / 2
+end
+local result = nil
+for i = 1, %d do
+    result = caseFn()
+end
+return result
+`, iterations))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				if _, err := ember.Run(proto); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkRuntimeLaneHostBoundary keeps host callback costs separate from
+// the scalar VM lanes. The callback, context, target table, and Runtime are
+// all created outside their timed loops.
+func BenchmarkRuntimeLaneHostBoundary(b *testing.B) {
+	b.Run("RunWithGlobals/host_func", func(b *testing.B) {
+		proto := benchmarkCompile(b, `return host(41)`)
+		host := ember.HostFuncValue(func(args []ember.Value) ([]ember.Value, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("host: got %d args", len(args))
+			}
+			return []ember.Value{args[0]}, nil
+		})
+		globals := map[string]ember.Value{"host": host}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			if _, err := ember.RunWithGlobals(proto, globals); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("RuntimeRunHook/runtime_host", func(b *testing.B) {
+		host := ember.RuntimeHostFunc(func(context.Context, ember.HostCall) (map[string]ember.Value, error) {
+			return map[string]ember.Value{
+				"host": ember.HostFuncValue(func(args []ember.Value) ([]ember.Value, error) {
+					return []ember.Value{ember.NumberValue(float64(len(args)))}, nil
+				}),
+			}, nil
+		})
+		runtime := newRuntimeLane(b, `
+return {
+    update = function()
+        return host(1, 2)
+    end,
+}
+`, host)
+		defer runtime.Close()
+		if _, err := runtime.RunHook(context.Background(), "update"); err != nil {
+			b.Fatal(err)
+		}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			if _, err := runtime.RunHook(context.Background(), "update"); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("RunWithGlobals/context_host_func", func(b *testing.B) {
+		proto := benchmarkCompile(b, `return host()`)
+		host := ember.ContextHostFuncValue(func(ctx context.Context, _ []ember.Value) ([]ember.Value, error) {
+			if ctx == nil {
+				return nil, errors.New("host: nil context")
+			}
+			return []ember.Value{ember.NumberValue(1)}, nil
+		})
+		globals := map[string]ember.Value{"host": host}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			if _, err := ember.RunWithGlobals(proto, globals); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("RunWithGlobals/error_host_func", func(b *testing.B) {
+		proto := benchmarkCompile(b, `return host()`)
+		hostErr := errors.New("expected host error")
+		host := ember.HostFuncValue(func([]ember.Value) ([]ember.Value, error) {
+			return nil, hostErr
+		})
+		globals := map[string]ember.Value{"host": host}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			if _, err := ember.RunWithGlobals(proto, globals); !errors.Is(err, hostErr) {
+				b.Fatalf("RunWithGlobals error = %v, want %v", err, hostErr)
+			}
+		}
+	})
+
+	b.Run("RunWithGlobals/table_mutation", func(b *testing.B) {
+		proto := benchmarkCompile(b, `return mutate(target)`)
+		target := ember.NewTable()
+		if err := target.Set(ember.StringValue("value"), ember.NumberValue(0)); err != nil {
+			b.Fatal(err)
+		}
+		mutate := ember.HostFuncValue(func(args []ember.Value) ([]ember.Value, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("mutate: got %d args", len(args))
+			}
+			table, ok := args[0].Table()
+			if !ok || table == nil {
+				return nil, errors.New("mutate: target is not a table")
+			}
+			current, _ := table.Get(ember.StringValue("value"))
+			number, _ := current.Number()
+			if err := table.Set(ember.StringValue("value"), ember.NumberValue(number+1)); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		})
+		globals := map[string]ember.Value{
+			"target": ember.TableValue(target),
+			"mutate": mutate,
+		}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			if _, err := ember.RunWithGlobals(proto, globals); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+type runtimeLaneLoader map[string]string
+
+func (loader runtimeLaneLoader) LoadModule(ctx context.Context, id ember.ModuleID) (ember.Source, error) {
+	if err := ctx.Err(); err != nil {
+		return ember.Source{}, err
+	}
+	name := id.String()
+	source, ok := loader[name]
+	if !ok {
+		return ember.Source{}, fmt.Errorf("runtime lane: missing module %s", name)
+	}
+	return ember.Source{Name: name, Text: source}, nil
+}
+
+func newRuntimeLane(tb testing.TB, source string, host ember.RuntimeHost) *ember.Runtime {
+	tb.Helper()
+	module := ember.LogicalModule("benchmark/init")
+	program, _, err := ember.LoadProgram(context.Background(), runtimeLaneLoader{
+		module.String(): source,
+	}, ember.ProgramOptions{
+		Entrypoints: []ember.Entrypoint{{Name: "benchmark", Module: module}},
+		Parallelism: 1,
+	})
+	if err != nil {
+		tb.Fatal(err)
+	}
+	runtime, err := program.NewRuntime(ember.RuntimeOptions{Host: host})
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return runtime
+}
 
 func BenchmarkCompileArithmetic(b *testing.B) {
 	for b.Loop() {

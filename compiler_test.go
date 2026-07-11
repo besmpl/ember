@@ -1511,6 +1511,28 @@ return rawlen(values)
 	}
 }
 
+func TestCompileAndRunCanAssignOverRawLenAfterRead(t *testing.T) {
+	results := compileAndRunValues(t, `
+local values = {1, 2, 3}
+local before = rawlen(values)
+rawlen = function()
+	return 99
+end
+return before, rawlen(values)
+`)
+	if len(results) != 2 {
+		t.Fatalf("Run returned %d results, want 2", len(results))
+	}
+	before, ok := results[0].Number()
+	if !ok || before != 3 {
+		t.Fatalf("before result is %v (%t), want 3", before, ok)
+	}
+	after, ok := results[1].Number()
+	if !ok || after != 99 {
+		t.Fatalf("after result is %v (%t), want 99", after, ok)
+	}
+}
+
 func TestCompileAndRunSelectReturnsValuesFromPositiveIndex(t *testing.T) {
 	results := compileAndRunValues(t, `
 local function tail(...)
@@ -1591,6 +1613,34 @@ func TestCompileAndRunToStringConvertsScalarValues(t *testing.T) {
 		}
 		if got != want {
 			t.Fatalf("result %d is %q, want %q", i+1, got, want)
+		}
+	}
+}
+
+func TestTostringWholeNumberFastPathMatchesExistingFormat(t *testing.T) {
+	results := compileAndRunValues(t, `return tostring(25), tostring(-42), tostring(999999), tostring(1000000)`)
+	wants := []string{"25", "-42", "999999", "1e+06"}
+	if len(results) != len(wants) {
+		t.Fatalf("Run returned %d results, want %d", len(results), len(wants))
+	}
+	for i, want := range wants {
+		got, ok := results[i].String()
+		if !ok || got != want {
+			t.Fatalf("result %d is %v (%t), want %q", i+1, results[i], ok, want)
+		}
+	}
+}
+
+func TestConcatNumberFormattingPreservesEdgeCases(t *testing.T) {
+	results := compileAndRunValues(t, `return "n=" .. 12.5, "p=" .. (1 / 0), "q=" .. (0 / 0), "z=" .. (-0), "b=" .. 1000000`)
+	wants := []string{"n=12.5", "p=+Inf", "q=NaN", "z=-0", "b=1e+06"}
+	if len(results) != len(wants) {
+		t.Fatalf("Run returned %d results, want %d", len(results), len(wants))
+	}
+	for i, want := range wants {
+		got, ok := results[i].String()
+		if !ok || got != want {
+			t.Fatalf("result %d is %v (%t), want %q", i+1, results[i], ok, want)
 		}
 	}
 }
@@ -4582,6 +4632,24 @@ return total
 `)
 	if got != 5 {
 		t.Fatalf("Run result is %v, want 5", got)
+	}
+}
+
+func TestCompileAndRunPairsMixedTableUsesDeterministicInsertionOrder(t *testing.T) {
+	got := compileAndRunString(t, `
+local values = {}
+values.b = 2
+values[2] = 20
+values.a = 1
+values[1] = 10
+local out = ""
+for key, value in pairs(values) do
+	out = out .. tostring(key) .. "=" .. tostring(value) .. ";"
+end
+return out
+`)
+	if got != "b=2;2=20;a=1;1=10;" {
+		t.Fatalf("Run result is %q, want insertion-order pairs output", got)
 	}
 }
 

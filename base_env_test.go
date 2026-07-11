@@ -52,7 +52,7 @@ func TestBaseFieldIntrinsicCalleeRefreshesNativeOwnField(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mathIntrinsicCallee returned error: %v", err)
 	}
-	if !fast || callee.nativeID != nativeFuncMathMin {
+	if !fast || valueNativeID(callee) != nativeFuncMathMin {
 		t.Fatalf("first callee = %#v fast %t, want native math.min", callee, fast)
 	}
 
@@ -79,7 +79,7 @@ func TestBaseFieldIntrinsicCalleeRefreshesNativeOwnField(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mathIntrinsicCallee after restore returned error: %v", err)
 	}
-	if !fast || callee.nativeID != nativeFuncMathMin {
+	if !fast || valueNativeID(callee) != nativeFuncMathMin {
 		t.Fatalf("restored callee = %#v fast %t, want native math.min", callee, fast)
 	}
 }
@@ -100,7 +100,7 @@ func TestBaseFieldIntrinsicCalleeKeepsMetatableLookupVisible(t *testing.T) {
 		if err != nil {
 			t.Fatalf("mathIntrinsicCallee call %d returned error: %v", i, err)
 		}
-		if !fast || callee.nativeID != nativeFuncMathMin {
+		if !fast || valueNativeID(callee) != nativeFuncMathMin {
 			t.Fatalf("callee %d = %#v fast %t, want native math.min", i, callee, fast)
 		}
 		if lookups != i {
@@ -115,6 +115,7 @@ func TestBaseFieldIntrinsicCalleeHoistsAbsentHostGlobalGuard(t *testing.T) {
 	restore := thread.activate()
 	defer restore()
 	var counts directFramePICCounts
+	thread.directFrameInstrumented = true
 	thread.directFramePICCounts = &counts
 
 	for i := 0; i < 4; i++ {
@@ -122,7 +123,7 @@ func TestBaseFieldIntrinsicCalleeHoistsAbsentHostGlobalGuard(t *testing.T) {
 		if err != nil {
 			t.Fatalf("mathIntrinsicCallee call %d returned error: %v", i+1, err)
 		}
-		if !fast || callee.nativeID != nativeFuncMathMin {
+		if !fast || valueNativeID(callee) != nativeFuncMathMin {
 			t.Fatalf("callee %d = %#v fast %t, want base math.min", i+1, callee, fast)
 		}
 	}

@@ -110,21 +110,7 @@ func (s rawSequence) remove(position int) (Value, error) {
 }
 
 func (s rawSequence) clear() {
-	if s.table == nil {
-		return
-	}
-	s.table.array = nil
-	s.table.arrayHasNil = false
-	for i := range s.table.stringFields {
-		s.table.stringFields[i] = tableStringField{}
-	}
-	s.table.stringFields = s.table.stringFields[:0]
-	for key := range s.table.stringFieldMap {
-		delete(s.table.stringFieldMap, key)
-	}
-	for key := range s.table.fields {
-		delete(s.table.fields, key)
-	}
+	s.table.clearRawStorage()
 }
 
 func (s rawSequence) writeValues(values []Value) error {
@@ -145,7 +131,7 @@ func (t *Table) canAppendFastArray() bool {
 }
 
 func (t *Table) canUseFastArrayStorage() bool {
-	return t != nil && !t.arrayHasNil && len(t.stringFields) == 0 && len(t.stringFieldMap) == 0 && len(t.fields) == 0
+	return t != nil && !t.arrayHasNil && len(t.stringFields) == 0 && t.hashFieldCount() == 0
 }
 
 func (t *Table) fastArrayAppend(value Value) {

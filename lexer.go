@@ -2,27 +2,33 @@ package ember
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
 
-type tokenKind string
+// tokenKind is deliberately kept to one byte. Token text is always recoverable
+// from the source span; the payload carries the one value that cannot be
+// recovered without decoding (numbers and escaped strings).
+type tokenKind uint8
 
 const (
-	tokenIdentifier tokenKind = "identifier"
-	tokenNumber     tokenKind = "number"
-	tokenString     tokenKind = "string"
-	tokenSymbol     tokenKind = "symbol"
-	tokenKeyword    tokenKind = "keyword"
+	tokenIdentifier tokenKind = iota
+	tokenNumber
+	tokenString
+	tokenSymbol
+	tokenKeyword
 )
 
+const maxSourceTokenOffset = uint64(^uint32(0))
+
+// sourceToken is the hot lexer/parser representation. Keep this shape small:
+// a source span and one kind-specific payload are enough for every token.
 type sourceToken struct {
-	kind        tokenKind
-	text        string
-	start       int
-	end         int
-	number      float64
-	stringValue string
+	kind    tokenKind
+	start   uint32
+	end     uint32
+	payload uint64
 }
 
 type sourceComment struct {
@@ -31,42 +37,160 @@ type sourceComment struct {
 	end   int
 }
 
-func (t sourceToken) matchesWordAt(pos int, word string) bool {
-	return t.start == pos &&
-		t.text == word &&
+type lexResult struct {
+	tokens         []sourceToken
+	comments       []sourceComment
+	decodedStrings []string
+	mode           sourceMode
+}
+
+type lexerOptions struct {
+	retainComments bool
+}
+
+func (t sourceToken) startOffset() int {
+	return int(t.start)
+}
+
+func (t sourceToken) endOffset() int {
+	return int(t.end)
+}
+
+func (t sourceToken) textAt(source string) string {
+	return source[t.startOffset():t.endOffset()]
+}
+
+func (t sourceToken) matchesWordAt(source string, pos int, word string) bool {
+	return t.startOffset() == pos &&
+		t.textAt(source) == word &&
 		(t.kind == tokenKeyword || t.kind == tokenIdentifier)
 }
 
-type lexer struct {
-	source string
-	pos    int
-	mode   sourceMode
+func (t sourceToken) numberValue() float64 {
+	return math.Float64frombits(t.payload)
 }
 
-func lexSource(source string) ([]sourceToken, []sourceComment, sourceMode, error) {
-	l := lexer{source: source}
-	var tokens []sourceToken
+// stringValue resolves a string token using the source span for raw literals
+// and the lexer-owned side pool for escaped literals.
+func (t sourceToken) stringValue(source string, decodedStrings []string) string {
+	if t.payload != 0 {
+		index := int(t.payload - 1)
+		if index >= 0 && index < len(decodedStrings) {
+			return decodedStrings[index]
+		}
+		return ""
+	}
+	if t.end <= t.start+1 {
+		return ""
+	}
+	return source[t.startOffset()+1 : t.endOffset()-1]
+}
+
+func (t sourceToken) rawEquals(source, text string) bool {
+	return len(text) == t.endOffset()-t.startOffset() &&
+		source[t.startOffset():t.endOffset()] == text
+}
+
+type lexer struct {
+	source         string
+	pos            int
+	mode           sourceMode
+	retainComments bool
+	decodedStrings []string
+}
+
+// lexSource retains comments for the focused lexer seam and existing tooling
+// tests. Compile parsing uses lexSourceForCompile, which recognizes directives
+// but does not retain discarded comment text.
+func lexSource(source string) (lexResult, error) {
+	return lexSourceWithOptions(source, lexerOptions{retainComments: true})
+}
+
+func lexSourceForCompile(source string) (lexResult, error) {
+	return lexSourceWithOptions(source, lexerOptions{})
+}
+
+func lexSourceWithOptions(source string, options lexerOptions) (lexResult, error) {
+	if err := validateSourceByteLength(uint64(len(source))); err != nil {
+		return lexResult{}, err
+	}
+
+	l := lexer{
+		source:         source,
+		retainComments: options.retainComments,
+	}
+	// Source density is intentionally only a hint and is bounded so a huge
+	// comment or string cannot turn preallocation into an unbounded request.
+	tokens := make([]sourceToken, 0, estimatedTokenCapacity(len(source)))
 	var comments []sourceComment
+	if options.retainComments {
+		comments = make([]sourceComment, 0, estimatedCommentCapacity(len(source)))
+	}
 
 	for {
 		comment, ok, err := l.skipSpaceAndComment()
 		if err != nil {
-			return nil, nil, "", err
+			return lexResult{}, err
 		}
 		if ok {
-			comments = append(comments, comment)
+			if options.retainComments {
+				comments = append(comments, comment)
+			}
 			continue
 		}
 		if l.done() {
-			return tokens, comments, l.mode, nil
+			return lexResult{
+				tokens:         tokens,
+				comments:       comments,
+				decodedStrings: l.decodedStrings,
+				mode:           l.mode,
+			}, nil
 		}
 
 		token, err := l.nextToken()
 		if err != nil {
-			return nil, nil, "", err
+			return lexResult{}, err
 		}
 		tokens = append(tokens, token)
 	}
+}
+
+func estimatedTokenCapacity(sourceLength int) int {
+	if sourceLength == 0 {
+		return 0
+	}
+	// The compiler corpus averages just over three source bytes per token.
+	// Using that measured density avoids repeated slice growth without making
+	// comment-heavy or unusually sparse source allocate in proportion to an
+	// unbounded token count.
+	capacity := sourceLength / 3
+	if capacity < 8 {
+		capacity = 8
+	}
+	const maxTokenCapacity = 4096
+	if capacity > maxTokenCapacity {
+		return maxTokenCapacity
+	}
+	return capacity
+}
+
+func estimatedCommentCapacity(sourceLength int) int {
+	capacity := sourceLength / 32
+	if capacity < 1 && sourceLength > 0 {
+		capacity = 1
+	}
+	const maxCommentCapacity = 1024
+	if capacity > maxCommentCapacity {
+		return maxCommentCapacity
+	}
+	return capacity
+}
+
+func validateSourceByteLength(length uint64) error {
+	if length > maxSourceTokenOffset {
+		return fmt.Errorf("lex: source too large: %d bytes exceeds uint32 offset limit %d", length, maxSourceTokenOffset)
+	}
+	return nil
 }
 
 func (l *lexer) skipSpaceAndComment() (sourceComment, bool, error) {
@@ -99,6 +223,9 @@ func (l *lexer) lineComment() (sourceComment, bool, error) {
 	}
 	text := strings.TrimSpace(l.source[textStart:l.pos])
 	l.applyDirective(text)
+	if !l.retainComments {
+		return sourceComment{start: start, end: l.pos}, true, nil
+	}
 	return sourceComment{text: text, start: start, end: l.pos}, true, nil
 }
 
@@ -112,11 +239,11 @@ func (l *lexer) blockComment() (sourceComment, bool, error) {
 	}
 	textEnd := l.pos + end
 	l.pos = textEnd + len("]]")
-	return sourceComment{
-		text:  strings.TrimSpace(l.source[textStart:textEnd]),
-		start: start,
-		end:   l.pos,
-	}, true, nil
+	if !l.retainComments {
+		return sourceComment{start: start, end: l.pos}, true, nil
+	}
+	text := strings.TrimSpace(l.source[textStart:textEnd])
+	return sourceComment{text: text, start: start, end: l.pos}, true, nil
 }
 
 func (l *lexer) applyDirective(text string) {
@@ -133,12 +260,11 @@ func (l *lexer) nextToken() (sourceToken, error) {
 		for !l.done() && isIdentByte(l.source[l.pos]) {
 			l.pos++
 		}
-		text := l.source[start:l.pos]
 		kind := tokenIdentifier
-		if isKeyword(text) {
+		if isKeyword(l.source[start:l.pos]) {
 			kind = tokenKeyword
 		}
-		return sourceToken{kind: kind, text: text, start: start, end: l.pos}, nil
+		return compactSourceToken(kind, start, l.pos, 0), nil
 	}
 	if l.isNumberStart() {
 		l.pos++
@@ -150,7 +276,7 @@ func (l *lexer) nextToken() (sourceToken, error) {
 		if err != nil {
 			return sourceToken{}, l.errorf("invalid number %q", text)
 		}
-		return sourceToken{kind: tokenNumber, text: text, start: start, end: l.pos, number: number}, nil
+		return compactSourceToken(tokenNumber, start, l.pos, math.Float64bits(number)), nil
 	}
 	if ch == '"' || ch == '\'' {
 		return l.stringToken()
@@ -158,44 +284,55 @@ func (l *lexer) nextToken() (sourceToken, error) {
 	return l.symbolToken()
 }
 
+func compactSourceToken(kind tokenKind, start, end int, payload uint64) sourceToken {
+	return sourceToken{kind: kind, start: uint32(start), end: uint32(end), payload: payload}
+}
+
 func (l *lexer) stringToken() (sourceToken, error) {
 	start := l.pos
 	quote := l.source[l.pos]
 	l.pos++
-	var b strings.Builder
+	rawStart := l.pos
+	hasEscape := false
+	var builder strings.Builder
 	for !l.done() {
+		chStart := l.pos
 		ch := l.source[l.pos]
 		l.pos++
 
 		switch ch {
 		case quote:
-			return sourceToken{
-				kind:        tokenString,
-				text:        l.source[start:l.pos],
-				start:       start,
-				end:         l.pos,
-				stringValue: b.String(),
-			}, nil
+			if !hasEscape {
+				return compactSourceToken(tokenString, start, l.pos, 0), nil
+			}
+			builder.WriteString(l.source[rawStart:chStart])
+			index := uint64(len(l.decodedStrings))
+			l.decodedStrings = append(l.decodedStrings, builder.String())
+			return compactSourceToken(tokenString, start, l.pos, index+1), nil
 		case '\\':
 			if l.done() {
 				return sourceToken{}, l.errorf("unterminated string")
 			}
+			if !hasEscape {
+				hasEscape = true
+				builder.Grow(l.pos - start)
+			}
+			builder.WriteString(l.source[rawStart:chStart])
 			escaped := l.source[l.pos]
 			l.pos++
 			switch escaped {
 			case '\\', quote:
-				b.WriteByte(escaped)
+				builder.WriteByte(escaped)
 			case 'n':
-				b.WriteByte('\n')
+				builder.WriteByte('\n')
 			case 't':
-				b.WriteByte('\t')
+				builder.WriteByte('\t')
 			default:
 				return sourceToken{}, l.errorf("unsupported string escape \\%c", escaped)
 			}
+			rawStart = l.pos
 		case '\n', '\r':
 			return sourceToken{}, l.errorf("unterminated string")
-		default:
-			b.WriteByte(ch)
 		}
 	}
 	return sourceToken{}, l.errorf("unterminated string")
@@ -206,11 +343,11 @@ func (l *lexer) symbolToken() (sourceToken, error) {
 	for _, symbol := range []string{"...", "::", "//", "..", "==", "~=", "<=", ">=", "->", "<<", ">>"} {
 		if strings.HasPrefix(l.source[l.pos:], symbol) {
 			l.pos += len(symbol)
-			return sourceToken{kind: tokenSymbol, text: symbol, start: start, end: l.pos}, nil
+			return compactSourceToken(tokenSymbol, start, l.pos, 0), nil
 		}
 	}
 	l.pos++
-	return sourceToken{kind: tokenSymbol, text: l.source[start:l.pos], start: start, end: l.pos}, nil
+	return compactSourceToken(tokenSymbol, start, l.pos, 0), nil
 }
 
 func (l *lexer) isNumberStart() bool {

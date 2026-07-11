@@ -151,8 +151,7 @@ func basePCall(globals *globalEnv, args []Value) ([]Value, error) {
 	results, err := protectedCallValue(args[0], globals, args[1:])
 	if err != nil {
 		if yield, ok := err.(vmYieldRequest); ok {
-			yield.protected = &vmProtectedCall{}
-			return nil, yield
+			return nil, protectedYieldRequest(yield, NilValue(), false)
 		}
 		if isVMHostInterrupt(err) {
 			return nil, err
@@ -180,8 +179,7 @@ func baseXPCall(globals *globalEnv, args []Value) ([]Value, error) {
 		return append([]Value{BoolValue(true)}, results...), nil
 	}
 	if yield, ok := err.(vmYieldRequest); ok {
-		yield.protected = &vmProtectedCall{handler: args[1], hasHandler: true}
-		return nil, yield
+		return nil, protectedYieldRequest(yield, args[1], true)
 	}
 	if isVMHostInterrupt(err) {
 		return nil, err
@@ -227,12 +225,16 @@ func baseNext(args []Value) ([]Value, error) {
 	return []Value{nextKey, value}, nil
 }
 
+func baseNextNative(_ *globalEnv, args []Value) ([]Value, error) {
+	return baseNext(args)
+}
+
 func basePairs(args []Value) ([]Value, error) {
 	table, err := tableArg("pairs", args, 0)
 	if err != nil {
 		return nil, err
 	}
-	return []Value{HostFuncValue(baseNext), TableValue(table), NilValue()}, nil
+	return []Value{nativeFuncValueWithID(baseNextNative, nativeFuncNext), TableValue(table), NilValue()}, nil
 }
 
 func baseIPairs(args []Value) ([]Value, error) {
@@ -441,6 +443,32 @@ func baseTableRemoveValue(args []Value) (Value, error) {
 		return NilValue(), err
 	}
 	return removed, nil
+}
+
+func baseTableRemoveFastArrayValue(tableValue Value, positionValue Value, argCount int) (Value, bool, error) {
+	if argCount < 1 {
+		return NilValue(), false, nil
+	}
+	table, ok := tableValue.Table()
+	if !ok || !table.canUseFastArrayStorage() {
+		return NilValue(), false, nil
+	}
+	length := len(table.array)
+	if length == 0 {
+		return NilValue(), true, nil
+	}
+	position := length
+	if argCount > 1 && !positionValue.IsNil() {
+		number, ok := positionValue.Number()
+		if !ok || number != math.Trunc(number) {
+			return NilValue(), false, nil
+		}
+		position = int(number)
+	}
+	if position < 1 || position > length {
+		return NilValue(), true, nil
+	}
+	return table.fastArrayRemove(position), true, nil
 }
 
 func baseTableRemoveNative(_ *globalEnv, args []Value) ([]Value, error) {

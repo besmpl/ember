@@ -104,10 +104,12 @@ func baseCoroutineResume(globals *globalEnv, args []Value) ([]Value, error) {
 		coroutine.status = vmCoroutineDead
 		coroutine.err = err
 		coroutine.suspended = vmSuspendedFrames{}
+		coroutine.thread.dropFrames(0)
 		return []Value{BoolValue(false), StringValue(err.Error())}, nil
 	}
 	coroutine.status = vmCoroutineDead
 	coroutine.suspended = vmSuspendedFrames{}
+	coroutine.thread.dropFrames(0)
 	return coroutine.resumeResult(true, results), nil
 }
 
@@ -151,7 +153,7 @@ func resumeCoroutine(coroutine *vmCoroutine, globals *globalEnv, args []Value) (
 		coroutine.suspended = vmSuspendedFrames{}
 		return coroutine.thread.continueSuspended(args)
 	}
-	return coroutine.thread.run(coroutine.root.proto, args, coroutine.root.upvalues)
+	return coroutine.thread.runWithUpvalues(coroutine.root.proto, args, coroutine.root.upvalues, coroutine.root.upvalueValues, coroutine.root.upvalueValueOK)
 }
 
 func baseCoroutineYield(globals *globalEnv, args []Value) ([]Value, error) {
@@ -207,12 +209,12 @@ func baseCoroutineClose(args []Value) ([]Value, error) {
 		coroutine.err = nil
 		coroutine.status = vmCoroutineDead
 		coroutine.suspended = vmSuspendedFrames{}
-		coroutine.thread.frames = nil
+		coroutine.thread.dropFrames(0)
 		return []Value{BoolValue(false), StringValue(err.Error())}, nil
 	}
 	coroutine.status = vmCoroutineDead
 	coroutine.suspended = vmSuspendedFrames{}
-	coroutine.thread.frames = nil
+	coroutine.thread.dropFrames(0)
 	return []Value{BoolValue(true)}, nil
 }
 
