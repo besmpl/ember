@@ -3569,6 +3569,14 @@ func (thread *vmThread) runDirectFrameInstrumented(frame **vmFrame) directFrameS
 	return runDirectFrameInstrumentedLoop(thread, frame)
 }
 
+// directFrameExitAt publishes the local dispatch PC only when a direct loop
+// leaves its hot path. Keeping this write at the exit seam avoids touching the
+// frame on every production instruction while preserving cold-loop resumption.
+func directFrameExitAt(frame *vmFrame, pc int, exit directFrameSideExit) directFrameSideExit {
+	frame.pc = pc
+	return exit
+}
+
 // resumeDirectFrameChild applies a returned nested callee result while the
 // direct dispatcher is still active. It is intentionally bounded by the
 // entry depth: frames owned by the surrounding cold dispatcher remain its
@@ -3619,6 +3627,8 @@ func (thread *vmThread) resumeDirectFrameChildOne(rootDepth int, frame **vmFrame
 
 func runDirectFrameInstrumentedLoop(thread *vmThread, frameRef **vmFrame) directFrameSideExit {
 	frame := *frameRef
+	var pc int
+	defer func() { frame.pc = pc }()
 	rootDepth := len(thread.frames) - 1
 	var (
 		proto                *Proto
@@ -3647,12 +3657,16 @@ reload:
 	constantNumbers = proto.constantNumbers
 	constantNumberOK = proto.constantNumberOK
 	registers = frame.registers
+	pc = frame.pc
 	picCounts = thread.directFramePICCounts
 	runLineHook = thread.debugHook != nil && thread.debugLineHook
 	runCountHook = thread.debugCountInterval > 0 && thread.debugHook != nil
 	runInstructionBudget = thread.instructionBudget >= 0
 
-	for frame.pc < len(code) {
+	for uint(pc) < uint(len(code)) {
+		if runInstructionBudget || runLineHook || runCountHook {
+			frame.pc = pc
+		}
 		if runInstructionBudget && !thread.consumeInstruction() {
 			return directFrameReturn(vmFrameResult{state: vmCallStateHostInterrupt})
 		}
@@ -3666,9 +3680,14 @@ reload:
 				return directFrameFail(err)
 			}
 		}
-		ins := code[frame.pc].unpack()
+		packed := code[pc]
+		op := packed.op
+		a := int(packed.a)
+		b := int(packed.b)
+		c := int(packed.c)
+		d := int(packed.d)
 		if counts := thread.directFrameOpcodeCounts; counts != nil {
-			counts[uint8(ins.op)]++
+			counts[uint8(op)]++
 		}
 		if pcCounts := thread.directFramePCCounts; pcCounts != nil {
 			perProto := pcCounts[proto]
@@ -3676,15 +3695,15 @@ reload:
 				perProto = make([]uint64, len(code))
 				pcCounts[proto] = perProto
 			}
-			perProto[frame.pc]++
+			perProto[pc]++
 		}
-		switch ins.op {
+		switch op {
 		case opLoadConst:
-			registers[ins.a] = constants[ins.b]
+			registers[a] = constants[b]
 
 		case opLoadGlobal:
-			name, _ := constants[ins.b].String()
-			value, ok, hit := thread.globals.getSlot(proto.globalSlot(ins.c, name), name)
+			name, _ := constants[b].String()
+			value, ok, hit := thread.globals.getSlot(proto.globalSlot(c, name), name)
 			if hit {
 				picCounts.addGlobalSlotHit()
 			} else {
@@ -3693,61 +3712,61 @@ reload:
 			if !ok {
 				return directFrameFail(fmt.Errorf("run: undefined global %q", name))
 			}
-			registers[ins.a] = value
+			registers[a] = value
 
 		case opSetGlobal:
-			name, _ := constants[ins.a].String()
-			thread.globals.setSlot(proto.globalSlot(ins.c, name), name, registers[ins.b])
+			name, _ := constants[a].String()
+			thread.globals.setSlot(proto.globalSlot(c, name), name, registers[b])
 
 		case opNewTable:
-			registers[ins.a] = TableValue(newTableWithCapacity(ins.b, ins.c))
+			registers[a] = TableValue(newTableWithCapacity(b, c))
 
 		case opMove:
-			registers[ins.a] = registers[ins.b]
+			registers[a] = registers[b]
 
 		case opGetUpvalue:
-			value, err := frame.upvalue(ins.b)
+			value, err := frame.upvalue(b)
 			if err != nil {
 				return directFrameFail(err)
 			}
-			registers[ins.a] = value
+			registers[a] = value
 
 		case opSetUpvalue:
-			if err := frame.setUpvalue(ins.a, registers[ins.b]); err != nil {
+			if err := frame.setUpvalue(a, registers[b]); err != nil {
 				return directFrameFail(err)
 			}
 
 		case opVararg:
-			resultCount := ins.b
+			resultCount := b
 			if resultCount == 0 {
 				resultCount = 1
 			}
 			if resultCount < 0 {
-				frame.openResultStart = ins.a
+				frame.openResultStart = a
 				frame.openResults = vmAdjustedBorrowedResultWindow(frame.varargs)
-				registers[ins.a] = frame.openResults.at(0)
-				frame.pc++
+				registers[a] = frame.openResults.at(0)
+				pc++
 				continue
 			}
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
 			for i := 0; i < resultCount; i++ {
 				if i >= len(frame.varargs) {
-					registers[ins.a+i] = NilValue()
+					registers[a+i] = NilValue()
 				} else {
-					registers[ins.a+i] = frame.varargs[i]
+					registers[a+i] = frame.varargs[i]
 				}
 			}
 
 		case opSetField:
-			base := registers[ins.a]
+			base := registers[a]
 			table := base.tableRef()
 			if table == nil {
 				return directFrameFail(fmt.Errorf("run: set field target is %s, want table", base.Kind()))
 			}
 			if table.metatable != nil {
 				picCounts.addSideExit(directFrameSideExitReasonTable)
-				ok, err := directFrameTableSetIsland(thread.globals, table, constants[ins.b], registers[ins.c])
+				ok, err := directFrameTableSetIsland(thread.globals, table, constants[b], registers[c])
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: set field failed: %w", err))
 				}
@@ -3756,32 +3775,32 @@ reload:
 				}
 				break
 			}
-			if constantKeyOK[ins.b] {
-				keyValue := constants[ins.b]
+			if constantKeyOK[b] {
+				keyValue := constants[b]
 				var err error
 				if valueKind(keyValue) == StringKind {
-					table.setRawStringFieldBox(keyValue.stringText(), keyValue.stringBox(), registers[ins.c])
+					table.setRawStringFieldBox(keyValue.stringText(), keyValue.stringBox(), registers[c])
 				} else {
-					err = table.rawSetKey(constantKeys[ins.b], registers[ins.c])
+					err = table.rawSetKey(constantKeys[b], registers[c])
 				}
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: set field failed: %w", err))
 				}
 				break
 			}
-			if err := table.rawSet(constants[ins.b], registers[ins.c]); err != nil {
+			if err := table.rawSet(constants[b], registers[c]); err != nil {
 				return directFrameFail(fmt.Errorf("run: set field failed: %w", err))
 			}
 
 		case opSetStringField:
-			base := registers[ins.a]
+			base := registers[a]
 			table := base.tableRef()
 			if table == nil {
 				return directFrameFail(fmt.Errorf("run: set field target is %s, want table", base.Kind()))
 			}
 			if table.metatable != nil {
 				picCounts.addSideExit(directFrameSideExitReasonTable)
-				ok, err := directFrameTableSetIsland(thread.globals, table, constants[ins.b], registers[ins.c])
+				ok, err := directFrameTableSetIsland(thread.globals, table, constants[b], registers[c])
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: set field failed: %w", err))
 				}
@@ -3790,11 +3809,11 @@ reload:
 				}
 				break
 			}
-			keyValue := constants[ins.b]
-			key := constantKeys[ins.b].str
-			value := registers[ins.c]
+			keyValue := constants[b]
+			key := constantKeys[b].str
+			value := registers[c]
 			if valueKind(keyValue) == StringKind && !value.IsNil() {
-				cache := proto.directFrameIndexCacheAt(frame.pc)
+				cache := proto.directFrameIndexCacheAt(pc)
 				if cache.hasValueKey(table, keyValue) {
 					if cache.writeValueCounted(table, keyValue, value, picCounts) {
 						break
@@ -3820,13 +3839,13 @@ reload:
 			table.setRawStringFieldBox(key, keyValue.stringBox(), value)
 
 		case opSetStringFieldIndex:
-			base := registers[ins.a]
+			base := registers[a]
 			table := base.tableRef()
 			if table == nil {
 				return directFrameFail(fmt.Errorf("run: set field target is %s, want table", base.Kind()))
 			}
-			firstKey := constantKeys[ins.b].str
-			firstBox := constants[ins.b].stringBox()
+			firstKey := constantKeys[b].str
+			firstBox := constants[b].stringBox()
 			first, ok := table.rawStringFieldBox(firstBox)
 			if firstBox == nil {
 				first, ok = table.rawStringField(firstKey)
@@ -3846,10 +3865,10 @@ reload:
 				picCounts.addMetatableMiss()
 				return directFrameEnterGenericFrameFor(directFrameSideExitReasonMetatable)
 			}
-			key := registers[ins.c]
+			key := registers[c]
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(frame.pc)
-				value := registers[ins.d]
+				cache := proto.directFrameIndexCacheAt(pc)
+				value := registers[d]
 				if cache.writeValueCounted(nextTable, key, value, picCounts) {
 					break
 				}
@@ -3860,22 +3879,22 @@ reload:
 			} else {
 				picCounts.addInvalidKeyFallback()
 			}
-			if err := nextTable.rawSet(key, registers[ins.d]); err != nil {
+			if err := nextTable.rawSet(key, registers[d]); err != nil {
 				return directFrameFail(fmt.Errorf("run: set index failed: %w", err))
 			}
 
 		case opGetStringField:
-			base := registers[ins.b]
+			base := registers[b]
 			table := base.tableRef()
 			if table == nil {
 				return directFrameFail(fmt.Errorf("run: get field target is %s, want table", base.Kind()))
 			}
-			key := constants[ins.c]
-			keyText := constantKeys[ins.c].str
+			key := constants[c]
+			keyText := constantKeys[c].str
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(frame.pc)
+				cache := proto.directFrameIndexCacheAt(pc)
 				if value, ok := cache.getValueCounted(table, key, picCounts); ok {
-					registers[ins.a] = value
+					registers[a] = value
 					break
 				}
 				slot, slotOK := table.rawStringFieldSlotBox(key.stringBox())
@@ -3885,38 +3904,38 @@ reload:
 				if slotOK {
 					if value, ok := table.rawStringFieldAtSlot(slot, keyText); ok {
 						cache.storeValue(table, key, slot)
-						registers[ins.a] = value
+						registers[a] = value
 						break
 					}
 				}
 			} else if value, ok := table.rawStringField(keyText); ok {
 				// Keep the existing raw-string adapter as a defensive fallback for
 				// malformed hand-built prototypes.
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
 			if table.metatable != nil {
 				picCounts.addSideExit(directFrameSideExitReasonTable)
-				value, ok, err := directFrameTableGetIsland(thread.globals, table, constants[ins.c])
+				value, ok, err := directFrameTableGetIsland(thread.globals, table, constants[c])
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: get field failed: %w", err))
 				}
 				if !ok {
 					return directFrameEnterGenericFrame()
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NilValue()
+			registers[a] = NilValue()
 
 		case opGetStringFieldIndex:
-			base := registers[ins.b]
+			base := registers[b]
 			table := base.tableRef()
 			if table == nil {
 				return directFrameFail(fmt.Errorf("run: get field target is %s, want table", base.Kind()))
 			}
-			firstKey := constantKeys[ins.c].str
-			firstBox := constants[ins.c].stringBox()
+			firstKey := constantKeys[c].str
+			firstBox := constants[c].stringBox()
 			first, ok := table.rawStringFieldBox(firstBox)
 			if firstBox == nil {
 				first, ok = table.rawStringField(firstKey)
@@ -3936,18 +3955,18 @@ reload:
 				picCounts.addMetatableMiss()
 				return directFrameEnterGenericFrameFor(directFrameSideExitReasonMetatable)
 			}
-			key := registers[ins.d]
+			key := registers[d]
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(frame.pc)
+				cache := proto.directFrameIndexCacheAt(pc)
 				if value, ok := cache.getValueCounted(nextTable, key, picCounts); ok {
-					registers[ins.a] = value
+					registers[a] = value
 					break
 				}
 				if slot, ok := nextTable.rawStringFieldSlot(key.stringText()); ok {
 					value, ok := nextTable.rawStringFieldAtSlot(slot, key.stringText())
 					if ok {
 						cache.storeValue(nextTable, key, slot)
-						registers[ins.a] = value
+						registers[a] = value
 						break
 					}
 				} else {
@@ -3960,10 +3979,10 @@ reload:
 			if err != nil {
 				return directFrameFail(fmt.Errorf("run: get index failed: %w", err))
 			}
-			registers[ins.a] = value
+			registers[a] = value
 
 		case opSetIndex:
-			base := registers[ins.a]
+			base := registers[a]
 			table := base.tableRef()
 			if table == nil {
 				return directFrameFail(fmt.Errorf("run: set index target is %s, want table", base.Kind()))
@@ -3971,7 +3990,7 @@ reload:
 			if table.metatable != nil {
 				picCounts.addMetatableMiss()
 				picCounts.addSideExit(directFrameSideExitReasonTable)
-				ok, err := directFrameTableSetIsland(thread.globals, table, registers[ins.b], registers[ins.c])
+				ok, err := directFrameTableSetIsland(thread.globals, table, registers[b], registers[c])
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: set index failed: %w", err))
 				}
@@ -3980,10 +3999,10 @@ reload:
 				}
 				break
 			}
-			key := registers[ins.b]
+			key := registers[b]
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(frame.pc)
-				value := registers[ins.c]
+				cache := proto.directFrameIndexCacheAt(pc)
+				value := registers[c]
 				if cache.writeValueCounted(table, key, value, picCounts) {
 					break
 				}
@@ -3994,12 +4013,12 @@ reload:
 			} else {
 				picCounts.addInvalidKeyFallback()
 			}
-			if err := table.rawSet(registers[ins.b], registers[ins.c]); err != nil {
+			if err := table.rawSet(registers[b], registers[c]); err != nil {
 				return directFrameFail(fmt.Errorf("run: set index failed: %w", err))
 			}
 
 		case opGetIndex:
-			base := registers[ins.b]
+			base := registers[b]
 			table := base.tableRef()
 			if table == nil {
 				return directFrameFail(fmt.Errorf("run: get index target is %s, want table", base.Kind()))
@@ -4007,28 +4026,28 @@ reload:
 			if table.metatable != nil {
 				picCounts.addMetatableMiss()
 				picCounts.addSideExit(directFrameSideExitReasonTable)
-				value, ok, err := directFrameTableGetIsland(thread.globals, table, registers[ins.c])
+				value, ok, err := directFrameTableGetIsland(thread.globals, table, registers[c])
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: get index failed: %w", err))
 				}
 				if !ok {
 					return directFrameEnterGenericFrame()
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			key := registers[ins.c]
+			key := registers[c]
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(frame.pc)
+				cache := proto.directFrameIndexCacheAt(pc)
 				if value, ok := cache.getValueCounted(table, key, picCounts); ok {
-					registers[ins.a] = value
+					registers[a] = value
 					break
 				}
 				if slot, ok := table.rawStringFieldSlot(key.stringText()); ok {
 					value, ok := table.rawStringFieldAtSlot(slot, key.stringText())
 					if ok {
 						cache.storeValue(table, key, slot)
-						registers[ins.a] = value
+						registers[a] = value
 						break
 					}
 				} else {
@@ -4036,7 +4055,7 @@ reload:
 				}
 			} else if index, ok := tableArrayIndexFromValue(key); ok && index <= len(table.array) {
 				picCounts.addNumericArrayIndexHit()
-				registers[ins.a] = table.array[index-1]
+				registers[a] = table.array[index-1]
 				break
 			} else {
 				picCounts.addInvalidKeyFallback()
@@ -4045,26 +4064,26 @@ reload:
 			if err != nil {
 				return directFrameFail(fmt.Errorf("run: get index failed: %w", err))
 			}
-			registers[ins.a] = value
+			registers[a] = value
 
 		case opClosure:
-			child := proto.prototypes[ins.b]
+			child := proto.prototypes[b]
 			captured := captureUpvalues(child, frame)
-			registers[ins.a] = functionValueWithCapturedUpvalues(child, captured)
+			registers[a] = functionValueWithCapturedUpvalues(child, captured)
 
 		case opPrepareIter:
-			iterValue := registers[ins.a]
+			iterValue := registers[a]
 			iterTable := iterValue.tableRef()
 			if iterTable != nil && iterTable.metatable == nil {
 				if tableCanIterateCleanArray(iterTable) {
-					registers[ins.a] = valueWithRefAndNativeID(HostFuncKind, nil, nativeFuncArrayNext)
-					registers[ins.b] = iterValue
-					registers[ins.c] = NilValue()
+					registers[a] = valueWithRefAndNativeID(HostFuncKind, nil, nativeFuncArrayNext)
+					registers[b] = iterValue
+					registers[c] = NilValue()
 					break
 				}
-				registers[ins.a] = valueWithRefAndNativeID(HostFuncKind, nil, nativeFuncTableNext)
-				registers[ins.b] = iterValue
-				registers[ins.c] = NilValue()
+				registers[a] = valueWithRefAndNativeID(HostFuncKind, nil, nativeFuncTableNext)
+				registers[b] = iterValue
+				registers[c] = NilValue()
 				break
 			}
 			generator, state, control, ok, err := prepareIterator(iterValue, thread.globals)
@@ -4072,13 +4091,13 @@ reload:
 				return directFrameFail(fmt.Errorf("run: prepare iterator failed: %w", err))
 			}
 			if ok {
-				registers[ins.a] = generator
-				registers[ins.b] = state
-				registers[ins.c] = control
+				registers[a] = generator
+				registers[b] = state
+				registers[c] = control
 			}
 
 		case opArrayNext:
-			callee := registers[ins.b]
+			callee := registers[b]
 			var first Value
 			var second Value
 			var count int
@@ -4086,12 +4105,12 @@ reload:
 			var err error
 			if valueNativeID(callee) == nativeFuncArrayNext {
 				ok = true
-				tableValue := registers[ins.c]
+				tableValue := registers[c]
 				table := tableValue.tableRef()
 				if table == nil {
 					err = fmt.Errorf("array iterator: argument #1 is %s, want table", tableValue.Kind())
 				} else {
-					controlValue := registers[ins.a]
+					controlValue := registers[a]
 					index := 0
 					if valueKind(controlValue) != NilKind {
 						if valueKind(controlValue) != NumberKind {
@@ -4117,7 +4136,7 @@ reload:
 				}
 				picCounts.addArrayIteratorFastStep()
 			} else {
-				first, second, count, ok, err = directFrameIteratorNext(callee, registers[ins.c], registers[ins.a])
+				first, second, count, ok, err = directFrameIteratorNext(callee, registers[c], registers[a])
 			}
 			if !ok {
 				return directFrameEnterGenericFrame()
@@ -4127,27 +4146,27 @@ reload:
 			}
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
-			for i := 0; i < ins.d; i++ {
+			for i := 0; i < d; i++ {
 				if i >= count {
-					registers[ins.a+i] = NilValue()
+					registers[a+i] = NilValue()
 					continue
 				}
 				if i == 0 {
-					registers[ins.a+i] = first
+					registers[a+i] = first
 				} else {
-					registers[ins.a+i] = second
+					registers[a+i] = second
 				}
 			}
 
 		case opArrayNextJump2:
-			callee := registers[ins.b]
+			callee := registers[b]
 			if valueNativeID(callee) == nativeFuncArrayNext {
-				tableValue := registers[ins.c]
+				tableValue := registers[c]
 				table := tableValue.tableRef()
 				if table == nil {
 					return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: argument #1 is %s, want table", tableValue.Kind()))
 				}
-				controlValue := registers[ins.a]
+				controlValue := registers[a]
 				index := 0
 				if valueKind(controlValue) != NilKind {
 					if valueKind(controlValue) != NumberKind {
@@ -4163,16 +4182,16 @@ reload:
 				frame.openResults = vmResultWindow{}
 				next := index + 1
 				if next < 1 || next > len(table.array) {
-					registers[ins.a] = NilValue()
-					registers[ins.a+1] = NilValue()
-					frame.pc = ins.d
+					registers[a] = NilValue()
+					registers[a+1] = NilValue()
+					pc = d
 					continue
 				}
-				registers[ins.a] = NumberValue(float64(next))
-				registers[ins.a+1] = table.array[next-1]
+				registers[a] = NumberValue(float64(next))
+				registers[a+1] = table.array[next-1]
 				break
 			}
-			first, second, count, ok, err := directFrameIteratorNext(callee, registers[ins.c], registers[ins.a])
+			first, second, count, ok, err := directFrameIteratorNext(callee, registers[c], registers[a])
 			if !ok {
 				return directFrameEnterGenericFrame()
 			}
@@ -4182,21 +4201,21 @@ reload:
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
 			if count < 1 || first.IsNil() {
-				registers[ins.a] = NilValue()
-				registers[ins.a+1] = NilValue()
-				frame.pc = ins.d
+				registers[a] = NilValue()
+				registers[a+1] = NilValue()
+				pc = d
 				continue
 			}
-			registers[ins.a] = first
+			registers[a] = first
 			if count > 1 {
-				registers[ins.a+1] = second
+				registers[a+1] = second
 			} else {
-				registers[ins.a+1] = NilValue()
+				registers[a+1] = NilValue()
 			}
 
 		case opAdd:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind {
 				value, err := directFrameBinaryArithmeticValue(
 					picCounts,
@@ -4210,14 +4229,14 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: add failed: %w", err))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(valueNumber(left) + valueNumber(right))
+			registers[a] = NumberValue(valueNumber(left) + valueNumber(right))
 
 		case opSub:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind {
 				value, err := directFrameBinaryArithmeticValue(
 					picCounts,
@@ -4231,14 +4250,14 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: subtract failed: %w", err))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(valueNumber(left) - valueNumber(right))
+			registers[a] = NumberValue(valueNumber(left) - valueNumber(right))
 
 		case opMul:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind {
 				value, err := directFrameBinaryArithmeticValue(
 					picCounts,
@@ -4252,14 +4271,14 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: multiply failed: %w", err))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(valueNumber(left) * valueNumber(right))
+			registers[a] = NumberValue(valueNumber(left) * valueNumber(right))
 
 		case opDiv:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind {
 				value, err := directFrameBinaryArithmeticValue(
 					picCounts,
@@ -4273,14 +4292,14 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: divide failed: %w", err))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(valueNumber(left) / valueNumber(right))
+			registers[a] = NumberValue(valueNumber(left) / valueNumber(right))
 
 		case opMod:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind {
 				value, err := directFrameBinaryArithmeticValue(
 					picCounts,
@@ -4294,14 +4313,14 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: modulo failed: %w", err))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(valueNumber(left) - math.Floor(valueNumber(left)/valueNumber(right))*valueNumber(right))
+			registers[a] = NumberValue(valueNumber(left) - math.Floor(valueNumber(left)/valueNumber(right))*valueNumber(right))
 
 		case opIDiv:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind {
 				value, err := directFrameBinaryArithmeticValue(
 					picCounts,
@@ -4315,14 +4334,14 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: floor divide failed: %w", err))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(math.Floor(valueNumber(left) / valueNumber(right)))
+			registers[a] = NumberValue(math.Floor(valueNumber(left) / valueNumber(right)))
 
 		case opPow:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind {
 				value, err := directFrameBinaryArithmeticValue(
 					picCounts,
@@ -4336,15 +4355,15 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: power failed: %w", err))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(math.Pow(valueNumber(left), valueNumber(right)))
+			registers[a] = NumberValue(math.Pow(valueNumber(left), valueNumber(right)))
 
 		case opAddK:
-			left := registers[ins.b]
-			if valueKind(left) != NumberKind || !constantNumberOK[ins.c] {
-				right := constants[ins.c]
+			left := registers[b]
+			if valueKind(left) != NumberKind || !constantNumberOK[c] {
+				right := constants[c]
 				value, err := directFrameBinaryArithmeticValue(
 					picCounts,
 					thread.globals,
@@ -4357,15 +4376,15 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: add failed: %w", err))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(valueNumber(left) + constantNumbers[ins.c])
+			registers[a] = NumberValue(valueNumber(left) + constantNumbers[c])
 
 		case opSubK:
-			left := registers[ins.b]
-			if valueKind(left) != NumberKind || !constantNumberOK[ins.c] {
-				right := constants[ins.c]
+			left := registers[b]
+			if valueKind(left) != NumberKind || !constantNumberOK[c] {
+				right := constants[c]
 				value, err := directFrameBinaryArithmeticValue(
 					picCounts,
 					thread.globals,
@@ -4378,15 +4397,15 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: subtract failed: %w", err))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(valueNumber(left) - constantNumbers[ins.c])
+			registers[a] = NumberValue(valueNumber(left) - constantNumbers[c])
 
 		case opMulK:
-			left := registers[ins.b]
-			if valueKind(left) != NumberKind || !constantNumberOK[ins.c] {
-				right := constants[ins.c]
+			left := registers[b]
+			if valueKind(left) != NumberKind || !constantNumberOK[c] {
+				right := constants[c]
 				value, err := directFrameBinaryArithmeticValue(
 					picCounts,
 					thread.globals,
@@ -4399,15 +4418,15 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: multiply failed: %w", err))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(valueNumber(left) * constantNumbers[ins.c])
+			registers[a] = NumberValue(valueNumber(left) * constantNumbers[c])
 
 		case opDivK:
-			left := registers[ins.b]
-			if valueKind(left) != NumberKind || !constantNumberOK[ins.c] {
-				right := constants[ins.c]
+			left := registers[b]
+			if valueKind(left) != NumberKind || !constantNumberOK[c] {
+				right := constants[c]
 				value, err := directFrameBinaryArithmeticValue(
 					picCounts,
 					thread.globals,
@@ -4420,15 +4439,15 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: divide failed: %w", err))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(valueNumber(left) / constantNumbers[ins.c])
+			registers[a] = NumberValue(valueNumber(left) / constantNumbers[c])
 
 		case opModK:
-			left := registers[ins.b]
-			if valueKind(left) != NumberKind || !constantNumberOK[ins.c] {
-				right := constants[ins.c]
+			left := registers[b]
+			if valueKind(left) != NumberKind || !constantNumberOK[c] {
+				right := constants[c]
 				value, err := directFrameBinaryArithmeticValue(
 					picCounts,
 					thread.globals,
@@ -4441,16 +4460,16 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: modulo failed: %w", err))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			right := constantNumbers[ins.c]
-			registers[ins.a] = NumberValue(valueNumber(left) - math.Floor(valueNumber(left)/right)*right)
+			right := constantNumbers[c]
+			registers[a] = NumberValue(valueNumber(left) - math.Floor(valueNumber(left)/right)*right)
 
 		case opIDivK:
-			left := registers[ins.b]
-			if valueKind(left) != NumberKind || !constantNumberOK[ins.c] {
-				right := constants[ins.c]
+			left := registers[b]
+			if valueKind(left) != NumberKind || !constantNumberOK[c] {
+				right := constants[c]
 				value, err := directFrameBinaryArithmeticValue(
 					picCounts,
 					thread.globals,
@@ -4463,28 +4482,28 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: floor divide failed: %w", err))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(math.Floor(valueNumber(left) / constantNumbers[ins.c]))
+			registers[a] = NumberValue(math.Floor(valueNumber(left) / constantNumbers[c]))
 
 		case opNeg:
-			operand := registers[ins.b]
+			operand := registers[b]
 			if valueKind(operand) != NumberKind {
 				value, err := directFrameUnaryArithmeticValue(picCounts, thread.globals, operand, negateValue)
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: %w", err))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(-valueNumber(operand))
+			registers[a] = NumberValue(-valueNumber(operand))
 
 		case opLen:
-			operand := registers[ins.b]
+			operand := registers[b]
 			switch valueKind(operand) {
 			case StringKind:
-				registers[ins.a] = NumberValue(float64(len(operand.stringText())))
+				registers[a] = NumberValue(float64(len(operand.stringText())))
 			case TableKind:
 				table := operand.tableRef()
 				if table == nil {
@@ -4496,38 +4515,38 @@ reload:
 					if err != nil {
 						return directFrameFail(fmt.Errorf("run: length failed: %w", err))
 					}
-					registers[ins.a] = value
+					registers[a] = value
 					break
 				}
 				length, err := table.rawLen()
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: length failed: %w", err))
 				}
-				registers[ins.a] = NumberValue(float64(length))
+				registers[a] = NumberValue(float64(length))
 			default:
 				picCounts.addSideExit(directFrameSideExitReasonMetatable)
 				value, err := lengthValue(operand, thread.globals)
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: length failed: %w", err))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 			}
 
 		case opConcat:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if !directFrameRawConcatOperand(left) || !directFrameRawConcatOperand(right) {
 				picCounts.addSideExit(directFrameSideExitReasonMetatable)
 				value, err := concatValue(left, right, thread.globals)
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: concat failed: %w", err))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
 			concatValues := [2]Value{left, right}
 			if value, ok := thread.internStringConcatValues(concatValues[:]); ok {
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
 			leftText, err := concatOperandString(left, "left")
@@ -4538,61 +4557,61 @@ reload:
 			if err != nil {
 				return directFrameFail(fmt.Errorf("run: concat failed: %w", err))
 			}
-			registers[ins.a] = thread.internStringValue(leftText + rightText)
+			registers[a] = thread.internStringValue(leftText + rightText)
 
 		case opConcatChain:
-			if value, ok := thread.internStringConcatValues(registers[ins.b : ins.b+ins.c]); ok {
-				registers[ins.a] = value
+			if value, ok := thread.internStringConcatValues(registers[b : b+c]); ok {
+				registers[a] = value
 				break
 			}
-			text, ok, err := thread.concatRawChainString(registers[ins.b : ins.b+ins.c])
+			text, ok, err := thread.concatRawChainString(registers[b : b+c])
 			if err != nil {
 				return directFrameFail(fmt.Errorf("run: concat failed: %w", err))
 			}
 			if !ok {
 				picCounts.addSideExit(directFrameSideExitReasonMetatable)
-				value, err := concatChainValue(registers[ins.b:ins.b+ins.c], thread.globals)
+				value, err := concatChainValue(registers[b:b+c], thread.globals)
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: concat failed: %w", err))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = thread.internStringValue(text)
+			registers[a] = thread.internStringValue(text)
 
 		case opEqual:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) == TableKind || valueKind(right) == TableKind || valueKind(left) == UserDataKind || valueKind(right) == UserDataKind {
 				picCounts.addSideExit(directFrameSideExitReasonMetatable)
 				value, err := equalValue(left, right, thread.globals)
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: equal failed: %w", err))
 				}
-				registers[ins.a] = BoolValue(value)
+				registers[a] = BoolValue(value)
 				break
 			}
-			registers[ins.a] = BoolValue(valuesEqual(left, right))
+			registers[a] = BoolValue(valuesEqual(left, right))
 
 		case opNotEqual:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) == TableKind || valueKind(right) == TableKind || valueKind(left) == UserDataKind || valueKind(right) == UserDataKind {
 				picCounts.addSideExit(directFrameSideExitReasonMetatable)
 				value, err := equalValue(left, right, thread.globals)
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: equal failed: %w", err))
 				}
-				registers[ins.a] = BoolValue(!value)
+				registers[a] = BoolValue(!value)
 				break
 			}
-			registers[ins.a] = BoolValue(!valuesEqual(left, right))
+			registers[a] = BoolValue(!valuesEqual(left, right))
 
 		case opLess:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) == StringKind && valueKind(right) == StringKind {
-				registers[ins.a] = BoolValue(left.stringText() < right.stringText())
+				registers[a] = BoolValue(left.stringText() < right.stringText())
 				break
 			}
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind || math.IsNaN(valueNumber(left)) || math.IsNaN(valueNumber(right)) {
@@ -4601,16 +4620,16 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: less failed: %w", err))
 				}
-				registers[ins.a] = BoolValue(value)
+				registers[a] = BoolValue(value)
 				break
 			}
-			registers[ins.a] = BoolValue(valueNumber(left) < valueNumber(right))
+			registers[a] = BoolValue(valueNumber(left) < valueNumber(right))
 
 		case opLessEqual:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) == StringKind && valueKind(right) == StringKind {
-				registers[ins.a] = BoolValue(left.stringText() <= right.stringText())
+				registers[a] = BoolValue(left.stringText() <= right.stringText())
 				break
 			}
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind || math.IsNaN(valueNumber(left)) || math.IsNaN(valueNumber(right)) {
@@ -4619,16 +4638,16 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: less equal failed: %w", err))
 				}
-				registers[ins.a] = BoolValue(value)
+				registers[a] = BoolValue(value)
 				break
 			}
-			registers[ins.a] = BoolValue(valueNumber(left) <= valueNumber(right))
+			registers[a] = BoolValue(valueNumber(left) <= valueNumber(right))
 
 		case opGreater:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) == StringKind && valueKind(right) == StringKind {
-				registers[ins.a] = BoolValue(left.stringText() > right.stringText())
+				registers[a] = BoolValue(left.stringText() > right.stringText())
 				break
 			}
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind || math.IsNaN(valueNumber(left)) || math.IsNaN(valueNumber(right)) {
@@ -4637,16 +4656,16 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: greater failed: %w", err))
 				}
-				registers[ins.a] = BoolValue(value)
+				registers[a] = BoolValue(value)
 				break
 			}
-			registers[ins.a] = BoolValue(valueNumber(left) > valueNumber(right))
+			registers[a] = BoolValue(valueNumber(left) > valueNumber(right))
 
 		case opGreaterEqual:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) == StringKind && valueKind(right) == StringKind {
-				registers[ins.a] = BoolValue(left.stringText() >= right.stringText())
+				registers[a] = BoolValue(left.stringText() >= right.stringText())
 				break
 			}
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind || math.IsNaN(valueNumber(left)) || math.IsNaN(valueNumber(right)) {
@@ -4655,15 +4674,15 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: greater equal failed: %w", err))
 				}
-				registers[ins.a] = BoolValue(value)
+				registers[a] = BoolValue(value)
 				break
 			}
-			registers[ins.a] = BoolValue(valueNumber(left) >= valueNumber(right))
+			registers[a] = BoolValue(valueNumber(left) >= valueNumber(right))
 
 		case opNumericForCheck:
-			loopValue := registers[ins.a]
-			limitValue := registers[ins.b]
-			stepValue := registers[ins.c]
+			loopValue := registers[a]
+			limitValue := registers[b]
+			stepValue := registers[c]
 			if valueKind(loopValue) != NumberKind {
 				return directFrameFail(fmt.Errorf("run: numeric for loop value is %s, want number", loopValue.Kind()))
 			}
@@ -4678,43 +4697,43 @@ reload:
 			}
 			if valueNumber(stepValue) > 0 {
 				if valueNumber(loopValue) > valueNumber(limitValue) {
-					frame.pc = ins.d
+					pc = d
 					continue
 				}
 				break
 			}
 			if valueNumber(loopValue) < valueNumber(limitValue) {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opNumericForLoop:
-			loopValue := registers[ins.a]
-			stepValue := registers[ins.b]
+			loopValue := registers[a]
+			stepValue := registers[b]
 			if valueKind(loopValue) != NumberKind || valueKind(stepValue) != NumberKind {
 				return directFrameEnterGenericFrame()
 			}
-			registers[ins.a] = NumberValue(valueNumber(loopValue) + valueNumber(stepValue))
-			frame.pc = ins.d
+			registers[a] = NumberValue(valueNumber(loopValue) + valueNumber(stepValue))
+			pc = d
 			continue
 
 		case opJumpIfNotEqualK:
-			left := registers[ins.a]
-			if valueKind(left) == NumberKind && constantNumberOK[ins.b] {
-				if valueNumber(left) != constantNumbers[ins.b] {
-					frame.pc = ins.d
+			left := registers[a]
+			if valueKind(left) == NumberKind && constantNumberOK[b] {
+				if valueNumber(left) != constantNumbers[b] {
+					pc = d
 					continue
 				}
 				break
 			}
-			if valueKind(left) == StringKind && constantKeyOK[ins.b] {
-				if left.stringText() != constantKeys[ins.b].str {
-					frame.pc = ins.d
+			if valueKind(left) == StringKind && constantKeyOK[b] {
+				if left.stringText() != constantKeys[b].str {
+					pc = d
 					continue
 				}
 				break
 			}
-			right := constants[ins.b]
+			right := constants[b]
 			if valueKind(left) == TableKind || valueKind(right) == TableKind || valueKind(left) == UserDataKind || valueKind(right) == UserDataKind {
 				picCounts.addSideExit(directFrameSideExitReasonMetatable)
 			}
@@ -4723,199 +4742,199 @@ reload:
 				return directFrameFail(fmt.Errorf("run: equal failed: %w", err))
 			}
 			if !equal {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfTableHasMetatable:
-			base := registers[ins.a]
+			base := registers[a]
 			if table := base.tableRef(); table != nil && table.metatable != nil {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfNotLessK:
-			left := registers[ins.a]
-			less, err := directFrameLessForBranch(picCounts, thread.globals, left, constants[ins.b])
+			left := registers[a]
+			less, err := directFrameLessForBranch(picCounts, thread.globals, left, constants[b])
 			if err != nil {
 				return directFrameFail(fmt.Errorf("run: less failed: %w", err))
 			}
 			if !less {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfNotGreaterK:
-			left := registers[ins.a]
-			greater, err := directFrameLessForBranch(picCounts, thread.globals, constants[ins.b], left)
+			left := registers[a]
+			greater, err := directFrameLessForBranch(picCounts, thread.globals, constants[b], left)
 			if err != nil {
 				return directFrameFail(fmt.Errorf("run: greater failed: %w", err))
 			}
 			if !greater {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfLessK:
-			left := registers[ins.a]
-			less, err := directFrameLessForBranch(picCounts, thread.globals, left, constants[ins.b])
+			left := registers[a]
+			less, err := directFrameLessForBranch(picCounts, thread.globals, left, constants[b])
 			if err != nil {
 				return directFrameFail(fmt.Errorf("run: less failed: %w", err))
 			}
 			if less {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfGreaterK:
-			left := registers[ins.a]
-			greater, err := directFrameLessForBranch(picCounts, thread.globals, constants[ins.b], left)
+			left := registers[a]
+			greater, err := directFrameLessForBranch(picCounts, thread.globals, constants[b], left)
 			if err != nil {
 				return directFrameFail(fmt.Errorf("run: greater failed: %w", err))
 			}
 			if greater {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfNotLess:
-			left := registers[ins.a]
-			right := registers[ins.b]
+			left := registers[a]
+			right := registers[b]
 			less, err := directFrameLessForBranch(picCounts, thread.globals, left, right)
 			if err != nil {
 				return directFrameFail(fmt.Errorf("run: less failed: %w", err))
 			}
 			if !less {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfNotGreater:
-			left := registers[ins.a]
-			right := registers[ins.b]
+			left := registers[a]
+			right := registers[b]
 			greater, err := directFrameLessForBranch(picCounts, thread.globals, right, left)
 			if err != nil {
 				return directFrameFail(fmt.Errorf("run: greater failed: %w", err))
 			}
 			if !greater {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfLess:
-			left := registers[ins.a]
-			right := registers[ins.b]
+			left := registers[a]
+			right := registers[b]
 			less, err := directFrameLessForBranch(picCounts, thread.globals, left, right)
 			if err != nil {
 				return directFrameFail(fmt.Errorf("run: less failed: %w", err))
 			}
 			if less {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfGreater:
-			left := registers[ins.a]
-			right := registers[ins.b]
+			left := registers[a]
+			right := registers[b]
 			greater, err := directFrameLessForBranch(picCounts, thread.globals, right, left)
 			if err != nil {
 				return directFrameFail(fmt.Errorf("run: greater failed: %w", err))
 			}
 			if greater {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfModKNotEqualK:
-			left := registers[ins.a]
-			if valueKind(left) != NumberKind || !constantNumberOK[ins.b] || !constantNumberOK[ins.c] {
+			left := registers[a]
+			if valueKind(left) != NumberKind || !constantNumberOK[b] || !constantNumberOK[c] {
 				return directFrameEnterGenericFrame()
 			}
-			modRight := constantNumbers[ins.b]
-			want := constantNumbers[ins.c]
+			modRight := constantNumbers[b]
+			want := constantNumbers[c]
 			got := valueNumber(left) - math.Floor(valueNumber(left)/modRight)*modRight
 			if got != want {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfStringFieldNotEqualK:
-			left, ok, err := directFrameStringFieldBox(registers[ins.a], constantKeys[ins.b].str, constants[ins.b].stringBox())
+			left, ok, err := directFrameStringFieldBox(registers[a], constantKeys[b].str, constants[b].stringBox())
 			if err != nil {
 				return directFrameFail(fmt.Errorf("run: get field failed: %w", err))
 			}
 			if !ok {
 				return directFrameEnterGenericFrame()
 			}
-			right := constants[ins.c]
+			right := constants[c]
 			if valueKind(left) == TableKind || valueKind(left) == UserDataKind || valueKind(right) == TableKind || valueKind(right) == UserDataKind {
 				return directFrameEnterGenericFrame()
 			}
 			if equal, fast := directFrameScalarValuesEqual(left, right); fast {
 				picCounts.addScalarEqualityFastCheck()
 				if !equal {
-					frame.pc = ins.d
+					pc = d
 					continue
 				}
 				break
 			}
 			if !valuesEqual(left, right) {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK:
-			left, ok, err := directFrameStringFieldBox(registers[ins.a], constantKeys[ins.b].str, constants[ins.b].stringBox())
+			left, ok, err := directFrameStringFieldBox(registers[a], constantKeys[b].str, constants[b].stringBox())
 			if err != nil {
 				return directFrameFail(fmt.Errorf("run: get field failed: %w", err))
 			}
-			if !ok || valueKind(left) != NumberKind || !constantNumberOK[ins.c] {
+			if !ok || valueKind(left) != NumberKind || !constantNumberOK[c] {
 				return directFrameEnterGenericFrame()
 			}
-			right := constantNumbers[ins.c]
+			right := constantNumbers[c]
 			if math.IsNaN(valueNumber(left)) || math.IsNaN(right) {
 				return directFrameEnterGenericFrame()
 			}
 			greater := valueNumber(left) > right
-			if (ins.op == opJumpIfStringFieldNotGreaterK && !greater) ||
-				(ins.op == opJumpIfStringFieldGreaterK && greater) {
-				frame.pc = ins.d
+			if (op == opJumpIfStringFieldNotGreaterK && !greater) ||
+				(op == opJumpIfStringFieldGreaterK && greater) {
+				pc = d
 				continue
 			}
 
 		case opJumpIfStringFieldNotGreaterR:
-			left, ok, err := directFrameStringFieldBox(registers[ins.a], constantKeys[ins.b].str, constants[ins.b].stringBox())
+			left, ok, err := directFrameStringFieldBox(registers[a], constantKeys[b].str, constants[b].stringBox())
 			if err != nil {
 				return directFrameFail(fmt.Errorf("run: get field failed: %w", err))
 			}
-			right := registers[ins.c]
+			right := registers[c]
 			if !ok || valueKind(left) != NumberKind || valueKind(right) != NumberKind ||
 				math.IsNaN(valueNumber(left)) || math.IsNaN(valueNumber(right)) {
 				return directFrameEnterGenericFrame()
 			}
 			if !(valueNumber(left) > valueNumber(right)) {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfFalse:
-			if !registers[ins.a].truthy() {
-				frame.pc = ins.b
+			if !registers[a].truthy() {
+				pc = b
 				continue
 			}
 
 		case opJump:
-			frame.pc = ins.b
+			pc = b
 			continue
 
 		case opCall:
-			resultCount := ins.d
+			resultCount := d
 			if resultCount == 0 {
 				resultCount = 1
 			}
-			callee := registers[ins.b]
-			if ins.c == 2 && resultCount == 2 {
-				first, second, count, ok, err := directFrameIteratorNext(callee, registers[ins.b+1], registers[ins.b+2])
+			callee := registers[b]
+			if c == 2 && resultCount == 2 {
+				first, second, count, ok, err := directFrameIteratorNext(callee, registers[b+1], registers[b+2])
 				if ok {
 					if err != nil {
 						return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
@@ -4924,30 +4943,30 @@ reload:
 					frame.openResults = vmResultWindow{}
 					for i := 0; i < resultCount; i++ {
 						if i >= count {
-							registers[ins.a+i] = NilValue()
+							registers[a+i] = NilValue()
 						} else if i == 0 {
-							registers[ins.a+i] = first
+							registers[a+i] = first
 						} else {
-							registers[ins.a+i] = second
+							registers[a+i] = second
 						}
 					}
 					break
 				}
 			}
 			if resultCount == 1 && valueNativeID(callee) == nativeFuncRawLen {
-				value, err := baseRawLenValue(registers[ins.b+1 : ins.b+1+ins.c])
+				value, err := baseRawLenValue(registers[b+1 : b+1+c])
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
 				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
 			if resultCount == 1 && valueNativeID(callee) == nativeFuncToString {
 				value := NilValue()
-				if ins.c > 0 {
-					value = registers[ins.b+1]
+				if c > 0 {
+					value = registers[b+1]
 				}
 				result, err := baseToStringValue(thread.globals, value)
 				if err != nil {
@@ -4955,13 +4974,14 @@ reload:
 				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
-				registers[ins.a] = result
+				registers[a] = result
 				break
 			}
-			if closure, ok := callee.scriptFunction(); ok && ins.c >= 0 {
-				destination := vmResultDestination{register: ins.a, count: ins.d}
-				args := registers[ins.b+1 : ins.b+1+ins.c]
-				frame.pc++
+			if closure, ok := callee.scriptFunction(); ok && c >= 0 {
+				destination := vmResultDestination{register: a, count: d}
+				args := registers[b+1 : b+1+c]
+				pc++
+				frame.pc = pc
 				result, err := thread.runInlineScriptCall(closure, args)
 				if err != nil {
 					if yield, ok := err.(vmYieldRequest); ok {
@@ -4985,22 +5005,22 @@ reload:
 			return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
 
 		case opCallOne:
-			callee := registers[ins.b]
-			argCount, borrowHint := decodeFixedCallCount(ins.c)
+			callee := registers[b]
+			argCount, borrowHint := decodeFixedCallCount(c)
 			if valueNativeID(callee) == nativeFuncRawLen {
-				value, err := baseRawLenValue(registers[ins.b+1 : ins.b+1+argCount])
+				value, err := baseRawLenValue(registers[b+1 : b+1+argCount])
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
 				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
 			if valueNativeID(callee) == nativeFuncToString {
 				value := NilValue()
 				if argCount > 0 {
-					value = registers[ins.b+1]
+					value = registers[b+1]
 				}
 				result, err := baseToStringValue(thread.globals, value)
 				if err != nil {
@@ -5008,14 +5028,15 @@ reload:
 				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
-				registers[ins.a] = result
+				registers[a] = result
 				break
 			}
 			if borrowHint {
 				if closure, ok := callee.scriptFunction(); ok {
-					if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, ins.b+1, argCount); borrowed {
-						frame.pc++
-						installFixedResultPendingCall(frame, vmResultDestination{register: ins.a, count: 1})
+					if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, b+1, argCount); borrowed {
+						pc++
+						frame.pc = pc
+						installFixedResultPendingCall(frame, vmResultDestination{register: a, count: 1})
 						thread.pushFrame(child)
 						thread.directFramePICCounts.addFixedCallTrampolineEntry()
 						frame = child
@@ -5027,16 +5048,17 @@ reload:
 			return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
 
 		case opCallLocalOne:
-			callee := registers[ins.b]
+			callee := registers[b]
 			closure, ok := callee.scriptFunction()
 			if !ok {
 				return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
 			}
-			argCount, borrowHint := decodeFixedCallCount(ins.d)
-			frame.pc++
+			argCount, borrowHint := decodeFixedCallCount(d)
+			pc++
+			frame.pc = pc
 			if borrowHint {
-				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, ins.c, argCount); borrowed {
-					installFixedResultPendingCall(frame, vmResultDestination{register: ins.a, count: 1})
+				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, c, argCount); borrowed {
+					installFixedResultPendingCall(frame, vmResultDestination{register: a, count: 1})
 					thread.pushFrame(child)
 					thread.directFramePICCounts.addFixedCallTrampolineEntry()
 					frame = child
@@ -5047,16 +5069,16 @@ reload:
 			var value Value
 			var callErr error
 			if argCount <= 3 {
-				first, second, third := fixedRegisterArgs(registers, ins.c, argCount)
+				first, second, third := fixedRegisterArgs(registers, c, argCount)
 				value, callErr = thread.runInlineScriptCallFixedOneNoHook(closure, first, second, third, argCount)
 			} else {
-				args := registers[ins.c : ins.c+argCount]
+				args := registers[c : c+argCount]
 				value, callErr = thread.runInlineScriptCallOneNoHook(closure, args)
 			}
 			if callErr != nil {
 				if yield, ok := callErr.(vmYieldRequest); ok {
 					thread.installPendingCall(frame, vmPendingCall{
-						destination: vmResultDestination{register: ins.a, count: 1},
+						destination: vmResultDestination{register: a, count: 1},
 						protected:   yield.protected,
 						host:        yield.host,
 					})
@@ -5067,11 +5089,11 @@ reload:
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
 			registers = frame.registers
-			registers[ins.a] = value
+			registers[a] = value
 			continue
 
 		case opCallUpvalueOne:
-			callee, err := frame.upvalue(ins.b)
+			callee, err := frame.upvalue(b)
 			if err != nil {
 				return directFrameFail(err)
 			}
@@ -5079,13 +5101,14 @@ reload:
 			if !ok {
 				return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
 			}
-			argCount, borrowHint := decodeFixedCallCount(ins.d)
-			frame.pc++
+			argCount, borrowHint := decodeFixedCallCount(d)
+			pc++
+			frame.pc = pc
 			var value Value
 			var callErr error
 			if borrowHint {
-				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, ins.c, argCount); borrowed {
-					installFixedResultPendingCall(frame, vmResultDestination{register: ins.a, count: 1})
+				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, c, argCount); borrowed {
+					installFixedResultPendingCall(frame, vmResultDestination{register: a, count: 1})
 					thread.pushFrame(child)
 					thread.directFramePICCounts.addFixedCallTrampolineEntry()
 					frame = child
@@ -5094,16 +5117,16 @@ reload:
 				}
 			}
 			if argCount <= 3 {
-				first, second, third := fixedRegisterArgs(registers, ins.c, argCount)
+				first, second, third := fixedRegisterArgs(registers, c, argCount)
 				value, callErr = thread.runInlineScriptCallFixedOneNoHook(closure, first, second, third, argCount)
 			} else {
-				args := registers[ins.c : ins.c+argCount]
+				args := registers[c : c+argCount]
 				value, callErr = thread.runInlineScriptCallOneNoHook(closure, args)
 			}
 			if callErr != nil {
 				if yield, ok := callErr.(vmYieldRequest); ok {
 					thread.installPendingCall(frame, vmPendingCall{
-						destination: vmResultDestination{register: ins.a, count: 1},
+						destination: vmResultDestination{register: a, count: 1},
 						protected:   yield.protected,
 						host:        yield.host,
 					})
@@ -5114,18 +5137,18 @@ reload:
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
 			registers = frame.registers
-			registers[ins.a] = value
+			registers[a] = value
 			continue
 
 		case opCallMethodOne:
-			receiver := registers[ins.b]
+			receiver := registers[b]
 			table := receiver.tableRef()
 			if table == nil {
 				return directFrameFail(fmt.Errorf("run: get field target is %s, want table", receiver.Kind()))
 			}
-			key := constantKeys[ins.c].str
-			callee, ok := table.rawStringFieldBox(constants[ins.c].stringBox())
-			if constants[ins.c].stringBox() == nil {
+			key := constantKeys[c].str
+			callee, ok := table.rawStringFieldBox(constants[c].stringBox())
+			if constants[c].stringBox() == nil {
 				callee, ok = table.rawStringField(key)
 			}
 			if !ok {
@@ -5139,15 +5162,16 @@ reload:
 			if !ok {
 				return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
 			}
-			registers[ins.a+1] = receiver
-			frame.pc++
-			explicitCount, borrowHint := decodeFixedCallCount(ins.d)
+			registers[a+1] = receiver
+			pc++
+			frame.pc = pc
+			explicitCount, borrowHint := decodeFixedCallCount(d)
 			argCount := explicitCount + 1
 			var value Value
 			var err error
 			if borrowHint && table.metatable == nil {
-				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, ins.a+1, argCount); borrowed {
-					installFixedResultPendingCall(frame, vmResultDestination{register: ins.a, count: 1})
+				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, a+1, argCount); borrowed {
+					installFixedResultPendingCall(frame, vmResultDestination{register: a, count: 1})
 					thread.pushFrame(child)
 					thread.directFramePICCounts.addFixedCallTrampolineEntry()
 					frame = child
@@ -5156,16 +5180,16 @@ reload:
 				}
 			}
 			if argCount <= 3 {
-				first, second, third := fixedRegisterArgs(registers, ins.a+1, argCount)
+				first, second, third := fixedRegisterArgs(registers, a+1, argCount)
 				value, err = thread.runInlineScriptCallFixedOneNoHook(closure, first, second, third, argCount)
 			} else {
-				args := registers[ins.a+1 : ins.a+1+argCount]
+				args := registers[a+1 : a+1+argCount]
 				value, err = thread.runInlineScriptCallOneNoHook(closure, args)
 			}
 			if err != nil {
 				if yield, ok := err.(vmYieldRequest); ok {
 					thread.installPendingCall(frame, vmPendingCall{
-						destination: vmResultDestination{register: ins.a, count: 1},
+						destination: vmResultDestination{register: a, count: 1},
 						protected:   yield.protected,
 						host:        yield.host,
 					})
@@ -5176,38 +5200,38 @@ reload:
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
 			registers = frame.registers
-			registers[ins.a] = value
+			registers[a] = value
 			continue
 
 		case opFastCall:
-			exit := thread.runDirectFastCall(frame, nativeFuncID(ins.b), ins.a, ins.c, ins.d, picCounts)
+			exit := thread.runDirectFastCall(frame, nativeFuncID(b), a, c, d, picCounts)
 			if exit.resumesDirectFrame() {
 				break
 			}
 			return exit
 
 		case opReturnOne:
-			if directChildActive && thread.resumeDirectFrameChildOne(rootDepth, &frame, registers[ins.a]) {
+			if directChildActive && thread.resumeDirectFrameChildOne(rootDepth, &frame, registers[a]) {
 				goto reload
 			}
-			result := vmReturnedValue(registers[ins.a])
+			result := vmReturnedValue(registers[a])
 			if directChildActive && thread.resumeDirectFrameChild(rootDepth, &frame, result) {
 				goto reload
 			}
 			return directFrameReturn(result)
 
 		case opReturn:
-			count := ins.b
+			count := b
 			if count < 0 {
 				prefixCount := -count - 1
-				if frame.openResultStart == ins.a+prefixCount {
-					result := vmReturnedPrefixAndWindow(registers[ins.a:ins.a+prefixCount], frame.openResults)
+				if frame.openResultStart == a+prefixCount {
+					result := vmReturnedPrefixAndWindow(registers[a:a+prefixCount], frame.openResults)
 					if directChildActive && thread.resumeDirectFrameChild(rootDepth, &frame, result) {
 						goto reload
 					}
 					return directFrameReturn(result)
 				}
-				result := vmReturnedValue(registers[ins.a])
+				result := vmReturnedValue(registers[a])
 				if directChildActive && thread.resumeDirectFrameChild(rootDepth, &frame, result) {
 					goto reload
 				}
@@ -5221,16 +5245,16 @@ reload:
 				return directFrameReturn(result)
 			}
 			if count == 1 {
-				if directChildActive && thread.resumeDirectFrameChildOne(rootDepth, &frame, registers[ins.a]) {
+				if directChildActive && thread.resumeDirectFrameChildOne(rootDepth, &frame, registers[a]) {
 					goto reload
 				}
-				result := vmReturnedValue(registers[ins.a])
+				result := vmReturnedValue(registers[a])
 				if directChildActive && thread.resumeDirectFrameChild(rootDepth, &frame, result) {
 					goto reload
 				}
 				return directFrameReturn(result)
 			}
-			result := vmReturnedBorrowedValues(registers[ins.a : ins.a+count])
+			result := vmReturnedBorrowedValues(registers[a : a+count])
 			if directChildActive && thread.resumeDirectFrameChild(rootDepth, &frame, result) {
 				goto reload
 			}
@@ -5239,7 +5263,7 @@ reload:
 		default:
 			return directFrameEnterGenericFrame()
 		}
-		frame.pc++
+		pc++
 	}
 	result := vmReturnedValues(nil)
 	if directChildActive && thread.resumeDirectFrameChild(rootDepth, &frame, result) {
@@ -5250,6 +5274,7 @@ reload:
 
 func runDirectFrameProductionLoop(thread *vmThread, frameRef **vmFrame) directFrameSideExit {
 	frame := *frameRef
+	var pc int
 	rootDepth := len(thread.frames) - 1
 	var (
 		proto             *Proto
@@ -5274,119 +5299,126 @@ reload:
 	constantNumbers = proto.constantNumbers
 	constantNumberOK = proto.constantNumberOK
 	registers = frame.registers
+	pc = frame.pc
 
-	for frame.pc < len(code) {
-		ins := code[frame.pc].unpack()
-		switch ins.op {
+	for uint(pc) < uint(len(code)) {
+		packed := code[pc]
+		op := packed.op
+		a := int(packed.a)
+		b := int(packed.b)
+		c := int(packed.c)
+		d := int(packed.d)
+		switch op {
 		case opLoadConst:
-			registers[ins.a] = constants[ins.b]
+			registers[a] = constants[b]
 
 		case opLoadGlobal:
-			name, _ := constants[ins.b].String()
-			value, ok, _ := thread.globals.getSlot(proto.globalSlot(ins.c, name), name)
+			name, _ := constants[b].String()
+			value, ok, _ := thread.globals.getSlot(proto.globalSlot(c, name), name)
 			if !ok {
-				return directFrameFail(fmt.Errorf("run: undefined global %q", name))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: undefined global %q", name)))
 			}
-			registers[ins.a] = value
+			registers[a] = value
 
 		case opSetGlobal:
-			name, _ := constants[ins.a].String()
-			thread.globals.setSlot(proto.globalSlot(ins.c, name), name, registers[ins.b])
+			name, _ := constants[a].String()
+			thread.globals.setSlot(proto.globalSlot(c, name), name, registers[b])
 
 		case opNewTable:
-			registers[ins.a] = TableValue(newTableWithCapacity(ins.b, ins.c))
+			registers[a] = TableValue(newTableWithCapacity(b, c))
 
 		case opMove:
-			registers[ins.a] = registers[ins.b]
+			registers[a] = registers[b]
 
 		case opGetUpvalue:
-			value, err := frame.upvalue(ins.b)
+			value, err := frame.upvalue(b)
 			if err != nil {
-				return directFrameFail(err)
+				return directFrameExitAt(frame, pc, directFrameFail(err))
 			}
-			registers[ins.a] = value
+			registers[a] = value
 
 		case opSetUpvalue:
-			if err := frame.setUpvalue(ins.a, registers[ins.b]); err != nil {
-				return directFrameFail(err)
+			if err := frame.setUpvalue(a, registers[b]); err != nil {
+				return directFrameExitAt(frame, pc, directFrameFail(err))
 			}
 
 		case opVararg:
-			resultCount := ins.b
+			resultCount := b
 			if resultCount == 0 {
 				resultCount = 1
 			}
 			if resultCount < 0 {
-				frame.openResultStart = ins.a
+				frame.openResultStart = a
 				frame.openResults = vmAdjustedBorrowedResultWindow(frame.varargs)
-				registers[ins.a] = frame.openResults.at(0)
-				frame.pc++
+				registers[a] = frame.openResults.at(0)
+				pc++
+				frame.pc = pc
 				continue
 			}
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
 			for i := 0; i < resultCount; i++ {
 				if i >= len(frame.varargs) {
-					registers[ins.a+i] = NilValue()
+					registers[a+i] = NilValue()
 				} else {
-					registers[ins.a+i] = frame.varargs[i]
+					registers[a+i] = frame.varargs[i]
 				}
 			}
 
 		case opSetField:
-			base := registers[ins.a]
+			base := registers[a]
 			table := base.tableRef()
 			if table == nil {
-				return directFrameFail(fmt.Errorf("run: set field target is %s, want table", base.Kind()))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field target is %s, want table", base.Kind())))
 			}
 			if table.metatable != nil {
-				ok, err := directFrameTableSetIsland(thread.globals, table, constants[ins.b], registers[ins.c])
+				ok, err := directFrameTableSetIsland(thread.globals, table, constants[b], registers[c])
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: set field failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field failed: %w", err)))
 				}
 				if !ok {
-					return directFrameEnterGenericFrame()
+					return directFrameExitAt(frame, pc, directFrameEnterGenericFrame())
 				}
 				break
 			}
-			if constantKeyOK[ins.b] {
-				keyValue := constants[ins.b]
+			if constantKeyOK[b] {
+				keyValue := constants[b]
 				var err error
 				if valueKind(keyValue) == StringKind {
-					table.setRawStringFieldBox(keyValue.stringText(), keyValue.stringBox(), registers[ins.c])
+					table.setRawStringFieldBox(keyValue.stringText(), keyValue.stringBox(), registers[c])
 				} else {
-					err = table.rawSetKey(constantKeys[ins.b], registers[ins.c])
+					err = table.rawSetKey(constantKeys[b], registers[c])
 				}
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: set field failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field failed: %w", err)))
 				}
 				break
 			}
-			if err := table.rawSet(constants[ins.b], registers[ins.c]); err != nil {
-				return directFrameFail(fmt.Errorf("run: set field failed: %w", err))
+			if err := table.rawSet(constants[b], registers[c]); err != nil {
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field failed: %w", err)))
 			}
 
 		case opSetStringField:
-			base := registers[ins.a]
+			base := registers[a]
 			table := base.tableRef()
 			if table == nil {
-				return directFrameFail(fmt.Errorf("run: set field target is %s, want table", base.Kind()))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field target is %s, want table", base.Kind())))
 			}
 			if table.metatable != nil {
-				ok, err := directFrameTableSetIsland(thread.globals, table, constants[ins.b], registers[ins.c])
+				ok, err := directFrameTableSetIsland(thread.globals, table, constants[b], registers[c])
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: set field failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field failed: %w", err)))
 				}
 				if !ok {
-					return directFrameEnterGenericFrame()
+					return directFrameExitAt(frame, pc, directFrameEnterGenericFrame())
 				}
 				break
 			}
-			keyValue := constants[ins.b]
-			key := constantKeys[ins.b].str
-			value := registers[ins.c]
+			keyValue := constants[b]
+			key := constantKeys[b].str
+			value := registers[c]
 			if valueKind(keyValue) == StringKind && !value.IsNil() {
-				cache := proto.directFrameIndexCacheAt(frame.pc)
+				cache := proto.directFrameIndexCacheAt(pc)
 				if cache.hasValueKey(table, keyValue) {
 					if cache.writeValue(table, keyValue, value) {
 						break
@@ -5412,34 +5444,34 @@ reload:
 			table.setRawStringFieldBox(key, keyValue.stringBox(), value)
 
 		case opSetStringFieldIndex:
-			base := registers[ins.a]
+			base := registers[a]
 			table := base.tableRef()
 			if table == nil {
-				return directFrameFail(fmt.Errorf("run: set field target is %s, want table", base.Kind()))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field target is %s, want table", base.Kind())))
 			}
-			firstKey := constantKeys[ins.b].str
-			firstBox := constants[ins.b].stringBox()
+			firstKey := constantKeys[b].str
+			firstBox := constants[b].stringBox()
 			first, ok := table.rawStringFieldBox(firstBox)
 			if firstBox == nil {
 				first, ok = table.rawStringField(firstKey)
 			}
 			if !ok {
 				if table.metatable != nil {
-					return directFrameEnterGenericFrameFor(directFrameSideExitReasonMetatable)
+					return directFrameExitAt(frame, pc, directFrameEnterGenericFrameFor(directFrameSideExitReasonMetatable))
 				}
-				return directFrameFail(fmt.Errorf("run: set index target is %s, want table", NilValue().Kind()))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set index target is %s, want table", NilValue().Kind())))
 			}
 			nextTable := first.tableRef()
 			if nextTable == nil {
-				return directFrameFail(fmt.Errorf("run: set index target is %s, want table", first.Kind()))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set index target is %s, want table", first.Kind())))
 			}
 			if nextTable.metatable != nil {
-				return directFrameEnterGenericFrameFor(directFrameSideExitReasonMetatable)
+				return directFrameExitAt(frame, pc, directFrameEnterGenericFrameFor(directFrameSideExitReasonMetatable))
 			}
-			key := registers[ins.c]
+			key := registers[c]
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(frame.pc)
-				value := registers[ins.d]
+				cache := proto.directFrameIndexCacheAt(pc)
+				value := registers[d]
 				if cache.writeValue(nextTable, key, value) {
 					break
 				}
@@ -5448,22 +5480,22 @@ reload:
 					break
 				}
 			}
-			if err := nextTable.rawSet(key, registers[ins.d]); err != nil {
-				return directFrameFail(fmt.Errorf("run: set index failed: %w", err))
+			if err := nextTable.rawSet(key, registers[d]); err != nil {
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set index failed: %w", err)))
 			}
 
 		case opGetStringField:
-			base := registers[ins.b]
+			base := registers[b]
 			table := base.tableRef()
 			if table == nil {
-				return directFrameFail(fmt.Errorf("run: get field target is %s, want table", base.Kind()))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: get field target is %s, want table", base.Kind())))
 			}
-			key := constants[ins.c]
-			keyText := constantKeys[ins.c].str
+			key := constants[c]
+			keyText := constantKeys[c].str
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(frame.pc)
+				cache := proto.directFrameIndexCacheAt(pc)
 				if value, ok := cache.getValue(table, key); ok {
-					registers[ins.a] = value
+					registers[a] = value
 					break
 				}
 				slot, slotOK := table.rawStringFieldSlotBox(key.stringBox())
@@ -5473,96 +5505,96 @@ reload:
 				if slotOK {
 					if value, ok := table.rawStringFieldAtSlot(slot, keyText); ok {
 						cache.storeValue(table, key, slot)
-						registers[ins.a] = value
+						registers[a] = value
 						break
 					}
 				}
 			} else if value, ok := table.rawStringField(keyText); ok {
 				// Keep the existing raw-string adapter as a defensive fallback for
 				// malformed hand-built prototypes.
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
 			if table.metatable != nil {
-				value, ok, err := directFrameTableGetIsland(thread.globals, table, constants[ins.c])
+				value, ok, err := directFrameTableGetIsland(thread.globals, table, constants[c])
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: get field failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: get field failed: %w", err)))
 				}
 				if !ok {
-					return directFrameEnterGenericFrame()
+					return directFrameExitAt(frame, pc, directFrameEnterGenericFrame())
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NilValue()
+			registers[a] = NilValue()
 
 		case opGetStringFieldIndex:
-			base := registers[ins.b]
+			base := registers[b]
 			table := base.tableRef()
 			if table == nil {
-				return directFrameFail(fmt.Errorf("run: get field target is %s, want table", base.Kind()))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: get field target is %s, want table", base.Kind())))
 			}
-			firstKey := constantKeys[ins.c].str
-			firstBox := constants[ins.c].stringBox()
+			firstKey := constantKeys[c].str
+			firstBox := constants[c].stringBox()
 			first, ok := table.rawStringFieldBox(firstBox)
 			if firstBox == nil {
 				first, ok = table.rawStringField(firstKey)
 			}
 			if !ok {
 				if table.metatable != nil {
-					return directFrameEnterGenericFrameFor(directFrameSideExitReasonMetatable)
+					return directFrameExitAt(frame, pc, directFrameEnterGenericFrameFor(directFrameSideExitReasonMetatable))
 				}
-				return directFrameFail(fmt.Errorf("run: get index target is %s, want table", NilValue().Kind()))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: get index target is %s, want table", NilValue().Kind())))
 			}
 			nextTable := first.tableRef()
 			if nextTable == nil {
-				return directFrameFail(fmt.Errorf("run: get index target is %s, want table", first.Kind()))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: get index target is %s, want table", first.Kind())))
 			}
 			if nextTable.metatable != nil {
-				return directFrameEnterGenericFrameFor(directFrameSideExitReasonMetatable)
+				return directFrameExitAt(frame, pc, directFrameEnterGenericFrameFor(directFrameSideExitReasonMetatable))
 			}
-			key := registers[ins.d]
+			key := registers[d]
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(frame.pc)
+				cache := proto.directFrameIndexCacheAt(pc)
 				if value, ok := cache.getValue(nextTable, key); ok {
-					registers[ins.a] = value
+					registers[a] = value
 					break
 				}
 				if slot, ok := nextTable.rawStringFieldSlot(key.stringText()); ok {
 					value, ok := nextTable.rawStringFieldAtSlot(slot, key.stringText())
 					if ok {
 						cache.storeValue(nextTable, key, slot)
-						registers[ins.a] = value
+						registers[a] = value
 						break
 					}
 				}
 			}
 			value, err := nextTable.rawGet(key)
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: get index failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: get index failed: %w", err)))
 			}
-			registers[ins.a] = value
+			registers[a] = value
 
 		case opSetIndex:
-			base := registers[ins.a]
+			base := registers[a]
 			table := base.tableRef()
 			if table == nil {
-				return directFrameFail(fmt.Errorf("run: set index target is %s, want table", base.Kind()))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set index target is %s, want table", base.Kind())))
 			}
 			if table.metatable != nil {
-				ok, err := directFrameTableSetIsland(thread.globals, table, registers[ins.b], registers[ins.c])
+				ok, err := directFrameTableSetIsland(thread.globals, table, registers[b], registers[c])
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: set index failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set index failed: %w", err)))
 				}
 				if !ok {
-					return directFrameEnterGenericFrame()
+					return directFrameExitAt(frame, pc, directFrameEnterGenericFrame())
 				}
 				break
 			}
-			key := registers[ins.b]
+			key := registers[b]
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(frame.pc)
-				value := registers[ins.c]
+				cache := proto.directFrameIndexCacheAt(pc)
+				value := registers[c]
 				if cache.writeValue(table, key, value) {
 					break
 				}
@@ -5571,84 +5603,84 @@ reload:
 					break
 				}
 			}
-			if err := table.rawSet(registers[ins.b], registers[ins.c]); err != nil {
-				return directFrameFail(fmt.Errorf("run: set index failed: %w", err))
+			if err := table.rawSet(registers[b], registers[c]); err != nil {
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set index failed: %w", err)))
 			}
 
 		case opGetIndex:
-			base := registers[ins.b]
+			base := registers[b]
 			table := base.tableRef()
 			if table == nil {
-				return directFrameFail(fmt.Errorf("run: get index target is %s, want table", base.Kind()))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: get index target is %s, want table", base.Kind())))
 			}
 			if table.metatable != nil {
-				value, ok, err := directFrameTableGetIsland(thread.globals, table, registers[ins.c])
+				value, ok, err := directFrameTableGetIsland(thread.globals, table, registers[c])
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: get index failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: get index failed: %w", err)))
 				}
 				if !ok {
-					return directFrameEnterGenericFrame()
+					return directFrameExitAt(frame, pc, directFrameEnterGenericFrame())
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			key := registers[ins.c]
+			key := registers[c]
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(frame.pc)
+				cache := proto.directFrameIndexCacheAt(pc)
 				if value, ok := cache.getValue(table, key); ok {
-					registers[ins.a] = value
+					registers[a] = value
 					break
 				}
 				if slot, ok := table.rawStringFieldSlot(key.stringText()); ok {
 					value, ok := table.rawStringFieldAtSlot(slot, key.stringText())
 					if ok {
 						cache.storeValue(table, key, slot)
-						registers[ins.a] = value
+						registers[a] = value
 						break
 					}
 				}
 			} else if index, ok := tableArrayIndexFromValue(key); ok && index <= len(table.array) {
-				registers[ins.a] = table.array[index-1]
+				registers[a] = table.array[index-1]
 				break
 			}
 			value, err := table.rawGet(key)
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: get index failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: get index failed: %w", err)))
 			}
-			registers[ins.a] = value
+			registers[a] = value
 
 		case opClosure:
-			child := proto.prototypes[ins.b]
+			child := proto.prototypes[b]
 			captured := captureUpvalues(child, frame)
-			registers[ins.a] = functionValueWithCapturedUpvalues(child, captured)
+			registers[a] = functionValueWithCapturedUpvalues(child, captured)
 
 		case opPrepareIter:
-			iterValue := registers[ins.a]
+			iterValue := registers[a]
 			iterTable := iterValue.tableRef()
 			if iterTable != nil && iterTable.metatable == nil {
 				if tableCanIterateCleanArray(iterTable) {
-					registers[ins.a] = valueWithRefAndNativeID(HostFuncKind, nil, nativeFuncArrayNext)
-					registers[ins.b] = iterValue
-					registers[ins.c] = NilValue()
+					registers[a] = valueWithRefAndNativeID(HostFuncKind, nil, nativeFuncArrayNext)
+					registers[b] = iterValue
+					registers[c] = NilValue()
 					break
 				}
-				registers[ins.a] = valueWithRefAndNativeID(HostFuncKind, nil, nativeFuncTableNext)
-				registers[ins.b] = iterValue
-				registers[ins.c] = NilValue()
+				registers[a] = valueWithRefAndNativeID(HostFuncKind, nil, nativeFuncTableNext)
+				registers[b] = iterValue
+				registers[c] = NilValue()
 				break
 			}
 			generator, state, control, ok, err := prepareIterator(iterValue, thread.globals)
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: prepare iterator failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: prepare iterator failed: %w", err)))
 			}
 			if ok {
-				registers[ins.a] = generator
-				registers[ins.b] = state
-				registers[ins.c] = control
+				registers[a] = generator
+				registers[b] = state
+				registers[c] = control
 			}
 
 		case opArrayNext:
-			callee := registers[ins.b]
+			callee := registers[b]
 			var first Value
 			var second Value
 			var count int
@@ -5656,12 +5688,12 @@ reload:
 			var err error
 			if valueNativeID(callee) == nativeFuncArrayNext {
 				ok = true
-				tableValue := registers[ins.c]
+				tableValue := registers[c]
 				table := tableValue.tableRef()
 				if table == nil {
 					err = fmt.Errorf("array iterator: argument #1 is %s, want table", tableValue.Kind())
 				} else {
-					controlValue := registers[ins.a]
+					controlValue := registers[a]
 					index := 0
 					if valueKind(controlValue) != NilKind {
 						if valueKind(controlValue) != NumberKind {
@@ -5686,85 +5718,85 @@ reload:
 					}
 				}
 			} else {
-				first, second, count, ok, err = directFrameIteratorNext(callee, registers[ins.c], registers[ins.a])
+				first, second, count, ok, err = directFrameIteratorNext(callee, registers[c], registers[a])
 			}
 			if !ok {
-				return directFrameEnterGenericFrame()
+				return directFrameExitAt(frame, pc, directFrameEnterGenericFrame())
 			}
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
 			}
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
-			for i := 0; i < ins.d; i++ {
+			for i := 0; i < d; i++ {
 				if i >= count {
-					registers[ins.a+i] = NilValue()
+					registers[a+i] = NilValue()
 					continue
 				}
 				if i == 0 {
-					registers[ins.a+i] = first
+					registers[a+i] = first
 				} else {
-					registers[ins.a+i] = second
+					registers[a+i] = second
 				}
 			}
 
 		case opArrayNextJump2:
-			callee := registers[ins.b]
+			callee := registers[b]
 			if valueNativeID(callee) == nativeFuncArrayNext {
-				tableValue := registers[ins.c]
+				tableValue := registers[c]
 				table := tableValue.tableRef()
 				if table == nil {
-					return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: argument #1 is %s, want table", tableValue.Kind()))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: argument #1 is %s, want table", tableValue.Kind())))
 				}
-				controlValue := registers[ins.a]
+				controlValue := registers[a]
 				index := 0
 				if valueKind(controlValue) != NilKind {
 					if valueKind(controlValue) != NumberKind {
-						return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: index is %s, want number or nil", controlValue.Kind()))
+						return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: index is %s, want number or nil", controlValue.Kind())))
 					}
 					index = int(valueNumber(controlValue))
 					if float64(index) != valueNumber(controlValue) {
-						return directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: index is %s, want integer", controlValue.Kind()))
+						return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: index is %s, want integer", controlValue.Kind())))
 					}
 				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
 				next := index + 1
 				if next < 1 || next > len(table.array) {
-					registers[ins.a] = NilValue()
-					registers[ins.a+1] = NilValue()
-					frame.pc = ins.d
+					registers[a] = NilValue()
+					registers[a+1] = NilValue()
+					pc = d
 					continue
 				}
-				registers[ins.a] = NumberValue(float64(next))
-				registers[ins.a+1] = table.array[next-1]
+				registers[a] = NumberValue(float64(next))
+				registers[a+1] = table.array[next-1]
 				break
 			}
-			first, second, count, ok, err := directFrameIteratorNext(callee, registers[ins.c], registers[ins.a])
+			first, second, count, ok, err := directFrameIteratorNext(callee, registers[c], registers[a])
 			if !ok {
-				return directFrameEnterGenericFrame()
+				return directFrameExitAt(frame, pc, directFrameEnterGenericFrame())
 			}
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
 			}
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
 			if count < 1 || first.IsNil() {
-				registers[ins.a] = NilValue()
-				registers[ins.a+1] = NilValue()
-				frame.pc = ins.d
+				registers[a] = NilValue()
+				registers[a+1] = NilValue()
+				pc = d
 				continue
 			}
-			registers[ins.a] = first
+			registers[a] = first
 			if count > 1 {
-				registers[ins.a+1] = second
+				registers[a+1] = second
 			} else {
-				registers[ins.a+1] = NilValue()
+				registers[a+1] = NilValue()
 			}
 
 		case opAdd:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind {
 				value, err := directFrameBinaryArithmeticValueUncounted(
 					thread.globals,
@@ -5775,16 +5807,16 @@ reload:
 					func(left float64, right float64) float64 { return left + right },
 				)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: add failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: add failed: %w", err)))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(valueNumber(left) + valueNumber(right))
+			registers[a] = NumberValue(valueNumber(left) + valueNumber(right))
 
 		case opSub:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind {
 				value, err := directFrameBinaryArithmeticValueUncounted(
 					thread.globals,
@@ -5795,16 +5827,16 @@ reload:
 					func(left float64, right float64) float64 { return left - right },
 				)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: subtract failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: subtract failed: %w", err)))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(valueNumber(left) - valueNumber(right))
+			registers[a] = NumberValue(valueNumber(left) - valueNumber(right))
 
 		case opMul:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind {
 				value, err := directFrameBinaryArithmeticValueUncounted(
 					thread.globals,
@@ -5815,16 +5847,16 @@ reload:
 					func(left float64, right float64) float64 { return left * right },
 				)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: multiply failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: multiply failed: %w", err)))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(valueNumber(left) * valueNumber(right))
+			registers[a] = NumberValue(valueNumber(left) * valueNumber(right))
 
 		case opDiv:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind {
 				value, err := directFrameBinaryArithmeticValueUncounted(
 					thread.globals,
@@ -5835,16 +5867,16 @@ reload:
 					func(left float64, right float64) float64 { return left / right },
 				)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: divide failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: divide failed: %w", err)))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(valueNumber(left) / valueNumber(right))
+			registers[a] = NumberValue(valueNumber(left) / valueNumber(right))
 
 		case opMod:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind {
 				value, err := directFrameBinaryArithmeticValueUncounted(
 					thread.globals,
@@ -5855,16 +5887,16 @@ reload:
 					math.Mod,
 				)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: modulo failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: modulo failed: %w", err)))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(valueNumber(left) - math.Floor(valueNumber(left)/valueNumber(right))*valueNumber(right))
+			registers[a] = NumberValue(valueNumber(left) - math.Floor(valueNumber(left)/valueNumber(right))*valueNumber(right))
 
 		case opIDiv:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind {
 				value, err := directFrameBinaryArithmeticValueUncounted(
 					thread.globals,
@@ -5875,16 +5907,16 @@ reload:
 					func(left float64, right float64) float64 { return math.Floor(left / right) },
 				)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: floor divide failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: floor divide failed: %w", err)))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(math.Floor(valueNumber(left) / valueNumber(right)))
+			registers[a] = NumberValue(math.Floor(valueNumber(left) / valueNumber(right)))
 
 		case opPow:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind {
 				value, err := directFrameBinaryArithmeticValueUncounted(
 					thread.globals,
@@ -5895,17 +5927,17 @@ reload:
 					math.Pow,
 				)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: power failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: power failed: %w", err)))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(math.Pow(valueNumber(left), valueNumber(right)))
+			registers[a] = NumberValue(math.Pow(valueNumber(left), valueNumber(right)))
 
 		case opAddK:
-			left := registers[ins.b]
-			if valueKind(left) != NumberKind || !constantNumberOK[ins.c] {
-				right := constants[ins.c]
+			left := registers[b]
+			if valueKind(left) != NumberKind || !constantNumberOK[c] {
+				right := constants[c]
 				value, err := directFrameBinaryArithmeticValueUncounted(
 					thread.globals,
 					left,
@@ -5915,17 +5947,17 @@ reload:
 					func(left float64, right float64) float64 { return left + right },
 				)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: add failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: add failed: %w", err)))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(valueNumber(left) + constantNumbers[ins.c])
+			registers[a] = NumberValue(valueNumber(left) + constantNumbers[c])
 
 		case opSubK:
-			left := registers[ins.b]
-			if valueKind(left) != NumberKind || !constantNumberOK[ins.c] {
-				right := constants[ins.c]
+			left := registers[b]
+			if valueKind(left) != NumberKind || !constantNumberOK[c] {
+				right := constants[c]
 				value, err := directFrameBinaryArithmeticValueUncounted(
 					thread.globals,
 					left,
@@ -5935,17 +5967,17 @@ reload:
 					func(left float64, right float64) float64 { return left - right },
 				)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: subtract failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: subtract failed: %w", err)))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(valueNumber(left) - constantNumbers[ins.c])
+			registers[a] = NumberValue(valueNumber(left) - constantNumbers[c])
 
 		case opMulK:
-			left := registers[ins.b]
-			if valueKind(left) != NumberKind || !constantNumberOK[ins.c] {
-				right := constants[ins.c]
+			left := registers[b]
+			if valueKind(left) != NumberKind || !constantNumberOK[c] {
+				right := constants[c]
 				value, err := directFrameBinaryArithmeticValueUncounted(
 					thread.globals,
 					left,
@@ -5955,17 +5987,17 @@ reload:
 					func(left float64, right float64) float64 { return left * right },
 				)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: multiply failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: multiply failed: %w", err)))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(valueNumber(left) * constantNumbers[ins.c])
+			registers[a] = NumberValue(valueNumber(left) * constantNumbers[c])
 
 		case opDivK:
-			left := registers[ins.b]
-			if valueKind(left) != NumberKind || !constantNumberOK[ins.c] {
-				right := constants[ins.c]
+			left := registers[b]
+			if valueKind(left) != NumberKind || !constantNumberOK[c] {
+				right := constants[c]
 				value, err := directFrameBinaryArithmeticValueUncounted(
 					thread.globals,
 					left,
@@ -5975,17 +6007,17 @@ reload:
 					func(left float64, right float64) float64 { return left / right },
 				)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: divide failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: divide failed: %w", err)))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(valueNumber(left) / constantNumbers[ins.c])
+			registers[a] = NumberValue(valueNumber(left) / constantNumbers[c])
 
 		case opModK:
-			left := registers[ins.b]
-			if valueKind(left) != NumberKind || !constantNumberOK[ins.c] {
-				right := constants[ins.c]
+			left := registers[b]
+			if valueKind(left) != NumberKind || !constantNumberOK[c] {
+				right := constants[c]
 				value, err := directFrameBinaryArithmeticValueUncounted(
 					thread.globals,
 					left,
@@ -5995,18 +6027,18 @@ reload:
 					math.Mod,
 				)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: modulo failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: modulo failed: %w", err)))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			right := constantNumbers[ins.c]
-			registers[ins.a] = NumberValue(valueNumber(left) - math.Floor(valueNumber(left)/right)*right)
+			right := constantNumbers[c]
+			registers[a] = NumberValue(valueNumber(left) - math.Floor(valueNumber(left)/right)*right)
 
 		case opIDivK:
-			left := registers[ins.b]
-			if valueKind(left) != NumberKind || !constantNumberOK[ins.c] {
-				right := constants[ins.c]
+			left := registers[b]
+			if valueKind(left) != NumberKind || !constantNumberOK[c] {
+				right := constants[c]
 				value, err := directFrameBinaryArithmeticValueUncounted(
 					thread.globals,
 					left,
@@ -6016,493 +6048,494 @@ reload:
 					func(left float64, right float64) float64 { return math.Floor(left / right) },
 				)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: floor divide failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: floor divide failed: %w", err)))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(math.Floor(valueNumber(left) / constantNumbers[ins.c]))
+			registers[a] = NumberValue(math.Floor(valueNumber(left) / constantNumbers[c]))
 
 		case opNeg:
-			operand := registers[ins.b]
+			operand := registers[b]
 			if valueKind(operand) != NumberKind {
 				value, err := directFrameUnaryArithmeticValueUncounted(thread.globals, operand, negateValue)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: %w", err)))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = NumberValue(-valueNumber(operand))
+			registers[a] = NumberValue(-valueNumber(operand))
 
 		case opLen:
-			operand := registers[ins.b]
+			operand := registers[b]
 			switch valueKind(operand) {
 			case StringKind:
-				registers[ins.a] = NumberValue(float64(len(operand.stringText())))
+				registers[a] = NumberValue(float64(len(operand.stringText())))
 			case TableKind:
 				table := operand.tableRef()
 				if table == nil {
-					return directFrameFail(fmt.Errorf("run: length failed: table: nil table"))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: length failed: table: nil table")))
 				}
 				if table.metatable != nil {
 					value, err := lengthValue(operand, thread.globals)
 					if err != nil {
-						return directFrameFail(fmt.Errorf("run: length failed: %w", err))
+						return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: length failed: %w", err)))
 					}
-					registers[ins.a] = value
+					registers[a] = value
 					break
 				}
 				length, err := table.rawLen()
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: length failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: length failed: %w", err)))
 				}
-				registers[ins.a] = NumberValue(float64(length))
+				registers[a] = NumberValue(float64(length))
 			default:
 				value, err := lengthValue(operand, thread.globals)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: length failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: length failed: %w", err)))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 			}
 
 		case opConcat:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if !directFrameRawConcatOperand(left) || !directFrameRawConcatOperand(right) {
 				value, err := concatValue(left, right, thread.globals)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: concat failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: concat failed: %w", err)))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
 			concatValues := [2]Value{left, right}
 			if value, ok := thread.internStringConcatValues(concatValues[:]); ok {
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
 			leftText, err := concatOperandString(left, "left")
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: concat failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: concat failed: %w", err)))
 			}
 			rightText, err := concatOperandString(right, "right")
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: concat failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: concat failed: %w", err)))
 			}
-			registers[ins.a] = thread.internStringValue(leftText + rightText)
+			registers[a] = thread.internStringValue(leftText + rightText)
 
 		case opConcatChain:
-			if value, ok := thread.internStringConcatValues(registers[ins.b : ins.b+ins.c]); ok {
-				registers[ins.a] = value
+			if value, ok := thread.internStringConcatValues(registers[b : b+c]); ok {
+				registers[a] = value
 				break
 			}
-			text, ok, err := thread.concatRawChainString(registers[ins.b : ins.b+ins.c])
+			text, ok, err := thread.concatRawChainString(registers[b : b+c])
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: concat failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: concat failed: %w", err)))
 			}
 			if !ok {
-				value, err := concatChainValue(registers[ins.b:ins.b+ins.c], thread.globals)
+				value, err := concatChainValue(registers[b:b+c], thread.globals)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: concat failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: concat failed: %w", err)))
 				}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
-			registers[ins.a] = thread.internStringValue(text)
+			registers[a] = thread.internStringValue(text)
 
 		case opEqual:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) == TableKind || valueKind(right) == TableKind || valueKind(left) == UserDataKind || valueKind(right) == UserDataKind {
 				value, err := equalValue(left, right, thread.globals)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: equal failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: equal failed: %w", err)))
 				}
-				registers[ins.a] = BoolValue(value)
+				registers[a] = BoolValue(value)
 				break
 			}
-			registers[ins.a] = BoolValue(valuesEqual(left, right))
+			registers[a] = BoolValue(valuesEqual(left, right))
 
 		case opNotEqual:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) == TableKind || valueKind(right) == TableKind || valueKind(left) == UserDataKind || valueKind(right) == UserDataKind {
 				value, err := equalValue(left, right, thread.globals)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: equal failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: equal failed: %w", err)))
 				}
-				registers[ins.a] = BoolValue(!value)
+				registers[a] = BoolValue(!value)
 				break
 			}
-			registers[ins.a] = BoolValue(!valuesEqual(left, right))
+			registers[a] = BoolValue(!valuesEqual(left, right))
 
 		case opLess:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) == StringKind && valueKind(right) == StringKind {
-				registers[ins.a] = BoolValue(left.stringText() < right.stringText())
+				registers[a] = BoolValue(left.stringText() < right.stringText())
 				break
 			}
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind || math.IsNaN(valueNumber(left)) || math.IsNaN(valueNumber(right)) {
 				value, err := lessValue(left, right, thread.globals)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: less failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: less failed: %w", err)))
 				}
-				registers[ins.a] = BoolValue(value)
+				registers[a] = BoolValue(value)
 				break
 			}
-			registers[ins.a] = BoolValue(valueNumber(left) < valueNumber(right))
+			registers[a] = BoolValue(valueNumber(left) < valueNumber(right))
 
 		case opLessEqual:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) == StringKind && valueKind(right) == StringKind {
-				registers[ins.a] = BoolValue(left.stringText() <= right.stringText())
+				registers[a] = BoolValue(left.stringText() <= right.stringText())
 				break
 			}
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind || math.IsNaN(valueNumber(left)) || math.IsNaN(valueNumber(right)) {
 				value, err := lessEqualValue(left, right, thread.globals)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: less equal failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: less equal failed: %w", err)))
 				}
-				registers[ins.a] = BoolValue(value)
+				registers[a] = BoolValue(value)
 				break
 			}
-			registers[ins.a] = BoolValue(valueNumber(left) <= valueNumber(right))
+			registers[a] = BoolValue(valueNumber(left) <= valueNumber(right))
 
 		case opGreater:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) == StringKind && valueKind(right) == StringKind {
-				registers[ins.a] = BoolValue(left.stringText() > right.stringText())
+				registers[a] = BoolValue(left.stringText() > right.stringText())
 				break
 			}
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind || math.IsNaN(valueNumber(left)) || math.IsNaN(valueNumber(right)) {
 				value, err := lessValue(right, left, thread.globals)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: greater failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: greater failed: %w", err)))
 				}
-				registers[ins.a] = BoolValue(value)
+				registers[a] = BoolValue(value)
 				break
 			}
-			registers[ins.a] = BoolValue(valueNumber(left) > valueNumber(right))
+			registers[a] = BoolValue(valueNumber(left) > valueNumber(right))
 
 		case opGreaterEqual:
-			left := registers[ins.b]
-			right := registers[ins.c]
+			left := registers[b]
+			right := registers[c]
 			if valueKind(left) == StringKind && valueKind(right) == StringKind {
-				registers[ins.a] = BoolValue(left.stringText() >= right.stringText())
+				registers[a] = BoolValue(left.stringText() >= right.stringText())
 				break
 			}
 			if valueKind(left) != NumberKind || valueKind(right) != NumberKind || math.IsNaN(valueNumber(left)) || math.IsNaN(valueNumber(right)) {
 				value, err := lessEqualValue(right, left, thread.globals)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: greater equal failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: greater equal failed: %w", err)))
 				}
-				registers[ins.a] = BoolValue(value)
+				registers[a] = BoolValue(value)
 				break
 			}
-			registers[ins.a] = BoolValue(valueNumber(left) >= valueNumber(right))
+			registers[a] = BoolValue(valueNumber(left) >= valueNumber(right))
 
 		case opNumericForCheck:
-			loopValue := registers[ins.a]
-			limitValue := registers[ins.b]
-			stepValue := registers[ins.c]
+			loopValue := registers[a]
+			limitValue := registers[b]
+			stepValue := registers[c]
 			if valueKind(loopValue) != NumberKind {
-				return directFrameFail(fmt.Errorf("run: numeric for loop value is %s, want number", loopValue.Kind()))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: numeric for loop value is %s, want number", loopValue.Kind())))
 			}
 			if valueKind(limitValue) != NumberKind {
-				return directFrameFail(fmt.Errorf("run: numeric for limit is %s, want number", limitValue.Kind()))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: numeric for limit is %s, want number", limitValue.Kind())))
 			}
 			if valueKind(stepValue) != NumberKind {
-				return directFrameFail(fmt.Errorf("run: numeric for step is %s, want number", stepValue.Kind()))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: numeric for step is %s, want number", stepValue.Kind())))
 			}
 			if math.IsNaN(valueNumber(loopValue)) || math.IsNaN(valueNumber(limitValue)) || math.IsNaN(valueNumber(stepValue)) {
-				return directFrameFail(fmt.Errorf("run: numeric for operand is NaN"))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: numeric for operand is NaN")))
 			}
 			if valueNumber(stepValue) > 0 {
 				if valueNumber(loopValue) > valueNumber(limitValue) {
-					frame.pc = ins.d
+					pc = d
 					continue
 				}
 				break
 			}
 			if valueNumber(loopValue) < valueNumber(limitValue) {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opNumericForLoop:
-			loopValue := registers[ins.a]
-			stepValue := registers[ins.b]
+			loopValue := registers[a]
+			stepValue := registers[b]
 			if valueKind(loopValue) != NumberKind || valueKind(stepValue) != NumberKind {
-				return directFrameEnterGenericFrame()
+				return directFrameExitAt(frame, pc, directFrameEnterGenericFrame())
 			}
-			registers[ins.a] = NumberValue(valueNumber(loopValue) + valueNumber(stepValue))
-			frame.pc = ins.d
+			registers[a] = NumberValue(valueNumber(loopValue) + valueNumber(stepValue))
+			pc = d
 			continue
 
 		case opJumpIfNotEqualK:
-			left := registers[ins.a]
-			if valueKind(left) == NumberKind && constantNumberOK[ins.b] {
-				if valueNumber(left) != constantNumbers[ins.b] {
-					frame.pc = ins.d
+			left := registers[a]
+			if valueKind(left) == NumberKind && constantNumberOK[b] {
+				if valueNumber(left) != constantNumbers[b] {
+					pc = d
 					continue
 				}
 				break
 			}
-			if valueKind(left) == StringKind && constantKeyOK[ins.b] {
-				if left.stringText() != constantKeys[ins.b].str {
-					frame.pc = ins.d
+			if valueKind(left) == StringKind && constantKeyOK[b] {
+				if left.stringText() != constantKeys[b].str {
+					pc = d
 					continue
 				}
 				break
 			}
-			right := constants[ins.b]
+			right := constants[b]
 			equal, err := equalValue(left, right, thread.globals)
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: equal failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: equal failed: %w", err)))
 			}
 			if !equal {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfTableHasMetatable:
-			base := registers[ins.a]
+			base := registers[a]
 			if table := base.tableRef(); table != nil && table.metatable != nil {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfNotLessK:
-			left := registers[ins.a]
-			less, err := directFrameLessForBranchUncounted(thread.globals, left, constants[ins.b])
+			left := registers[a]
+			less, err := directFrameLessForBranchUncounted(thread.globals, left, constants[b])
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: less failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: less failed: %w", err)))
 			}
 			if !less {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfNotGreaterK:
-			left := registers[ins.a]
-			greater, err := directFrameLessForBranchUncounted(thread.globals, constants[ins.b], left)
+			left := registers[a]
+			greater, err := directFrameLessForBranchUncounted(thread.globals, constants[b], left)
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: greater failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: greater failed: %w", err)))
 			}
 			if !greater {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfLessK:
-			left := registers[ins.a]
-			less, err := directFrameLessForBranchUncounted(thread.globals, left, constants[ins.b])
+			left := registers[a]
+			less, err := directFrameLessForBranchUncounted(thread.globals, left, constants[b])
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: less failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: less failed: %w", err)))
 			}
 			if less {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfGreaterK:
-			left := registers[ins.a]
-			greater, err := directFrameLessForBranchUncounted(thread.globals, constants[ins.b], left)
+			left := registers[a]
+			greater, err := directFrameLessForBranchUncounted(thread.globals, constants[b], left)
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: greater failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: greater failed: %w", err)))
 			}
 			if greater {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfNotLess:
-			left := registers[ins.a]
-			right := registers[ins.b]
+			left := registers[a]
+			right := registers[b]
 			less, err := directFrameLessForBranchUncounted(thread.globals, left, right)
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: less failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: less failed: %w", err)))
 			}
 			if !less {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfNotGreater:
-			left := registers[ins.a]
-			right := registers[ins.b]
+			left := registers[a]
+			right := registers[b]
 			greater, err := directFrameLessForBranchUncounted(thread.globals, right, left)
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: greater failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: greater failed: %w", err)))
 			}
 			if !greater {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfLess:
-			left := registers[ins.a]
-			right := registers[ins.b]
+			left := registers[a]
+			right := registers[b]
 			less, err := directFrameLessForBranchUncounted(thread.globals, left, right)
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: less failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: less failed: %w", err)))
 			}
 			if less {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfGreater:
-			left := registers[ins.a]
-			right := registers[ins.b]
+			left := registers[a]
+			right := registers[b]
 			greater, err := directFrameLessForBranchUncounted(thread.globals, right, left)
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: greater failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: greater failed: %w", err)))
 			}
 			if greater {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfModKNotEqualK:
-			left := registers[ins.a]
-			if valueKind(left) != NumberKind || !constantNumberOK[ins.b] || !constantNumberOK[ins.c] {
-				return directFrameEnterGenericFrame()
+			left := registers[a]
+			if valueKind(left) != NumberKind || !constantNumberOK[b] || !constantNumberOK[c] {
+				return directFrameExitAt(frame, pc, directFrameEnterGenericFrame())
 			}
-			modRight := constantNumbers[ins.b]
-			want := constantNumbers[ins.c]
+			modRight := constantNumbers[b]
+			want := constantNumbers[c]
 			got := valueNumber(left) - math.Floor(valueNumber(left)/modRight)*modRight
 			if got != want {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfStringFieldNotEqualK:
-			left, ok, err := directFrameStringFieldBox(registers[ins.a], constantKeys[ins.b].str, constants[ins.b].stringBox())
+			left, ok, err := directFrameStringFieldBox(registers[a], constantKeys[b].str, constants[b].stringBox())
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: get field failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: get field failed: %w", err)))
 			}
 			if !ok {
-				return directFrameEnterGenericFrame()
+				return directFrameExitAt(frame, pc, directFrameEnterGenericFrame())
 			}
-			right := constants[ins.c]
+			right := constants[c]
 			if valueKind(left) == TableKind || valueKind(left) == UserDataKind || valueKind(right) == TableKind || valueKind(right) == UserDataKind {
-				return directFrameEnterGenericFrame()
+				return directFrameExitAt(frame, pc, directFrameEnterGenericFrame())
 			}
 			if equal, fast := directFrameScalarValuesEqual(left, right); fast {
 				if !equal {
-					frame.pc = ins.d
+					pc = d
 					continue
 				}
 				break
 			}
 			if !valuesEqual(left, right) {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK:
-			left, ok, err := directFrameStringFieldBox(registers[ins.a], constantKeys[ins.b].str, constants[ins.b].stringBox())
+			left, ok, err := directFrameStringFieldBox(registers[a], constantKeys[b].str, constants[b].stringBox())
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: get field failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: get field failed: %w", err)))
 			}
-			if !ok || valueKind(left) != NumberKind || !constantNumberOK[ins.c] {
-				return directFrameEnterGenericFrame()
+			if !ok || valueKind(left) != NumberKind || !constantNumberOK[c] {
+				return directFrameExitAt(frame, pc, directFrameEnterGenericFrame())
 			}
-			right := constantNumbers[ins.c]
+			right := constantNumbers[c]
 			if math.IsNaN(valueNumber(left)) || math.IsNaN(right) {
-				return directFrameEnterGenericFrame()
+				return directFrameExitAt(frame, pc, directFrameEnterGenericFrame())
 			}
 			greater := valueNumber(left) > right
-			if (ins.op == opJumpIfStringFieldNotGreaterK && !greater) ||
-				(ins.op == opJumpIfStringFieldGreaterK && greater) {
-				frame.pc = ins.d
+			if (op == opJumpIfStringFieldNotGreaterK && !greater) ||
+				(op == opJumpIfStringFieldGreaterK && greater) {
+				pc = d
 				continue
 			}
 
 		case opJumpIfStringFieldNotGreaterR:
-			left, ok, err := directFrameStringFieldBox(registers[ins.a], constantKeys[ins.b].str, constants[ins.b].stringBox())
+			left, ok, err := directFrameStringFieldBox(registers[a], constantKeys[b].str, constants[b].stringBox())
 			if err != nil {
-				return directFrameFail(fmt.Errorf("run: get field failed: %w", err))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: get field failed: %w", err)))
 			}
-			right := registers[ins.c]
+			right := registers[c]
 			if !ok || valueKind(left) != NumberKind || valueKind(right) != NumberKind ||
 				math.IsNaN(valueNumber(left)) || math.IsNaN(valueNumber(right)) {
-				return directFrameEnterGenericFrame()
+				return directFrameExitAt(frame, pc, directFrameEnterGenericFrame())
 			}
 			if !(valueNumber(left) > valueNumber(right)) {
-				frame.pc = ins.d
+				pc = d
 				continue
 			}
 
 		case opJumpIfFalse:
-			if !registers[ins.a].truthy() {
-				frame.pc = ins.b
+			if !registers[a].truthy() {
+				pc = b
 				continue
 			}
 
 		case opJump:
-			frame.pc = ins.b
+			pc = b
 			continue
 
 		case opCall:
-			resultCount := ins.d
+			resultCount := d
 			if resultCount == 0 {
 				resultCount = 1
 			}
-			callee := registers[ins.b]
-			if ins.c == 2 && resultCount == 2 {
-				first, second, count, ok, err := directFrameIteratorNext(callee, registers[ins.b+1], registers[ins.b+2])
+			callee := registers[b]
+			if c == 2 && resultCount == 2 {
+				first, second, count, ok, err := directFrameIteratorNext(callee, registers[b+1], registers[b+2])
 				if ok {
 					if err != nil {
-						return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
+						return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
 					}
 					frame.openResultStart = -1
 					frame.openResults = vmResultWindow{}
 					for i := 0; i < resultCount; i++ {
 						if i >= count {
-							registers[ins.a+i] = NilValue()
+							registers[a+i] = NilValue()
 						} else if i == 0 {
-							registers[ins.a+i] = first
+							registers[a+i] = first
 						} else {
-							registers[ins.a+i] = second
+							registers[a+i] = second
 						}
 					}
 					break
 				}
 			}
 			if resultCount == 1 && valueNativeID(callee) == nativeFuncRawLen {
-				value, err := baseRawLenValue(registers[ins.b+1 : ins.b+1+ins.c])
+				value, err := baseRawLenValue(registers[b+1 : b+1+c])
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
 				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
 			if resultCount == 1 && valueNativeID(callee) == nativeFuncToString {
 				value := NilValue()
-				if ins.c > 0 {
-					value = registers[ins.b+1]
+				if c > 0 {
+					value = registers[b+1]
 				}
 				result, err := baseToStringValue(thread.globals, value)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
 				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
-				registers[ins.a] = result
+				registers[a] = result
 				break
 			}
-			if closure, ok := callee.scriptFunction(); ok && ins.c >= 0 {
-				destination := vmResultDestination{register: ins.a, count: ins.d}
-				args := registers[ins.b+1 : ins.b+1+ins.c]
-				frame.pc++
+			if closure, ok := callee.scriptFunction(); ok && c >= 0 {
+				destination := vmResultDestination{register: a, count: d}
+				args := registers[b+1 : b+1+c]
+				pc++
+				frame.pc = pc
 				result, err := thread.runInlineScriptCall(closure, args)
 				if err != nil {
 					if yield, ok := err.(vmYieldRequest); ok {
@@ -6511,9 +6544,9 @@ reload:
 							protected:   yield.protected,
 							host:        yield.host,
 						})
-						return directFrameYield(vmYieldedValues(yield.values))
+						return directFrameExitAt(frame, pc, directFrameYield(vmYieldedValues(yield.values)))
 					}
-					return directFrameFail(err)
+					return directFrameExitAt(frame, pc, directFrameFail(err))
 				}
 				// A nested materialized call may grow the shared register arena and
 				// rebind every live frame. Refresh the dispatch slice before the
@@ -6523,40 +6556,41 @@ reload:
 				frame.applyValueListDestination(destination, result.window)
 				continue
 			}
-			return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
+			return directFrameExitAt(frame, pc, directFrameEnterGenericFrameFor(directFrameSideExitReasonCall))
 
 		case opCallOne:
-			callee := registers[ins.b]
-			argCount, borrowHint := decodeFixedCallCount(ins.c)
+			callee := registers[b]
+			argCount, borrowHint := decodeFixedCallCount(c)
 			if valueNativeID(callee) == nativeFuncRawLen {
-				value, err := baseRawLenValue(registers[ins.b+1 : ins.b+1+argCount])
+				value, err := baseRawLenValue(registers[b+1 : b+1+argCount])
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
 				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
-				registers[ins.a] = value
+				registers[a] = value
 				break
 			}
 			if valueNativeID(callee) == nativeFuncToString {
 				value := NilValue()
 				if argCount > 0 {
-					value = registers[ins.b+1]
+					value = registers[b+1]
 				}
 				result, err := baseToStringValue(thread.globals, value)
 				if err != nil {
-					return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
+					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
 				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
-				registers[ins.a] = result
+				registers[a] = result
 				break
 			}
 			if borrowHint {
 				if closure, ok := callee.scriptFunction(); ok {
-					if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, ins.b+1, argCount); borrowed {
-						frame.pc++
-						installFixedResultPendingCall(frame, vmResultDestination{register: ins.a, count: 1})
+					if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, b+1, argCount); borrowed {
+						pc++
+						frame.pc = pc
+						installFixedResultPendingCall(frame, vmResultDestination{register: a, count: 1})
 						thread.pushFrame(child)
 						frame = child
 						directChildActive = true
@@ -6564,19 +6598,20 @@ reload:
 					}
 				}
 			}
-			return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
+			return directFrameExitAt(frame, pc, directFrameEnterGenericFrameFor(directFrameSideExitReasonCall))
 
 		case opCallLocalOne:
-			callee := registers[ins.b]
+			callee := registers[b]
 			closure, ok := callee.scriptFunction()
 			if !ok {
-				return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
+				return directFrameExitAt(frame, pc, directFrameEnterGenericFrameFor(directFrameSideExitReasonCall))
 			}
-			argCount, borrowHint := decodeFixedCallCount(ins.d)
-			frame.pc++
+			argCount, borrowHint := decodeFixedCallCount(d)
+			pc++
+			frame.pc = pc
 			if borrowHint {
-				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, ins.c, argCount); borrowed {
-					installFixedResultPendingCall(frame, vmResultDestination{register: ins.a, count: 1})
+				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, c, argCount); borrowed {
+					installFixedResultPendingCall(frame, vmResultDestination{register: a, count: 1})
 					thread.pushFrame(child)
 					frame = child
 					directChildActive = true
@@ -6586,45 +6621,46 @@ reload:
 			var value Value
 			var callErr error
 			if argCount <= 3 {
-				first, second, third := fixedRegisterArgs(registers, ins.c, argCount)
+				first, second, third := fixedRegisterArgs(registers, c, argCount)
 				value, callErr = thread.runInlineScriptCallFixedOneNoHook(closure, first, second, third, argCount)
 			} else {
-				args := registers[ins.c : ins.c+argCount]
+				args := registers[c : c+argCount]
 				value, callErr = thread.runInlineScriptCallOneNoHook(closure, args)
 			}
 			if callErr != nil {
 				if yield, ok := callErr.(vmYieldRequest); ok {
 					thread.installPendingCall(frame, vmPendingCall{
-						destination: vmResultDestination{register: ins.a, count: 1},
+						destination: vmResultDestination{register: a, count: 1},
 						protected:   yield.protected,
 						host:        yield.host,
 					})
-					return directFrameYield(vmYieldedValues(yield.values))
+					return directFrameExitAt(frame, pc, directFrameYield(vmYieldedValues(yield.values)))
 				}
-				return directFrameFail(callErr)
+				return directFrameExitAt(frame, pc, directFrameFail(callErr))
 			}
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
 			registers = frame.registers
-			registers[ins.a] = value
+			registers[a] = value
 			continue
 
 		case opCallUpvalueOne:
-			callee, err := frame.upvalue(ins.b)
+			callee, err := frame.upvalue(b)
 			if err != nil {
-				return directFrameFail(err)
+				return directFrameExitAt(frame, pc, directFrameFail(err))
 			}
 			closure, ok := callee.scriptFunction()
 			if !ok {
-				return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
+				return directFrameExitAt(frame, pc, directFrameEnterGenericFrameFor(directFrameSideExitReasonCall))
 			}
-			argCount, borrowHint := decodeFixedCallCount(ins.d)
-			frame.pc++
+			argCount, borrowHint := decodeFixedCallCount(d)
+			pc++
+			frame.pc = pc
 			var value Value
 			var callErr error
 			if borrowHint {
-				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, ins.c, argCount); borrowed {
-					installFixedResultPendingCall(frame, vmResultDestination{register: ins.a, count: 1})
+				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, c, argCount); borrowed {
+					installFixedResultPendingCall(frame, vmResultDestination{register: a, count: 1})
 					thread.pushFrame(child)
 					frame = child
 					directChildActive = true
@@ -6632,59 +6668,60 @@ reload:
 				}
 			}
 			if argCount <= 3 {
-				first, second, third := fixedRegisterArgs(registers, ins.c, argCount)
+				first, second, third := fixedRegisterArgs(registers, c, argCount)
 				value, callErr = thread.runInlineScriptCallFixedOneNoHook(closure, first, second, third, argCount)
 			} else {
-				args := registers[ins.c : ins.c+argCount]
+				args := registers[c : c+argCount]
 				value, callErr = thread.runInlineScriptCallOneNoHook(closure, args)
 			}
 			if callErr != nil {
 				if yield, ok := callErr.(vmYieldRequest); ok {
 					thread.installPendingCall(frame, vmPendingCall{
-						destination: vmResultDestination{register: ins.a, count: 1},
+						destination: vmResultDestination{register: a, count: 1},
 						protected:   yield.protected,
 						host:        yield.host,
 					})
-					return directFrameYield(vmYieldedValues(yield.values))
+					return directFrameExitAt(frame, pc, directFrameYield(vmYieldedValues(yield.values)))
 				}
-				return directFrameFail(callErr)
+				return directFrameExitAt(frame, pc, directFrameFail(callErr))
 			}
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
 			registers = frame.registers
-			registers[ins.a] = value
+			registers[a] = value
 			continue
 
 		case opCallMethodOne:
-			receiver := registers[ins.b]
+			receiver := registers[b]
 			table := receiver.tableRef()
 			if table == nil {
-				return directFrameFail(fmt.Errorf("run: get field target is %s, want table", receiver.Kind()))
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: get field target is %s, want table", receiver.Kind())))
 			}
-			key := constantKeys[ins.c].str
-			callee, ok := table.rawStringFieldBox(constants[ins.c].stringBox())
-			if constants[ins.c].stringBox() == nil {
+			key := constantKeys[c].str
+			callee, ok := table.rawStringFieldBox(constants[c].stringBox())
+			if constants[c].stringBox() == nil {
 				callee, ok = table.rawStringField(key)
 			}
 			if !ok {
 				if table.metatable != nil {
-					return directFrameEnterGenericFrameFor(directFrameSideExitReasonMetatable)
+					return directFrameExitAt(frame, pc, directFrameEnterGenericFrameFor(directFrameSideExitReasonMetatable))
 				}
-				return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
+				return directFrameExitAt(frame, pc, directFrameEnterGenericFrameFor(directFrameSideExitReasonCall))
 			}
 			closure, ok := callee.scriptFunction()
 			if !ok {
-				return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
+				return directFrameExitAt(frame, pc, directFrameEnterGenericFrameFor(directFrameSideExitReasonCall))
 			}
-			registers[ins.a+1] = receiver
-			frame.pc++
-			explicitCount, borrowHint := decodeFixedCallCount(ins.d)
+			registers[a+1] = receiver
+			pc++
+			frame.pc = pc
+			explicitCount, borrowHint := decodeFixedCallCount(d)
 			argCount := explicitCount + 1
 			var value Value
 			var err error
 			if borrowHint && table.metatable == nil {
-				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, ins.a+1, argCount); borrowed {
-					installFixedResultPendingCall(frame, vmResultDestination{register: ins.a, count: 1})
+				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, a+1, argCount); borrowed {
+					installFixedResultPendingCall(frame, vmResultDestination{register: a, count: 1})
 					thread.pushFrame(child)
 					frame = child
 					directChildActive = true
@@ -6692,96 +6729,97 @@ reload:
 				}
 			}
 			if argCount <= 3 {
-				first, second, third := fixedRegisterArgs(registers, ins.a+1, argCount)
+				first, second, third := fixedRegisterArgs(registers, a+1, argCount)
 				value, err = thread.runInlineScriptCallFixedOneNoHook(closure, first, second, third, argCount)
 			} else {
-				args := registers[ins.a+1 : ins.a+1+argCount]
+				args := registers[a+1 : a+1+argCount]
 				value, err = thread.runInlineScriptCallOneNoHook(closure, args)
 			}
 			if err != nil {
 				if yield, ok := err.(vmYieldRequest); ok {
 					thread.installPendingCall(frame, vmPendingCall{
-						destination: vmResultDestination{register: ins.a, count: 1},
+						destination: vmResultDestination{register: a, count: 1},
 						protected:   yield.protected,
 						host:        yield.host,
 					})
-					return directFrameYield(vmYieldedValues(yield.values))
+					return directFrameExitAt(frame, pc, directFrameYield(vmYieldedValues(yield.values)))
 				}
-				return directFrameFail(err)
+				return directFrameExitAt(frame, pc, directFrameFail(err))
 			}
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
 			registers = frame.registers
-			registers[ins.a] = value
+			registers[a] = value
 			continue
 
 		case opFastCall:
-			exit := thread.runDirectFastCall(frame, nativeFuncID(ins.b), ins.a, ins.c, ins.d, nil)
+			exit := thread.runDirectFastCall(frame, nativeFuncID(b), a, c, d, nil)
 			if exit.resumesDirectFrame() {
 				break
 			}
+			frame.pc = pc
 			return exit
 
 		case opReturnOne:
-			if directChildActive && thread.resumeDirectFrameChildOne(rootDepth, &frame, registers[ins.a]) {
+			if directChildActive && thread.resumeDirectFrameChildOne(rootDepth, &frame, registers[a]) {
 				goto reload
 			}
-			result := vmReturnedValue(registers[ins.a])
+			result := vmReturnedValue(registers[a])
 			if directChildActive && thread.resumeDirectFrameChild(rootDepth, &frame, result) {
 				goto reload
 			}
-			return directFrameReturn(result)
+			return directFrameExitAt(frame, pc, directFrameReturn(result))
 
 		case opReturn:
-			count := ins.b
+			count := b
 			if count < 0 {
 				prefixCount := -count - 1
-				if frame.openResultStart == ins.a+prefixCount {
-					result := vmReturnedPrefixAndWindow(registers[ins.a:ins.a+prefixCount], frame.openResults)
+				if frame.openResultStart == a+prefixCount {
+					result := vmReturnedPrefixAndWindow(registers[a:a+prefixCount], frame.openResults)
 					if directChildActive && thread.resumeDirectFrameChild(rootDepth, &frame, result) {
 						goto reload
 					}
-					return directFrameReturn(result)
+					return directFrameExitAt(frame, pc, directFrameReturn(result))
 				}
-				result := vmReturnedValue(registers[ins.a])
+				result := vmReturnedValue(registers[a])
 				if directChildActive && thread.resumeDirectFrameChild(rootDepth, &frame, result) {
 					goto reload
 				}
-				return directFrameReturn(result)
+				return directFrameExitAt(frame, pc, directFrameReturn(result))
 			}
 			if count == 0 {
 				result := vmReturnedValues(nil)
 				if directChildActive && thread.resumeDirectFrameChild(rootDepth, &frame, result) {
 					goto reload
 				}
-				return directFrameReturn(result)
+				return directFrameExitAt(frame, pc, directFrameReturn(result))
 			}
 			if count == 1 {
-				if directChildActive && thread.resumeDirectFrameChildOne(rootDepth, &frame, registers[ins.a]) {
+				if directChildActive && thread.resumeDirectFrameChildOne(rootDepth, &frame, registers[a]) {
 					goto reload
 				}
-				result := vmReturnedValue(registers[ins.a])
+				result := vmReturnedValue(registers[a])
 				if directChildActive && thread.resumeDirectFrameChild(rootDepth, &frame, result) {
 					goto reload
 				}
-				return directFrameReturn(result)
+				return directFrameExitAt(frame, pc, directFrameReturn(result))
 			}
-			result := vmReturnedBorrowedValues(registers[ins.a : ins.a+count])
+			result := vmReturnedBorrowedValues(registers[a : a+count])
 			if directChildActive && thread.resumeDirectFrameChild(rootDepth, &frame, result) {
 				goto reload
 			}
-			return directFrameReturn(result)
+			return directFrameExitAt(frame, pc, directFrameReturn(result))
 
 		default:
-			return directFrameEnterGenericFrame()
+			return directFrameExitAt(frame, pc, directFrameEnterGenericFrame())
 		}
-		frame.pc++
+		pc++
 	}
 	result := vmReturnedValues(nil)
 	if directChildActive && thread.resumeDirectFrameChild(rootDepth, &frame, result) {
 		goto reload
 	}
-	return directFrameReturn(result)
+	return directFrameExitAt(frame, pc, directFrameReturn(result))
 }
 
 func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, error) {
@@ -6817,19 +6855,24 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				return vmFrameResult{}, err
 			}
 		}
-		ins := code[frame.pc].unpack()
+		packed := code[frame.pc]
+		op := packed.op
+		a := int(packed.a)
+		b := int(packed.b)
+		c := int(packed.c)
+		d := int(packed.d)
 
-		switch ins.op {
+		switch op {
 		case opLoadConst:
 			if true {
-				frame.registers[ins.a] = proto.constants[ins.b]
+				frame.registers[a] = proto.constants[b]
 				break
 			}
-			frame.setRegister(ins.a, proto.constants[ins.b])
+			frame.setRegister(a, proto.constants[b])
 
 		case opLoadGlobal:
-			name, _ := proto.constants[ins.b].String()
-			value, ok, hit := globals.getSlot(proto.globalSlot(ins.c, name), name)
+			name, _ := proto.constants[b].String()
+			value, ok, hit := globals.getSlot(proto.globalSlot(c, name), name)
 			if hit {
 				thread.directFramePICCounts.addGlobalSlotHit()
 			} else {
@@ -6839,76 +6882,76 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				return vmFrameResult{}, fmt.Errorf("run: undefined global %q", name)
 			}
 			if true {
-				frame.registers[ins.a] = value
+				frame.registers[a] = value
 				break
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opSetGlobal:
-			name, _ := proto.constants[ins.a].String()
+			name, _ := proto.constants[a].String()
 			if true {
-				globals.setSlot(proto.globalSlot(ins.c, name), name, frame.registers[ins.b])
+				globals.setSlot(proto.globalSlot(c, name), name, frame.registers[b])
 				break
 			}
-			globals.setSlot(proto.globalSlot(ins.c, name), name, frame.register(ins.b))
+			globals.setSlot(proto.globalSlot(c, name), name, frame.register(b))
 
 		case opMove:
 			if true {
-				frame.registers[ins.a] = frame.registers[ins.b]
+				frame.registers[a] = frame.registers[b]
 				break
 			}
-			frame.setRegister(ins.a, frame.register(ins.b))
+			frame.setRegister(a, frame.register(b))
 
 		case opNewTable:
 			if true {
-				frame.registers[ins.a] = TableValue(newTableWithCapacity(ins.b, ins.c))
+				frame.registers[a] = TableValue(newTableWithCapacity(b, c))
 				break
 			}
-			frame.setRegister(ins.a, TableValue(newTableWithCapacity(ins.b, ins.c)))
+			frame.setRegister(a, TableValue(newTableWithCapacity(b, c)))
 
 		case opClosure:
-			captured := captureUpvalues(proto.prototypes[ins.b], frame)
-			value := functionValueWithCapturedUpvalues(proto.prototypes[ins.b], captured)
+			captured := captureUpvalues(proto.prototypes[b], frame)
+			value := functionValueWithCapturedUpvalues(proto.prototypes[b], captured)
 			if true {
-				frame.registers[ins.a] = value
+				frame.registers[a] = value
 				break
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opGetUpvalue:
-			value, err := frame.upvalue(ins.b)
+			value, err := frame.upvalue(b)
 			if err != nil {
 				return vmFrameResult{}, err
 			}
 			if true {
-				frame.registers[ins.a] = value
+				frame.registers[a] = value
 				break
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opSetUpvalue:
 			var value Value
 			if true {
-				value = frame.registers[ins.b]
+				value = frame.registers[b]
 			} else {
-				value = frame.register(ins.b)
+				value = frame.register(b)
 			}
-			if err := frame.setUpvalue(ins.a, value); err != nil {
+			if err := frame.setUpvalue(a, value); err != nil {
 				return vmFrameResult{}, err
 			}
 
 		case opVararg:
-			resultCount := ins.b
+			resultCount := b
 			if resultCount == 0 {
 				resultCount = 1
 			}
 			if resultCount < 0 {
-				frame.openResultStart = ins.a
+				frame.openResultStart = a
 				frame.openResults = vmAdjustedBorrowedResultWindow(varargs)
 				if true {
-					frame.registers[ins.a] = frame.openResults.at(0)
+					frame.registers[a] = frame.openResults.at(0)
 				} else {
-					frame.setRegister(ins.a, frame.openResults.at(0))
+					frame.setRegister(a, frame.openResults.at(0))
 				}
 				frame.pc++
 				continue
@@ -6920,29 +6963,29 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				if len(varargs) >= resultCount {
 					switch resultCount {
 					case 1:
-						frame.registers[ins.a] = varargs[0]
+						frame.registers[a] = varargs[0]
 						copied = true
 					case 2:
-						frame.registers[ins.a] = varargs[0]
-						frame.registers[ins.a+1] = varargs[1]
+						frame.registers[a] = varargs[0]
+						frame.registers[a+1] = varargs[1]
 						copied = true
 					case 3:
-						frame.registers[ins.a] = varargs[0]
-						frame.registers[ins.a+1] = varargs[1]
-						frame.registers[ins.a+2] = varargs[2]
+						frame.registers[a] = varargs[0]
+						frame.registers[a+1] = varargs[1]
+						frame.registers[a+2] = varargs[2]
 						copied = true
 					case 4:
-						frame.registers[ins.a] = varargs[0]
-						frame.registers[ins.a+1] = varargs[1]
-						frame.registers[ins.a+2] = varargs[2]
-						frame.registers[ins.a+3] = varargs[3]
+						frame.registers[a] = varargs[0]
+						frame.registers[a+1] = varargs[1]
+						frame.registers[a+2] = varargs[2]
+						frame.registers[a+3] = varargs[3]
 						copied = true
 					case 5:
-						frame.registers[ins.a] = varargs[0]
-						frame.registers[ins.a+1] = varargs[1]
-						frame.registers[ins.a+2] = varargs[2]
-						frame.registers[ins.a+3] = varargs[3]
-						frame.registers[ins.a+4] = varargs[4]
+						frame.registers[a] = varargs[0]
+						frame.registers[a+1] = varargs[1]
+						frame.registers[a+2] = varargs[2]
+						frame.registers[a+3] = varargs[3]
+						frame.registers[a+4] = varargs[4]
 						copied = true
 					}
 					if copied {
@@ -6951,43 +6994,43 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				}
 				for i := 0; i < resultCount; i++ {
 					if i >= len(varargs) {
-						frame.registers[ins.a+i] = NilValue()
+						frame.registers[a+i] = NilValue()
 					} else {
-						frame.registers[ins.a+i] = varargs[i]
+						frame.registers[a+i] = varargs[i]
 					}
 				}
 				break
 			}
 			for i := 0; i < resultCount; i++ {
 				if i >= len(varargs) {
-					frame.setRegister(ins.a+i, NilValue())
+					frame.setRegister(a+i, NilValue())
 				} else {
-					frame.setRegister(ins.a+i, varargs[i])
+					frame.setRegister(a+i, varargs[i])
 				}
 			}
 
 		case opPrepareIter:
-			generator, state, control, ok, err := prepareIterator(frame.register(ins.a), globals)
+			generator, state, control, ok, err := prepareIterator(frame.register(a), globals)
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: prepare iterator failed: %w", err)
 			}
 			if ok {
-				frame.setRegister(ins.a, generator)
-				frame.setRegister(ins.b, state)
-				frame.setRegister(ins.c, control)
+				frame.setRegister(a, generator)
+				frame.setRegister(b, state)
+				frame.setRegister(c, control)
 			}
 
 		case opArrayNext:
-			callee := frame.register(ins.b)
-			destination := vmResultDestination{register: ins.a, count: ins.d}
+			callee := frame.register(b)
+			destination := vmResultDestination{register: a, count: d}
 			var tableValue Value
 			var controlValue Value
 			if true {
-				tableValue = frame.registers[ins.c]
-				controlValue = frame.registers[ins.a]
+				tableValue = frame.registers[c]
+				controlValue = frame.registers[a]
 			} else {
-				tableValue = frame.register(ins.c)
-				controlValue = frame.register(ins.a)
+				tableValue = frame.register(c)
+				controlValue = frame.register(a)
 			}
 			if results, count, ok, err := inlineNativeIteratorNext(callee, tableValue, controlValue); ok {
 				if err != nil {
@@ -6996,11 +7039,11 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
 				if true {
-					for i := 0; i < ins.d; i++ {
+					for i := 0; i < d; i++ {
 						if i >= count {
-							frame.registers[ins.a+i] = NilValue()
+							frame.registers[a+i] = NilValue()
 						} else {
-							frame.registers[ins.a+i] = results[i]
+							frame.registers[a+i] = results[i]
 						}
 					}
 				} else {
@@ -7008,22 +7051,22 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				}
 				break
 			}
-			args := frame.scriptCallArgs(ins.c, 2)
+			args := frame.scriptCallArgs(c, 2)
 			if result, done, err := frame.callValueToDestination(callee, globals, args, destination); done || err != nil {
 				return result, err
 			}
 
 		case opArrayNextJump2:
-			callee := frame.register(ins.b)
-			destination := vmResultDestination{register: ins.a, count: 2}
+			callee := frame.register(b)
+			destination := vmResultDestination{register: a, count: 2}
 			var tableValue Value
 			var controlValue Value
 			if true {
-				tableValue = frame.registers[ins.c]
-				controlValue = frame.registers[ins.a]
+				tableValue = frame.registers[c]
+				controlValue = frame.registers[a]
 			} else {
-				tableValue = frame.register(ins.c)
-				controlValue = frame.register(ins.a)
+				tableValue = frame.register(c)
+				controlValue = frame.register(a)
 			}
 			if results, count, ok, err := inlineNativeIteratorNext(callee, tableValue, controlValue); ok {
 				if err != nil {
@@ -7034,40 +7077,40 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				if true {
 					for i := 0; i < 2; i++ {
 						if i >= count {
-							frame.registers[ins.a+i] = NilValue()
+							frame.registers[a+i] = NilValue()
 						} else {
-							frame.registers[ins.a+i] = results[i]
+							frame.registers[a+i] = results[i]
 						}
 					}
 				} else {
 					frame.applyInlineResultDestination(destination, results, count)
 				}
 			} else {
-				args := frame.scriptCallArgs(ins.c, 2)
+				args := frame.scriptCallArgs(c, 2)
 				if result, done, err := frame.callValueToDestination(callee, globals, args, destination); done || err != nil {
 					return result, err
 				}
 			}
-			if frame.register(ins.a).IsNil() {
-				frame.pc = ins.d
+			if frame.register(a).IsNil() {
+				frame.pc = d
 				continue
 			}
 
 		case opSetField:
 			if true {
-				base := frame.registers[ins.a]
+				base := frame.registers[a]
 				table := base.tableRef()
 				if table == nil {
 					return vmFrameResult{}, fmt.Errorf("run: set field target is %s, want table", base.Kind())
 				}
-				if table.metatable == nil && proto.constantKeyOK[ins.b] {
-					value := frame.registers[ins.c]
-					keyValue := proto.constants[ins.b]
+				if table.metatable == nil && proto.constantKeyOK[b] {
+					value := frame.registers[c]
+					keyValue := proto.constants[b]
 					var err error
 					if valueKind(keyValue) == StringKind {
 						table.setRawStringFieldBox(keyValue.stringText(), keyValue.stringBox(), value)
 					} else {
-						err = table.rawSetKey(proto.constantKeys[ins.b], value)
+						err = table.rawSetKey(proto.constantKeys[b], value)
 					}
 					if err != nil {
 						return vmFrameResult{}, fmt.Errorf("run: set field failed: %w", err)
@@ -7075,18 +7118,18 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 					break
 				}
 			}
-			table, ok := frame.register(ins.a).Table()
+			table, ok := frame.register(a).Table()
 			if !ok {
-				return vmFrameResult{}, fmt.Errorf("run: set field target is %s, want table", frame.register(ins.a).Kind())
+				return vmFrameResult{}, fmt.Errorf("run: set field target is %s, want table", frame.register(a).Kind())
 			}
 			if table.metatable == nil {
-				if proto.constantKeyOK[ins.b] {
-					keyValue := proto.constants[ins.b]
+				if proto.constantKeyOK[b] {
+					keyValue := proto.constants[b]
 					var err error
 					if valueKind(keyValue) == StringKind {
-						table.setRawStringFieldBox(keyValue.stringText(), keyValue.stringBox(), frame.register(ins.c))
+						table.setRawStringFieldBox(keyValue.stringText(), keyValue.stringBox(), frame.register(c))
 					} else {
-						err = table.rawSetKey(proto.constantKeys[ins.b], frame.register(ins.c))
+						err = table.rawSetKey(proto.constantKeys[b], frame.register(c))
 					}
 					if err != nil {
 						return vmFrameResult{}, fmt.Errorf("run: set field failed: %w", err)
@@ -7094,42 +7137,42 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 					break
 				}
 			}
-			if err := runtimeTableAccess(globals).set(table, proto.constants[ins.b], frame.register(ins.c)); err != nil {
+			if err := runtimeTableAccess(globals).set(table, proto.constants[b], frame.register(c)); err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: set field failed: %w", err)
 			}
 
 		case opSetStringField:
 			if true {
-				base := frame.registers[ins.a]
+				base := frame.registers[a]
 				table := base.tableRef()
 				if table == nil {
 					return vmFrameResult{}, fmt.Errorf("run: set field target is %s, want table", base.Kind())
 				}
-				value := frame.registers[ins.c]
+				value := frame.registers[c]
 				if table.metatable == nil {
-					key := proto.constants[ins.b]
+					key := proto.constants[b]
 					table.setRawStringFieldBox(key.stringText(), key.stringBox(), value)
 					break
 				}
 			}
-			table, ok := frame.register(ins.a).Table()
+			table, ok := frame.register(a).Table()
 			if !ok {
-				return vmFrameResult{}, fmt.Errorf("run: set field target is %s, want table", frame.register(ins.a).Kind())
+				return vmFrameResult{}, fmt.Errorf("run: set field target is %s, want table", frame.register(a).Kind())
 			}
 			if table.metatable == nil {
-				key := proto.constants[ins.b]
-				table.setRawStringFieldBox(key.stringText(), key.stringBox(), frame.register(ins.c))
+				key := proto.constants[b]
+				table.setRawStringFieldBox(key.stringText(), key.stringBox(), frame.register(c))
 				break
 			}
-			if err := runtimeTableAccess(globals).set(table, proto.constants[ins.b], frame.register(ins.c)); err != nil {
+			if err := runtimeTableAccess(globals).set(table, proto.constants[b], frame.register(c)); err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: set field failed: %w", err)
 			}
 
 		case opSetStringFieldIndex:
-			firstKey := proto.constantKeys[ins.b].str
-			firstBox := proto.constants[ins.b].stringBox()
+			firstKey := proto.constantKeys[b].str
+			firstBox := proto.constants[b].stringBox()
 			if true {
-				base := frame.registers[ins.a]
+				base := frame.registers[a]
 				table := base.tableRef()
 				if table == nil {
 					return vmFrameResult{}, fmt.Errorf("run: set field target is %s, want table", base.Kind())
@@ -7144,7 +7187,7 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 						return vmFrameResult{}, fmt.Errorf("run: set index target is %s, want table", first.Kind())
 					}
 					if nextTable.metatable == nil {
-						if err := nextTable.rawSet(frame.registers[ins.c], frame.registers[ins.d]); err != nil {
+						if err := nextTable.rawSet(frame.registers[c], frame.registers[d]); err != nil {
 							return vmFrameResult{}, fmt.Errorf("run: set index failed: %w", err)
 						}
 						break
@@ -7153,13 +7196,13 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 					return vmFrameResult{}, fmt.Errorf("run: set index target is %s, want table", NilValue().Kind())
 				}
 			}
-			base := frame.register(ins.a)
+			base := frame.register(a)
 			table, ok := base.Table()
 			if !ok {
 				return vmFrameResult{}, fmt.Errorf("run: set field target is %s, want table", base.Kind())
 			}
 			access := runtimeTableAccess(globals)
-			first, err := access.getString(table, firstKey, proto.constants[ins.b])
+			first, err := access.getString(table, firstKey, proto.constants[b])
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: get field failed: %w", err)
 			}
@@ -7167,15 +7210,15 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			if !ok {
 				return vmFrameResult{}, fmt.Errorf("run: set index target is %s, want table", first.Kind())
 			}
-			if err := access.set(nextTable, frame.register(ins.c), frame.register(ins.d)); err != nil {
+			if err := access.set(nextTable, frame.register(c), frame.register(d)); err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: set index failed: %w", err)
 			}
 
 		case opGetStringField:
-			key := proto.constantKeys[ins.c].str
-			keyBox := proto.constants[ins.c].stringBox()
+			key := proto.constantKeys[c].str
+			keyBox := proto.constants[c].stringBox()
 			if true {
-				base := frame.registers[ins.b]
+				base := frame.registers[b]
 				table := base.tableRef()
 				if table == nil {
 					return vmFrameResult{}, fmt.Errorf("run: get field target is %s, want table", base.Kind())
@@ -7185,41 +7228,41 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 					value, fieldOK = table.rawStringField(key)
 				}
 				if fieldOK {
-					frame.registers[ins.a] = value
+					frame.registers[a] = value
 					break
 				}
 				if table.metatable == nil {
-					frame.registers[ins.a] = NilValue()
+					frame.registers[a] = NilValue()
 					break
 				}
 			}
-			table, ok := frame.register(ins.b).Table()
+			table, ok := frame.register(b).Table()
 			if !ok {
-				return vmFrameResult{}, fmt.Errorf("run: get field target is %s, want table", frame.register(ins.b).Kind())
+				return vmFrameResult{}, fmt.Errorf("run: get field target is %s, want table", frame.register(b).Kind())
 			}
 			value, fieldOK := table.rawStringFieldBox(keyBox)
 			if keyBox == nil {
 				value, fieldOK = table.rawStringField(key)
 			}
 			if fieldOK {
-				frame.setRegister(ins.a, value)
+				frame.setRegister(a, value)
 				break
 			}
 			if table.metatable == nil {
-				frame.setRegister(ins.a, NilValue())
+				frame.setRegister(a, NilValue())
 				break
 			}
-			value, err := runtimeTableAccess(globals).get(table, proto.constants[ins.c])
+			value, err := runtimeTableAccess(globals).get(table, proto.constants[c])
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: get field failed: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opGetStringFieldIndex:
-			firstKey := proto.constantKeys[ins.c].str
-			firstBox := proto.constants[ins.c].stringBox()
+			firstKey := proto.constantKeys[c].str
+			firstBox := proto.constants[c].stringBox()
 			if true {
-				base := frame.registers[ins.b]
+				base := frame.registers[b]
 				table := base.tableRef()
 				if table == nil {
 					return vmFrameResult{}, fmt.Errorf("run: get field target is %s, want table", base.Kind())
@@ -7234,24 +7277,24 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 						return vmFrameResult{}, fmt.Errorf("run: get index target is %s, want table", first.Kind())
 					}
 					if nextTable.metatable == nil {
-						value, err := nextTable.rawGet(frame.registers[ins.d])
+						value, err := nextTable.rawGet(frame.registers[d])
 						if err != nil {
 							return vmFrameResult{}, fmt.Errorf("run: get index failed: %w", err)
 						}
-						frame.registers[ins.a] = value
+						frame.registers[a] = value
 						break
 					}
 				} else if table.metatable == nil {
 					return vmFrameResult{}, fmt.Errorf("run: get index target is %s, want table", NilValue().Kind())
 				}
 			}
-			base := frame.register(ins.b)
+			base := frame.register(b)
 			table, ok := base.Table()
 			if !ok {
 				return vmFrameResult{}, fmt.Errorf("run: get field target is %s, want table", base.Kind())
 			}
 			access := runtimeTableAccess(globals)
-			first, err := access.getString(table, firstKey, proto.constants[ins.c])
+			first, err := access.getString(table, firstKey, proto.constants[c])
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: get field failed: %w", err)
 			}
@@ -7259,45 +7302,45 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			if !ok {
 				return vmFrameResult{}, fmt.Errorf("run: get index target is %s, want table", first.Kind())
 			}
-			value, err := access.get(nextTable, frame.register(ins.d))
+			value, err := access.get(nextTable, frame.register(d))
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: get index failed: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opSetIndex:
-			table, ok := frame.register(ins.a).Table()
+			table, ok := frame.register(a).Table()
 			if !ok {
-				return vmFrameResult{}, fmt.Errorf("run: set index target is %s, want table", frame.register(ins.a).Kind())
+				return vmFrameResult{}, fmt.Errorf("run: set index target is %s, want table", frame.register(a).Kind())
 			}
-			if err := runtimeTableAccess(globals).set(table, frame.register(ins.b), frame.register(ins.c)); err != nil {
+			if err := runtimeTableAccess(globals).set(table, frame.register(b), frame.register(c)); err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: set index failed: %w", err)
 			}
 
 		case opGetIndex:
-			table, ok := frame.register(ins.b).Table()
+			table, ok := frame.register(b).Table()
 			if !ok {
-				return vmFrameResult{}, fmt.Errorf("run: get index target is %s, want table", frame.register(ins.b).Kind())
+				return vmFrameResult{}, fmt.Errorf("run: get index target is %s, want table", frame.register(b).Kind())
 			}
-			value, err := runtimeTableAccess(globals).get(table, frame.register(ins.c))
+			value, err := runtimeTableAccess(globals).get(table, frame.register(c))
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: get index failed: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opAdd:
 			if true {
-				left := frame.registers[ins.b]
-				right := frame.registers[ins.c]
+				left := frame.registers[b]
+				right := frame.registers[c]
 				if valueKind(left) == NumberKind && valueKind(right) == NumberKind {
-					frame.registers[ins.a] = NumberValue(valueNumber(left) + valueNumber(right))
+					frame.registers[a] = NumberValue(valueNumber(left) + valueNumber(right))
 					break
 				}
 			}
-			left := frame.register(ins.b)
-			right := frame.register(ins.c)
+			left := frame.register(b)
+			right := frame.register(c)
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind {
-				frame.setRegister(ins.a, NumberValue(valueNumber(left)+valueNumber(right)))
+				frame.setRegister(a, NumberValue(valueNumber(left)+valueNumber(right)))
 				break
 			}
 			value, err := binaryArithmeticValue(
@@ -7311,21 +7354,21 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opSub:
 			if true {
-				left := frame.registers[ins.b]
-				right := frame.registers[ins.c]
+				left := frame.registers[b]
+				right := frame.registers[c]
 				if valueKind(left) == NumberKind && valueKind(right) == NumberKind {
-					frame.registers[ins.a] = NumberValue(valueNumber(left) - valueNumber(right))
+					frame.registers[a] = NumberValue(valueNumber(left) - valueNumber(right))
 					break
 				}
 			}
-			left := frame.register(ins.b)
-			right := frame.register(ins.c)
+			left := frame.register(b)
+			right := frame.register(c)
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind {
-				frame.setRegister(ins.a, NumberValue(valueNumber(left)-valueNumber(right)))
+				frame.setRegister(a, NumberValue(valueNumber(left)-valueNumber(right)))
 				break
 			}
 			value, err := binaryArithmeticValue(
@@ -7339,21 +7382,21 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opMul:
 			if true {
-				left := frame.registers[ins.b]
-				right := frame.registers[ins.c]
+				left := frame.registers[b]
+				right := frame.registers[c]
 				if valueKind(left) == NumberKind && valueKind(right) == NumberKind {
-					frame.registers[ins.a] = NumberValue(valueNumber(left) * valueNumber(right))
+					frame.registers[a] = NumberValue(valueNumber(left) * valueNumber(right))
 					break
 				}
 			}
-			left := frame.register(ins.b)
-			right := frame.register(ins.c)
+			left := frame.register(b)
+			right := frame.register(c)
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind {
-				frame.setRegister(ins.a, NumberValue(valueNumber(left)*valueNumber(right)))
+				frame.setRegister(a, NumberValue(valueNumber(left)*valueNumber(right)))
 				break
 			}
 			value, err := binaryArithmeticValue(
@@ -7367,13 +7410,13 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opDiv:
-			left := frame.register(ins.b)
-			right := frame.register(ins.c)
+			left := frame.register(b)
+			right := frame.register(c)
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind {
-				frame.setRegister(ins.a, NumberValue(valueNumber(left)/valueNumber(right)))
+				frame.setRegister(a, NumberValue(valueNumber(left)/valueNumber(right)))
 				break
 			}
 			value, err := binaryArithmeticValue(
@@ -7387,13 +7430,13 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opMod:
-			left := frame.register(ins.b)
-			right := frame.register(ins.c)
+			left := frame.register(b)
+			right := frame.register(c)
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind {
-				frame.setRegister(ins.a, NumberValue(valueNumber(left)-math.Floor(valueNumber(left)/valueNumber(right))*valueNumber(right)))
+				frame.setRegister(a, NumberValue(valueNumber(left)-math.Floor(valueNumber(left)/valueNumber(right))*valueNumber(right)))
 				break
 			}
 			value, err := binaryArithmeticValue(
@@ -7409,13 +7452,13 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opIDiv:
-			left := frame.register(ins.b)
-			right := frame.register(ins.c)
+			left := frame.register(b)
+			right := frame.register(c)
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind {
-				frame.setRegister(ins.a, NumberValue(math.Floor(valueNumber(left)/valueNumber(right))))
+				frame.setRegister(a, NumberValue(math.Floor(valueNumber(left)/valueNumber(right))))
 				break
 			}
 			value, err := binaryArithmeticValue(
@@ -7429,13 +7472,13 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opPow:
-			left := frame.register(ins.b)
-			right := frame.register(ins.c)
+			left := frame.register(b)
+			right := frame.register(c)
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind {
-				frame.setRegister(ins.a, NumberValue(math.Pow(valueNumber(left), valueNumber(right))))
+				frame.setRegister(a, NumberValue(math.Pow(valueNumber(left), valueNumber(right))))
 				break
 			}
 			value, err := binaryArithmeticValue(
@@ -7449,57 +7492,57 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opNeg:
-			operand := frame.register(ins.b)
+			operand := frame.register(b)
 			if valueKind(operand) == NumberKind {
-				frame.setRegister(ins.a, NumberValue(-valueNumber(operand)))
+				frame.setRegister(a, NumberValue(-valueNumber(operand)))
 				break
 			}
 			value, err := negateValue(operand, globals)
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opLen:
-			value, err := lengthValue(frame.register(ins.b), globals)
+			value, err := lengthValue(frame.register(b), globals)
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: length failed: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opConcat:
-			value, err := concatValue(frame.register(ins.b), frame.register(ins.c), globals)
+			value, err := concatValue(frame.register(b), frame.register(c), globals)
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: concat failed: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opConcatChain:
-			operands := make([]Value, ins.c)
+			operands := make([]Value, c)
 			for index := range operands {
-				operands[index] = frame.register(ins.b + index)
+				operands[index] = frame.register(b + index)
 			}
 			value, err := concatChainValue(operands, globals)
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: concat failed: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opAddK:
 			if true {
-				left := frame.registers[ins.b]
-				if valueKind(left) == NumberKind && proto.constantNumberOK[ins.c] {
-					frame.registers[ins.a] = NumberValue(valueNumber(left) + proto.constantNumbers[ins.c])
+				left := frame.registers[b]
+				if valueKind(left) == NumberKind && proto.constantNumberOK[c] {
+					frame.registers[a] = NumberValue(valueNumber(left) + proto.constantNumbers[c])
 					break
 				}
 			}
-			left := frame.register(ins.b)
-			right := proto.constants[ins.c]
+			left := frame.register(b)
+			right := proto.constants[c]
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind {
-				frame.setRegister(ins.a, NumberValue(valueNumber(left)+valueNumber(right)))
+				frame.setRegister(a, NumberValue(valueNumber(left)+valueNumber(right)))
 				break
 			}
 			value, err := binaryArithmeticValue(
@@ -7513,20 +7556,20 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: add failed: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opSubK:
 			if true {
-				left := frame.registers[ins.b]
-				if valueKind(left) == NumberKind && proto.constantNumberOK[ins.c] {
-					frame.registers[ins.a] = NumberValue(valueNumber(left) - proto.constantNumbers[ins.c])
+				left := frame.registers[b]
+				if valueKind(left) == NumberKind && proto.constantNumberOK[c] {
+					frame.registers[a] = NumberValue(valueNumber(left) - proto.constantNumbers[c])
 					break
 				}
 			}
-			left := frame.register(ins.b)
-			right := proto.constants[ins.c]
+			left := frame.register(b)
+			right := proto.constants[c]
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind {
-				frame.setRegister(ins.a, NumberValue(valueNumber(left)-valueNumber(right)))
+				frame.setRegister(a, NumberValue(valueNumber(left)-valueNumber(right)))
 				break
 			}
 			value, err := binaryArithmeticValue(
@@ -7540,20 +7583,20 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: subtract failed: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opMulK:
 			if true {
-				left := frame.registers[ins.b]
-				if valueKind(left) == NumberKind && proto.constantNumberOK[ins.c] {
-					frame.registers[ins.a] = NumberValue(valueNumber(left) * proto.constantNumbers[ins.c])
+				left := frame.registers[b]
+				if valueKind(left) == NumberKind && proto.constantNumberOK[c] {
+					frame.registers[a] = NumberValue(valueNumber(left) * proto.constantNumbers[c])
 					break
 				}
 			}
-			left := frame.register(ins.b)
-			right := proto.constants[ins.c]
+			left := frame.register(b)
+			right := proto.constants[c]
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind {
-				frame.setRegister(ins.a, NumberValue(valueNumber(left)*valueNumber(right)))
+				frame.setRegister(a, NumberValue(valueNumber(left)*valueNumber(right)))
 				break
 			}
 			value, err := binaryArithmeticValue(
@@ -7567,20 +7610,20 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: multiply failed: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opDivK:
 			if true {
-				left := frame.registers[ins.b]
-				if valueKind(left) == NumberKind && proto.constantNumberOK[ins.c] {
-					frame.registers[ins.a] = NumberValue(valueNumber(left) / proto.constantNumbers[ins.c])
+				left := frame.registers[b]
+				if valueKind(left) == NumberKind && proto.constantNumberOK[c] {
+					frame.registers[a] = NumberValue(valueNumber(left) / proto.constantNumbers[c])
 					break
 				}
 			}
-			left := frame.register(ins.b)
-			right := proto.constants[ins.c]
+			left := frame.register(b)
+			right := proto.constants[c]
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind {
-				frame.setRegister(ins.a, NumberValue(valueNumber(left)/valueNumber(right)))
+				frame.setRegister(a, NumberValue(valueNumber(left)/valueNumber(right)))
 				break
 			}
 			value, err := binaryArithmeticValue(
@@ -7594,21 +7637,21 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: divide failed: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opModK:
 			if true {
-				left := frame.registers[ins.b]
-				if valueKind(left) == NumberKind && proto.constantNumberOK[ins.c] {
-					right := proto.constantNumbers[ins.c]
-					frame.registers[ins.a] = NumberValue(valueNumber(left) - math.Floor(valueNumber(left)/right)*right)
+				left := frame.registers[b]
+				if valueKind(left) == NumberKind && proto.constantNumberOK[c] {
+					right := proto.constantNumbers[c]
+					frame.registers[a] = NumberValue(valueNumber(left) - math.Floor(valueNumber(left)/right)*right)
 					break
 				}
 			}
-			left := frame.register(ins.b)
-			right := proto.constants[ins.c]
+			left := frame.register(b)
+			right := proto.constants[c]
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind {
-				frame.setRegister(ins.a, NumberValue(valueNumber(left)-math.Floor(valueNumber(left)/valueNumber(right))*valueNumber(right)))
+				frame.setRegister(a, NumberValue(valueNumber(left)-math.Floor(valueNumber(left)/valueNumber(right))*valueNumber(right)))
 				break
 			}
 			value, err := binaryArithmeticValue(
@@ -7622,20 +7665,20 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: modulo failed: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opIDivK:
 			if true {
-				left := frame.registers[ins.b]
-				if valueKind(left) == NumberKind && proto.constantNumberOK[ins.c] {
-					frame.registers[ins.a] = NumberValue(math.Floor(valueNumber(left) / proto.constantNumbers[ins.c]))
+				left := frame.registers[b]
+				if valueKind(left) == NumberKind && proto.constantNumberOK[c] {
+					frame.registers[a] = NumberValue(math.Floor(valueNumber(left) / proto.constantNumbers[c]))
 					break
 				}
 			}
-			left := frame.register(ins.b)
-			right := proto.constants[ins.c]
+			left := frame.register(b)
+			right := proto.constants[c]
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind {
-				frame.setRegister(ins.a, NumberValue(math.Floor(valueNumber(left)/valueNumber(right))))
+				frame.setRegister(a, NumberValue(math.Floor(valueNumber(left)/valueNumber(right))))
 				break
 			}
 			value, err := binaryArithmeticValue(
@@ -7649,79 +7692,79 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: floor divide failed: %w", err)
 			}
-			frame.setRegister(ins.a, value)
+			frame.setRegister(a, value)
 
 		case opEqual:
-			value, err := equalValue(frame.register(ins.b), frame.register(ins.c), globals)
+			value, err := equalValue(frame.register(b), frame.register(c), globals)
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: equal failed: %w", err)
 			}
-			frame.setRegister(ins.a, BoolValue(value))
+			frame.setRegister(a, BoolValue(value))
 
 		case opNotEqual:
-			value, err := equalValue(frame.register(ins.b), frame.register(ins.c), globals)
+			value, err := equalValue(frame.register(b), frame.register(c), globals)
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: not equal failed: %w", err)
 			}
-			frame.setRegister(ins.a, BoolValue(!value))
+			frame.setRegister(a, BoolValue(!value))
 
 		case opLess:
-			left := frame.register(ins.b)
-			right := frame.register(ins.c)
+			left := frame.register(b)
+			right := frame.register(c)
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind && !math.IsNaN(valueNumber(left)) && !math.IsNaN(valueNumber(right)) {
-				frame.setRegister(ins.a, BoolValue(valueNumber(left) < valueNumber(right)))
+				frame.setRegister(a, BoolValue(valueNumber(left) < valueNumber(right)))
 				break
 			}
 			value, err := lessValue(left, right, globals)
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: less failed: %w", err)
 			}
-			frame.setRegister(ins.a, BoolValue(value))
+			frame.setRegister(a, BoolValue(value))
 
 		case opLessEqual:
-			left := frame.register(ins.b)
-			right := frame.register(ins.c)
+			left := frame.register(b)
+			right := frame.register(c)
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind && !math.IsNaN(valueNumber(left)) && !math.IsNaN(valueNumber(right)) {
-				frame.setRegister(ins.a, BoolValue(valueNumber(left) <= valueNumber(right)))
+				frame.setRegister(a, BoolValue(valueNumber(left) <= valueNumber(right)))
 				break
 			}
 			value, err := lessEqualValue(left, right, globals)
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: less equal failed: %w", err)
 			}
-			frame.setRegister(ins.a, BoolValue(value))
+			frame.setRegister(a, BoolValue(value))
 
 		case opGreater:
-			left := frame.register(ins.b)
-			right := frame.register(ins.c)
+			left := frame.register(b)
+			right := frame.register(c)
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind && !math.IsNaN(valueNumber(left)) && !math.IsNaN(valueNumber(right)) {
-				frame.setRegister(ins.a, BoolValue(valueNumber(left) > valueNumber(right)))
+				frame.setRegister(a, BoolValue(valueNumber(left) > valueNumber(right)))
 				break
 			}
 			value, err := lessValue(right, left, globals)
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: greater failed: %w", err)
 			}
-			frame.setRegister(ins.a, BoolValue(value))
+			frame.setRegister(a, BoolValue(value))
 
 		case opGreaterEqual:
-			left := frame.register(ins.b)
-			right := frame.register(ins.c)
+			left := frame.register(b)
+			right := frame.register(c)
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind && !math.IsNaN(valueNumber(left)) && !math.IsNaN(valueNumber(right)) {
-				frame.setRegister(ins.a, BoolValue(valueNumber(left) >= valueNumber(right)))
+				frame.setRegister(a, BoolValue(valueNumber(left) >= valueNumber(right)))
 				break
 			}
 			value, err := lessEqualValue(right, left, globals)
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: greater equal failed: %w", err)
 			}
-			frame.setRegister(ins.a, BoolValue(value))
+			frame.setRegister(a, BoolValue(value))
 
 		case opNumericForCheck:
 			if true {
-				loopValue := frame.registers[ins.a]
-				limitValue := frame.registers[ins.b]
-				stepValue := frame.registers[ins.c]
+				loopValue := frame.registers[a]
+				limitValue := frame.registers[b]
+				stepValue := frame.registers[c]
 				if valueKind(loopValue) != NumberKind {
 					return vmFrameResult{}, fmt.Errorf("run: numeric for loop value is %s, want number", loopValue.Kind())
 				}
@@ -7736,20 +7779,20 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				}
 				if valueNumber(stepValue) > 0 {
 					if valueNumber(loopValue) > valueNumber(limitValue) {
-						frame.pc = ins.d
+						frame.pc = d
 						continue
 					}
 					break
 				}
 				if valueNumber(loopValue) < valueNumber(limitValue) {
-					frame.pc = ins.d
+					frame.pc = d
 					continue
 				}
 				break
 			}
-			loopValue := frame.register(ins.a)
-			limitValue := frame.register(ins.b)
-			stepValue := frame.register(ins.c)
+			loopValue := frame.register(a)
+			limitValue := frame.register(b)
+			stepValue := frame.register(c)
 			if valueKind(loopValue) != NumberKind {
 				return vmFrameResult{}, fmt.Errorf("run: numeric for loop value is %s, want number", loopValue.Kind())
 			}
@@ -7764,53 +7807,53 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			}
 			if valueNumber(stepValue) > 0 {
 				if valueNumber(loopValue) > valueNumber(limitValue) {
-					frame.pc = ins.d
+					frame.pc = d
 					continue
 				}
 				break
 			}
 			if valueNumber(loopValue) < valueNumber(limitValue) {
-				frame.pc = ins.d
+				frame.pc = d
 				continue
 			}
 
 		case opNumericForLoop:
-			loopValue := frame.register(ins.a)
-			stepValue := frame.register(ins.b)
+			loopValue := frame.register(a)
+			stepValue := frame.register(b)
 			if valueKind(loopValue) != NumberKind {
 				return vmFrameResult{}, fmt.Errorf("run: numeric for loop value is %s, want number", loopValue.Kind())
 			}
 			if valueKind(stepValue) != NumberKind {
 				return vmFrameResult{}, fmt.Errorf("run: numeric for step is %s, want number", stepValue.Kind())
 			}
-			frame.setRegister(ins.a, NumberValue(valueNumber(loopValue)+valueNumber(stepValue)))
-			frame.pc = ins.d
+			frame.setRegister(a, NumberValue(valueNumber(loopValue)+valueNumber(stepValue)))
+			frame.pc = d
 			continue
 
 		case opJumpIfNotEqualK:
 			if true {
-				left := frame.registers[ins.a]
-				if valueKind(left) == NumberKind && proto.constantNumberOK[ins.b] {
-					if valueNumber(left) != proto.constantNumbers[ins.b] {
-						frame.pc = ins.d
+				left := frame.registers[a]
+				if valueKind(left) == NumberKind && proto.constantNumberOK[b] {
+					if valueNumber(left) != proto.constantNumbers[b] {
+						frame.pc = d
 						continue
 					}
 					break
 				}
-				right := proto.constants[ins.b]
+				right := proto.constants[b]
 				if valueKind(left) == StringKind && valueKind(right) == StringKind {
 					if left.stringText() != right.stringText() {
-						frame.pc = ins.d
+						frame.pc = d
 						continue
 					}
 					break
 				}
 			}
-			left := frame.register(ins.a)
-			right := proto.constants[ins.b]
+			left := frame.register(a)
+			right := proto.constants[b]
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind {
 				if valueNumber(left) != valueNumber(right) {
-					frame.pc = ins.d
+					frame.pc = d
 					continue
 				}
 				break
@@ -7820,34 +7863,34 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				return vmFrameResult{}, fmt.Errorf("run: equal failed: %w", err)
 			}
 			if !value {
-				frame.pc = ins.d
+				frame.pc = d
 				continue
 			}
 
 		case opJumpIfTableHasMetatable:
-			base := frame.register(ins.a)
+			base := frame.register(a)
 			if table := base.tableRef(); table != nil && table.metatable != nil {
-				frame.pc = ins.d
+				frame.pc = d
 				continue
 			}
 
 		case opJumpIfNotLessK:
 			if true {
-				left := frame.registers[ins.a]
-				if valueKind(left) == NumberKind && proto.constantNumberOK[ins.b] {
-					right := proto.constantNumbers[ins.b]
+				left := frame.registers[a]
+				if valueKind(left) == NumberKind && proto.constantNumberOK[b] {
+					right := proto.constantNumbers[b]
 					if !math.IsNaN(valueNumber(left)) && !math.IsNaN(right) && valueNumber(left) >= right {
-						frame.pc = ins.d
+						frame.pc = d
 						continue
 					}
 					break
 				}
 			}
-			left := frame.register(ins.a)
-			right := proto.constants[ins.b]
+			left := frame.register(a)
+			right := proto.constants[b]
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind && !math.IsNaN(valueNumber(left)) && !math.IsNaN(valueNumber(right)) {
 				if valueNumber(left) >= valueNumber(right) {
-					frame.pc = ins.d
+					frame.pc = d
 					continue
 				}
 				break
@@ -7857,27 +7900,27 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				return vmFrameResult{}, fmt.Errorf("run: less failed: %w", err)
 			}
 			if !value {
-				frame.pc = ins.d
+				frame.pc = d
 				continue
 			}
 
 		case opJumpIfNotGreaterK:
 			if true {
-				left := frame.registers[ins.a]
-				if valueKind(left) == NumberKind && proto.constantNumberOK[ins.b] {
-					right := proto.constantNumbers[ins.b]
+				left := frame.registers[a]
+				if valueKind(left) == NumberKind && proto.constantNumberOK[b] {
+					right := proto.constantNumbers[b]
 					if !math.IsNaN(valueNumber(left)) && !math.IsNaN(right) && valueNumber(left) <= right {
-						frame.pc = ins.d
+						frame.pc = d
 						continue
 					}
 					break
 				}
 			}
-			left := frame.register(ins.a)
-			right := proto.constants[ins.b]
+			left := frame.register(a)
+			right := proto.constants[b]
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind && !math.IsNaN(valueNumber(left)) && !math.IsNaN(valueNumber(right)) {
 				if valueNumber(left) <= valueNumber(right) {
-					frame.pc = ins.d
+					frame.pc = d
 					continue
 				}
 				break
@@ -7887,27 +7930,27 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				return vmFrameResult{}, fmt.Errorf("run: greater failed: %w", err)
 			}
 			if !value {
-				frame.pc = ins.d
+				frame.pc = d
 				continue
 			}
 
 		case opJumpIfLessK:
 			if true {
-				left := frame.registers[ins.a]
-				if valueKind(left) == NumberKind && proto.constantNumberOK[ins.b] {
-					right := proto.constantNumbers[ins.b]
+				left := frame.registers[a]
+				if valueKind(left) == NumberKind && proto.constantNumberOK[b] {
+					right := proto.constantNumbers[b]
 					if !math.IsNaN(valueNumber(left)) && !math.IsNaN(right) && valueNumber(left) < right {
-						frame.pc = ins.d
+						frame.pc = d
 						continue
 					}
 					break
 				}
 			}
-			left := frame.register(ins.a)
-			right := proto.constants[ins.b]
+			left := frame.register(a)
+			right := proto.constants[b]
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind && !math.IsNaN(valueNumber(left)) && !math.IsNaN(valueNumber(right)) {
 				if valueNumber(left) < valueNumber(right) {
-					frame.pc = ins.d
+					frame.pc = d
 					continue
 				}
 				break
@@ -7917,27 +7960,27 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				return vmFrameResult{}, fmt.Errorf("run: less failed: %w", err)
 			}
 			if value {
-				frame.pc = ins.d
+				frame.pc = d
 				continue
 			}
 
 		case opJumpIfGreaterK:
 			if true {
-				left := frame.registers[ins.a]
-				if valueKind(left) == NumberKind && proto.constantNumberOK[ins.b] {
-					right := proto.constantNumbers[ins.b]
+				left := frame.registers[a]
+				if valueKind(left) == NumberKind && proto.constantNumberOK[b] {
+					right := proto.constantNumbers[b]
 					if !math.IsNaN(valueNumber(left)) && !math.IsNaN(right) && valueNumber(left) > right {
-						frame.pc = ins.d
+						frame.pc = d
 						continue
 					}
 					break
 				}
 			}
-			left := frame.register(ins.a)
-			right := proto.constants[ins.b]
+			left := frame.register(a)
+			right := proto.constants[b]
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind && !math.IsNaN(valueNumber(left)) && !math.IsNaN(valueNumber(right)) {
 				if valueNumber(left) > valueNumber(right) {
-					frame.pc = ins.d
+					frame.pc = d
 					continue
 				}
 				break
@@ -7947,27 +7990,27 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				return vmFrameResult{}, fmt.Errorf("run: greater failed: %w", err)
 			}
 			if value {
-				frame.pc = ins.d
+				frame.pc = d
 				continue
 			}
 
 		case opJumpIfNotLess:
 			if true {
-				left := frame.registers[ins.a]
-				right := frame.registers[ins.b]
+				left := frame.registers[a]
+				right := frame.registers[b]
 				if valueKind(left) == NumberKind && valueKind(right) == NumberKind && !math.IsNaN(valueNumber(left)) && !math.IsNaN(valueNumber(right)) {
 					if valueNumber(left) >= valueNumber(right) {
-						frame.pc = ins.d
+						frame.pc = d
 						continue
 					}
 					break
 				}
 			}
-			left := frame.register(ins.a)
-			right := frame.register(ins.b)
+			left := frame.register(a)
+			right := frame.register(b)
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind && !math.IsNaN(valueNumber(left)) && !math.IsNaN(valueNumber(right)) {
 				if valueNumber(left) >= valueNumber(right) {
-					frame.pc = ins.d
+					frame.pc = d
 					continue
 				}
 				break
@@ -7977,27 +8020,27 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				return vmFrameResult{}, fmt.Errorf("run: less failed: %w", err)
 			}
 			if !value {
-				frame.pc = ins.d
+				frame.pc = d
 				continue
 			}
 
 		case opJumpIfNotGreater:
 			if true {
-				left := frame.registers[ins.a]
-				right := frame.registers[ins.b]
+				left := frame.registers[a]
+				right := frame.registers[b]
 				if valueKind(left) == NumberKind && valueKind(right) == NumberKind && !math.IsNaN(valueNumber(left)) && !math.IsNaN(valueNumber(right)) {
 					if valueNumber(left) <= valueNumber(right) {
-						frame.pc = ins.d
+						frame.pc = d
 						continue
 					}
 					break
 				}
 			}
-			left := frame.register(ins.a)
-			right := frame.register(ins.b)
+			left := frame.register(a)
+			right := frame.register(b)
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind && !math.IsNaN(valueNumber(left)) && !math.IsNaN(valueNumber(right)) {
 				if valueNumber(left) <= valueNumber(right) {
-					frame.pc = ins.d
+					frame.pc = d
 					continue
 				}
 				break
@@ -8007,27 +8050,27 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				return vmFrameResult{}, fmt.Errorf("run: greater failed: %w", err)
 			}
 			if !value {
-				frame.pc = ins.d
+				frame.pc = d
 				continue
 			}
 
 		case opJumpIfLess:
 			if true {
-				left := frame.registers[ins.a]
-				right := frame.registers[ins.b]
+				left := frame.registers[a]
+				right := frame.registers[b]
 				if valueKind(left) == NumberKind && valueKind(right) == NumberKind && !math.IsNaN(valueNumber(left)) && !math.IsNaN(valueNumber(right)) {
 					if valueNumber(left) < valueNumber(right) {
-						frame.pc = ins.d
+						frame.pc = d
 						continue
 					}
 					break
 				}
 			}
-			left := frame.register(ins.a)
-			right := frame.register(ins.b)
+			left := frame.register(a)
+			right := frame.register(b)
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind && !math.IsNaN(valueNumber(left)) && !math.IsNaN(valueNumber(right)) {
 				if valueNumber(left) < valueNumber(right) {
-					frame.pc = ins.d
+					frame.pc = d
 					continue
 				}
 				break
@@ -8037,27 +8080,27 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				return vmFrameResult{}, fmt.Errorf("run: less failed: %w", err)
 			}
 			if value {
-				frame.pc = ins.d
+				frame.pc = d
 				continue
 			}
 
 		case opJumpIfGreater:
 			if true {
-				left := frame.registers[ins.a]
-				right := frame.registers[ins.b]
+				left := frame.registers[a]
+				right := frame.registers[b]
 				if valueKind(left) == NumberKind && valueKind(right) == NumberKind && !math.IsNaN(valueNumber(left)) && !math.IsNaN(valueNumber(right)) {
 					if valueNumber(left) > valueNumber(right) {
-						frame.pc = ins.d
+						frame.pc = d
 						continue
 					}
 					break
 				}
 			}
-			left := frame.register(ins.a)
-			right := frame.register(ins.b)
+			left := frame.register(a)
+			right := frame.register(b)
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind && !math.IsNaN(valueNumber(left)) && !math.IsNaN(valueNumber(right)) {
 				if valueNumber(left) > valueNumber(right) {
-					frame.pc = ins.d
+					frame.pc = d
 					continue
 				}
 				break
@@ -8067,23 +8110,23 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				return vmFrameResult{}, fmt.Errorf("run: greater failed: %w", err)
 			}
 			if value {
-				frame.pc = ins.d
+				frame.pc = d
 				continue
 			}
 
 		case opJumpIfModKNotEqualK:
 			var left Value
 			if true {
-				left = frame.registers[ins.a]
+				left = frame.registers[a]
 			} else {
-				left = frame.register(ins.a)
+				left = frame.register(a)
 			}
-			modRight := proto.constants[ins.b]
-			want := proto.constants[ins.c]
+			modRight := proto.constants[b]
+			want := proto.constants[c]
 			if valueKind(left) == NumberKind && valueKind(modRight) == NumberKind && valueKind(want) == NumberKind {
 				got := valueNumber(left) - math.Floor(valueNumber(left)/valueNumber(modRight))*valueNumber(modRight)
 				if got != valueNumber(want) {
-					frame.pc = ins.d
+					frame.pc = d
 					continue
 				}
 				break
@@ -8106,18 +8149,18 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				return vmFrameResult{}, fmt.Errorf("run: equal failed: %w", err)
 			}
 			if !equal {
-				frame.pc = ins.d
+				frame.pc = d
 				continue
 			}
 
 		case opJumpIfStringFieldNotEqualK:
-			key := proto.constantKeys[ins.b].str
-			keyBox := proto.constants[ins.b].stringBox()
+			key := proto.constantKeys[b].str
+			keyBox := proto.constants[b].stringBox()
 			var base Value
 			if true {
-				base = frame.registers[ins.a]
+				base = frame.registers[a]
 			} else {
-				base = frame.register(ins.a)
+				base = frame.register(a)
 			}
 			table := base.tableRef()
 			if table == nil {
@@ -8133,16 +8176,16 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			} else if table.metatable == nil {
 				left = NilValue()
 			} else {
-				value, err := runtimeTableAccess(globals).get(table, proto.constants[ins.b])
+				value, err := runtimeTableAccess(globals).get(table, proto.constants[b])
 				if err != nil {
 					return vmFrameResult{}, fmt.Errorf("run: get field failed: %w", err)
 				}
 				left = value
 			}
-			right := proto.constants[ins.c]
+			right := proto.constants[c]
 			if valueKind(left) == StringKind && valueKind(right) == StringKind {
 				if left.stringText() != right.stringText() {
-					frame.pc = ins.d
+					frame.pc = d
 					continue
 				}
 				break
@@ -8152,18 +8195,18 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				return vmFrameResult{}, fmt.Errorf("run: equal failed: %w", err)
 			}
 			if !value {
-				frame.pc = ins.d
+				frame.pc = d
 				continue
 			}
 
 		case opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK:
-			key := proto.constantKeys[ins.b].str
-			keyBox := proto.constants[ins.b].stringBox()
+			key := proto.constantKeys[b].str
+			keyBox := proto.constants[b].stringBox()
 			var base Value
 			if true {
-				base = frame.registers[ins.a]
+				base = frame.registers[a]
 			} else {
-				base = frame.register(ins.a)
+				base = frame.register(a)
 			}
 			table := base.tableRef()
 			if table == nil {
@@ -8179,46 +8222,46 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			} else if table.metatable == nil {
 				left = NilValue()
 			} else {
-				value, err := runtimeTableAccess(globals).get(table, proto.constants[ins.b])
+				value, err := runtimeTableAccess(globals).get(table, proto.constants[b])
 				if err != nil {
 					return vmFrameResult{}, fmt.Errorf("run: get field failed: %w", err)
 				}
 				left = value
 			}
-			if valueKind(left) == NumberKind && proto.constantNumberOK[ins.c] {
-				right := proto.constantNumbers[ins.c]
+			if valueKind(left) == NumberKind && proto.constantNumberOK[c] {
+				right := proto.constantNumbers[c]
 				if !math.IsNaN(valueNumber(left)) && !math.IsNaN(right) {
 					greater := valueNumber(left) > right
-					if (ins.op == opJumpIfStringFieldNotGreaterK && !greater) ||
-						(ins.op == opJumpIfStringFieldGreaterK && greater) {
-						frame.pc = ins.d
+					if (op == opJumpIfStringFieldNotGreaterK && !greater) ||
+						(op == opJumpIfStringFieldGreaterK && greater) {
+						frame.pc = d
 						continue
 					}
 					break
 				}
 			}
-			right := proto.constants[ins.c]
+			right := proto.constants[c]
 			greater, err := lessValue(right, left, globals)
 			if err != nil {
-				if ins.op == opJumpIfStringFieldGreaterK {
+				if op == opJumpIfStringFieldGreaterK {
 					return vmFrameResult{}, fmt.Errorf("run: less equal failed: %w", err)
 				}
 				return vmFrameResult{}, fmt.Errorf("run: greater failed: %w", err)
 			}
-			if (ins.op == opJumpIfStringFieldNotGreaterK && !greater) ||
-				(ins.op == opJumpIfStringFieldGreaterK && greater) {
-				frame.pc = ins.d
+			if (op == opJumpIfStringFieldNotGreaterK && !greater) ||
+				(op == opJumpIfStringFieldGreaterK && greater) {
+				frame.pc = d
 				continue
 			}
 
 		case opJumpIfStringFieldNotGreaterR:
-			key := proto.constantKeys[ins.b].str
-			keyBox := proto.constants[ins.b].stringBox()
+			key := proto.constantKeys[b].str
+			keyBox := proto.constants[b].stringBox()
 			var base Value
 			if true {
-				base = frame.registers[ins.a]
+				base = frame.registers[a]
 			} else {
-				base = frame.register(ins.a)
+				base = frame.register(a)
 			}
 			table := base.tableRef()
 			if table == nil {
@@ -8234,7 +8277,7 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			} else if table.metatable == nil {
 				left = NilValue()
 			} else {
-				value, err := runtimeTableAccess(globals).get(table, proto.constants[ins.b])
+				value, err := runtimeTableAccess(globals).get(table, proto.constants[b])
 				if err != nil {
 					return vmFrameResult{}, fmt.Errorf("run: get field failed: %w", err)
 				}
@@ -8242,14 +8285,14 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			}
 			var right Value
 			if true {
-				right = frame.registers[ins.c]
+				right = frame.registers[c]
 			} else {
-				right = frame.register(ins.c)
+				right = frame.register(c)
 			}
 			if valueKind(left) == NumberKind && valueKind(right) == NumberKind &&
 				!math.IsNaN(valueNumber(left)) && !math.IsNaN(valueNumber(right)) {
 				if !(valueNumber(left) > valueNumber(right)) {
-					frame.pc = ins.d
+					frame.pc = d
 					continue
 				}
 				break
@@ -8259,31 +8302,31 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				return vmFrameResult{}, fmt.Errorf("run: greater failed: %w", err)
 			}
 			if !greater {
-				frame.pc = ins.d
+				frame.pc = d
 				continue
 			}
 
 		case opFastCall:
-			if result, done, err := thread.runColdFastCall(frame, nativeFuncID(ins.b), ins.a, ins.c, ins.d); done || err != nil {
+			if result, done, err := thread.runColdFastCall(frame, nativeFuncID(b), a, c, d); done || err != nil {
 				return result, err
 			}
 
 		case opCall:
 			var callee Value
 			if true {
-				callee = frame.registers[ins.b]
+				callee = frame.registers[b]
 			} else {
-				callee = frame.register(ins.b)
+				callee = frame.register(b)
 			}
-			destination := vmResultDestination{register: ins.a, count: ins.d}
+			destination := vmResultDestination{register: a, count: d}
 			resultCount := destination.count
 			if resultCount == 0 {
 				resultCount = 1
 			}
-			if resultCount == 1 && ins.c >= 0 && valueNativeID(callee) == nativeFuncToString {
+			if resultCount == 1 && c >= 0 && valueNativeID(callee) == nativeFuncToString {
 				value := NilValue()
-				if ins.c > 0 {
-					value = frame.register(ins.b + 1)
+				if c > 0 {
+					value = frame.register(b + 1)
 				}
 				result, err := baseToStringValue(globals, value)
 				if err != nil {
@@ -8292,8 +8335,8 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				frame.applyInlineResultDestination(destination, [2]Value{result}, 1)
 				break
 			}
-			if ins.c >= 0 {
-				done, err := frame.callFixedTableScriptCallMetamethod(callee, globals, ins.b+1, ins.c, destination)
+			if c >= 0 {
+				done, err := frame.callFixedTableScriptCallMetamethod(callee, globals, b+1, c, destination)
 				if err != nil {
 					return vmFrameResult{}, fmt.Errorf("run: call failed: %w", err)
 				}
@@ -8302,14 +8345,14 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				}
 			}
 			var args []Value
-			if ins.c < 0 {
-				prefixCount := -ins.c - 1
-				if frame.openResultStart == ins.b+1+prefixCount {
+			if c < 0 {
+				prefixCount := -c - 1
+				if frame.openResultStart == b+1+prefixCount {
 					if _, ok := callee.scriptFunction(); ok && prefixCount == 0 && globals != nil && globals.thread != nil {
 						args = frame.openResults.borrowedValues()
 					} else {
 						args = make([]Value, 0, prefixCount+frame.openResults.len())
-						for register := ins.b + 1; register <= ins.b+prefixCount; register++ {
+						for register := b + 1; register <= b+prefixCount; register++ {
 							if true {
 								args = append(args, frame.registers[register])
 							} else {
@@ -8319,12 +8362,12 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 						args = frame.openResults.appendTo(args)
 					}
 				} else {
-					args = frame.retainedFixedCallArgs(ins.b+1, prefixCount).values
+					args = frame.retainedFixedCallArgs(b+1, prefixCount).values
 				}
 			} else if _, ok := callee.scriptFunction(); ok && globals != nil && globals.thread != nil {
-				args = frame.borrowedFixedCallArgs(ins.b+1, ins.c).values
+				args = frame.borrowedFixedCallArgs(b+1, c).values
 			} else {
-				args = frame.retainedFixedCallArgs(ins.b+1, ins.c).values
+				args = frame.retainedFixedCallArgs(b+1, c).values
 			}
 			if result, done, err := frame.callValueToDestination(callee, globals, args, destination); done || err != nil {
 				return result, err
@@ -8333,16 +8376,16 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 		case opCallOne:
 			var callee Value
 			if true {
-				callee = frame.registers[ins.b]
+				callee = frame.registers[b]
 			} else {
-				callee = frame.register(ins.b)
+				callee = frame.register(b)
 			}
-			destination := vmResultDestination{register: ins.a, count: 1}
-			argCount, _ := decodeFixedCallCount(ins.c)
+			destination := vmResultDestination{register: a, count: 1}
+			argCount, _ := decodeFixedCallCount(c)
 			if valueNativeID(callee) == nativeFuncToString {
 				value := NilValue()
 				if argCount > 0 {
-					value = frame.register(ins.b + 1)
+					value = frame.register(b + 1)
 				}
 				result, err := baseToStringValue(globals, value)
 				if err != nil {
@@ -8351,7 +8394,7 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				frame.applyInlineResultDestination(destination, [2]Value{result}, 1)
 				break
 			}
-			done, err := frame.callFixedTableScriptCallMetamethod(callee, globals, ins.b+1, argCount, destination)
+			done, err := frame.callFixedTableScriptCallMetamethod(callee, globals, b+1, argCount, destination)
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: call failed: %w", err)
 			}
@@ -8360,24 +8403,24 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			}
 			var args []Value
 			if _, ok := callee.scriptFunction(); ok && globals != nil && globals.thread != nil {
-				args = frame.borrowedFixedCallArgs(ins.b+1, argCount).values
+				args = frame.borrowedFixedCallArgs(b+1, argCount).values
 			} else {
-				args = frame.retainedFixedCallArgs(ins.b+1, argCount).values
+				args = frame.retainedFixedCallArgs(b+1, argCount).values
 			}
 			if result, done, err := frame.callValueToDestination(callee, globals, args, destination); done || err != nil {
 				return result, err
 			}
 
 		case opCallLocalOne:
-			callee := frame.register(ins.b)
-			destination := vmResultDestination{register: ins.a, count: 1}
-			argCount, _ := decodeFixedCallCount(ins.d)
+			callee := frame.register(b)
+			destination := vmResultDestination{register: a, count: 1}
+			argCount, _ := decodeFixedCallCount(d)
 			if closure, ok := callee.scriptFunction(); ok {
 				var args []Value
 				if true {
-					args = frame.registers[ins.c : ins.c+argCount]
+					args = frame.registers[c : c+argCount]
 				} else {
-					args = frame.scriptCallArgs(ins.c, argCount)
+					args = frame.scriptCallArgs(c, argCount)
 				}
 				frame.pc++
 				if thread.debugHook != nil {
@@ -8392,7 +8435,7 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 						}
 						return vmFrameResult{}, err
 					}
-					frame.applySingleFrameResult(ins.a, result)
+					frame.applySingleFrameResult(a, result)
 					continue
 				}
 				value, err := thread.runInlineScriptCallOneNoHook(closure, args)
@@ -8409,21 +8452,21 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
 				if true {
-					frame.registers[ins.a] = value
+					frame.registers[a] = value
 				} else {
-					frame.setRegister(ins.a, value)
+					frame.setRegister(a, value)
 				}
 				continue
 			}
 
-			done, err := frame.callFixedTableScriptCallMetamethod(callee, globals, ins.c, argCount, destination)
+			done, err := frame.callFixedTableScriptCallMetamethod(callee, globals, c, argCount, destination)
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: call failed: %w", err)
 			}
 			if done {
 				break
 			}
-			args := frame.retainedFixedCallArgs(ins.c, argCount).values
+			args := frame.retainedFixedCallArgs(c, argCount).values
 			results, err := callValue(callee, globals, args)
 			if err != nil {
 				if yield, ok := err.(vmYieldRequest); ok {
@@ -8443,18 +8486,18 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			frame.applyResultDestination(destination, results)
 
 		case opCallUpvalueOne:
-			callee, err := frame.upvalue(ins.b)
+			callee, err := frame.upvalue(b)
 			if err != nil {
 				return vmFrameResult{}, err
 			}
-			destination := vmResultDestination{register: ins.a, count: 1}
-			argCount, _ := decodeFixedCallCount(ins.d)
+			destination := vmResultDestination{register: a, count: 1}
+			argCount, _ := decodeFixedCallCount(d)
 			if closure, ok := callee.scriptFunction(); ok {
 				var args []Value
 				if true {
-					args = frame.registers[ins.c : ins.c+argCount]
+					args = frame.registers[c : c+argCount]
 				} else {
-					args = frame.scriptCallArgs(ins.c, argCount)
+					args = frame.scriptCallArgs(c, argCount)
 				}
 				frame.pc++
 				value, err := thread.runInlineScriptCallOneNoHook(closure, args)
@@ -8471,21 +8514,21 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
 				if true {
-					frame.registers[ins.a] = value
+					frame.registers[a] = value
 				} else {
-					frame.setRegister(ins.a, value)
+					frame.setRegister(a, value)
 				}
 				continue
 			}
 
-			done, err := frame.callFixedTableScriptCallMetamethod(callee, globals, ins.c, argCount, destination)
+			done, err := frame.callFixedTableScriptCallMetamethod(callee, globals, c, argCount, destination)
 			if err != nil {
 				return vmFrameResult{}, fmt.Errorf("run: call failed: %w", err)
 			}
 			if done {
 				break
 			}
-			args := frame.retainedFixedCallArgs(ins.c, argCount).values
+			args := frame.retainedFixedCallArgs(c, argCount).values
 			results, err := callValue(callee, globals, args)
 			if err != nil {
 				if yield, ok := err.(vmYieldRequest); ok {
@@ -8507,16 +8550,16 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 		case opCallMethodOne:
 			var receiver Value
 			if true {
-				receiver = frame.registers[ins.b]
+				receiver = frame.registers[b]
 			} else {
-				receiver = frame.register(ins.b)
+				receiver = frame.register(b)
 			}
 			table, ok := receiver.Table()
 			if !ok {
 				return vmFrameResult{}, fmt.Errorf("run: get field target is %s, want table", receiver.Kind())
 			}
-			key := proto.constantKeys[ins.c].str
-			keyBox := proto.constants[ins.c].stringBox()
+			key := proto.constantKeys[c].str
+			keyBox := proto.constants[c].stringBox()
 			var callee Value
 			value, fieldOK := table.rawStringFieldBox(keyBox)
 			if keyBox == nil {
@@ -8527,24 +8570,24 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			} else if table.metatable == nil {
 				callee = NilValue()
 			} else {
-				value, err := runtimeTableAccess(globals).get(table, proto.constants[ins.c])
+				value, err := runtimeTableAccess(globals).get(table, proto.constants[c])
 				if err != nil {
 					return vmFrameResult{}, fmt.Errorf("run: get field failed: %w", err)
 				}
 				callee = value
 			}
 			if true {
-				frame.registers[ins.a+1] = receiver
+				frame.registers[a+1] = receiver
 			} else {
-				frame.setRegister(ins.a+1, receiver)
+				frame.setRegister(a+1, receiver)
 			}
-			explicitCount, _ := decodeFixedCallCount(ins.d)
+			explicitCount, _ := decodeFixedCallCount(d)
 			argCount := explicitCount + 1
-			args := frame.scriptCallArgs(ins.a+1, argCount)
-			destination := vmResultDestination{register: ins.a, count: 1}
+			args := frame.scriptCallArgs(a+1, argCount)
+			destination := vmResultDestination{register: a, count: 1}
 			if closure, ok := callee.scriptFunction(); ok {
 				if true {
-					args = frame.registers[ins.a+1 : ins.a+1+argCount]
+					args = frame.registers[a+1 : a+1+argCount]
 				}
 				frame.pc++
 				value, err := thread.runInlineScriptCallOneNoHook(closure, args)
@@ -8561,9 +8604,9 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
 				if true {
-					frame.registers[ins.a] = value
+					frame.registers[a] = value
 				} else {
-					frame.setRegister(ins.a, value)
+					frame.setRegister(a, value)
 				}
 				continue
 			}
@@ -8587,69 +8630,69 @@ func (thread *vmThread) runColdInstructionLoop(frame *vmFrame) (vmFrameResult, e
 			frame.openResults = vmResultWindow{}
 			if len(results) == 0 {
 				if true {
-					frame.registers[ins.a] = NilValue()
+					frame.registers[a] = NilValue()
 				} else {
-					frame.setRegister(ins.a, NilValue())
+					frame.setRegister(a, NilValue())
 				}
 				break
 			}
 			if true {
-				frame.registers[ins.a] = results[0]
+				frame.registers[a] = results[0]
 			} else {
-				frame.setRegister(ins.a, results[0])
+				frame.setRegister(a, results[0])
 			}
 
 		case opJumpIfFalse:
 			var condition Value
 			if true {
-				condition = frame.registers[ins.a]
+				condition = frame.registers[a]
 			} else {
-				condition = frame.register(ins.a)
+				condition = frame.register(a)
 			}
 			if !condition.truthy() {
-				frame.pc = ins.b
+				frame.pc = b
 				continue
 			}
 
 		case opJump:
-			frame.pc = ins.b
+			frame.pc = b
 			continue
 
 		case opReturnOne:
 			if true {
-				return vmReturnedValue(frame.registers[ins.a]), nil
+				return vmReturnedValue(frame.registers[a]), nil
 			}
-			return vmReturnedValue(frame.register(ins.a)), nil
+			return vmReturnedValue(frame.register(a)), nil
 
 		case opReturn:
-			count := ins.b
+			count := b
 			if count < 0 {
 				prefixCount := -count - 1
-				if frame.openResultStart == ins.a+prefixCount {
-					return vmReturnedPrefixAndWindow(frame.registers[ins.a:ins.a+prefixCount], frame.openResults), nil
+				if frame.openResultStart == a+prefixCount {
+					return vmReturnedPrefixAndWindow(frame.registers[a:a+prefixCount], frame.openResults), nil
 				}
-				return vmReturnedValue(frame.register(ins.a)), nil
+				return vmReturnedValue(frame.register(a)), nil
 			}
 			if count == 0 {
 				return vmReturnedValues(nil), nil
 			}
 			if count == 1 {
 				if true {
-					return vmReturnedValue(frame.registers[ins.a]), nil
+					return vmReturnedValue(frame.registers[a]), nil
 				}
-				return vmReturnedValue(frame.register(ins.a)), nil
+				return vmReturnedValue(frame.register(a)), nil
 			}
 			if true {
-				return vmReturnedBorrowedValues(frame.registers[ins.a : ins.a+count]), nil
+				return vmReturnedBorrowedValues(frame.registers[a : a+count]), nil
 			}
 			results := make([]Value, count)
 			for i := range results {
-				results[i] = frame.register(ins.a + i)
+				results[i] = frame.register(a + i)
 			}
 			return vmReturnedValues(results), nil
 
 		default:
-			return vmFrameResult{}, fmt.Errorf("run: unknown opcode %d", ins.op)
+			return vmFrameResult{}, fmt.Errorf("run: unknown opcode %d", op)
 		}
 		frame.pc++
 	}
