@@ -1791,7 +1791,10 @@ func (c *compiler) compileConditionJumpIfFalse(expr expression) (int, bool, erro
 	if condition, ok := c.moduloConstantEqualityCondition(comparison, right); ok {
 		mod := c.addConstant(NumberValue(condition.mod))
 		value := c.addConstant(NumberValue(condition.value))
-		jump := c.emit(instruction{op: opJumpIfModKNotEqualK, a: condition.source.index, b: mod, c: value})
+		modResult := c.allocTemp()
+		c.emit(instruction{op: opModK, a: modResult, b: condition.source.index, c: mod})
+		jump := c.emit(instruction{op: opJumpIfNotEqualK, a: modResult, b: value})
+		c.releaseTemp(modResult)
 		return jump, true, nil
 	}
 	left, releaseLeft, err := c.compileConditionLeftRegister(comparison.left)
@@ -1894,20 +1897,15 @@ func (c *compiler) compileAndChainJumpIfFalse(expr expression) (int, bool, error
 			}
 		case opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
 			constant := c.addConstant(NumberValue(plan.constant))
-			falseJumps = append(falseJumps, c.emit(instruction{
-				op: plan.op,
-				a:  plan.a,
-				b:  constant,
-			}))
-		case opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK:
-			field := c.addStringConstant(plan.field)
-			value := c.addConstant(NumberValue(plan.constant))
-			falseJumps = append(falseJumps, c.emit(instruction{
-				op: plan.op,
-				a:  plan.a,
-				b:  field,
-				c:  value,
-			}))
+			if plan.field != "" {
+				falseJumps = append(falseJumps, c.emitAndChainStringFieldNumericBranch(plan, constant))
+			} else {
+				falseJumps = append(falseJumps, c.emit(instruction{
+					op: plan.op,
+					a:  plan.a,
+					b:  constant,
+				}))
+			}
 		default:
 			return 0, false, nil
 		}
@@ -1990,6 +1988,14 @@ func (c *compiler) emitAndChainFieldPairBranch(plan andChainBranchPlan) int {
 	return jump
 }
 
+func (c *compiler) emitAndChainStringFieldNumericBranch(plan andChainBranchPlan, constant int) int {
+	value := c.allocTemp()
+	c.emitLocalStringFieldLoad(value, plan.a, plan.field)
+	jump := c.emit(instruction{op: plan.op, a: value, b: constant})
+	c.releaseTemp(value)
+	return jump
+}
+
 func (c *compiler) emitLocalStringFieldLoad(target int, table int, field string) {
 	key := c.addStringConstant(field)
 	c.emit(instruction{op: opGetStringField, a: target, b: table, c: key})
@@ -2010,9 +2016,9 @@ func (c *compiler) andChainStringFieldNumericPlan(comparison comparisonExpressio
 	var op opcode
 	switch comparison.op {
 	case comparisonGreater:
-		op = opJumpIfStringFieldNotGreaterK
+		op = opJumpIfNotGreaterK
 	case comparisonLessEqual:
-		op = opJumpIfStringFieldGreaterK
+		op = opJumpIfGreaterK
 	default:
 		return andChainBranchPlan{}, false
 	}
@@ -2130,7 +2136,11 @@ func (c *compiler) compileStringFieldEqualityJumpIfFalse(expr expression) (int, 
 func (c *compiler) emitStringFieldEqualityJump(condition stringFieldEqualityCondition) int {
 	field := c.addStringConstant(condition.field)
 	value := c.addConstant(condition.value)
-	return c.emit(instruction{op: opJumpIfStringFieldNotEqualK, a: condition.table, b: field, c: value})
+	loaded := c.allocTemp()
+	c.emit(instruction{op: opGetStringField, a: loaded, b: condition.table, c: field})
+	jump := c.emit(instruction{op: opJumpIfNotEqualK, a: loaded, b: value})
+	c.releaseTemp(loaded)
+	return jump
 }
 
 func (c *compiler) stringFieldEqualityCondition(expr comparisonExpression) (stringFieldEqualityCondition, bool) {
@@ -2220,10 +2230,16 @@ func (c *compiler) compileStringFieldNumericJumpIfFalse(expr expression) (int, b
 	valueConstant := c.addConstant(NumberValue(right))
 	switch comparison.op {
 	case comparisonGreater:
-		jump := c.emit(instruction{op: opJumpIfStringFieldNotGreaterK, a: table.index, b: fieldConstant, c: valueConstant})
+		loaded := c.allocTemp()
+		c.emit(instruction{op: opGetStringField, a: loaded, b: table.index, c: fieldConstant})
+		jump := c.emit(instruction{op: opJumpIfNotGreaterK, a: loaded, b: valueConstant})
+		c.releaseTemp(loaded)
 		return jump, true, nil
 	case comparisonLessEqual:
-		jump := c.emit(instruction{op: opJumpIfStringFieldGreaterK, a: table.index, b: fieldConstant, c: valueConstant})
+		loaded := c.allocTemp()
+		c.emit(instruction{op: opGetStringField, a: loaded, b: table.index, c: fieldConstant})
+		jump := c.emit(instruction{op: opJumpIfGreaterK, a: loaded, b: valueConstant})
+		c.releaseTemp(loaded)
 		return jump, true, nil
 	default:
 		return 0, false, nil
@@ -2247,7 +2263,10 @@ func (c *compiler) compileRegisterStringFieldNumericJumpIfFalse(expr expression)
 		return 0, false, err
 	}
 	fieldConstant := c.addStringConstant(field)
-	jump := c.emit(instruction{op: opJumpIfStringFieldNotGreaterR, a: table.index, b: fieldConstant, c: left})
+	loaded := c.allocTemp()
+	c.emit(instruction{op: opGetStringField, a: loaded, b: table.index, c: fieldConstant})
+	jump := c.emit(instruction{op: opJumpIfNotGreater, a: loaded, b: left})
+	c.releaseTemp(loaded)
 	releaseLeft()
 	return jump, true, nil
 }

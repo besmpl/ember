@@ -23,7 +23,6 @@ const (
 	wordcodeFormatABC wordcodeFormat = iota + 1
 	wordcodeFormatAD
 	wordcodeFormatE
-	wordcodeFormatDeferred
 )
 
 type wordcodeFormat uint8
@@ -55,9 +54,7 @@ const (
 )
 
 // wordcodeEncodingMetadata is intentionally kept beside opcode effects and
-// operand metadata. One AUX word is the hard contract; narrow opcodes that
-// need two independent wide constants are explicitly deferred to a later
-// generic lowering.
+// operand metadata. One AUX word is the hard contract.
 type wordcodeEncodingMetadata struct {
 	format      wordcodeFormat
 	adOperand   wordcodeOperandSlot
@@ -108,12 +105,6 @@ func wordcodeMetadataFor(op opcode) wordcodeEncodingMetadata {
 		meta = wordcodeEncodingMetadata{format: wordcodeFormatAD, adOperand: wordcodeSlotB, aux: wordcodeAuxD, auxRequired: true}
 	case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
 		meta = wordcodeEncodingMetadata{format: wordcodeFormatABC, aux: wordcodeAuxD, auxRequired: true}
-	case opJumpIfModKNotEqualK,
-		opJumpIfStringFieldNotEqualK,
-		opJumpIfStringFieldNotGreaterK,
-		opJumpIfStringFieldGreaterK,
-		opJumpIfStringFieldNotGreaterR:
-		meta = wordcodeEncodingMetadata{format: wordcodeFormatDeferred}
 	case opJumpIfTableHasMetatable:
 		meta = wordcodeEncodingMetadata{format: wordcodeFormatAD, adOperand: wordcodeSlotD, aux: wordcodeAuxD, auxRequired: true}
 	case opFastCall:
@@ -434,9 +425,6 @@ func wordcodeValidateMetadata(op opcode, meta opcodeMetadataEntry) error {
 	if encoding.format == 0 {
 		return fmt.Errorf("wordcode format is missing")
 	}
-	if encoding.format == wordcodeFormatDeferred {
-		return nil
-	}
 	if encoding.aux == wordcodeAuxNone && encoding.auxRequired {
 		return fmt.Errorf("marks AUX required without an AUX mode")
 	}
@@ -484,9 +472,6 @@ func wordcodeEncodeInstruction(ins instruction, pc int, nextWordPC int, boundari
 		return nil, fmt.Errorf("unknown opcode %d", ins.op)
 	}
 	encoding := meta.wordcode
-	if encoding.format == wordcodeFormatDeferred {
-		return nil, fmt.Errorf("%s requires Phase 2.5 lowering before wordcode encoding", opcodeName(ins.op))
-	}
 	displacement := 0
 	if target, ok := instructionJumpTarget(ins); ok {
 		if target < 0 || target >= len(boundaries) {
@@ -622,9 +607,6 @@ func buildWordcodeBoundaryMap(code []instruction) (wordcodeBoundaryMap, error) {
 			if !ok {
 				return wordcodeBoundaryMap{}, fmt.Errorf("instruction %d: unknown opcode %d", pc, ins.op)
 			}
-			if meta.wordcode.format == wordcodeFormatDeferred {
-				return wordcodeBoundaryMap{}, fmt.Errorf("instruction %d %s requires Phase 2.5 lowering before wordcode encoding", pc, opcodeName(ins.op))
-			}
 			words := 1
 			if meta.wordcode.auxRequired || meta.wordcode.hasAux(ins) || forcedJumpAux[pc] {
 				words++
@@ -724,9 +706,6 @@ func wordcodeDecodeWords(words []wordcodeWord) ([]wordcodeDecoded, []int, error)
 		if !ok {
 			return nil, nil, fmt.Errorf("word %d: unknown opcode byte 0x%02x", wordPC, rawOp)
 		}
-		if meta.wordcode.format == wordcodeFormatDeferred {
-			return nil, nil, fmt.Errorf("word %d %s requires Phase 2.5 lowering before decode", wordPC, opcodeName(op))
-		}
 		if meta.wordcode.aux == wordcodeAuxNone && hasAux {
 			return nil, nil, fmt.Errorf("word %d %s has an unexpected AUX word", wordPC, opcodeName(op))
 		}
@@ -790,12 +769,9 @@ func decodeWordcode(words []wordcodeWord) ([]instruction, error) {
 }
 
 func verifyWordcodeInstruction(ins instruction, registerCount, constantCount, prototypeCount, upvalueCount, codeLen int) error {
-	meta, ok := opcodeMetadata(ins.op)
+	_, ok := opcodeMetadata(ins.op)
 	if !ok {
 		return fmt.Errorf("unknown opcode %d", ins.op)
-	}
-	if meta.wordcode.format == wordcodeFormatDeferred {
-		return fmt.Errorf("%s requires Phase 2.5 lowering before wordcode verification", opcodeName(ins.op))
 	}
 	if registerCount < 0 {
 		registerCount = 255

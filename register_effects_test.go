@@ -384,11 +384,8 @@ func instructionReadsRegister(ins instruction, register int) bool {
 	case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
 		return ins.a == register || ins.b == register
 	case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK,
-		opJumpIfModKNotEqualK, opJumpIfTableHasMetatable,
-		opJumpIfStringFieldNotEqualK, opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK:
+		opJumpIfTableHasMetatable:
 		return ins.a == register
-	case opJumpIfStringFieldNotGreaterR:
-		return ins.a == register || ins.c == register
 	case opNeg, opLen:
 		return ins.b == register
 	case opFastCall:

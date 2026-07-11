@@ -2,7 +2,6 @@ package ember
 
 import (
 	"fmt"
-	"math"
 )
 
 // coldInstructionAction is the small result protocol between the direct
@@ -220,91 +219,6 @@ func (thread *vmThread) runColdInstruction(frame *vmFrame) coldInstructionAction
 		}
 		frame.setRegister(a, NumberValue(valueNumber(loopValue)+valueNumber(stepValue)))
 		return coldInstructionContinue(frame, d)
-
-	case opJumpIfModKNotEqualK:
-		left := frame.register(a)
-		modRight := proto.constants[b]
-		want := proto.constants[c]
-		if valueKind(left) == NumberKind && valueKind(modRight) == NumberKind && valueKind(want) == NumberKind {
-			got := valueNumber(left) - math.Floor(valueNumber(left)/valueNumber(modRight))*valueNumber(modRight)
-			if got != valueNumber(want) {
-				return coldInstructionContinue(frame, d)
-			}
-			return coldInstructionResume(frame)
-		}
-		modValue, err := binaryArithmeticValue(left, modRight, globals, "__mod", "modulo", func(left, right float64) float64 {
-			return left - math.Floor(left/right)*right
-		})
-		if err != nil {
-			return coldInstructionError(fmt.Errorf("run: modulo failed: %w", err))
-		}
-		equal, err := equalValue(modValue, want, globals)
-		if err != nil {
-			return coldInstructionError(fmt.Errorf("run: equal failed: %w", err))
-		}
-		if !equal {
-			return coldInstructionContinue(frame, d)
-		}
-		return coldInstructionResume(frame)
-
-	case opJumpIfStringFieldNotEqualK:
-		table, ok := frame.register(a).Table()
-		if !ok {
-			return coldInstructionError(fmt.Errorf("run: get field target is %s, want table", frame.register(a).Kind()))
-		}
-		left, err := runtimeTableAccess(globals).get(table, proto.constants[b])
-		if err != nil {
-			return coldInstructionError(fmt.Errorf("run: get field failed: %w", err))
-		}
-		equal, err := equalValue(left, proto.constants[c], globals)
-		if err != nil {
-			return coldInstructionError(fmt.Errorf("run: equal failed: %w", err))
-		}
-		if !equal {
-			return coldInstructionContinue(frame, d)
-		}
-		return coldInstructionResume(frame)
-
-	case opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK:
-		table, ok := frame.register(a).Table()
-		if !ok {
-			return coldInstructionError(fmt.Errorf("run: get field target is %s, want table", frame.register(a).Kind()))
-		}
-		left, err := runtimeTableAccess(globals).get(table, proto.constants[b])
-		if err != nil {
-			return coldInstructionError(fmt.Errorf("run: get field failed: %w", err))
-		}
-		greater, err := lessValue(proto.constants[c], left, globals)
-		if err != nil {
-			label := "greater"
-			if packed.op == opJumpIfStringFieldNotGreaterK {
-				label = "less equal"
-			}
-			return coldInstructionError(fmt.Errorf("run: %s failed: %w", label, err))
-		}
-		if (packed.op == opJumpIfStringFieldNotGreaterK && !greater) ||
-			(packed.op == opJumpIfStringFieldGreaterK && greater) {
-			return coldInstructionContinue(frame, d)
-		}
-		return coldInstructionResume(frame)
-
-	case opJumpIfStringFieldNotGreaterR:
-		table, ok := frame.register(a).Table()
-		if !ok {
-			return coldInstructionError(fmt.Errorf("run: get field target is %s, want table", frame.register(a).Kind()))
-		}
-		left, err := runtimeTableAccess(globals).get(table, proto.constants[b])
-		if err != nil {
-			return coldInstructionError(fmt.Errorf("run: get field failed: %w", err))
-		}
-		greater, err := lessValue(frame.register(c), left, globals)
-		if err != nil {
-			return coldInstructionError(fmt.Errorf("run: greater failed: %w", err))
-		}
-		if !greater {
-			return coldInstructionContinue(frame, d)
-		}
-		return coldInstructionResume(frame)
 
 	case opFastCall:
 		result, done, err := thread.runColdFastCall(frame, nativeFuncID(b), a, c, d)

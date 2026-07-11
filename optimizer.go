@@ -175,9 +175,8 @@ func instructionAllowsDeadCodeCleanupInBlock(ins instruction) bool {
 		opPrepareIter, opArrayNext, opArrayNextJump2,
 		opNumericForCheck, opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK,
 		opJumpIfLessK, opJumpIfGreaterK, opJumpIfNotLess, opJumpIfNotGreater,
-		opJumpIfLess, opJumpIfGreater, opJumpIfModKNotEqualK,
+		opJumpIfLess, opJumpIfGreater,
 		opJumpIfTableHasMetatable,
-		opJumpIfStringFieldNotGreaterK, opJumpIfStringFieldGreaterK,
 		opSetField, opGetIndex, opSetIndex, opGetStringField, opSetStringField,
 		opGetStringFieldIndex, opSetStringFieldIndex:
 		return true
@@ -1011,14 +1010,6 @@ func bytecodeIRScalarBranchDecision(ins instruction, state []scalarLatticeValue,
 				}
 				return result, true
 			}
-		}
-	case opJumpIfModKNotEqualK:
-		modRight, modOK := facts.scalarConstantAt(ins.b)
-		want, wantOK := facts.scalarConstantAt(ins.c)
-		if leftOK && modOK && wantOK && valueKind(left) == NumberKind && valueKind(modRight) == NumberKind && valueKind(want) == NumberKind {
-			leftNumber, modNumber, wantNumber := valueNumber(left), valueNumber(modRight), valueNumber(want)
-			got := leftNumber - math.Floor(leftNumber/modNumber)*modNumber
-			return got != wantNumber, true
 		}
 	}
 	return false, false

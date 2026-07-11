@@ -44,9 +44,6 @@ func TestWordcodeRoundTripFormatsAndRelativeJumps(t *testing.T) {
 
 func TestWordcodeRoundTripsEveryEncodableOpcodeShape(t *testing.T) {
 	for _, op := range allOpcodes {
-		if wordcodeMetadataFor(op).format == wordcodeFormatDeferred {
-			continue
-		}
 		ins := wordcodeSampleInstruction(op)
 		words, err := encodeWordcode([]instruction{ins}, 16, 100)
 		if err != nil {
@@ -63,8 +60,8 @@ func TestWordcodeRoundTripsEveryEncodableOpcodeShape(t *testing.T) {
 }
 
 func TestWordcodeMetadataCoversAllOpcodesAndHiddenOperands(t *testing.T) {
-	if len(allOpcodes) != 69 {
-		t.Fatalf("opcode count = %d, want 69", len(allOpcodes))
+	if len(allOpcodes) != 64 {
+		t.Fatalf("opcode count = %d, want 64 after removing narrow branches", len(allOpcodes))
 	}
 	for _, op := range allOpcodes {
 		meta, ok := opcodeMetadata(op)
@@ -300,13 +297,10 @@ func wordcodeSampleInstruction(op opcode) instruction {
 	return ins
 }
 
-func TestWordcodeRejectsMalformedAUXAndDeferredOpcodes(t *testing.T) {
+func TestWordcodeRejectsMalformedAUXAndReservedOpcodes(t *testing.T) {
 	move := wordcodeWord(uint32(opMove) | uint32(1)<<8 | uint32(2)<<16)
 	if err := verifyWordcode([]wordcodeWord{move | wordcodeAuxBit}, 4, 4); err == nil || !strings.Contains(err.Error(), "unexpected AUX") {
 		t.Fatalf("verifyWordcode accepted unexpected AUX: %v", err)
-	}
-	if _, err := encodeWordcode([]instruction{{op: opJumpIfModKNotEqualK, a: 0, b: 1, c: 2, d: 0}}, 4, 4); err == nil || !strings.Contains(err.Error(), "Phase 2.5") {
-		t.Fatalf("deferred opcode error = %v, want Phase 2.5", err)
 	}
 	if _, err := decodeWordcode([]wordcodeWord{uint32(opLoadGlobal) | uint32(1)<<8}); err == nil || !strings.Contains(err.Error(), "AUX") {
 		t.Fatalf("decodeWordcode accepted missing required AUX: %v", err)

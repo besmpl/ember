@@ -587,9 +587,10 @@ func TestBytecodeFinalizerRejectsInvalidStringFieldNumericBranchConstants(t *tes
 		var builder bytecodeBuilder
 		field := builder.addConstant(NumberValue(1))
 		value := builder.addConstant(NumberValue(0))
-		builder.emit(instruction{op: opJumpIfStringFieldNotGreaterK, a: 0, b: field, c: value, d: 1})
+		builder.emit(instruction{op: opGetStringField, a: 1, b: 0, c: field})
+		builder.emit(instruction{op: opJumpIfNotGreaterK, a: 1, b: value, d: 2})
 
-		_, err := builder.finalizeProto(nil, 1, 0, false)
+		_, err := builder.finalizeProto(nil, 2, 0, false)
 		if err == nil {
 			t.Fatal("finalizeProto succeeded, want non-string field error")
 		}
@@ -598,20 +599,6 @@ func TestBytecodeFinalizerRejectsInvalidStringFieldNumericBranchConstants(t *tes
 		}
 	})
 
-	t.Run("value", func(t *testing.T) {
-		var builder bytecodeBuilder
-		field := builder.addConstant(StringValue("shield"))
-		value := builder.addConstant(StringValue("zero"))
-		builder.emit(instruction{op: opJumpIfStringFieldGreaterK, a: 0, b: field, c: value, d: 1})
-
-		_, err := builder.finalizeProto(nil, 1, 0, false)
-		if err == nil {
-			t.Fatal("finalizeProto succeeded, want non-number value error")
-		}
-		if !strings.Contains(err.Error(), "constant index 1 is string, want number") {
-			t.Fatalf("finalizeProto error is %q, want non-number value detail", err)
-		}
-	})
 }
 
 func TestBytecodeFinalizerRejectsInvalidCanonicalFieldConstant(t *testing.T) {
@@ -5783,9 +5770,9 @@ return score
 	for _, want := range []string{
 		"GET_STRING_FIELD",
 		"JUMP_IF_FALSE",
-		"JUMP_IF_STRING_FIELD_NOT_EQUAL_K",
-		"JUMP_IF_STRING_FIELD_NOT_GREATER_K",
-		"JUMP_IF_STRING_FIELD_GREATER_K",
+		"JUMP_IF_NOT_EQUAL_K",
+		"JUMP_IF_NOT_GREATER_K",
+		"JUMP_IF_GREATER_K",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("compiled branch program is missing %s:\n%s", want, joined)
@@ -6440,11 +6427,10 @@ return total
 	}
 
 	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_MOD_K_NOT_EQUAL_K") {
-		t.Fatalf("compiled modulo branch is missing direct modulo jump:\n%s", joined)
-	}
-	if strings.Contains(joined, " MOD_K r") {
-		t.Fatalf("compiled modulo branch materialized modulo register:\n%s", joined)
+	for _, want := range []string{"MOD_K", "JUMP_IF_NOT_EQUAL_K"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("compiled modulo branch is missing %s:\n%s", want, joined)
+		}
 	}
 
 	results, err := Run(proto)
@@ -6473,8 +6459,8 @@ return 2
 		t.Fatalf("Compile returned error: %v", err)
 	}
 	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_MOD_K_NOT_EQUAL_K") {
-		t.Fatalf("compiled modulo branch is missing direct modulo jump:\n%s", joined)
+	if !strings.Contains(joined, "MOD_K") || !strings.Contains(joined, "JUMP_IF_NOT_EQUAL_K") {
+		t.Fatalf("compiled modulo branch is missing general modulo sequence:\n%s", joined)
 	}
 
 	results, err := Run(proto)
@@ -7273,8 +7259,8 @@ return 0
 	}
 
 	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_STRING_FIELD_NOT_EQUAL_K") {
-		t.Fatalf("compiled string field branch is missing JUMP_IF_STRING_FIELD_NOT_EQUAL_K:\n%s", joined)
+	if !strings.Contains(joined, "GET_STRING_FIELD") || !strings.Contains(joined, "JUMP_IF_NOT_EQUAL_K") {
+		t.Fatalf("compiled string field branch is missing general field sequence:\n%s", joined)
 	}
 }
 
@@ -7357,8 +7343,8 @@ return total
 		t.Fatalf("Compile returned error: %v", err)
 	}
 	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_STRING_FIELD_NOT_EQUAL_K") {
-		t.Fatalf("compiled string field branch is missing JUMP_IF_STRING_FIELD_NOT_EQUAL_K:\n%s", joined)
+	if !strings.Contains(joined, "GET_STRING_FIELD") || !strings.Contains(joined, "JUMP_IF_NOT_EQUAL_K") {
+		t.Fatalf("compiled string field branch is missing general field sequence:\n%s", joined)
 	}
 
 	results, err := Run(proto)
@@ -7513,8 +7499,9 @@ return score
 
 	joined := strings.Join(disassembleProto(proto), "\n")
 	for _, want := range []string{
-		"JUMP_IF_STRING_FIELD_NOT_GREATER_K",
-		"JUMP_IF_STRING_FIELD_GREATER_K",
+		"GET_STRING_FIELD",
+		"JUMP_IF_NOT_GREATER_K",
+		"JUMP_IF_GREATER_K",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("compiled numeric field branch is missing %s:\n%s", want, joined)
@@ -7549,9 +7536,10 @@ return score
 		t.Fatalf("Compile returned error: %v", err)
 	}
 	joined := strings.Join(disassembleProto(proto), "\n")
-	if !strings.Contains(joined, "JUMP_IF_STRING_FIELD_NOT_GREATER_K") ||
-		!strings.Contains(joined, "JUMP_IF_STRING_FIELD_GREATER_K") {
-		t.Fatalf("compiled numeric field branch is missing optimized branch:\n%s", joined)
+	if !strings.Contains(joined, "GET_STRING_FIELD") ||
+		!strings.Contains(joined, "JUMP_IF_NOT_GREATER_K") ||
+		!strings.Contains(joined, "JUMP_IF_GREATER_K") {
+		t.Fatalf("compiled numeric field branch is missing general sequence:\n%s", joined)
 	}
 
 	results, err := Run(proto)
@@ -8440,7 +8428,6 @@ func TestInstructionReadModelCoversComparisonBranchOperands(t *testing.T) {
 		{name: "not greater register", ins: instruction{op: opJumpIfNotGreater, a: 8, b: 1, d: 20}, want: []int{1, 8}},
 		{name: "less register", ins: instruction{op: opJumpIfLess, a: 8, b: 1, d: 20}, want: []int{1, 8}},
 		{name: "greater register", ins: instruction{op: opJumpIfGreater, a: 8, b: 1, d: 20}, want: []int{1, 8}},
-		{name: "mod not equal constants", ins: instruction{op: opJumpIfModKNotEqualK, a: 8, b: 1, c: 2, d: 20}, want: []int{8}},
 	}
 
 	for _, tt := range tests {
@@ -8462,10 +8449,6 @@ func TestInstructionReadModelCoversTablePredicateBranchOperands(t *testing.T) {
 		want []int
 	}{
 		{name: "table has metatable", ins: instruction{op: opJumpIfTableHasMetatable, a: 8, d: 20}, want: []int{8}},
-		{name: "string field not equal constant", ins: instruction{op: opJumpIfStringFieldNotEqualK, a: 8, b: 1, c: 2, d: 20}, want: []int{8}},
-		{name: "string field not greater constant", ins: instruction{op: opJumpIfStringFieldNotGreaterK, a: 8, b: 1, c: 2, d: 20}, want: []int{8}},
-		{name: "string field greater constant", ins: instruction{op: opJumpIfStringFieldGreaterK, a: 8, b: 1, c: 2, d: 20}, want: []int{8}},
-		{name: "string field not greater register", ins: instruction{op: opJumpIfStringFieldNotGreaterR, a: 8, b: 1, c: 2, d: 20}, want: []int{2, 8}},
 	}
 
 	for _, tt := range tests {
@@ -9455,11 +9438,6 @@ func wantOpcodeCallbackMask(op opcode) bool {
 		opJumpIfNotGreater,
 		opJumpIfLess,
 		opJumpIfGreater,
-		opJumpIfModKNotEqualK,
-		opJumpIfStringFieldNotEqualK,
-		opJumpIfStringFieldNotGreaterK,
-		opJumpIfStringFieldGreaterK,
-		opJumpIfStringFieldNotGreaterR,
 		opFastCall,
 		opCall,
 		opCallOne,
@@ -9527,12 +9505,7 @@ func wantDirectFrameOpcodeSupported(op opcode) bool {
 		opJumpIfNotGreater,
 		opJumpIfLess,
 		opJumpIfGreater,
-		opJumpIfModKNotEqualK,
 		opJumpIfTableHasMetatable,
-		opJumpIfStringFieldNotEqualK,
-		opJumpIfStringFieldNotGreaterK,
-		opJumpIfStringFieldGreaterK,
-		opJumpIfStringFieldNotGreaterR,
 		opFastCall,
 		opJumpIfFalse,
 		opCall,
@@ -9565,12 +9538,7 @@ func wantOpcodeControlFlow(op opcode) opcodeControlFlowKind {
 		opJumpIfNotGreater,
 		opJumpIfLess,
 		opJumpIfGreater,
-		opJumpIfModKNotEqualK,
 		opJumpIfTableHasMetatable,
-		opJumpIfStringFieldNotEqualK,
-		opJumpIfStringFieldNotGreaterK,
-		opJumpIfStringFieldGreaterK,
-		opJumpIfStringFieldNotGreaterR,
 		opJumpIfFalse:
 		return opcodeControlBranch
 	case opReturnOne, opReturn:

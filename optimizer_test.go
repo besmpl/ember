@@ -516,14 +516,15 @@ func assertOptimizedRunErrorMatchesDisabledHIR(t *testing.T, source string) {
 	}
 }
 
-func TestInstructionSuccessorsIncludeSpecializedModuloBranch(t *testing.T) {
+func TestInstructionSuccessorsIncludeGeneralModuloBranch(t *testing.T) {
 	code := []instruction{
-		{op: opJumpIfModKNotEqualK, d: 2},
+		{op: opModK, a: 0, b: 0, c: 1},
+		{op: opJumpIfNotEqualK, a: 0, b: 1, d: 3},
 		{op: opReturnOne},
 	}
 
-	if got, want := instructionSuccessors(code, 0), []int{1, 2}; !equalIntSlices(got, want) {
-		t.Fatalf("specialized modulo branch successors are %#v, want %#v", got, want)
+	if got, want := instructionSuccessors(code, 1), []int{2, 3}; !equalIntSlices(got, want) {
+		t.Fatalf("general modulo branch successors are %#v, want %#v", got, want)
 	}
 }
 

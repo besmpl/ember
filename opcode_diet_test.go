@@ -3,12 +3,12 @@ package ember
 import "testing"
 
 func TestOpcodeDietRemovesCompilerUnreachableOperations(t *testing.T) {
-	const executableOpcodeCeiling = 69
+	const executableOpcodeCeiling = 64
 	if got := int(opcodeCount); got > executableOpcodeCeiling {
 		t.Fatalf("executable opcode count = %d, want at most %d", got, executableOpcodeCeiling)
 	}
-	if got := int(opcodeCount); got != 69 {
-		t.Fatalf("executable opcode count = %d, want 69 after removing unreachable field arithmetic", got)
+	if got := int(opcodeCount); got != 64 {
+		t.Fatalf("executable opcode count = %d, want 64 after removing narrow predicate branches", got)
 	}
 	seen := make(map[opcode]struct{}, opcodeCount)
 	for _, op := range allOpcodes {
@@ -45,7 +45,7 @@ func TestOpcodeDietPreservesEstablishedWireIDs(t *testing.T) {
 			t.Errorf("%s wire ID = %d, want %d", opcodeName(op), got, want)
 		}
 	}
-	for _, removed := range []opcode{0, 7, 12, 13, 63, 64, 65, 66, 67} {
+	for _, removed := range []opcode{0, 7, 12, 13, 57, 59, 60, 61, 62, 63, 64, 65, 66, 67} {
 		if _, ok := opcodeMetadata(removed); ok {
 			t.Errorf("removed wire ID %d still has opcode metadata", removed)
 		}

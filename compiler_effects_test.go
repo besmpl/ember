@@ -72,9 +72,7 @@ func TestMetamethodCapableOpcodeEffects(t *testing.T) {
 			ops: []opcode{
 				opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK,
 				opJumpIfLessK, opJumpIfGreaterK, opJumpIfNotLess, opJumpIfNotGreater,
-				opJumpIfLess, opJumpIfGreater, opJumpIfModKNotEqualK,
-				opJumpIfStringFieldNotEqualK, opJumpIfStringFieldNotGreaterK,
-				opJumpIfStringFieldGreaterK, opJumpIfStringFieldNotGreaterR,
+				opJumpIfLess, opJumpIfGreater,
 			},
 		},
 		{
