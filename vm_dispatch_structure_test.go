@@ -168,6 +168,50 @@ func TestWordcodeHotEncodingMatchesOpcodeMetadata(t *testing.T) {
 	}
 }
 
+func TestDirectFrameDefersRuntimeFunctionInstanceLookupUntilCacheUse(t *testing.T) {
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	source, err := os.ReadFile(filepath.Join(filepath.Dir(testFile), "vm.go"))
+	if err != nil {
+		t.Fatalf("read vm.go: %v", err)
+	}
+	text := string(source)
+	for _, bounds := range [][2]string{
+		{"func runDirectFrameInstrumentedLoop", "func runDirectFrameProductionLoop"},
+		{"func runDirectFrameProductionLoop", "func (thread *vmThread) consumeInstruction"},
+	} {
+		start := strings.Index(text, bounds[0])
+		end := strings.Index(text, bounds[1])
+		if start < 0 || end <= start {
+			t.Fatalf("vm.go is missing direct-loop bounds %q..%q", bounds[0], bounds[1])
+		}
+		loop := text[start:end]
+		reload := strings.Index(loop, "reload:")
+		if reload < 0 {
+			t.Fatalf("%s is missing reload marker", bounds[0])
+		}
+		dispatch := strings.Index(loop[reload:], "for uint(pc) < uint(len(words))")
+		if dispatch < 0 {
+			t.Fatalf("%s is missing reload/dispatch markers", bounds[0])
+		}
+		setup := loop[reload : reload+dispatch]
+		if strings.Contains(setup, "thread.functionInstance(proto)") {
+			t.Fatalf("%s eagerly looks up runtime function state on every frame reload", bounds[0])
+		}
+		if !strings.Contains(setup, "functionInstance = nil") {
+			t.Fatalf("%s does not reset its lazy runtime function state", bounds[0])
+		}
+		if got, want := strings.Count(loop, "functionInstance = thread.functionInstance(proto)"), 6; got != want {
+			t.Fatalf("%s has %d lazy runtime function lookups, want %d cache paths", bounds[0], got, want)
+		}
+		if got, want := strings.Count(loop, "cache := functionInstance.cacheAt(cacheID)"), 6; got != want {
+			t.Fatalf("%s has %d runtime cache reads, want %d cache paths", bounds[0], got, want)
+		}
+	}
+}
+
 func TestColdInstructionErrorKeepsCurrentPhysicalPC(t *testing.T) {
 	proto := newProto(
 		[]Value{StringValue("field")},

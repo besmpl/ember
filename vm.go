@@ -3920,7 +3920,7 @@ reload:
 	*frameRef = frame
 	directChildActive = len(thread.frames)-1 > rootDepth
 	proto = frame.proto
-	functionInstance = thread.functionInstance(proto)
+	functionInstance = nil
 	if proto.verifyErr != nil {
 		return directFrameExitAt(frame, frame.pc, directFrameFail(fmt.Errorf("run: invalid prototype: %w", proto.verifyErr)))
 	}
@@ -4188,6 +4188,9 @@ reload:
 			key := constantKeys[b].str
 			value := registers[c]
 			if valueKind(keyValue) == StringKind && !value.IsNil() {
+				if functionInstance == nil {
+					functionInstance = thread.functionInstance(proto)
+				}
 				cache := functionInstance.cacheAt(cacheID)
 				if cache.hasValueKey(table, keyValue) {
 					if cache.writeValueCounted(table, keyValue, value, picCounts) {
@@ -4242,6 +4245,9 @@ reload:
 			}
 			key := registers[c]
 			if valueKind(key) == StringKind {
+				if functionInstance == nil {
+					functionInstance = thread.functionInstance(proto)
+				}
 				cache := functionInstance.cacheAt(cacheID)
 				value := registers[d]
 				if cache.writeValueCounted(nextTable, key, value, picCounts) {
@@ -4267,6 +4273,9 @@ reload:
 			key := constants[c]
 			keyText := constantKeys[c].str
 			if valueKind(key) == StringKind {
+				if functionInstance == nil {
+					functionInstance = thread.functionInstance(proto)
+				}
 				cache := functionInstance.cacheAt(cacheID)
 				if value, ok := cache.getValueCounted(table, key, picCounts); ok {
 					registers[a] = value
@@ -4332,6 +4341,9 @@ reload:
 			}
 			key := registers[d]
 			if valueKind(key) == StringKind {
+				if functionInstance == nil {
+					functionInstance = thread.functionInstance(proto)
+				}
 				cache := functionInstance.cacheAt(cacheID)
 				if value, ok := cache.getValueCounted(nextTable, key, picCounts); ok {
 					registers[a] = value
@@ -4376,6 +4388,9 @@ reload:
 			}
 			key := registers[b]
 			if valueKind(key) == StringKind {
+				if functionInstance == nil {
+					functionInstance = thread.functionInstance(proto)
+				}
 				cache := functionInstance.cacheAt(cacheID)
 				value := registers[c]
 				if cache.writeValueCounted(table, key, value, picCounts) {
@@ -4413,6 +4428,9 @@ reload:
 			}
 			key := registers[c]
 			if valueKind(key) == StringKind {
+				if functionInstance == nil {
+					functionInstance = thread.functionInstance(proto)
+				}
 				cache := functionInstance.cacheAt(cacheID)
 				if value, ok := cache.getValueCounted(table, key, picCounts); ok {
 					registers[a] = value
@@ -5596,7 +5614,7 @@ reload:
 	*frameRef = frame
 	directChildActive = len(thread.frames)-1 > rootDepth
 	proto = frame.proto
-	functionInstance = thread.functionInstance(proto)
+	functionInstance = nil
 	if proto.verifyErr != nil {
 		return directFrameExitAt(frame, frame.pc, directFrameFail(fmt.Errorf("run: invalid prototype: %w", proto.verifyErr)))
 	}
@@ -5809,6 +5827,9 @@ reload:
 			key := constantKeys[b].str
 			value := registers[c]
 			if valueKind(keyValue) == StringKind && !value.IsNil() {
+				if functionInstance == nil {
+					functionInstance = thread.functionInstance(proto)
+				}
 				cache := functionInstance.cacheAt(cacheID)
 				if cache.hasValueKey(table, keyValue) {
 					if cache.writeValue(table, keyValue, value) {
@@ -5861,6 +5882,9 @@ reload:
 			}
 			key := registers[c]
 			if valueKind(key) == StringKind {
+				if functionInstance == nil {
+					functionInstance = thread.functionInstance(proto)
+				}
 				cache := functionInstance.cacheAt(cacheID)
 				value := registers[d]
 				if cache.writeValue(nextTable, key, value) {
@@ -5884,6 +5908,9 @@ reload:
 			key := constants[c]
 			keyText := constantKeys[c].str
 			if valueKind(key) == StringKind {
+				if functionInstance == nil {
+					functionInstance = thread.functionInstance(proto)
+				}
 				cache := functionInstance.cacheAt(cacheID)
 				if value, ok := cache.getValue(table, key); ok {
 					registers[a] = value
@@ -5946,6 +5973,9 @@ reload:
 			}
 			key := registers[d]
 			if valueKind(key) == StringKind {
+				if functionInstance == nil {
+					functionInstance = thread.functionInstance(proto)
+				}
 				cache := functionInstance.cacheAt(cacheID)
 				if value, ok := cache.getValue(nextTable, key); ok {
 					registers[a] = value
@@ -5984,6 +6014,9 @@ reload:
 			}
 			key := registers[b]
 			if valueKind(key) == StringKind {
+				if functionInstance == nil {
+					functionInstance = thread.functionInstance(proto)
+				}
 				cache := functionInstance.cacheAt(cacheID)
 				value := registers[c]
 				if cache.writeValue(table, key, value) {
@@ -6017,6 +6050,9 @@ reload:
 			}
 			key := registers[c]
 			if valueKind(key) == StringKind {
+				if functionInstance == nil {
+					functionInstance = thread.functionInstance(proto)
+				}
 				cache := functionInstance.cacheAt(cacheID)
 				if value, ok := cache.getValue(table, key); ok {
 					registers[a] = value
