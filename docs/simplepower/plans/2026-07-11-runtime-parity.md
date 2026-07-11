@@ -175,9 +175,12 @@ alternating samples and independent complete-state plus changed-diff review.
   ratio, or parity attempt created, so the run blocked on external machine load
   without accepting or rejecting performance. The last valid quiet-run Phase 1
   evidence remains v3: 1.6865x median and 1.7236x p90.
-- Publication was requested from the isolated v5 worktree on branch
-  `codex/runtime-parity-phase1`; local SimplePower journals and ignored raw
-  benchmark artifacts are intentionally excluded from source control.
+- Publication completed from the isolated v5 worktree on branch
+  `codex/runtime-parity-phase1`: source commit `d7a1a57` was pushed and draft
+  PR [#5](https://github.com/besmpl/ember/pull/5) was opened. Local SimplePower
+  journals and ignored raw benchmark artifacts are excluded from source
+  control. Merge was not performed because repository agent rules require
+  opening a PR and prohibit agents from merging it.
 
 ## Review and verification
 
