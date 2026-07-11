@@ -27,7 +27,11 @@ func (r *Runtime) newRuntimeCallContext(ctx context.Context, from moduleKey, glo
 }
 
 func (call runtimeCallContext) envWithRequire() *globalEnv {
-	env := runtimeGlobals(call.globals)
+	var owner *runtimeOwner
+	if call.runtime != nil {
+		owner = call.runtime.owner
+	}
+	env := runtimeGlobalsWithOwner(call.globals, owner)
 	env.set("require", nativeFuncValue(call.require))
 	return env
 }

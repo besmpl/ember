@@ -5,6 +5,7 @@ type globalEnv struct {
 	host    map[string]Value
 	slots   []globalSlot
 	thread  *vmThread
+	owner   *runtimeOwner
 	version uint64
 }
 
@@ -23,6 +24,12 @@ func runtimeGlobals(globals map[string]Value) *globalEnv {
 	if len(globals) != 0 {
 		env.version = 1
 	}
+	return env
+}
+
+func runtimeGlobalsWithOwner(globals map[string]Value, owner *runtimeOwner) *globalEnv {
+	env := runtimeGlobals(globals)
+	env.owner = owner
 	return env
 }
 

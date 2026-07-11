@@ -53,7 +53,23 @@ type executeOptions struct {
 }
 
 func executeProto(ctx context.Context, proto *Proto, globals *globalEnv, options executeOptions) ([]Value, error) {
+	if globals != nil && globals.owner != nil {
+		return executeProtoWithOwner(ctx, proto, globals, options)
+	}
 	thread := acquireVMThread(ctx, globals)
+	defer releaseVMThread(thread)
+	thread.instructionBudget = options.maxInstructions
+	return thread.runWithUpvalues(proto, options.args, options.upvalues, options.upvalueValues, options.upvalueValueOK)
+}
+
+func executeProtoWithOwner(ctx context.Context, proto *Proto, globals *globalEnv, options executeOptions) ([]Value, error) {
+	thread := acquireVMThread(ctx, globals)
+	if err := thread.bindOwner(globals.owner); err != nil {
+		thread.owner = nil
+		thread.resetForPool()
+		vmThreadPool.Put(thread)
+		return nil, err
+	}
 	defer releaseVMThread(thread)
 	thread.instructionBudget = options.maxInstructions
 	return thread.runWithUpvalues(proto, options.args, options.upvalues, options.upvalueValues, options.upvalueValueOK)
@@ -70,6 +86,8 @@ type vmThread struct {
 	ctx         context.Context
 	globals     *globalEnv
 	baseGlobals globalEnv
+	owner       *runtimeOwner
+	ownerBound  bool
 	frames      []*vmFrame
 	frameSlots  []*vmFrame
 	stackOwner  *vmStackOwner
@@ -106,6 +124,13 @@ type vmThread struct {
 	stringScratch           []byte
 	functionInstances       map[*Proto]*vmFunctionInstance
 	functionInstanceSites   int
+}
+
+type vmCacheBundle struct {
+	stringIntern          map[string]*stringBox
+	stringConcatIntern    map[stringConcatKey]*stringBox
+	functionInstances     map[*Proto]*vmFunctionInstance
+	functionInstanceSites int
 }
 
 type stringConcatKey struct {
@@ -1010,13 +1035,17 @@ func newVMThreadWithContext(ctx context.Context, globals *globalEnv) vmThread {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return vmThread{
+	thread := vmThread{
 		ctx:                   ctx,
 		globals:               globals,
 		stackOwner:            &vmStackOwner{},
 		nearestProtectedFrame: noProtectedFrame,
 		instructionBudget:     -1,
 	}
+	if globals != nil {
+		thread.owner = globals.owner
+	}
+	return thread
 }
 
 func (thread *vmThread) functionInstance(proto *Proto) *vmFunctionInstance {
@@ -1071,6 +1100,10 @@ func (thread *vmThread) resetForRun(ctx context.Context, globals *globalEnv) {
 	}
 	thread.ctx = ctx
 	thread.globals = globals
+	thread.owner = nil
+	if globals != nil {
+		thread.owner = globals.owner
+	}
 	thread.frames = thread.frames[:0]
 	if thread.stackOwner == nil {
 		thread.stackOwner = &vmStackOwner{}
@@ -1104,7 +1137,13 @@ func (thread *vmThread) resetForRun(ctx context.Context, globals *globalEnv) {
 }
 
 func (thread *vmThread) resetForPool() {
+	owned := thread.ownerBound
 	thread.dropFrames(0)
+	if owned {
+		for _, frame := range thread.frameSlots {
+			frame.resetForPool()
+		}
+	}
 	thread.nearestProtectedFrame = noProtectedFrame
 	thread.protectedRecoveryLookups = 0
 	thread.protectedRecoveryScans = 0
@@ -1140,6 +1179,68 @@ func (thread *vmThread) resetForPool() {
 		thread.functionInstances = nil
 		thread.functionInstanceSites = 0
 	}
+	thread.unbindOwner()
+}
+
+func (thread *vmThread) bindOwner(owner *runtimeOwner) error {
+	if thread == nil {
+		return errRuntimeOwnerInvalid
+	}
+	if owner == nil {
+		thread.owner = nil
+		thread.ownerBound = false
+		return nil
+	}
+	if thread.ownerBound {
+		if thread.owner != owner {
+			return errRuntimeOwnerInvalid
+		}
+		return nil
+	}
+	bundle, err := owner.checkoutVMThread(thread)
+	if err != nil {
+		return err
+	}
+	thread.owner = owner
+	thread.ownerBound = true
+	thread.attachVMCaches(bundle)
+	return nil
+}
+
+func (thread *vmThread) unbindOwner() {
+	if thread == nil {
+		return
+	}
+	if thread.ownerBound {
+		if thread.owner != nil {
+			owner := thread.owner
+			bundle := thread.detachVMCaches()
+			owner.returnVMThread(thread, bundle)
+		}
+		thread.ownerBound = false
+	}
+	thread.owner = nil
+}
+
+func (thread *vmThread) attachVMCaches(bundle vmCacheBundle) {
+	thread.stringIntern = bundle.stringIntern
+	thread.stringConcatIntern = bundle.stringConcatIntern
+	thread.functionInstances = bundle.functionInstances
+	thread.functionInstanceSites = bundle.functionInstanceSites
+}
+
+func (thread *vmThread) detachVMCaches() vmCacheBundle {
+	bundle := vmCacheBundle{
+		stringIntern:          thread.stringIntern,
+		stringConcatIntern:    thread.stringConcatIntern,
+		functionInstances:     thread.functionInstances,
+		functionInstanceSites: thread.functionInstanceSites,
+	}
+	thread.stringIntern = nil
+	thread.stringConcatIntern = nil
+	thread.functionInstances = nil
+	thread.functionInstanceSites = 0
+	return bundle
 }
 
 func (thread *vmThread) inheritDebugConfig(parent *vmThread) {
@@ -1160,6 +1261,7 @@ func (thread *vmThread) inheritRuntimeState(parent *vmThread) {
 	}
 	thread.ctx = parent.ctx
 	thread.instructionBudget = parent.instructionBudget
+	thread.owner = parent.owner
 	thread.inheritDebugConfig(parent)
 }
 
@@ -2369,6 +2471,8 @@ func (frame *vmFrame) resetForPool() {
 		clear(frame.openResults.values[:cap(frame.openResults.values)])
 	}
 	frame.resetForReuse()
+	frame.registers = nil
+	frame.varargs = nil
 }
 
 func capturedLocalRegisters(proto *Proto) []bool {

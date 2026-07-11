@@ -37,6 +37,8 @@ type runtimeOwner struct {
 
 	pinStates map[slot]runtimeOwnerPinState
 	nextToken uint64
+
+	idleVMCaches []vmCacheBundle
 }
 
 type runtimeOwnerPinState struct {
@@ -106,11 +108,46 @@ func (owner *runtimeOwner) close() error {
 		return errRuntimeOwnerActive
 	}
 	owner.state = runtimeOwnerClosed
+	owner.idleVMCaches = nil
 	for _, root := range owner.roots {
 		root.released = true
 	}
 	clear(owner.roots)
 	return nil
+}
+
+const maxIdleVMCacheBundles = 4
+
+func (owner *runtimeOwner) checkoutVMThread(thread *vmThread) (vmCacheBundle, error) {
+	if owner == nil || thread == nil {
+		return vmCacheBundle{}, errRuntimeOwnerInvalid
+	}
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if owner.state == runtimeOwnerClosed {
+		return vmCacheBundle{}, errRuntimeOwnerClosed
+	}
+	owner.threads[thread] = struct{}{}
+	if len(owner.idleVMCaches) == 0 {
+		return vmCacheBundle{}, nil
+	}
+	last := len(owner.idleVMCaches) - 1
+	bundle := owner.idleVMCaches[last]
+	owner.idleVMCaches[last] = vmCacheBundle{}
+	owner.idleVMCaches = owner.idleVMCaches[:last]
+	return bundle, nil
+}
+
+func (owner *runtimeOwner) returnVMThread(thread *vmThread, bundle vmCacheBundle) {
+	if owner == nil || thread == nil {
+		return
+	}
+	owner.mu.Lock()
+	if owner.state == runtimeOwnerOpen && len(owner.idleVMCaches) < maxIdleVMCacheBundles {
+		owner.idleVMCaches = append(owner.idleVMCaches, bundle)
+	}
+	delete(owner.threads, thread)
+	owner.mu.Unlock()
 }
 
 type runtimeRoot struct {

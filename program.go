@@ -292,7 +292,7 @@ func (r *Runtime) RunHook(ctx context.Context, hook string, args ...Value) (Hook
 		if !ok {
 			return report, fmt.Errorf("runtime: entrypoint %s returned %s, want table or nil", entrypoint.name, export.Kind())
 		}
-		hookValue, err := runtimeTableAccess(runtimeGlobals(hookGlobals)).get(table, StringValue(hook))
+		hookValue, err := runtimeTableAccess(runtimeGlobalsWithOwner(hookGlobals, r.owner)).get(table, StringValue(hook))
 		if err != nil {
 			return report, fmt.Errorf("runtime: get hook %s.%s: %w", entrypoint.name, hook, err)
 		}
