@@ -237,3 +237,14 @@ func TestSlotHandleLifetimeValidationAndGenerationRetirement(t *testing.T) {
 		t.Fatal("retired max-generation handle still resolved")
 	}
 }
+
+func TestSlotNativeIDRejectsUnknown(t *testing.T) {
+	var heap runtimeHeap
+	unknown := slotNativeID(nativeFuncUnknown)
+	if _, err := slotNativeIDValue(unknown); err == nil {
+		t.Fatal("unknown native function ID decoded successfully")
+	}
+	if _, err := heap.exportValue(unknown); err == nil {
+		t.Fatal("unknown native function ID exported successfully")
+	}
+}

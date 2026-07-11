@@ -14,10 +14,11 @@ const (
 	slotTagShift = 44
 	slotTagMask  = uint64(0xf)
 
-	slotGenerationShift = 28
-	slotGenerationMask  = uint64(0xffff)
-	slotIndexMask       = uint64((1 << 28) - 1)
-	slotMaxGeneration   = uint16(0xffff)
+	slotGenerationShift   = 28
+	slotGenerationMask    = uint64(0xffff)
+	slotIndexMask         = uint64((1 << 28) - 1)
+	slotMaxGeneration     = uint16(0xffff)
+	slotHandlePayloadMask = (slotGenerationMask << slotGenerationShift) | slotIndexMask
 )
 
 // The high 16 bits identify tagged slots. The four bits immediately below
@@ -47,27 +48,6 @@ const (
 	// IEEE-754 representation of positive zero, not Luau nil.
 	slotNil slot = slot(slotTaggedPrefix | uint64(slotTagNil)<<slotTagShift)
 )
-
-// runtimeHeap is the private owner for out-of-line slot payloads. It is kept
-// intentionally small until the runtime's public Value/slot conversion seam
-// is introduced.
-type slotNumberEntry struct {
-	bits       uint64
-	generation uint16
-	live       bool
-	retired    bool
-}
-
-// slotNumberSlab is the first typed generation-checked slab. Index zero is
-// reserved for typed-nil payloads, while retired entries are never recycled.
-type slotNumberSlab struct {
-	entries []slotNumberEntry
-	free    []uint32
-}
-
-type runtimeHeap struct {
-	boxedNumbers slotNumberSlab
-}
 
 func slotIsTagged(value slot) bool {
 	return uint64(value)&slotTaggedMask == slotTaggedPrefix
@@ -119,6 +99,9 @@ func slotBoolValue(value slot) (bool, error) {
 	if !slotIsTagged(value) {
 		return false, fmt.Errorf("slot: untagged value is not a boolean")
 	}
+	if uint64(value)&slotHandlePayloadMask != 0 {
+		return false, fmt.Errorf("slot: boolean immediate has a non-zero payload")
+	}
 	switch slotTagOf(value) {
 	case slotTagFalse:
 		return false, nil
@@ -127,6 +110,10 @@ func slotBoolValue(value slot) (bool, error) {
 	default:
 		return false, fmt.Errorf("slot: tagged %v is not a boolean", slotTagOf(value))
 	}
+}
+
+func slotImmediatePayloadZero(value slot) bool {
+	return uint64(value)&slotHandlePayloadMask == 0
 }
 
 func slotHandleKind(kind slotTag) bool {
@@ -179,6 +166,20 @@ func slotUnpackHandle(value slot) (slotTag, uint32, uint16, error) {
 	return kind, index, generation, nil
 }
 
+func slotValidateHandle(value slot, wantKind slotTag) (uint32, uint16, error) {
+	kind, index, generation, err := slotUnpackHandle(value)
+	if err != nil {
+		return 0, 0, err
+	}
+	if kind != wantKind {
+		return 0, 0, fmt.Errorf("slot: %v handle is not a %v handle", kind, wantKind)
+	}
+	if index == 0 || generation == 0 {
+		return 0, 0, fmt.Errorf("slot: malformed %v handle", wantKind)
+	}
+	return index, generation, nil
+}
+
 func slotPackTypedNil(kind slotTag) (slot, error) {
 	if !slotTypedReferenceKind(kind) {
 		return 0, fmt.Errorf("slot: %v is not a typed reference kind", kind)
@@ -197,101 +198,9 @@ func slotNativeIDValue(value slot) (nativeFuncID, error) {
 	if uint64(value)&(slotIndexMask|(slotGenerationMask<<slotGenerationShift)) > 0xff {
 		return 0, fmt.Errorf("slot: native function immediate payload is malformed")
 	}
-	return nativeFuncID(uint64(value) & 0xff), nil
-}
-
-func slotFromNumberBits(bits uint64, heap *runtimeHeap) (slot, error) {
-	value := slot(bits)
-	if !slotIsTagged(value) {
-		return value, nil
+	id := nativeFuncID(uint64(value) & 0xff)
+	if id == nativeFuncUnknown {
+		return 0, fmt.Errorf("slot: native function immediate has unknown ID")
 	}
-	if heap == nil {
-		return 0, fmt.Errorf("slot: number bits %#x require a heap box", bits)
-	}
-	return heap.boxNumberBits(bits)
-}
-
-func (heap *runtimeHeap) boxNumberBits(bits uint64) (slot, error) {
-	slab := &heap.boxedNumbers
-	if len(slab.entries) == 0 {
-		// Index zero is reserved so that an all-zero handle payload can remain a
-		// typed-nil sentinel once other reference kinds use this slab.
-		slab.entries = append(slab.entries, slotNumberEntry{})
-	}
-	for len(slab.free) > 0 {
-		last := len(slab.free) - 1
-		index := slab.free[last]
-		slab.free = slab.free[:last]
-		entry := &slab.entries[index]
-		if entry.retired || entry.live {
-			continue
-		}
-		entry.bits = bits
-		entry.live = true
-		return slotPackHandle(slotTagBoxedNumber, index, entry.generation)
-	}
-	if len(slab.entries) > int(slotIndexMask) {
-		return 0, fmt.Errorf("slot: boxed number slab exhausted")
-	}
-	index := uint32(len(slab.entries))
-	slab.entries = append(slab.entries, slotNumberEntry{
-		bits:       bits,
-		generation: 1,
-		live:       true,
-	})
-	return slotPackHandle(slotTagBoxedNumber, index, 1)
-}
-
-func (heap *runtimeHeap) releaseBoxedNumber(value slot) error {
-	kind, index, generation, err := slotUnpackHandle(value)
-	if err != nil {
-		return err
-	}
-	if kind != slotTagBoxedNumber {
-		return fmt.Errorf("slot: %v is not a boxed number handle", kind)
-	}
-	slab := &heap.boxedNumbers
-	if index == 0 || int(index) >= len(slab.entries) {
-		return fmt.Errorf("slot: boxed number index %d is invalid", index)
-	}
-	entry := &slab.entries[index]
-	if !entry.live || entry.retired || entry.generation != generation {
-		return fmt.Errorf("slot: boxed number handle is stale")
-	}
-	entry.bits = 0
-	entry.live = false
-	if generation == slotMaxGeneration {
-		entry.retired = true
-		return nil
-	}
-	entry.generation++
-	slab.free = append(slab.free, index)
-	return nil
-}
-
-func slotNumberBits(value slot, heap *runtimeHeap) (uint64, error) {
-	if !slotIsTagged(value) {
-		return uint64(value), nil
-	}
-	if slotTagOf(value) == slotTagBoxedNumber {
-		if heap == nil {
-			return 0, fmt.Errorf("slot: boxed number needs a heap")
-		}
-		kind, index, generation, err := slotUnpackHandle(value)
-		if err != nil {
-			return 0, err
-		}
-		if kind != slotTagBoxedNumber {
-			return 0, fmt.Errorf("slot: %v is not a boxed number handle", kind)
-		}
-		if index == 0 || int(index) >= len(heap.boxedNumbers.entries) {
-			return 0, fmt.Errorf("slot: boxed number index %d is invalid", index)
-		}
-		entry := heap.boxedNumbers.entries[index]
-		if !entry.live || entry.retired || entry.generation != generation {
-			return 0, fmt.Errorf("slot: boxed number handle is stale")
-		}
-		return entry.bits, nil
-	}
-	return 0, fmt.Errorf("slot: tagged %v is not an inline number", slotTagOf(value))
+	return id, nil
 }
