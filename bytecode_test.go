@@ -4081,8 +4081,12 @@ func TestAssemblerRemovesJumpToNextInstruction(t *testing.T) {
 
 func TestRunProductionLoopHasNoInstrumentationSideEffects(t *testing.T) {
 	proto, err := Compile(`
-local value = 1
-return value + 2
+local row = {value = 5}
+local total = 0
+for i = 1, 4 do
+	total = total + math.min(row.value, i)
+end
+return total
 `)
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
@@ -4092,20 +4096,25 @@ return value + 2
 	}
 
 	var opcodeCounts directFrameOpcodeCounts
+	var picCounts directFramePICCounts
 	pcCounts := make(map[*Proto][]uint64)
 	thread := newVMThread(runtimeGlobals(nil))
 	thread.directFrameOpcodeCounts = &opcodeCounts
+	thread.directFramePICCounts = &picCounts
 	thread.directFramePCCounts = pcCounts
 	results, err := thread.run(proto, nil, nil)
 	if err != nil {
 		t.Fatalf("thread.run returned error: %v", err)
 	}
 	got, ok := results[0].Number()
-	if !ok || got != 3 {
-		t.Fatalf("result is %v (%t), want number 3", results[0], ok)
+	if !ok || got != 10 {
+		t.Fatalf("result is %v (%t), want number 10", results[0], ok)
 	}
 	if got := len(opcodeCounts.ranked()); got != 0 {
 		t.Fatalf("production direct-frame opcode counters recorded %d opcodes without opt-in", got)
+	}
+	if got := picCounts.totalMechanismActivity(); got != 0 {
+		t.Fatalf("production direct-frame PIC counters recorded %d events without opt-in", got)
 	}
 	if got := pcCounts[proto]; len(got) != 0 {
 		t.Fatalf("production direct-frame pc counters recorded %v without opt-in", got)
