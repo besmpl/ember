@@ -39,8 +39,8 @@ func TestProtoPublishesWordcodeAndPhysicalLineMap(t *testing.T) {
 	if len(proto.words) <= len(code) {
 		t.Fatalf("word stream length = %d, want AUX-expanded stream longer than %d instructions", len(proto.words), len(code))
 	}
-	if got := len(proto.directFrameIndexCaches); got != len(proto.words) {
-		t.Fatalf("direct-frame cache length = %d, want physical word length %d", got, len(proto.words))
+	if got := proto.cacheSiteCount; got != 1 {
+		t.Fatalf("cache site count = %d, want one cache site", got)
 	}
 	if proto.wordLines[boundaries[0]] != 11 || proto.wordLines[boundaries[0]+1] != 0 {
 		t.Fatalf("AUX line mapping = %#v, want primary line 11 followed by zero", proto.wordLines)

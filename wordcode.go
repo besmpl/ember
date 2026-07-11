@@ -42,6 +42,11 @@ const (
 	wordcodeAuxAC16
 	wordcodeAuxBD16
 	wordcodeAuxCD16
+	// Cache-site encodings reserve the low/high halves for a semantic
+	// constant index and a zero-based cache site id. The cache32 form is used
+	// by register-only index operations whose ABC operands are already full.
+	wordcodeAuxConstCache16
+	wordcodeAuxCache32
 )
 
 type wordcodeOperandSlot uint8
@@ -149,19 +154,19 @@ func wordcodeMetadataFor(op opcode) wordcodeEncodingMetadata {
 	case opSetGlobal:
 		meta = wordcodeEncodingMetadata{format: wordcodeFormatABC, aux: wordcodeAuxAC16, auxRequired: true}
 	case opMove,
-		opSetIndex, opGetIndex, opPrepareIter,
+		opPrepareIter,
 		opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow,
 		opConcat, opEqual, opNotEqual, opLess, opLessEqual, opGreater, opGreaterEqual,
 		opReturnOne:
 		meta = wordcodeEncodingMetadata{format: wordcodeFormatABC}
 	case opNewTable:
 		meta = wordcodeEncodingMetadata{format: wordcodeFormatABC, aux: wordcodeAuxBC16}
-	case opSetField, opSetStringField:
+	case opSetField:
 		meta = wordcodeEncodingMetadata{format: wordcodeFormatABC, aux: wordcodeAuxB}
-	case opSetStringFieldIndex, opGetStringFieldIndex:
-		meta = wordcodeEncodingMetadata{format: wordcodeFormatABC, aux: wordcodeAuxBD16, auxRequired: true}
-	case opGetStringField:
-		meta = wordcodeEncodingMetadata{format: wordcodeFormatABC, aux: wordcodeAuxC}
+	case opSetStringField, opGetStringField, opSetStringFieldIndex, opGetStringFieldIndex:
+		meta = wordcodeEncodingMetadata{format: wordcodeFormatABC, aux: wordcodeAuxConstCache16, auxRequired: true}
+	case opSetIndex, opGetIndex:
+		meta = wordcodeEncodingMetadata{format: wordcodeFormatABC, aux: wordcodeAuxCache32, auxRequired: true}
 	case opClosure, opGetUpvalue:
 		meta = wordcodeEncodingMetadata{format: wordcodeFormatAD, adOperand: wordcodeSlotB, aux: wordcodeAuxB}
 	case opSetUpvalue:
@@ -396,9 +401,44 @@ func wordcodeAuxContains(meta wordcodeEncodingMetadata, slot wordcodeOperandSlot
 		return slot == wordcodeSlotB || slot == wordcodeSlotD
 	case wordcodeAuxCD16:
 		return slot == wordcodeSlotC || slot == wordcodeSlotD
+	case wordcodeAuxConstCache16, wordcodeAuxCache32:
+		// Cache-site operands live in the AUX payload and are not part of the
+		// canonical A/B/C/D instruction slots.
+		return false
 	default:
 		return false
 	}
+}
+
+func wordcodeCacheableOpcode(op opcode) bool {
+	switch op {
+	case opSetStringField, opGetStringField,
+		opSetStringFieldIndex, opGetStringFieldIndex, opSetIndex, opGetIndex:
+		return true
+	default:
+		return false
+	}
+}
+
+func wordcodeCacheConstantSlot(op opcode) wordcodeOperandSlot {
+	switch op {
+	case opSetStringField, opSetStringFieldIndex:
+		return wordcodeSlotB
+	case opGetStringField, opGetStringFieldIndex:
+		return wordcodeSlotC
+	default:
+		return wordcodeSlotA
+	}
+}
+
+func wordcodeCacheSiteCount(code []instruction) int {
+	count := 0
+	for _, ins := range code {
+		if wordcodeCacheableOpcode(ins.op) {
+			count++
+		}
+	}
+	return count
 }
 
 func wordcodeJumpSlot(op opcode) (wordcodeOperandSlot, bool) {
@@ -432,7 +472,26 @@ func wordcodeSigned16ForAux(op opcode, slot wordcodeOperandSlot, value int) (uin
 	return uint16(value), nil
 }
 
-func wordcodeBuildAux(op opcode, meta wordcodeEncodingMetadata, ins instruction, displacement int) (wordcodeWord, error) {
+func wordcodeBuildAux(op opcode, meta wordcodeEncodingMetadata, ins instruction, displacement int, cacheSiteID int) (wordcodeWord, error) {
+	if meta.aux == wordcodeAuxConstCache16 {
+		constant := wordcodeSlotValue(ins, wordcodeCacheConstantSlot(op))
+		if constant < 0 || constant > 0xffff {
+			return 0, fmt.Errorf("%s cache constant index %d out of uint16 range", opcodeName(op), constant)
+		}
+		if cacheSiteID < 0 || cacheSiteID > 0xffff {
+			return 0, fmt.Errorf("%s cache site id %d out of uint16 range", opcodeName(op), cacheSiteID)
+		}
+		return wordcodeWord(uint16(constant)) | wordcodeWord(uint16(cacheSiteID))<<16, nil
+	}
+	if meta.aux == wordcodeAuxCache32 {
+		if cacheSiteID < 0 {
+			return 0, fmt.Errorf("%s cache site id is required by the encoder", opcodeName(op))
+		}
+		if uint64(cacheSiteID) > uint64(^uint32(0)) {
+			return 0, fmt.Errorf("%s cache site id %d exceeds uint32 range", opcodeName(op), cacheSiteID)
+		}
+		return wordcodeWord(uint32(cacheSiteID)), nil
+	}
 	value := func(slot wordcodeOperandSlot) int { return wordcodeValueForAux(op, ins, slot, displacement) }
 	switch meta.aux {
 	case wordcodeAuxA, wordcodeAuxB, wordcodeAuxC, wordcodeAuxD:
@@ -462,6 +521,8 @@ func wordcodeBuildAux(op opcode, meta wordcodeEncodingMetadata, ins instruction,
 			return 0, err
 		}
 		return wordcodeWord(low) | wordcodeWord(high)<<16, nil
+	case wordcodeAuxConstCache16, wordcodeAuxCache32:
+		return 0, fmt.Errorf("%s cache AUX requires cache-aware encoding", opcodeName(op))
 	default:
 		return 0, fmt.Errorf("%s declares unsupported AUX mode %d", opcodeName(op), meta.aux)
 	}
@@ -491,6 +552,16 @@ func wordcodeSetAux(ins *instruction, meta wordcodeEncodingMetadata, aux wordcod
 		}
 		setWordcodeSlot(ins, lowSlot, wordcodeDecodeAD(ins.op, lowSlot, aux))
 		setWordcodeSlot(ins, highSlot, wordcodeDecodeAD(ins.op, highSlot, aux>>16))
+		return nil
+	case wordcodeAuxConstCache16:
+		// The cache id is carried alongside the constant and is consumed by
+		// wordcodeDecodeWords/dispatchers; this helper only reconstructs the
+		// canonical semantic constant operand.
+		setWordcodeSlot(ins, wordcodeCacheConstantSlot(ins.op), int(uint16(aux)))
+		return nil
+	case wordcodeAuxCache32:
+		// Register-only index operations have no semantic AUX operand. The
+		// payload is the cache id, which callers that need it extract directly.
 		return nil
 	default:
 		return fmt.Errorf("%s declares unsupported AUX mode %d", opcodeName(ins.op), meta.aux)
@@ -543,7 +614,7 @@ func wordcodePrimaryAD(value int, signed bool, aux bool) (wordcodeWord, error) {
 	return wordcodeWord(uint16(value)), nil
 }
 
-func wordcodeEncodeInstruction(ins instruction, pc int, nextWordPC int, boundaries []int) ([]wordcodeWord, error) {
+func wordcodeEncodeInstruction(ins instruction, pc int, nextWordPC int, boundaries []int, cacheSite ...int) ([]wordcodeWord, error) {
 	meta, ok := opcodeMetadata(ins.op)
 	if !ok {
 		return nil, fmt.Errorf("unknown opcode %d", ins.op)
@@ -566,6 +637,16 @@ func wordcodeEncodeInstruction(ins instruction, pc int, nextWordPC int, boundari
 	if encoding.auxRequired {
 		hasAux = true
 	}
+	if len(cacheSite) > 1 {
+		return nil, fmt.Errorf("%s received %d cache site ids", opcodeName(ins.op), len(cacheSite))
+	}
+	cacheSiteID := -1
+	if len(cacheSite) != 0 {
+		cacheSiteID = cacheSite[0]
+	}
+	if wordcodeCacheableOpcode(ins.op) && cacheSiteID < 0 {
+		return nil, fmt.Errorf("%s cache site id is required by the encoder", opcodeName(ins.op))
+	}
 	if encoding.aux == wordcodeAuxNone && hasAux {
 		return nil, fmt.Errorf("%s does not permit an AUX word", opcodeName(ins.op))
 	}
@@ -581,8 +662,24 @@ func wordcodeEncodeInstruction(ins instruction, pc int, nextWordPC int, boundari
 	}
 	switch encoding.format {
 	case wordcodeFormatABC:
+		primary := [3]int{ins.a, ins.b, ins.c}
+		if wordcodeCacheableOpcode(ins.op) {
+			// Cacheable table/index operations use the primary ABC fields for
+			// their semantic register operands. Constants and the cache site id
+			// live in AUX, keeping every cacheable operation on the one-AUX path.
+			switch ins.op {
+			case opSetStringField:
+				primary = [3]int{ins.a, ins.c, 0}
+			case opGetStringField:
+				primary = [3]int{ins.a, ins.b, 0}
+			case opSetStringFieldIndex:
+				primary = [3]int{ins.a, ins.c, ins.d}
+			case opGetStringFieldIndex:
+				primary = [3]int{ins.a, ins.b, ins.d}
+			}
+		}
 		for index, slot := range []wordcodeOperandSlot{wordcodeSlotA, wordcodeSlotB, wordcodeSlotC} {
-			value := wordcodeSlotValue(ins, slot)
+			value := primary[index]
 			field, err := encodePrimary(slot, value)
 			if err != nil {
 				return nil, fmt.Errorf("%s operand %s: %w", opcodeName(ins.op), wordcodeSlotName(slot), err)
@@ -616,7 +713,7 @@ func wordcodeEncodeInstruction(ins instruction, pc int, nextWordPC int, boundari
 	if !hasAux {
 		return []wordcodeWord{word}, nil
 	}
-	aux, err := wordcodeBuildAux(ins.op, encoding, ins, displacement)
+	aux, err := wordcodeBuildAux(ins.op, encoding, ins, displacement, cacheSiteID)
 	if err != nil {
 		return nil, err
 	}
@@ -744,8 +841,14 @@ func encodeWordcode(code []instruction, limits ...int) ([]wordcodeWord, error) {
 	}
 	boundaries := boundaryMap.logicalToWord
 	words := make([]wordcodeWord, 0, boundaries[len(code)])
+	cacheSiteID := 0
 	for pc, ins := range code {
-		encoded, err := wordcodeEncodeInstruction(ins, pc, boundaries[pc+1], boundaries)
+		siteID := -1
+		if wordcodeCacheableOpcode(ins.op) {
+			siteID = cacheSiteID
+			cacheSiteID++
+		}
+		encoded, err := wordcodeEncodeInstruction(ins, pc, boundaries[pc+1], boundaries, siteID)
 		if err != nil {
 			return nil, fmt.Errorf("instruction %d %s: %w", pc, opcodeName(ins.op), err)
 		}
@@ -769,6 +872,7 @@ type wordcodeDecoded struct {
 	ins      instruction
 	wordPC   int
 	nextWord int
+	cacheID  uint32
 }
 
 func wordcodeDecodeWords(words []wordcodeWord) ([]wordcodeDecoded, []int, error) {
@@ -795,6 +899,26 @@ func wordcodeDecodeWords(words []wordcodeWord) ([]wordcodeDecoded, []int, error)
 			ins.a = wordcodeDecodeByte(op, wordcodeSlotA, raw>>8)
 			ins.b = wordcodeDecodeByte(op, wordcodeSlotB, raw>>16)
 			ins.c = wordcodeDecodeByte(op, wordcodeSlotC, raw>>24)
+			switch op {
+			case opSetStringField:
+				if ins.c != 0 {
+					return nil, nil, fmt.Errorf("word %d %s reserves primary C for zero", wordPC, opcodeName(op))
+				}
+				ins.c = ins.b
+				ins.b = 0
+			case opGetStringField:
+				if ins.c != 0 {
+					return nil, nil, fmt.Errorf("word %d %s reserves primary C for zero", wordPC, opcodeName(op))
+				}
+				ins.c = 0
+			case opSetStringFieldIndex:
+				ins.d = ins.c
+				ins.c = ins.b
+				ins.b = 0
+			case opGetStringFieldIndex:
+				ins.d = ins.c
+				ins.c = 0
+			}
 		case wordcodeFormatAD:
 			ins.a = wordcodeDecodeByte(op, wordcodeSlotA, raw>>8)
 			setWordcodeSlot(&ins, meta.wordcode.adOperand, wordcodeDecodeAD(op, meta.wordcode.adOperand, raw>>16))
@@ -804,16 +928,24 @@ func wordcodeDecodeWords(words []wordcodeWord) ([]wordcodeDecoded, []int, error)
 			return nil, nil, fmt.Errorf("word %d %s has unsupported format %d", wordPC, opcodeName(op), meta.wordcode.format)
 		}
 		nextWord := wordPC + 1
+		cacheID := uint32(0)
 		if hasAux {
 			if nextWord >= len(words) {
 				return nil, nil, fmt.Errorf("word %d %s AUX word is truncated", wordPC, opcodeName(op))
 			}
-			if err := wordcodeSetAux(&ins, meta.wordcode, words[nextWord]); err != nil {
+			aux := words[nextWord]
+			if meta.wordcode.aux == wordcodeAuxConstCache16 {
+				constant := int(uint16(aux))
+				cacheID = uint32(aux >> 16)
+				setWordcodeSlot(&ins, wordcodeCacheConstantSlot(op), constant)
+			} else if meta.wordcode.aux == wordcodeAuxCache32 {
+				cacheID = uint32(aux)
+			} else if err := wordcodeSetAux(&ins, meta.wordcode, aux); err != nil {
 				return nil, nil, err
 			}
 			nextWord++
 		}
-		decoded = append(decoded, wordcodeDecoded{ins: ins, wordPC: wordPC, nextWord: nextWord})
+		decoded = append(decoded, wordcodeDecoded{ins: ins, wordPC: wordPC, nextWord: nextWord, cacheID: cacheID})
 		boundaries = append(boundaries, nextWord)
 		wordPC = nextWord
 	}
@@ -823,6 +955,9 @@ func wordcodeDecodeWords(words []wordcodeWord) ([]wordcodeDecoded, []int, error)
 func decodeWordcode(words []wordcodeWord) ([]instruction, error) {
 	decoded, boundaries, err := wordcodeDecodeWords(words)
 	if err != nil {
+		return nil, err
+	}
+	if err := verifyWordcodeCacheSiteIDs(decoded, -1); err != nil {
 		return nil, err
 	}
 	wordToLogical := make(map[int]int, len(boundaries))
@@ -985,6 +1120,13 @@ func verifyWordcodeInstruction(ins instruction, registerCount, constantCount, pr
 // verifyWordcode validates a decoded stream. Optional limits are registers,
 // constants, prototypes, and upvalues respectively.
 func verifyWordcode(words []wordcodeWord, limits ...int) error {
+	decoded, _, err := wordcodeDecodeWords(words)
+	if err != nil {
+		return err
+	}
+	if err := verifyWordcodeCacheSiteIDs(decoded, -1); err != nil {
+		return err
+	}
 	code, err := decodeWordcode(words)
 	if err != nil {
 		return err
@@ -1017,6 +1159,26 @@ func verifyWordcode(words []wordcodeWord, limits ...int) error {
 	return nil
 }
 
+// verifyWordcodeCacheSiteIDs enforces the compact, encounter-order cache-site
+// numbering contract. The production loops can then use the AUX id as a
+// direct index without a physical-PC side table or a second lookup.
+func verifyWordcodeCacheSiteIDs(decoded []wordcodeDecoded, expected int) error {
+	next := 0
+	for pc, entry := range decoded {
+		if !wordcodeCacheableOpcode(entry.ins.op) {
+			continue
+		}
+		if entry.cacheID != uint32(next) {
+			return fmt.Errorf("instruction %d %s cache site id %d, want %d", pc, opcodeName(entry.ins.op), entry.cacheID, next)
+		}
+		next++
+	}
+	if expected >= 0 && next != expected {
+		return fmt.Errorf("wordcode contains %d cache sites, want %d", next, expected)
+	}
+	return nil
+}
+
 func wordcodeOpenResultProducer(code []instruction, pc, start int) bool {
 	if pc <= 0 || start < 0 {
 		return false
@@ -1038,7 +1200,17 @@ func verifyWordcodeForProto(proto *Proto, words []wordcodeWord) error {
 	if proto == nil {
 		return fmt.Errorf("nil prototype")
 	}
+	if proto.cacheSiteCount < 0 {
+		return fmt.Errorf("negative cache site count %d", proto.cacheSiteCount)
+	}
 	if err := verifyWordcode(words, proto.registers, len(proto.constants), len(proto.prototypes), len(proto.upvalues)); err != nil {
+		return err
+	}
+	decoded, _, err := wordcodeDecodeWords(words)
+	if err != nil {
+		return err
+	}
+	if err := verifyWordcodeCacheSiteIDs(decoded, proto.cacheSiteCount); err != nil {
 		return err
 	}
 	code, err := decodeWordcode(words)

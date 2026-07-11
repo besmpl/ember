@@ -1552,10 +1552,9 @@ type Proto struct {
 	params                  int
 	variadic                bool
 	capturedLocals          []bool
-	directFrameIndexCaches  []dynamicStringIndexCache
+	cacheSiteCount          int
 	entryNilRegisters       []int
 	reuseZeroCaptureClosure bool
-	canonicalClosure        *closure
 	verifyErr               error
 }
 
@@ -1683,7 +1682,6 @@ func finalizeProtoExecutionArtifact(proto *Proto, sourceCode ...[]instruction) e
 		proto.verifyErr = err
 		return proto.verifyErr
 	}
-	applyProtoWordIndexCaches(proto, code)
 	return proto.verifyErr
 }
 
@@ -1738,6 +1736,7 @@ func encodeProtoWords(proto *Proto, code []instruction) error {
 		return err
 	}
 	proto.words = words
+	proto.cacheSiteCount = wordcodeCacheSiteCount(code)
 	if len(proto.lines) == 0 {
 		proto.wordLines = nil
 	} else {
@@ -1763,23 +1762,6 @@ func wordcodeLinesFromWords(logicalLines []int, words []wordcodeWord) []int {
 		}
 	}
 	return lines
-}
-
-// applyProtoWordIndexCaches sizes the transitional direct-frame cache by the
-// physical word stream. AUX words intentionally have no cache entry; runtime
-// dispatch indexes this slice by the primary word PC.
-func applyProtoWordIndexCaches(proto *Proto, code []instruction) {
-	if proto == nil || !codeUsesDirectFrameIndexCache(code) {
-		if proto != nil {
-			proto.directFrameIndexCaches = nil
-		}
-		return
-	}
-	if len(proto.directFrameIndexCaches) != len(proto.words) {
-		proto.directFrameIndexCaches = make([]dynamicStringIndexCache, len(proto.words))
-		return
-	}
-	clear(proto.directFrameIndexCaches)
 }
 
 func buildExecutionArtifact(proto *Proto, code []instruction) executionArtifact {
@@ -1814,24 +1796,12 @@ func codeSupportsDirectFrame(code []instruction) bool {
 	return true
 }
 
-func codeUsesDirectFrameIndexCache(code []instruction) bool {
-	for _, ins := range code {
-		switch ins.op {
-		case opSetStringField, opGetStringField,
-			opSetStringFieldIndex, opGetStringFieldIndex, opSetIndex, opGetIndex:
-			return true
-		}
-	}
-	return false
-}
-
 func markReusableZeroCaptureClosures(proto *Proto, code []instruction) {
 	if proto == nil {
 		return
 	}
 	for _, child := range proto.prototypes {
 		child.reuseZeroCaptureClosure = false
-		child.canonicalClosure = nil
 	}
 	for pc, ins := range code {
 		if ins.op != opClosure || ins.b < 0 || ins.b >= len(proto.prototypes) {

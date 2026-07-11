@@ -24,9 +24,8 @@ func TestProtoFieldClassificationBudget(t *testing.T) {
 		"params":                  {},
 		"variadic":                {},
 		"capturedLocals":          {},
-		"directFrameIndexCaches":  {},
+		"cacheSiteCount":          {},
 		"reuseZeroCaptureClosure": {},
-		"canonicalClosure":        {},
 		"verifyErr":               {},
 	}
 	runtimeSideTables := map[string]struct{}{

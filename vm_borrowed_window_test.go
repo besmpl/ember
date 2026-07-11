@@ -7,7 +7,6 @@ func rebuildProtoExecutionCodeForTest(t *testing.T, proto *Proto, code []instruc
 	if err := encodeProtoWords(proto, code); err != nil {
 		t.Fatalf("encode marked prototype: %v", err)
 	}
-	applyProtoWordIndexCaches(proto, code)
 }
 
 func markFirstLocalCallBorrowHint(t *testing.T, proto *Proto, borrow bool) {

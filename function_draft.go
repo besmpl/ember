@@ -103,7 +103,6 @@ func sealFunctionProto(proto *Proto, assembly *assembledBytecodeIR) error {
 		proto.verifyErr = err
 		return err
 	}
-	applyProtoWordIndexCaches(proto, assembly.code)
 	return proto.verifyErr
 }
 

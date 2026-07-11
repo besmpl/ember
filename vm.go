@@ -104,6 +104,8 @@ type vmThread struct {
 	stringIntern            map[string]*stringBox
 	stringConcatIntern      map[stringConcatKey]*stringBox
 	stringScratch           []byte
+	functionInstances       map[*Proto]*vmFunctionInstance
+	functionInstanceSites   int
 }
 
 type stringConcatKey struct {
@@ -543,6 +545,19 @@ type dynamicStringIndexCache struct {
 	next    uint8
 }
 
+// vmFunctionInstance owns mutable execution artifacts for one immutable Proto
+// on one vmThread. Compiled prototypes can therefore be run concurrently
+// without sharing inline caches or reusable closure values.
+type vmFunctionInstance struct {
+	caches           []*dynamicStringIndexCache
+	canonicalClosure *closure
+}
+
+// dynamicStringIndexCacheCold marks a cache site that has been observed once
+// but has not yet earned a full inline-cache allocation. It is never returned
+// to callers, so the shared sentinel cannot be mutated by cache helpers.
+var dynamicStringIndexCacheCold = &dynamicStringIndexCache{}
+
 type dynamicStringIndexCacheEntry struct {
 	table *Table
 	// key is kept for the raw-string adapter and for diagnostics.  The hot
@@ -572,11 +587,20 @@ const (
 	dynamicStringIndexKeyHashBytes
 )
 
-func (proto *Proto) directFrameIndexCacheAt(pc int) *dynamicStringIndexCache {
-	if proto == nil || pc < 0 || pc >= len(proto.directFrameIndexCaches) {
+func (instance *vmFunctionInstance) cacheAt(cacheID uint32) *dynamicStringIndexCache {
+	if instance == nil || cacheID >= uint32(len(instance.caches)) {
 		return nil
 	}
-	return &proto.directFrameIndexCaches[pc]
+	cache := instance.caches[cacheID]
+	if cache == nil {
+		instance.caches[cacheID] = dynamicStringIndexCacheCold
+		return nil
+	}
+	if cache == dynamicStringIndexCacheCold {
+		cache = &dynamicStringIndexCache{}
+		instance.caches[cacheID] = cache
+	}
+	return cache
 }
 
 type vmSuspendedFrames struct {
@@ -875,13 +899,16 @@ func directFrameFail(err error) directFrameSideExit {
 	return directFrameSideExit{kind: directFrameSideExitFail, reason: directFrameSideExitReasonError, err: err}
 }
 
-func functionValueWithCapturedUpvalues(proto *Proto, captured capturedUpvalueSet) Value {
+func (thread *vmThread) functionValueWithCapturedUpvalues(proto *Proto, captured capturedUpvalueSet) Value {
 	if captured.count == 0 {
 		if proto != nil && proto.reuseZeroCaptureClosure {
-			if proto.canonicalClosure == nil {
-				proto.canonicalClosure = &closure{proto: proto}
+			instance := thread.functionInstance(proto)
+			if instance != nil {
+				if instance.canonicalClosure == nil {
+					instance.canonicalClosure = &closure{proto: proto}
+				}
+				return closureFunctionValue(instance.canonicalClosure)
 			}
-			return closureFunctionValue(proto.canonicalClosure)
 		}
 		return functionValue(proto, nil)
 	}
@@ -992,6 +1019,34 @@ func newVMThreadWithContext(ctx context.Context, globals *globalEnv) vmThread {
 	}
 }
 
+func (thread *vmThread) functionInstance(proto *Proto) *vmFunctionInstance {
+	if thread == nil || proto == nil || (proto.cacheSiteCount == 0 && !proto.reuseZeroCaptureClosure) {
+		return nil
+	}
+	if thread.functionInstances == nil {
+		thread.functionInstances = make(map[*Proto]*vmFunctionInstance)
+	}
+	instance := thread.functionInstances[proto]
+	if instance == nil {
+		instance = &vmFunctionInstance{}
+		if proto.cacheSiteCount > 0 {
+			instance.caches = make([]*dynamicStringIndexCache, proto.cacheSiteCount)
+		}
+		thread.functionInstanceSites += proto.cacheSiteCount
+		thread.functionInstances[proto] = instance
+		return instance
+	}
+	if len(instance.caches) != proto.cacheSiteCount {
+		thread.functionInstanceSites += proto.cacheSiteCount - len(instance.caches)
+		if proto.cacheSiteCount > 0 {
+			instance.caches = make([]*dynamicStringIndexCache, proto.cacheSiteCount)
+		} else {
+			instance.caches = nil
+		}
+	}
+	return instance
+}
+
 func acquireVMThread(ctx context.Context, globals *globalEnv) *vmThread {
 	thread := vmThreadPool.Get().(*vmThread)
 	thread.resetForRun(ctx, globals)
@@ -1081,6 +1136,10 @@ func (thread *vmThread) resetForPool() {
 	thread.directFramePICCounts = nil
 	thread.directFramePCCounts = nil
 	thread.intrinsicGuards = nil
+	if len(thread.functionInstances) > 64 || thread.functionInstanceSites > 1024 {
+		thread.functionInstances = nil
+		thread.functionInstanceSites = 0
+	}
 }
 
 func (thread *vmThread) inheritDebugConfig(parent *vmThread) {
@@ -3566,6 +3625,7 @@ type wordcodeDispatch struct {
 	op       opcode
 	a, b, c  int
 	d        int
+	cacheID  uint32
 	nextWord int
 }
 
@@ -3593,6 +3653,24 @@ func decodeWordcodeDispatch(words []wordcodeWord, pc int) (wordcodeDispatch, err
 		dispatch.a = wordcodeDecodeByte(op, wordcodeSlotA, raw>>8)
 		dispatch.b = wordcodeDecodeByte(op, wordcodeSlotB, raw>>16)
 		dispatch.c = wordcodeDecodeByte(op, wordcodeSlotC, raw>>24)
+		if meta.wordcode.aux == wordcodeAuxConstCache16 {
+			switch op {
+			case opSetStringField:
+				if dispatch.c != 0 {
+					return wordcodeDispatch{}, fmt.Errorf("wordcode pc %d %s reserves primary C for zero", pc, opcodeName(op))
+				}
+				dispatch.c, dispatch.b = dispatch.b, 0
+			case opGetStringField:
+				if dispatch.c != 0 {
+					return wordcodeDispatch{}, fmt.Errorf("wordcode pc %d %s reserves primary C for zero", pc, opcodeName(op))
+				}
+				dispatch.c = 0
+			case opSetStringFieldIndex:
+				dispatch.d, dispatch.c, dispatch.b = dispatch.c, dispatch.b, 0
+			case opGetStringFieldIndex:
+				dispatch.d, dispatch.c = dispatch.c, 0
+			}
+		}
 	case wordcodeFormatAD:
 		dispatch.a = wordcodeDecodeByte(op, wordcodeSlotA, raw>>8)
 		value := wordcodeDecodeAD(op, meta.wordcode.adOperand, raw>>16)
@@ -3623,6 +3701,17 @@ func decodeWordcodeDispatch(words []wordcodeWord, pc int) (wordcodeDispatch, err
 		case wordcodeAuxCD16:
 			dispatch.c = wordcodeDecodeAD(op, wordcodeSlotC, aux)
 			dispatch.d = wordcodeDecodeAD(op, wordcodeSlotD, aux>>16)
+		case wordcodeAuxConstCache16:
+			constant := int(uint16(aux))
+			dispatch.cacheID = uint32(aux >> 16)
+			switch op {
+			case opSetStringField, opSetStringFieldIndex:
+				dispatch.b = constant
+			case opGetStringField, opGetStringFieldIndex:
+				dispatch.c = constant
+			}
+		case wordcodeAuxCache32:
+			dispatch.cacheID = uint32(aux)
 		default:
 			return wordcodeDispatch{}, fmt.Errorf("wordcode pc %d %s has unsupported AUX mode %d", pc, opcodeName(op), meta.wordcode.aux)
 		}
@@ -3708,6 +3797,7 @@ func runDirectFrameInstrumentedLoop(thread *vmThread, frameRef **vmFrame) direct
 	rootDepth := len(thread.frames) - 1
 	var (
 		proto                *Proto
+		functionInstance     *vmFunctionInstance
 		words                []wordcodeWord
 		constants            []Value
 		constantKeys         []tableKey
@@ -3726,6 +3816,7 @@ reload:
 	*frameRef = frame
 	directChildActive = len(thread.frames)-1 > rootDepth
 	proto = frame.proto
+	functionInstance = thread.functionInstance(proto)
 	if proto.verifyErr != nil {
 		return directFrameExitAt(frame, frame.pc, directFrameFail(fmt.Errorf("run: invalid prototype: %w", proto.verifyErr)))
 	}
@@ -3780,6 +3871,18 @@ reload:
 			a = wordcodeDecodeByte(op, wordcodeSlotA, raw>>8)
 			b = wordcodeDecodeByte(op, wordcodeSlotB, raw>>16)
 			c = wordcodeDecodeByte(op, wordcodeSlotC, raw>>24)
+			if encoding.aux == wordcodeAuxConstCache16 {
+				switch op {
+				case opSetStringField:
+					c, b = b, 0
+				case opGetStringField:
+					c = 0
+				case opSetStringFieldIndex:
+					d, c, b = c, b, 0
+				case opGetStringFieldIndex:
+					d, c = c, 0
+				}
+			}
 		case wordcodeFormatAD:
 			a = wordcodeDecodeByte(op, wordcodeSlotA, raw>>8)
 			value := wordcodeDecodeAD(op, encoding.adOperand, raw>>16)
@@ -3805,6 +3908,7 @@ reload:
 			return directFrameFail(fmt.Errorf("wordcode pc %d %s has unsupported format %d", pc, opcodeName(op), encoding.format))
 		}
 		nextWord := pc + 1
+		cacheID := uint32(0)
 		if hasAux {
 			if nextWord >= len(words) {
 				return directFrameFail(fmt.Errorf("wordcode pc %d %s AUX is truncated", pc, opcodeName(op)))
@@ -3831,6 +3935,17 @@ reload:
 			case wordcodeAuxCD16:
 				c = wordcodeDecodeAD(op, wordcodeSlotC, aux)
 				d = wordcodeDecodeAD(op, wordcodeSlotD, aux>>16)
+			case wordcodeAuxConstCache16:
+				setCacheConstant := int(uint16(aux))
+				cacheID = uint32(aux >> 16)
+				switch op {
+				case opSetStringField, opSetStringFieldIndex:
+					b = setCacheConstant
+				case opGetStringField, opGetStringFieldIndex:
+					c = setCacheConstant
+				}
+			case wordcodeAuxCache32:
+				cacheID = uint32(aux)
 			default:
 				return directFrameFail(fmt.Errorf("wordcode pc %d %s has unsupported AUX mode %d", pc, opcodeName(op), encoding.aux))
 			}
@@ -3969,7 +4084,7 @@ reload:
 			key := constantKeys[b].str
 			value := registers[c]
 			if valueKind(keyValue) == StringKind && !value.IsNil() {
-				cache := proto.directFrameIndexCacheAt(pc)
+				cache := functionInstance.cacheAt(cacheID)
 				if cache.hasValueKey(table, keyValue) {
 					if cache.writeValueCounted(table, keyValue, value, picCounts) {
 						break
@@ -4023,7 +4138,7 @@ reload:
 			}
 			key := registers[c]
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(pc)
+				cache := functionInstance.cacheAt(cacheID)
 				value := registers[d]
 				if cache.writeValueCounted(nextTable, key, value, picCounts) {
 					break
@@ -4048,7 +4163,7 @@ reload:
 			key := constants[c]
 			keyText := constantKeys[c].str
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(pc)
+				cache := functionInstance.cacheAt(cacheID)
 				if value, ok := cache.getValueCounted(table, key, picCounts); ok {
 					registers[a] = value
 					break
@@ -4113,7 +4228,7 @@ reload:
 			}
 			key := registers[d]
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(pc)
+				cache := functionInstance.cacheAt(cacheID)
 				if value, ok := cache.getValueCounted(nextTable, key, picCounts); ok {
 					registers[a] = value
 					break
@@ -4157,7 +4272,7 @@ reload:
 			}
 			key := registers[b]
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(pc)
+				cache := functionInstance.cacheAt(cacheID)
 				value := registers[c]
 				if cache.writeValueCounted(table, key, value, picCounts) {
 					break
@@ -4194,7 +4309,7 @@ reload:
 			}
 			key := registers[c]
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(pc)
+				cache := functionInstance.cacheAt(cacheID)
 				if value, ok := cache.getValueCounted(table, key, picCounts); ok {
 					registers[a] = value
 					break
@@ -4225,7 +4340,7 @@ reload:
 		case opClosure:
 			child := proto.prototypes[b]
 			captured := captureUpvalues(child, frame)
-			registers[a] = functionValueWithCapturedUpvalues(child, captured)
+			registers[a] = thread.functionValueWithCapturedUpvalues(child, captured)
 
 		case opPrepareIter:
 			iterValue := registers[a]
@@ -5362,6 +5477,7 @@ func runDirectFrameProductionLoop(thread *vmThread, frameRef **vmFrame) directFr
 	rootDepth := len(thread.frames) - 1
 	var (
 		proto             *Proto
+		functionInstance  *vmFunctionInstance
 		words             []wordcodeWord
 		constants         []Value
 		constantKeys      []tableKey
@@ -5376,6 +5492,7 @@ reload:
 	*frameRef = frame
 	directChildActive = len(thread.frames)-1 > rootDepth
 	proto = frame.proto
+	functionInstance = thread.functionInstance(proto)
 	if proto.verifyErr != nil {
 		return directFrameExitAt(frame, frame.pc, directFrameFail(fmt.Errorf("run: invalid prototype: %w", proto.verifyErr)))
 	}
@@ -5399,6 +5516,18 @@ reload:
 			a = wordcodeHotDecodeByte(raw>>8, wordcodeHotSlotSigned(encoding, wordcodeSlotA))
 			b = wordcodeHotDecodeByte(raw>>16, wordcodeHotSlotSigned(encoding, wordcodeSlotB))
 			c = wordcodeHotDecodeByte(raw>>24, wordcodeHotSlotSigned(encoding, wordcodeSlotC))
+			if encoding.aux == wordcodeAuxConstCache16 {
+				switch op {
+				case opSetStringField:
+					c, b = b, 0
+				case opGetStringField:
+					c = 0
+				case opSetStringFieldIndex:
+					d, c, b = c, b, 0
+				case opGetStringFieldIndex:
+					d, c = c, 0
+				}
+			}
 		case wordcodeFormatAD:
 			a = wordcodeHotDecodeByte(raw>>8, wordcodeHotSlotSigned(encoding, wordcodeSlotA))
 			value := wordcodeHotDecodeAD(raw>>16, wordcodeHotSlotSigned(encoding, encoding.adOperand))
@@ -5422,6 +5551,7 @@ reload:
 			}
 		}
 		nextWord := pc + 1
+		cacheID := uint32(0)
 		if hasAux {
 			aux := words[nextWord]
 			switch encoding.aux {
@@ -5445,6 +5575,17 @@ reload:
 			case wordcodeAuxCD16:
 				c = wordcodeHotDecodeAD(aux, wordcodeHotSlotSigned(encoding, wordcodeSlotC))
 				d = wordcodeHotDecodeAD(aux>>16, wordcodeHotSlotSigned(encoding, wordcodeSlotD))
+			case wordcodeAuxConstCache16:
+				constant := int(uint16(aux))
+				cacheID = uint32(aux >> 16)
+				switch op {
+				case opSetStringField, opSetStringFieldIndex:
+					b = constant
+				case opGetStringField, opGetStringFieldIndex:
+					c = constant
+				}
+			case wordcodeAuxCache32:
+				cacheID = uint32(aux)
 			}
 			nextWord++
 		}
@@ -5564,7 +5705,7 @@ reload:
 			key := constantKeys[b].str
 			value := registers[c]
 			if valueKind(keyValue) == StringKind && !value.IsNil() {
-				cache := proto.directFrameIndexCacheAt(pc)
+				cache := functionInstance.cacheAt(cacheID)
 				if cache.hasValueKey(table, keyValue) {
 					if cache.writeValue(table, keyValue, value) {
 						break
@@ -5616,7 +5757,7 @@ reload:
 			}
 			key := registers[c]
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(pc)
+				cache := functionInstance.cacheAt(cacheID)
 				value := registers[d]
 				if cache.writeValue(nextTable, key, value) {
 					break
@@ -5639,7 +5780,7 @@ reload:
 			key := constants[c]
 			keyText := constantKeys[c].str
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(pc)
+				cache := functionInstance.cacheAt(cacheID)
 				if value, ok := cache.getValue(table, key); ok {
 					registers[a] = value
 					break
@@ -5701,7 +5842,7 @@ reload:
 			}
 			key := registers[d]
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(pc)
+				cache := functionInstance.cacheAt(cacheID)
 				if value, ok := cache.getValue(nextTable, key); ok {
 					registers[a] = value
 					break
@@ -5739,7 +5880,7 @@ reload:
 			}
 			key := registers[b]
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(pc)
+				cache := functionInstance.cacheAt(cacheID)
 				value := registers[c]
 				if cache.writeValue(table, key, value) {
 					break
@@ -5772,7 +5913,7 @@ reload:
 			}
 			key := registers[c]
 			if valueKind(key) == StringKind {
-				cache := proto.directFrameIndexCacheAt(pc)
+				cache := functionInstance.cacheAt(cacheID)
 				if value, ok := cache.getValue(table, key); ok {
 					registers[a] = value
 					break
@@ -5798,7 +5939,7 @@ reload:
 		case opClosure:
 			child := proto.prototypes[b]
 			captured := captureUpvalues(child, frame)
-			registers[a] = functionValueWithCapturedUpvalues(child, captured)
+			registers[a] = thread.functionValueWithCapturedUpvalues(child, captured)
 
 		case opPrepareIter:
 			iterValue := registers[a]

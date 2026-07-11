@@ -76,7 +76,7 @@ return value.name, value.hp`,
 			maxConstants:     6,
 			maxRegisterSlots: 5,
 			wantChildProtos:  0,
-			maxWordcodeWords: 12,
+			maxWordcodeWords: 18,
 		},
 	}
 

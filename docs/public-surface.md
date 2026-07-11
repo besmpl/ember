@@ -112,10 +112,11 @@ testable seam.
 - `RunWithGlobals(proto *Proto, globals map[string]Value) ([]Value, error)`
   executes with Ember's pure base globals plus explicit host-provided globals.
   Host-provided globals override base globals with the same name.
-- A compiled `*Proto` owns mutable runtime caches used to warm repeated table
-  access. Do not execute the same `*Proto` concurrently on multiple
-  goroutines; compile a separate prototype per concurrent runtime or serialize
-  calls through one runtime owner.
+- A compiled `*Proto` is immutable after sealing and may be executed
+  concurrently. Each execution runtime owns its function instances, inline
+  caches, and reusable closure values, so warming one runtime does not mutate
+  or contaminate another runtime's state. Host-provided globals and tables
+  remain caller-owned and still require ordinary synchronization when shared.
 - Scripts can read and assign globals as expression values, call host global
   functions, access fields or indexes on host global tables, and pass opaque
   host userdata values through script code. Local and upvalue names take
