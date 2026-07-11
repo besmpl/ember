@@ -175,6 +175,7 @@ type opcodeMetadataEntry struct {
 	registerEffects              opcodeRegisterEffects
 	effects                      opcodeEffects
 	directFrameUnsupportedReason string
+	wordcode                     wordcodeEncodingMetadata
 }
 
 type opcodeEffects struct {
@@ -378,8 +379,8 @@ var opcodeMetadataTable = func() [opcodeLimit]opcodeMetadataEntry {
 		table[op].operands = opcodeOperandShape{a: a, b: b, c: c, d: d}
 	}
 	setOperands(opLoadConst, register, constant, unused, unused)
-	setOperands(opLoadGlobal, register, constant, unused, unused)
-	setOperands(opSetGlobal, constant, register, unused, unused)
+	setOperands(opLoadGlobal, register, constant, bytecodeOperandGlobalSlot, unused)
+	setOperands(opSetGlobal, constant, register, bytecodeOperandGlobalSlot, unused)
 	setOperands(opMove, register, register, unused, unused)
 	setOperands(opNewTable, register, count, count, unused)
 	setOperands(opSetField, register, constant, register, unused)
@@ -436,7 +437,7 @@ var opcodeMetadataTable = func() [opcodeLimit]opcodeMetadataEntry {
 	setOperands(opJumpIfStringFieldNotGreaterK, register, constant, constant, jumpTarget)
 	setOperands(opJumpIfStringFieldGreaterK, register, constant, constant, jumpTarget)
 	setOperands(opJumpIfStringFieldNotGreaterR, register, constant, register, jumpTarget)
-	setOperands(opFastCall, register, count, count, count)
+	setOperands(opFastCall, register, bytecodeOperandNativeID, count, count)
 	setOperands(opCall, register, register, count, count)
 	setOperands(opCallOne, register, register, count, count)
 	setOperands(opCallLocalOne, register, register, register, count)
@@ -446,6 +447,9 @@ var opcodeMetadataTable = func() [opcodeLimit]opcodeMetadataEntry {
 	setOperands(opJump, unused, jumpTarget, unused, unused)
 	setOperands(opReturnOne, register, unused, unused, unused)
 	setOperands(opReturn, register, count, unused, unused)
+	for _, op := range allOpcodes {
+		table[op].wordcode = wordcodeMetadataFor(op)
+	}
 	setRegisterEffects := func(op opcode, fixed []opcodeRegisterEffect, spans []opcodeRegisterSpan) {
 		table[op].registerEffects = newOpcodeRegisterEffects(fixed, spans)
 	}
@@ -604,6 +608,9 @@ func validateOpcodeMetadataTable(table [opcodeLimit]opcodeMetadataEntry) error {
 		if meta.operands == (opcodeOperandShape{}) {
 			return fmt.Errorf("%s metadata missing operand shape", opcodeName(op))
 		}
+		if err := wordcodeValidateMetadata(op, meta); err != nil {
+			return fmt.Errorf("%s %w", opcodeName(op), err)
+		}
 		if (meta.controlFlow == opcodeControlJump || meta.controlFlow == opcodeControlBranch) && meta.jumpTarget == opcodeJumpTargetNone {
 			return fmt.Errorf("%s control flow without jump target", opcodeName(op))
 		}
@@ -724,6 +731,8 @@ const (
 	bytecodeOperandPrototype
 	bytecodeOperandUpvalue
 	bytecodeOperandJumpTarget
+	bytecodeOperandGlobalSlot
+	bytecodeOperandNativeID
 	bytecodeOperandCount
 )
 
