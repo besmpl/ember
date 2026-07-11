@@ -29,20 +29,24 @@ complexity contained, and leave Ember easier to reason about than you found it.
 - Keep diffs small.
 - Do not refactor unrelated code.
 - Do not add dependencies without asking.
-- Open a PR, never merge.
+- Work directly on `main` unless the user explicitly asks for a branch or PR.
+- After a requested change passes its relevant checks, commit it and push it to
+  `origin/main` without asking for separate approval.
+- When the user explicitly requests a PR, use GitHub's normal merge controls
+  and enable auto-merge after required checks pass unless told otherwise.
 
 ## Workflow
 
-For rough ideas:
-
-- First create a short implementation brief.
-- Do not code until the brief is approved.
+For rough ideas, create a short implementation brief when it would materially
+clarify scope. Continue with reasonable assumptions unless the user explicitly
+asks to approve the brief before implementation.
 
 For implementation:
 
-- Implement only the approved phase or slice.
+- Implement only the requested phase or slice.
 - Run relevant tests.
-- Include changed files, tests run, risks, and out-of-scope notes in the PR.
+- Include changed files, tests run, risks, and out-of-scope notes in the final
+  report or PR, when one was explicitly requested.
 
 ## Project Direction
 
