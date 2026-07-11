@@ -9,3 +9,10 @@ Keep each ADR focused:
 - decision;
 - consequences;
 - alternatives considered.
+
+Current runtime decisions:
+
+- `0001-go-native-runtime-mapping.md`: public Go-object mapping and default Go
+  lifetime.
+- `0004-runtime-slot-handle-ownership.md`: private slot/handle ownership when
+  measured internal VM pressure justifies a runtime heap.

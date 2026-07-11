@@ -30,6 +30,8 @@ and retire or delete it when the slice lands or is abandoned.
 - `checks.md`: local verification commands.
 - `adr/0001-go-native-runtime-mapping.md`: decision to prefer Go objects,
   Go GC, and Go runtime features behind Ember interfaces.
+- `adr/0004-runtime-slot-handle-ownership.md`: private runtime slots, typed
+  handle ownership, external pins, and the first stop-the-world collector.
 
 ## Workflow Documents
 
