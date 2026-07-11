@@ -112,6 +112,10 @@ testable seam.
 - `RunWithGlobals(proto *Proto, globals map[string]Value) ([]Value, error)`
   executes with Ember's pure base globals plus explicit host-provided globals.
   Host-provided globals override base globals with the same name.
+- A compiled `*Proto` owns mutable runtime caches used to warm repeated table
+  access. Do not execute the same `*Proto` concurrently on multiple
+  goroutines; compile a separate prototype per concurrent runtime or serialize
+  calls through one runtime owner.
 - Scripts can read and assign globals as expression values, call host global
   functions, access fields or indexes on host global tables, and pass opaque
   host userdata values through script code. Local and upvalue names take
@@ -181,7 +185,10 @@ testable seam.
 - Generic `for` loops support iterator expressions such as `pairs(table)`,
   `ipairs(table)`, and `next, table`, plus direct table values using the
   current raw table iteration order or a function-valued `__iter` metamethod.
-  Loop variables are scoped to the body. Explicit `pairs(table)` uses raw table
+  Raw table iteration is deterministic insertion order across array, string,
+  table, userdata, boolean, and other hash keys. Updating an existing key keeps
+  its position; setting nil removes the key from active iteration. Loop
+  variables are scoped to the body. Explicit `pairs(table)` uses raw table
   iteration. `ipairs(table)` walks positive integer keys from 1 and stops at
   the first nil value.
 - Table literals support array fields, named fields, and computed-key fields

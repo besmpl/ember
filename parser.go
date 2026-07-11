@@ -6,8 +6,10 @@ import (
 )
 
 type program struct {
+	id         syntaxID
 	statements []statement
 	mode       sourceMode
+	nodeCount  int
 }
 
 type sourceMode string
@@ -20,6 +22,7 @@ const (
 )
 
 type statement struct {
+	id         syntaxID
 	local      *localStatement
 	localFunc  *localFunctionStatement
 	funcDecl   *functionDeclarationStatement
@@ -39,28 +42,39 @@ type statement struct {
 
 type localStatement struct {
 	names       []string
+	nameID      syntaxID
 	nameRanges  []sourceRange
 	annotations []*typeExpression
 	values      []expression
 }
 
 type typeAliasStatement struct {
-	exported   bool
-	name       string
-	start      int
-	end        int
-	nameStart  int
-	nameEnd    int
-	typeParams []string
-	typePacks  []string
-	value      *typeExpression
+	id          syntaxID
+	exported    bool
+	name        string
+	nameID      syntaxID
+	start       int
+	end         int
+	nameStart   int
+	nameEnd     int
+	typeParams  []string
+	typeParamID syntaxID
+	typePacks   []string
+	typePackID  syntaxID
+	value       *typeExpression
 }
 
 type localFunctionStatement struct {
+	id                 syntaxID
+	functionID         int
 	name               string
+	nameID             syntaxID
 	typeParams         []string
+	typeParamID        syntaxID
 	typePacks          []string
+	typePackID         syntaxID
 	params             []string
+	paramID            syntaxID
 	paramAnnotations   []*typeExpression
 	variadic           bool
 	variadicAnnotation *typeExpression
@@ -69,10 +83,16 @@ type localFunctionStatement struct {
 }
 
 type functionDeclarationStatement struct {
+	id                 syntaxID
+	functionID         int
 	target             assignTarget
 	typeParams         []string
+	typeParamID        syntaxID
 	typePacks          []string
+	typePackID         syntaxID
 	params             []string
+	paramID            syntaxID
+	selfID             syntaxID
 	paramAnnotations   []*typeExpression
 	variadic           bool
 	variadicAnnotation *typeExpression
@@ -82,9 +102,14 @@ type functionDeclarationStatement struct {
 }
 
 type functionExpression struct {
+	id                 syntaxID
+	functionID         int
 	typeParams         []string
+	typeParamID        syntaxID
 	typePacks          []string
+	typePackID         syntaxID
 	params             []string
+	paramID            syntaxID
 	paramAnnotations   []*typeExpression
 	variadic           bool
 	variadicAnnotation *typeExpression
@@ -109,20 +134,23 @@ const (
 )
 
 type typeExpression struct {
-	start      int
-	end        int
-	kind       typeKind
-	name       []string
-	typeArgs   []*typeExpression
-	types      []*typeExpression
-	inner      *typeExpression
-	fields     []typeField
-	params     []typeFunctionParam
-	returnType *typeExpression
-	typeParams []string
-	typePacks  []string
-	expr       *expression
-	literal    *Value
+	id          syntaxID
+	start       int
+	end         int
+	kind        typeKind
+	name        []string
+	typeArgs    []*typeExpression
+	types       []*typeExpression
+	inner       *typeExpression
+	fields      []typeField
+	params      []typeFunctionParam
+	returnType  *typeExpression
+	typeParams  []string
+	typeParamID syntaxID
+	typePacks   []string
+	typePackID  syntaxID
+	expr        *expression
+	literal     *Value
 }
 
 type typeField struct {
@@ -144,6 +172,7 @@ type assignStatement struct {
 }
 
 type assignTarget struct {
+	id        syntaxID
 	start     int
 	end       int
 	name      string
@@ -168,6 +197,7 @@ type whileStatement struct {
 }
 
 type forStatement struct {
+	nameID     syntaxID
 	name       string
 	start      expression
 	limit      expression
@@ -177,6 +207,7 @@ type forStatement struct {
 
 type genericForStatement struct {
 	names      []string
+	nameID     syntaxID
 	values     []expression
 	statements []statement
 }
@@ -202,6 +233,7 @@ type returnStatement struct {
 }
 
 type expression struct {
+	id    syntaxID
 	terms []andExpression
 }
 
@@ -273,6 +305,7 @@ type powerExpression struct {
 }
 
 type term struct {
+	id         syntaxID
 	start      int
 	end        int
 	number     *float64
@@ -340,7 +373,9 @@ func (p *parser) parse() (program, error) {
 	if !p.done() {
 		return program{}, p.errorf("unexpected input %q", p.source[p.pos:])
 	}
-	return program{statements: statements, mode: p.mode}, nil
+	prog := program{statements: statements, mode: p.mode}
+	assignProgramSyntaxIDs(&prog)
+	return prog, nil
 }
 
 func (p *parser) parseBlock(stopKeywords ...string) ([]statement, error) {

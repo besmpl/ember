@@ -119,11 +119,8 @@ func (s rawSequence) clear() {
 		s.table.stringFields[i] = tableStringField{}
 	}
 	s.table.stringFields = s.table.stringFields[:0]
-	for key := range s.table.stringFieldMap {
-		delete(s.table.stringFieldMap, key)
-	}
-	for key := range s.table.fields {
-		delete(s.table.fields, key)
+	if s.table.cold != nil {
+		s.table.cold.fields = tableHashFields{}
 	}
 }
 
@@ -145,7 +142,7 @@ func (t *Table) canAppendFastArray() bool {
 }
 
 func (t *Table) canUseFastArrayStorage() bool {
-	return t != nil && !t.arrayHasNil && len(t.stringFields) == 0 && len(t.stringFieldMap) == 0 && len(t.fields) == 0
+	return t != nil && !t.arrayHasNil && len(t.stringFields) == 0 && t.hashFieldCount() == 0
 }
 
 func (t *Table) fastArrayAppend(value Value) {

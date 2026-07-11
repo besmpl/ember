@@ -34,6 +34,13 @@ Ember can describe support in levels rather than all-or-nothing claims:
 - Keep failing or unsupported categories documented.
 - Prefer bytecode fixtures for VM work before the compiler exists.
 
+## Documented Ember Choices
+
+- Raw table iteration through `next`, `pairs`, and direct table generic `for`
+  uses deterministic insertion order. Luau does not guarantee a portable raw
+  table order, so tests that depend on Ember's order are testing Ember's host
+  contract rather than upstream ordering.
+
 ## Non-Goals For Early Ember
 
 - Full native codegen.

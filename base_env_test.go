@@ -115,6 +115,7 @@ func TestBaseFieldIntrinsicCalleeHoistsAbsentHostGlobalGuard(t *testing.T) {
 	restore := thread.activate()
 	defer restore()
 	var counts directFramePICCounts
+	thread.directFrameInstrumented = true
 	thread.directFramePICCounts = &counts
 
 	for i := 0; i < 4; i++ {

@@ -3,77 +3,90 @@ package ember
 import "sync"
 
 type sourceArtifact struct {
-	identity sourceIdentity
-	source   Source
-	program  program
-	bind     bindResult
-	proto    *Proto
-	check    *checkArtifact
+	source  Source
+	program program
+	bind    bindResult
+	proto   *Proto
+	check   *checkArtifact
 }
 
 type sourceArtifactStore struct {
 	mu        sync.Mutex
 	artifacts map[sourceIdentity]sourceArtifact
+	preparing map[sourceIdentity]*sourceArtifactPreparation
+	prepare   func(Source) (sourceArtifact, error)
 }
 
-type sourceArtifactStoreSnapshot struct {
-	artifacts map[sourceIdentity]sourceArtifact
+type sourceArtifactPreparation struct {
+	done     chan struct{}
+	artifact sourceArtifact
+	err      error
 }
 
 func parseSource(source Source) (sourceArtifact, error) {
-	identity := identifyModuleSource(source)
 	p := parser{source: source.Text}
 	prog, err := p.parse()
 	if err != nil {
 		return sourceArtifact{}, err
 	}
 	return sourceArtifact{
-		identity: identity,
-		source:   source,
-		program:  prog,
-		bind:     bindProgram(prog),
+		source:  source,
+		program: prog,
+		bind:    bindProgram(prog),
 	}, nil
 }
 
 func newSourceArtifactStore() *sourceArtifactStore {
+	return newSourceArtifactStoreWithPrepare(parseSource)
+}
+
+func newSourceArtifactStoreWithPrepare(prepare func(Source) (sourceArtifact, error)) *sourceArtifactStore {
 	return &sourceArtifactStore{
 		artifacts: make(map[sourceIdentity]sourceArtifact),
+		preparing: make(map[sourceIdentity]*sourceArtifactPreparation),
+		prepare:   prepare,
 	}
-}
-
-func (s *sourceArtifactStore) snapshot() sourceArtifactStoreSnapshot {
-	if s == nil {
-		return sourceArtifactStoreSnapshot{}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return sourceArtifactStoreSnapshot{
-		artifacts: copySourceArtifacts(s.artifacts),
-	}
-}
-
-func (s *sourceArtifactStore) restore(snapshot sourceArtifactStoreSnapshot) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.artifacts = snapshot.artifacts
 }
 
 func (s *sourceArtifactStore) parse(source Source, identity sourceIdentity) (sourceArtifact, error) {
 	if s == nil {
 		return parseSource(source)
 	}
-	if artifact, ok := s.artifact(identity); ok {
+
+	s.mu.Lock()
+	if artifact, ok := s.artifacts[identity]; ok {
+		s.mu.Unlock()
 		return artifact, nil
 	}
-	artifact, err := parseSource(source)
+	if preparation, ok := s.preparing[identity]; ok {
+		s.mu.Unlock()
+		<-preparation.done
+		return preparation.artifact, preparation.err
+	}
+	preparation := &sourceArtifactPreparation{done: make(chan struct{})}
+	s.preparing[identity] = preparation
+	s.mu.Unlock()
+
+	artifact, err := s.prepare(source)
+
+	s.mu.Lock()
+	if err == nil {
+		if stored, ok := s.artifacts[identity]; ok {
+			artifact = stored
+		} else {
+			s.artifacts[identity] = artifact
+		}
+	}
+	preparation.artifact = artifact
+	preparation.err = err
+	delete(s.preparing, identity)
+	close(preparation.done)
+	s.mu.Unlock()
+
 	if err != nil {
 		return sourceArtifact{}, err
 	}
-	artifact.identity = identity
-	return s.storeParsed(identity, artifact), nil
+	return artifact, nil
 }
 
 func (s *sourceArtifactStore) compile(source Source, identity sourceIdentity) (*Proto, error) {
@@ -116,31 +129,6 @@ func (s *sourceArtifactStore) check(source Source, identity sourceIdentity) (che
 	return s.storeChecked(identity, artifact, check), nil
 }
 
-func copySourceArtifacts(values map[sourceIdentity]sourceArtifact) map[sourceIdentity]sourceArtifact {
-	copied := make(map[sourceIdentity]sourceArtifact, len(values))
-	for key, value := range values {
-		copied[key] = value
-	}
-	return copied
-}
-
-func (s *sourceArtifactStore) artifact(identity sourceIdentity) (sourceArtifact, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	artifact, ok := s.artifacts[identity]
-	return artifact, ok
-}
-
-func (s *sourceArtifactStore) storeParsed(identity sourceIdentity, artifact sourceArtifact) sourceArtifact {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if stored, ok := s.artifacts[identity]; ok {
-		return stored
-	}
-	s.artifacts[identity] = artifact
-	return artifact
-}
-
 func (s *sourceArtifactStore) storeCompiled(identity sourceIdentity, artifact sourceArtifact, proto *Proto) *Proto {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -150,7 +138,6 @@ func (s *sourceArtifactStore) storeCompiled(identity sourceIdentity, artifact so
 		}
 		artifact = stored
 	}
-	artifact.identity = identity
 	artifact.proto = proto
 	s.artifacts[identity] = artifact
 	return proto
@@ -165,7 +152,6 @@ func (s *sourceArtifactStore) storeChecked(identity sourceIdentity, artifact sou
 		}
 		artifact = stored
 	}
-	artifact.identity = identity
 	artifact.check = &check
 	s.artifacts[identity] = artifact
 	return check
