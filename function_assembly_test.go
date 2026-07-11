@@ -7,7 +7,7 @@ import (
 
 var functionAssemblyProtoSink *Proto
 
-func TestFunctionAssemblyOwnsCodeMappingLinesAndPackedCode(t *testing.T) {
+func TestFunctionAssemblyOwnsCodeMappingLinesAndWordcode(t *testing.T) {
 	source := "local value = 1\nvalue = value + 1\nreturn value\n"
 	ir := []bytecodeIRInstruction{
 		lowerInstructionToBytecodeIR(
@@ -25,9 +25,6 @@ func TestFunctionAssemblyOwnsCodeMappingLinesAndPackedCode(t *testing.T) {
 	}
 
 	assembly := assembleFunctionBytecode(newSourceLineMap(source), ir)
-	if err := assembly.pack(); err != nil {
-		t.Fatalf("assembly.pack returned error: %v", err)
-	}
 
 	wantCode := []instruction{
 		{op: opLoadConst, a: 0, b: 0},
@@ -45,13 +42,23 @@ func TestFunctionAssemblyOwnsCodeMappingLinesAndPackedCode(t *testing.T) {
 	if want := []int{1, 3}; !reflect.DeepEqual(assembly.lines, want) {
 		t.Fatalf("source lines are %#v, want %#v", assembly.lines, want)
 	}
-	if len(assembly.packedCode) != len(assembly.code) {
-		t.Fatalf("packed code has %d instructions for %d executable instructions", len(assembly.packedCode), len(assembly.code))
+	words, err := encodeWordcode(assembly.code, 1, 1)
+	if err != nil {
+		t.Fatalf("encodeWordcode returned error: %v", err)
 	}
-	for pc := range assembly.code {
-		if got := assembly.packedCode[pc].unpack(); got != assembly.code[pc] {
-			t.Fatalf("packed instruction %d is %#v, want %#v", pc, got, assembly.code[pc])
-		}
+	decoded, err := decodeWordcode(words)
+	if err != nil {
+		t.Fatalf("decodeWordcode returned error: %v", err)
+	}
+	if !reflect.DeepEqual(decoded, assembly.code) {
+		t.Fatalf("decoded wordcode is %#v, want %#v", decoded, assembly.code)
+	}
+	boundaries, err := wordcodeBoundaries(assembly.code)
+	if err != nil {
+		t.Fatalf("wordcodeBoundaries returned error: %v", err)
+	}
+	if got := wordcodeLogicalLineMap(assembly.lines, boundaries); len(got) != len(words) {
+		t.Fatalf("word line map has %d entries for %d words", len(got), len(words))
 	}
 }
 

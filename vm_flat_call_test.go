@@ -165,7 +165,7 @@ func TestMarkedGenericOneResultCallUsesBorrowedTrampoline(t *testing.T) {
 		[]instruction{
 			{op: opClosure, a: 0, b: 0},
 			{op: opLoadConst, a: 1, b: 0},
-			{op: opCallOne, a: 0, b: 0, c: encodeFixedCallCount(1, true)},
+			{op: opCallOne, a: 0, b: 0, c: encodeFixedCallCount(1, true), d: 1},
 			{op: opReturnOne, a: 0},
 		},
 		[]*Proto{callee}, nil, 2, 0, false,

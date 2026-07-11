@@ -2,9 +2,21 @@ package ember
 
 import "testing"
 
+func rebuildProtoExecutionCodeForTest(t *testing.T, proto *Proto, code []instruction) {
+	t.Helper()
+	if err := encodeProtoWords(proto, code); err != nil {
+		t.Fatalf("encode marked prototype: %v", err)
+	}
+	applyProtoWordIndexCaches(proto, code)
+}
+
 func markFirstLocalCallBorrowHint(t *testing.T, proto *Proto, borrow bool) {
 	t.Helper()
-	for pc, ins := range proto.code {
+	code, err := decodeWordcode(proto.words)
+	if err != nil {
+		t.Fatalf("decode prototype wordcode: %v", err)
+	}
+	for pc, ins := range code {
 		if ins.op == opCall {
 			count := ins.c
 			if count < 0 {
@@ -13,20 +25,16 @@ func markFirstLocalCallBorrowHint(t *testing.T, proto *Proto, borrow bool) {
 			ins.op = opCallLocalOne
 			ins.c = ins.b + 1
 			ins.d = encodeFixedCallCount(count, borrow)
-			proto.code[pc] = ins
-			if err := packProtoCode(proto); err != nil {
-				t.Fatalf("pack marked prototype: %v", err)
-			}
+			code[pc] = ins
+			rebuildProtoExecutionCodeForTest(t, proto, code)
 			return
 		}
 		if ins.op != opCallLocalOne {
 			continue
 		}
 		count, _ := decodeFixedCallCount(ins.d)
-		proto.code[pc].d = encodeFixedCallCount(count, borrow)
-		if err := packProtoCode(proto); err != nil {
-			t.Fatalf("pack marked prototype: %v", err)
-		}
+		code[pc].d = encodeFixedCallCount(count, borrow)
+		rebuildProtoExecutionCodeForTest(t, proto, code)
 		return
 	}
 	t.Fatalf("compiled prototype has no CALL_LOCAL_ONE: %v", disassembleProto(proto))
@@ -136,7 +144,7 @@ func TestMarkedFixedCallOneRuntimeNativeUsesDecodedCount(t *testing.T) {
 		[]instruction{
 			{op: opLoadGlobal, a: 0, b: 0},
 			{op: opNewTable, a: 1},
-			{op: opCallOne, a: 0, b: 0, c: encodeFixedCallCount(1, true)},
+			{op: opCallOne, a: 0, b: 0, c: encodeFixedCallCount(1, true), d: 1},
 			{op: opReturnOne, a: 0},
 		},
 		nil,
@@ -174,21 +182,23 @@ return value
 		t.Fatalf("Compile returned error: %v", err)
 	}
 	var marked bool
-	for pc, ins := range proto.code {
+	code, err := decodeWordcode(proto.words)
+	if err != nil {
+		t.Fatalf("decode prototype wordcode: %v", err)
+	}
+	for pc, ins := range code {
 		if ins.op != opCallMethodOne {
 			continue
 		}
 		count, _ := decodeFixedCallCount(ins.d)
-		proto.code[pc].d = encodeFixedCallCount(count, true)
+		code[pc].d = encodeFixedCallCount(count, true)
 		marked = true
 		break
 	}
 	if !marked {
 		t.Fatalf("compiled method program has no CALL_METHOD_ONE: %v", disassembleProto(proto))
 	}
-	if err := packProtoCode(proto); err != nil {
-		t.Fatalf("pack marked method prototype: %v", err)
-	}
+	rebuildProtoExecutionCodeForTest(t, proto, code)
 	results, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
 	if err != nil {
 		t.Fatalf("marked method run returned error: %v", err)
@@ -224,21 +234,23 @@ return #object
 		t.Fatalf("Compile returned error: %v", err)
 	}
 	var marked bool
-	for pc, ins := range proto.code {
+	code, err := decodeWordcode(proto.words)
+	if err != nil {
+		t.Fatalf("decode prototype wordcode: %v", err)
+	}
+	for pc, ins := range code {
 		if ins.op != opCallMethodOne {
 			continue
 		}
 		count, _ := decodeFixedCallCount(ins.d)
-		proto.code[pc].d = encodeFixedCallCount(count, true)
+		code[pc].d = encodeFixedCallCount(count, true)
 		marked = true
 		break
 	}
 	if !marked {
 		t.Fatalf("compiled native method program has no CALL_METHOD_ONE: %v", disassembleProto(proto))
 	}
-	if err := packProtoCode(proto); err != nil {
-		t.Fatalf("pack marked native method prototype: %v", err)
-	}
+	rebuildProtoExecutionCodeForTest(t, proto, code)
 	results, _, err := runWithDirectFrameMechanismCounters(proto, nil)
 	if err != nil {
 		t.Fatalf("marked native method run returned error: %v", err)

@@ -621,49 +621,6 @@ type instruction struct {
 	d  int
 }
 
-type packedInstruction struct {
-	op opcode
-	a  int16
-	b  int16
-	c  int16
-	d  int32
-	_  uint32
-}
-
-func packInstruction(ins instruction) (packedInstruction, error) {
-	a, err := packInstructionOperand16(ins.a, "a")
-	if err != nil {
-		return packedInstruction{}, err
-	}
-	b, err := packInstructionOperand16(ins.b, "b")
-	if err != nil {
-		return packedInstruction{}, err
-	}
-	c, err := packInstructionOperand16(ins.c, "c")
-	if err != nil {
-		return packedInstruction{}, err
-	}
-	d, err := packInstructionOperand32(ins.d, "d")
-	if err != nil {
-		return packedInstruction{}, err
-	}
-	return packedInstruction{op: ins.op, a: a, b: b, c: c, d: d}, nil
-}
-
-func packInstructionOperand16(value int, name string) (int16, error) {
-	if value < -32768 || value > 32767 {
-		return 0, fmt.Errorf("operand %s value %d out of int16 range", name, value)
-	}
-	return int16(value), nil
-}
-
-func packInstructionOperand32(value int, name string) (int32, error) {
-	if int(int32(value)) != value {
-		return 0, fmt.Errorf("operand %s value %d out of int32 range", name, value)
-	}
-	return int32(value), nil
-}
-
 // encodeFixedCallCount reserves the negative int16 count space used by fixed
 // one-result calls for a borrow hint. Generic opCall keeps its existing open
 // result/count encoding and must not use this helper.
@@ -683,16 +640,6 @@ func decodeFixedCallCount(raw int) (count int, borrowHint bool) {
 		return -(raw + 1), true
 	}
 	return raw, false
-}
-
-func (ins packedInstruction) unpack() instruction {
-	return instruction{
-		op: ins.op,
-		a:  int(ins.a),
-		b:  int(ins.b),
-		c:  int(ins.c),
-		d:  int(ins.d),
-	}
 }
 
 type bytecodeOperandKind int
@@ -985,9 +932,10 @@ func bytecodeBuilderCapturedRegisters(prototypes []*Proto) []bool {
 }
 
 func (b *bytecodeBuilder) proto(upvalues []upvalueDesc, registers int, params int, variadic bool) *Proto {
-	proto := newProtoWithDescriptors(b.constants, b.assembledCode(), b.prototypes, upvalues, registers, params, variadic)
+	code := b.assembledCode()
+	proto := newProtoWithDescriptors(b.constants, code, b.prototypes, upvalues, registers, params, variadic)
 	proto.lines = bytecodeIRLines(b.sourceText, b.ir)
-	_ = finalizeProtoExecutionArtifact(proto)
+	_ = finalizeProtoExecutionArtifact(proto, code)
 	return proto
 }
 
@@ -1280,29 +1228,16 @@ func registerOperands(values ...int) bytecodeOperands {
 }
 
 type assembledBytecodeIR struct {
-	code       []instruction
-	oldToNew   []int
-	sources    []sourceRange
-	lines      []int
-	packedCode []packedInstruction
+	code     []instruction
+	oldToNew []int
+	sources  []sourceRange
+	lines    []int
 }
 
 func assembleFunctionBytecode(lines sourceLineMap, ir []bytecodeIRInstruction) assembledBytecodeIR {
 	assembled := assembleBytecodeIRResult(ir)
 	assembled.lines = sourceRangesLines(lines, assembled.sources)
 	return assembled
-}
-
-func (assembled *assembledBytecodeIR) pack() error {
-	if assembled == nil {
-		return nil
-	}
-	packed, err := packInstructions(assembled.code)
-	if err != nil {
-		return err
-	}
-	assembled.packedCode = packed
-	return nil
 }
 
 func assembleBytecodeIR(ir []bytecodeIRInstruction) []instruction {
@@ -1384,16 +1319,12 @@ func remapAssembledBytecodeIRJumpTargets(ins bytecodeIRInstruction, oldToNew []i
 }
 
 func disassembleBytecodeIR(constants []Value, ir []bytecodeIRInstruction) []string {
-	proto := &Proto{
-		constants: constants,
-		code:      assembleBytecodeIR(ir),
-	}
-	return disassembleProto(proto)
+	return disassembleInstructions(&Proto{constants: constants}, assembleBytecodeIR(ir))
 }
 
 func disassembleBytecodeIRWithSource(constants []Value, ir []bytecodeIRInstruction) []string {
 	assembled := assembleBytecodeIRResult(ir)
-	lines := disassembleProto(&Proto{constants: constants, code: assembled.code})
+	lines := disassembleInstructions(&Proto{constants: constants}, assembled.code)
 	for i := range lines {
 		source := assembled.sources[i]
 		lines[i] = fmt.Sprintf("%04d [%d,%d) %s", i, source.start, source.end, lines[i][5:])
@@ -1604,14 +1535,16 @@ func bytecodeIRBlockSuccessors(ir []bytecodeIRInstruction, blocks []bytecodeIRBl
 
 // Proto is an executable Ember function prototype.
 type Proto struct {
-	constants               []Value
-	constantKeys            []tableKey
-	constantKeyOK           []bool
-	constantNumbers         []float64
-	constantNumberOK        []bool
-	globalNames             []string
-	code                    []instruction
-	packedCode              []packedInstruction
+	constants        []Value
+	constantKeys     []tableKey
+	constantKeyOK    []bool
+	constantNumbers  []float64
+	constantNumberOK []bool
+	globalNames      []string
+	// words is the immutable executable stream. Compiler instructions remain
+	// transient in the IR/assembly pipeline and are never retained here.
+	words                   []wordcodeWord
+	wordLines               []int
 	lines                   []int
 	prototypes              []*Proto
 	upvalues                []upvalueDesc
@@ -1700,44 +1633,61 @@ type executionArtifact struct {
 }
 
 func newProto(constants []Value, code []instruction, prototypes []*Proto, upvalues []upvalueDesc, registers int, params int, variadic bool) *Proto {
-	return newProtoWithDescriptors(constants, code, prototypes, upvalues, registers, params, variadic)
+	proto := newProtoWithDescriptors(constants, code, prototypes, upvalues, registers, params, variadic)
+	_ = finalizeProtoExecutionArtifact(proto, code)
+	return proto
 }
 
 func newProtoWithDescriptors(constants []Value, code []instruction, prototypes []*Proto, upvalues []upvalueDesc, registers int, params int, variadic bool) *Proto {
-	proto := &Proto{
+	return &Proto{
 		constants:  constants,
-		code:       code,
 		prototypes: prototypes,
 		upvalues:   upvalues,
 		registers:  registers,
 		params:     params,
 		variadic:   variadic,
 	}
-	_ = finalizeProtoExecutionArtifact(proto)
-	return proto
 }
 
-func finalizeProtoExecutionArtifact(proto *Proto) error {
+func finalizeProtoExecutionArtifact(proto *Proto, sourceCode ...[]instruction) error {
 	if proto == nil {
 		return nil
 	}
-	assignProtoGlobalSlots(proto)
-	artifact := buildExecutionArtifact(proto)
+	var code []instruction
+	if len(sourceCode) != 0 {
+		code = sourceCode[0]
+	} else if len(proto.words) != 0 {
+		decoded, err := decodeWordcode(proto.words)
+		if err != nil {
+			proto.verifyErr = err
+			return err
+		}
+		code = decoded
+	}
+	assignProtoGlobalSlots(proto, code)
+	artifact := buildExecutionArtifact(proto, code)
 	artifact.apply(proto)
 	// The analysis marker is intentionally encoded in the existing fixed-call
 	// count operand. Runtime dispatch treats it as a hint and retains the
 	// copied path whenever its dynamic guards fail.
-	proto.code = markBorrowableFixedCallWindows(proto.code, proto.registers, artifact.capturedLocals)
-	markReusableZeroCaptureClosures(proto)
-	if err := packProtoCode(proto); err != nil {
+	code = markBorrowableFixedCallWindows(code, proto.registers, artifact.capturedLocals)
+	markReusableZeroCaptureClosures(proto, code)
+	// Preserve the established semantic verifier errors before applying the
+	// narrower physical-word limits. This keeps invalid source diagnostics
+	// stable while still rejecting malformed wordcode for valid prototypes.
+	proto.verifyErr = verifyProtoWithCode(proto, code)
+	if proto.verifyErr != nil {
+		return proto.verifyErr
+	}
+	if err := encodeProtoWords(proto, code); err != nil {
 		proto.verifyErr = err
 		return proto.verifyErr
 	}
-	proto.verifyErr = verifyProto(proto)
+	applyProtoWordIndexCaches(proto, code)
 	return proto.verifyErr
 }
 
-func assignProtoGlobalSlots(proto *Proto) {
+func assignProtoGlobalSlots(proto *Proto, code []instruction) {
 	if proto == nil {
 		return
 	}
@@ -1752,7 +1702,7 @@ func assignProtoGlobalSlots(proto *Proto) {
 		names = append(names, name)
 		return slot
 	}
-	for pc, ins := range proto.code {
+	for pc, ins := range code {
 		var constant int
 		switch ins.op {
 		case opLoadGlobal:
@@ -1763,44 +1713,76 @@ func assignProtoGlobalSlots(proto *Proto) {
 			continue
 		}
 		if constant < 0 || constant >= len(proto.constants) {
-			proto.code[pc].c = -1
+			code[pc].c = -1
 			continue
 		}
 		name, ok := proto.constants[constant].String()
 		if !ok {
-			proto.code[pc].c = -1
+			code[pc].c = -1
 			continue
 		}
-		proto.code[pc].c = slotFor(name)
+		code[pc].c = slotFor(name)
 	}
 	proto.globalNames = names
 }
 
-func packProtoCode(proto *Proto) error {
+// encodeProtoWords publishes the immutable verifier-first wordcode
+// representation. The canonical instruction slice is compiler-transient;
+// wordcode uses physical word PCs and AUX words receive no source line.
+func encodeProtoWords(proto *Proto, code []instruction) error {
 	if proto == nil {
 		return nil
 	}
-	packed, err := packInstructions(proto.code)
+	words, err := encodeWordcode(code, proto.registers, len(proto.constants))
 	if err != nil {
 		return err
 	}
-	proto.packedCode = packed
+	proto.words = words
+	if len(proto.lines) == 0 {
+		proto.wordLines = nil
+	} else {
+		proto.wordLines = wordcodeLinesFromWords(proto.lines, words)
+	}
 	return nil
 }
 
-func packInstructions(code []instruction) ([]packedInstruction, error) {
-	packed := make([]packedInstruction, len(code))
-	for pc, ins := range code {
-		packedIns, err := packInstruction(ins)
-		if err != nil {
-			return nil, fmt.Errorf("instruction %d %s: %w", pc, opcodeName(ins.op), err)
-		}
-		packed[pc] = packedIns
+// wordcodeLinesFromWords maps logical source lines onto physical words without
+// rebuilding the boundary slice that encodeWordcode already computed. AUX
+// words remain line-less implementation details.
+func wordcodeLinesFromWords(logicalLines []int, words []wordcodeWord) []int {
+	if len(logicalLines) == 0 || len(words) == 0 {
+		return nil
 	}
-	return packed, nil
+	lines := make([]int, len(words))
+	logical := 0
+	for wordPC := 0; wordPC < len(words) && logical < len(logicalLines); wordPC++ {
+		lines[wordPC] = logicalLines[logical]
+		logical++
+		if words[wordPC]&wordcodeAuxBit != 0 {
+			wordPC++
+		}
+	}
+	return lines
 }
 
-func buildExecutionArtifact(proto *Proto) executionArtifact {
+// applyProtoWordIndexCaches sizes the transitional direct-frame cache by the
+// physical word stream. AUX words intentionally have no cache entry; runtime
+// dispatch indexes this slice by the primary word PC.
+func applyProtoWordIndexCaches(proto *Proto, code []instruction) {
+	if proto == nil || !codeUsesDirectFrameIndexCache(code) {
+		if proto != nil {
+			proto.directFrameIndexCaches = nil
+		}
+		return
+	}
+	if len(proto.directFrameIndexCaches) != len(proto.words) {
+		proto.directFrameIndexCaches = make([]dynamicStringIndexCache, len(proto.words))
+		return
+	}
+	clear(proto.directFrameIndexCaches)
+}
+
+func buildExecutionArtifact(proto *Proto, code []instruction) executionArtifact {
 	constantKeys, constantKeyOK := protoConstantTableKeys(proto.constants)
 	constantNumbers, constantNumberOK := protoConstantNumbers(proto.constants)
 	capturedLocals := capturedLocalRegisters(proto)
@@ -1810,7 +1792,7 @@ func buildExecutionArtifact(proto *Proto) executionArtifact {
 		constantNumbers:   constantNumbers,
 		constantNumberOK:  constantNumberOK,
 		capturedLocals:    capturedLocals,
-		entryNilRegisters: protoEntryNilRegisters(proto.code, proto.params, proto.registers),
+		entryNilRegisters: protoEntryNilRegisters(code, proto.params, proto.registers),
 	}
 }
 
@@ -1820,15 +1802,6 @@ func (artifact executionArtifact) apply(proto *Proto) {
 	proto.constantNumbers = artifact.constantNumbers
 	proto.constantNumberOK = artifact.constantNumberOK
 	proto.capturedLocals = artifact.capturedLocals
-	if codeUsesDirectFrameIndexCache(proto.code) {
-		if len(proto.directFrameIndexCaches) != len(proto.code) {
-			proto.directFrameIndexCaches = make([]dynamicStringIndexCache, len(proto.code))
-		} else {
-			clear(proto.directFrameIndexCaches)
-		}
-	} else {
-		proto.directFrameIndexCaches = nil
-	}
 	proto.entryNilRegisters = artifact.entryNilRegisters
 }
 
@@ -1852,7 +1825,7 @@ func codeUsesDirectFrameIndexCache(code []instruction) bool {
 	return false
 }
 
-func markReusableZeroCaptureClosures(proto *Proto) {
+func markReusableZeroCaptureClosures(proto *Proto, code []instruction) {
 	if proto == nil {
 		return
 	}
@@ -1860,7 +1833,7 @@ func markReusableZeroCaptureClosures(proto *Proto) {
 		child.reuseZeroCaptureClosure = false
 		child.canonicalClosure = nil
 	}
-	for pc, ins := range proto.code {
+	for pc, ins := range code {
 		if ins.op != opClosure || ins.b < 0 || ins.b >= len(proto.prototypes) {
 			continue
 		}
@@ -1868,7 +1841,7 @@ func markReusableZeroCaptureClosures(proto *Proto) {
 		if child == nil || len(child.upvalues) != 0 {
 			continue
 		}
-		if closureValueImmediatelyCalled(proto.code, pc, ins.a) {
+		if closureValueImmediatelyCalled(code, pc, ins.a) {
 			child.reuseZeroCaptureClosure = true
 		}
 	}
@@ -2013,13 +1986,14 @@ type registerKindState struct {
 }
 
 func detectRegisterKindFacts(proto *Proto) []registerKindFactDesc {
-	if proto == nil || len(proto.code) == 0 || proto.registers <= 0 {
+	code, err := protoDecodedInstructions(proto)
+	if err != nil || len(code) == 0 || proto == nil || proto.registers <= 0 {
 		return nil
 	}
-	blockStarts := registerKindBlockStarts(proto.code)
+	blockStarts := registerKindBlockStarts(code)
 	state := make([]registerKindState, proto.registers)
 	var facts []registerKindFactDesc
-	for pc, ins := range proto.code {
+	for pc, ins := range code {
 		if pc > 0 && blockStarts[pc] {
 			clearRegisterKindState(state)
 		}
@@ -2047,21 +2021,23 @@ func detectNumericOperandFacts(proto *Proto) []numericOperandFactDesc {
 }
 
 func detectNumericOperandFactPCs(proto *Proto) []bool {
-	if proto == nil || len(proto.code) == 0 {
+	code, err := protoDecodedInstructions(proto)
+	if err != nil || len(code) == 0 || proto == nil {
 		return nil
 	}
-	pcs := make([]bool, len(proto.code))
+	pcs := make([]bool, len(code))
 	detectNumericOperandFactsInto(proto, nil, pcs)
 	return pcs
 }
 
 func detectNumericOperandFactsInto(proto *Proto, facts *[]numericOperandFactDesc, pcs []bool) {
-	if proto == nil || len(proto.code) == 0 || proto.registers <= 0 {
+	code, err := protoDecodedInstructions(proto)
+	if err != nil || len(code) == 0 || proto == nil || proto.registers <= 0 {
 		return
 	}
-	blockStarts := registerKindBlockStarts(proto.code)
+	blockStarts := registerKindBlockStarts(code)
 	state := make([]registerKindState, proto.registers)
-	for pc, ins := range proto.code {
+	for pc, ins := range code {
 		if pc > 0 && blockStarts[pc] {
 			clearRegisterKindState(state)
 		}
@@ -2260,14 +2236,15 @@ type slotKindLiteralState struct {
 }
 
 func detectSlotKindFacts(proto *Proto) []slotKindFactDesc {
-	if proto == nil || len(proto.code) == 0 || proto.registers <= 0 {
+	code, err := protoDecodedInstructions(proto)
+	if err != nil || len(code) == 0 || proto == nil || proto.registers <= 0 {
 		return nil
 	}
-	blockStarts := registerKindBlockStarts(proto.code)
+	blockStarts := registerKindBlockStarts(code)
 	registerKinds := make([]registerKindState, proto.registers)
 	literalSlots := make([]slotKindLiteralState, proto.registers)
 	var facts []slotKindFactDesc
-	for pc, ins := range proto.code {
+	for pc, ins := range code {
 		if pc > 0 && blockStarts[pc] {
 			clearRegisterKindState(registerKinds)
 			clearSlotKindLiteralState(literalSlots)
@@ -2507,10 +2484,33 @@ func protoConstantNumbers(constants []Value) ([]float64, []bool) {
 }
 
 func verifyProto(proto *Proto) error {
-	return verifyProtoSeen(proto, make(map[*Proto]bool))
+	code, err := protoDecodedInstructions(proto)
+	if err != nil {
+		return err
+	}
+	return verifyProtoSeenWithCode(proto, make(map[*Proto]bool), code)
 }
 
 func verifyProtoSeen(proto *Proto, seen map[*Proto]bool) error {
+	code, err := protoDecodedInstructions(proto)
+	if err != nil {
+		return err
+	}
+	return verifyProtoSeenWithCode(proto, seen, code)
+}
+
+func verifyProtoWithCode(proto *Proto, code []instruction) error {
+	return verifyProtoSeenWithCode(proto, make(map[*Proto]bool), code)
+}
+
+func protoDecodedInstructions(proto *Proto) ([]instruction, error) {
+	if proto == nil || len(proto.words) == 0 {
+		return nil, nil
+	}
+	return decodeWordcode(proto.words)
+}
+
+func verifyProtoSeenWithCode(proto *Proto, seen map[*Proto]bool, code []instruction) error {
 	if proto == nil {
 		return fmt.Errorf("nil prototype")
 	}
@@ -2527,7 +2527,7 @@ func verifyProtoSeen(proto *Proto, seen map[*Proto]bool) error {
 	if proto.params > proto.registers {
 		return fmt.Errorf("parameter count %d exceeds register count %d", proto.params, proto.registers)
 	}
-	if want := protoEntryNilRegisters(proto.code, proto.params, proto.registers); !equalIntSlices(proto.entryNilRegisters, want) {
+	if want := protoEntryNilRegisters(code, proto.params, proto.registers); !equalIntSlices(proto.entryNilRegisters, want) {
 		return fmt.Errorf("entry nil registers %v do not match finalized plan %v", proto.entryNilRegisters, want)
 	}
 	for index, upvalue := range proto.upvalues {
@@ -2535,19 +2535,26 @@ func verifyProtoSeen(proto *Proto, seen map[*Proto]bool) error {
 			return fmt.Errorf("upvalue %d has negative index %d", index, upvalue.index)
 		}
 	}
-	for pc, ins := range proto.code {
-		if err := verifyInstruction(proto, pc, ins); err != nil {
+	for pc, ins := range code {
+		if err := verifyInstruction(proto, pc, ins, len(code)); err != nil {
 			return fmt.Errorf("instruction %d %s(%d,%d,%d,%d): %w", pc, opcodeName(ins.op), ins.a, ins.b, ins.c, ins.d, err)
 		}
 	}
-	if proto.lines != nil && len(proto.lines) != len(proto.code) {
-		return fmt.Errorf("line table length %d does not match code length %d", len(proto.lines), len(proto.code))
+	if proto.lines != nil && len(proto.lines) != len(code) {
+		return fmt.Errorf("line table length %d does not match code length %d", len(proto.lines), len(code))
+	}
+	if proto.wordLines != nil && len(proto.wordLines) != len(proto.words) {
+		return fmt.Errorf("word line table length %d does not match wordcode length %d", len(proto.wordLines), len(proto.words))
 	}
 	for index, child := range proto.prototypes {
 		if err := verifyChildUpvalues(proto, child); err != nil {
 			return fmt.Errorf("prototype %d: %w", index, err)
 		}
-		if err := verifyProtoSeen(child, seen); err != nil {
+		childCode, err := protoDecodedInstructions(child)
+		if err != nil {
+			return fmt.Errorf("prototype %d: %w", index, err)
+		}
+		if err := verifyProtoSeenWithCode(child, seen, childCode); err != nil {
 			return fmt.Errorf("prototype %d: %w", index, err)
 		}
 	}
@@ -2555,15 +2562,22 @@ func verifyProtoSeen(proto *Proto, seen map[*Proto]bool) error {
 }
 
 func protoSupportsDirectFrame(proto *Proto) bool {
-	return proto != nil
+	if proto == nil {
+		return false
+	}
+	code, err := protoDecodedInstructions(proto)
+	return err == nil && codeSupportsDirectFrame(code)
 }
 
 func protoDirectFrameRejection(proto *Proto) (directFrameRejection, bool) {
 	if proto == nil {
 		return directFrameRejection{pc: -1, reason: "nil prototype"}, true
 	}
-	for pc := 0; pc < len(proto.code); pc++ {
-		ins := proto.code[pc]
+	code, err := protoDecodedInstructions(proto)
+	if err != nil {
+		return directFrameRejection{pc: -1, reason: err.Error()}, true
+	}
+	for pc, ins := range code {
 		if !directFrameOpcodeSupported(ins.op) {
 			return directFrameRejection{
 				pc:     pc,
@@ -2702,7 +2716,7 @@ func verifyChildUpvalues(parent *Proto, child *Proto) error {
 	return nil
 }
 
-func verifyInstruction(proto *Proto, pc int, ins instruction) error {
+func verifyInstruction(proto *Proto, pc int, ins instruction, codeLen ...int) error {
 	switch ins.op {
 	case opLoadConst:
 		return verifyRegisterAndConstant(proto, ins.a, ins.b)
@@ -2789,7 +2803,7 @@ func verifyInstruction(proto *Proto, pc int, ins instruction) error {
 		if ins.a+1 >= proto.registers {
 			return fmt.Errorf("array next jump2 result range r%d..r%d out of range", ins.a, ins.a+1)
 		}
-		return verifyJumpTarget(proto, ins.d)
+		return verifyJumpTarget(proto, ins.d, codeLen...)
 	case opClosure:
 		if err := verifyRegister(proto, ins.a); err != nil {
 			return err
@@ -2836,12 +2850,12 @@ func verifyInstruction(proto *Proto, pc int, ins instruction) error {
 		if err := verifyRegisters(proto, ins.a, ins.b, ins.c); err != nil {
 			return err
 		}
-		return verifyJumpTarget(proto, ins.d)
+		return verifyJumpTarget(proto, ins.d, codeLen...)
 	case opNumericForLoop:
 		if err := verifyRegisters(proto, ins.a, ins.b); err != nil {
 			return err
 		}
-		return verifyJumpTarget(proto, ins.d)
+		return verifyJumpTarget(proto, ins.d, codeLen...)
 	case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
 		if err := verifyRegister(proto, ins.a); err != nil {
 			return err
@@ -2849,17 +2863,17 @@ func verifyInstruction(proto *Proto, pc int, ins instruction) error {
 		if err := verifyConstant(proto, ins.b); err != nil {
 			return err
 		}
-		return verifyJumpTarget(proto, ins.d)
+		return verifyJumpTarget(proto, ins.d, codeLen...)
 	case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
 		if err := verifyRegisters(proto, ins.a, ins.b); err != nil {
 			return err
 		}
-		return verifyJumpTarget(proto, ins.d)
+		return verifyJumpTarget(proto, ins.d, codeLen...)
 	case opJumpIfTableHasMetatable:
 		if err := verifyRegister(proto, ins.a); err != nil {
 			return err
 		}
-		return verifyJumpTarget(proto, ins.d)
+		return verifyJumpTarget(proto, ins.d, codeLen...)
 	case opFastCall:
 		nativeID := nativeFuncID(ins.b)
 		if _, ok := nativeFuncByID(nativeID); !ok {
@@ -2959,9 +2973,9 @@ func verifyInstruction(proto *Proto, pc int, ins instruction) error {
 		if err := verifyRegister(proto, ins.a); err != nil {
 			return err
 		}
-		return verifyJumpTarget(proto, ins.b)
+		return verifyJumpTarget(proto, ins.b, codeLen...)
 	case opJump:
-		return verifyJumpTarget(proto, ins.b)
+		return verifyJumpTarget(proto, ins.b, codeLen...)
 	case opReturnOne:
 		return verifyRegister(proto, ins.a)
 	case opReturn:
@@ -3064,8 +3078,18 @@ func verifyUpvalue(proto *Proto, upvalue int) error {
 	return nil
 }
 
-func verifyJumpTarget(proto *Proto, target int) error {
-	if target < 0 || target > len(proto.code) {
+func verifyJumpTarget(proto *Proto, target int, codeLen ...int) error {
+	length := -1
+	if len(codeLen) != 0 {
+		length = codeLen[0]
+	} else {
+		code, err := protoDecodedInstructions(proto)
+		if err != nil {
+			return err
+		}
+		length = len(code)
+	}
+	if target < 0 || target > length {
 		return fmt.Errorf("jump target %d out of range", target)
 	}
 	return nil
@@ -3075,9 +3099,17 @@ func disassembleProto(proto *Proto) []string {
 	if proto == nil {
 		return nil
 	}
+	code, err := protoDecodedInstructions(proto)
+	if err != nil {
+		return []string{fmt.Sprintf("<invalid wordcode: %v>", err)}
+	}
 
-	lines := make([]string, len(proto.code))
-	for pc, ins := range proto.code {
+	return disassembleInstructions(proto, code)
+}
+
+func disassembleInstructions(proto *Proto, code []instruction) []string {
+	lines := make([]string, len(code))
+	for pc, ins := range code {
 		lines[pc] = fmt.Sprintf("%04d %s", pc, disassembleInstruction(proto, ins))
 	}
 	return lines
@@ -3087,6 +3119,7 @@ func disassembleProtoFacts(proto *Proto) []string {
 	if proto == nil {
 		return nil
 	}
+	code, decodeErr := protoDecodedInstructions(proto)
 
 	facts := deriveProtoDiagnosticFacts(proto)
 	lines := []string{
@@ -3095,11 +3128,11 @@ func disassembleProtoFacts(proto *Proto) []string {
 		disassembleEntryNilRegisters(proto.entryNilRegisters),
 	}
 	if rejection, ok := protoDirectFrameRejection(proto); ok {
-		if rejection.pc >= 0 && rejection.pc < len(proto.code) {
+		if decodeErr == nil && rejection.pc >= 0 && rejection.pc < len(code) {
 			lines = append(lines, fmt.Sprintf(
 				"direct_frame_rejection pc%d %s: %s",
 				rejection.pc,
-				disassembleInstruction(proto, proto.code[rejection.pc]),
+				disassembleInstruction(proto, code[rejection.pc]),
 				rejection.reason,
 			))
 		} else {

@@ -465,9 +465,9 @@ return (x + y) * 3 - 4 / 2
 	if metrics.ChildProtos != 0 {
 		t.Fatalf("compiled arithmetic has %d child protos, want 0", metrics.ChildProtos)
 	}
-	packedInstructionBytes := int64(reflect.TypeOf(packedInstruction{}).Size())
-	if got := metrics.PackedBytes / packedInstructionBytes; got > 8 {
-		t.Fatalf("compiled arithmetic has %d packed instructions, want at most 8", got)
+	wordcodeBytes := int64(reflect.TypeOf(wordcodeWord(0)).Size())
+	if got := metrics.WordcodeBytes / wordcodeBytes; got > 8 {
+		t.Fatalf("compiled arithmetic has %d wordcode words, want at most 8", got)
 	}
 
 	// The green baseline measured 132 allocations for this fixed source. Keep

@@ -2449,7 +2449,6 @@ func (frame *vmFrame) callValueToDestination(callee Value, globals *globalEnv, a
 					protected:   yield.protected,
 					host:        yield.host,
 				})
-				frame.pc++
 				return vmYieldedValues(yield.values), true, nil
 			}
 			if isVMHostInterrupt(err) {
@@ -2468,7 +2467,6 @@ func (frame *vmFrame) callValueToDestination(callee Value, globals *globalEnv, a
 				protected:   yield.protected,
 				host:        yield.host,
 			})
-			frame.pc++
 			return vmYieldedValues(yield.values), true, nil
 		}
 		if isVMHostInterrupt(err) {
@@ -3559,6 +3557,102 @@ func directFrameExitAt(frame *vmFrame, pc int, exit directFrameSideExit) directF
 	return exit
 }
 
+// wordcodeDispatch is the scalar view used by the cold side-exit helper. It
+// deliberately does not materialize an instruction: the helper decodes the
+// primary word and optional AUX payload directly into register-sized operands.
+// Branch operands are returned as physical word PCs so callers can keep
+// frame.pc in the same coordinate system as the stream.
+type wordcodeDispatch struct {
+	op       opcode
+	a, b, c  int
+	d        int
+	nextWord int
+}
+
+func decodeWordcodeDispatch(words []wordcodeWord, pc int) (wordcodeDispatch, error) {
+	if pc < 0 || pc >= len(words) {
+		return wordcodeDispatch{}, fmt.Errorf("wordcode pc %d out of range", pc)
+	}
+	raw := words[pc]
+	rawOp := uint8(raw)
+	hasAux := raw&wordcodeAuxBit != 0
+	op := opcode(rawOp & uint8(wordcodeOpcodeMask))
+	meta, ok := opcodeMetadata(op)
+	if !ok {
+		return wordcodeDispatch{}, fmt.Errorf("wordcode pc %d has unknown opcode byte 0x%02x", pc, rawOp)
+	}
+	if meta.wordcode.aux == wordcodeAuxNone && hasAux {
+		return wordcodeDispatch{}, fmt.Errorf("wordcode pc %d %s has unexpected AUX", pc, opcodeName(op))
+	}
+	if meta.wordcode.auxRequired && !hasAux {
+		return wordcodeDispatch{}, fmt.Errorf("wordcode pc %d %s is missing AUX", pc, opcodeName(op))
+	}
+	dispatch := wordcodeDispatch{op: op}
+	switch meta.wordcode.format {
+	case wordcodeFormatABC:
+		dispatch.a = wordcodeDecodeByte(op, wordcodeSlotA, raw>>8)
+		dispatch.b = wordcodeDecodeByte(op, wordcodeSlotB, raw>>16)
+		dispatch.c = wordcodeDecodeByte(op, wordcodeSlotC, raw>>24)
+	case wordcodeFormatAD:
+		dispatch.a = wordcodeDecodeByte(op, wordcodeSlotA, raw>>8)
+		value := wordcodeDecodeAD(op, meta.wordcode.adOperand, raw>>16)
+		setWordcodeDispatchSlot(&dispatch, meta.wordcode.adOperand, value)
+	case wordcodeFormatE:
+		setWordcodeDispatchSlot(&dispatch, opcodeJumpTargetSlotToWordcode(opcodeJumpTarget(op)), wordcodeDecodeE(raw>>8))
+	default:
+		return wordcodeDispatch{}, fmt.Errorf("wordcode pc %d %s has unsupported format %d", pc, opcodeName(op), meta.wordcode.format)
+	}
+	nextWord := pc + 1
+	if hasAux {
+		if nextWord >= len(words) {
+			return wordcodeDispatch{}, fmt.Errorf("wordcode pc %d %s AUX is truncated", pc, opcodeName(op))
+		}
+		aux := words[nextWord]
+		switch meta.wordcode.aux {
+		case wordcodeAuxA, wordcodeAuxB, wordcodeAuxC, wordcodeAuxD:
+			setWordcodeDispatchSlot(&dispatch, wordcodeAuxSlot(meta.wordcode.aux), int(int32(aux)))
+		case wordcodeAuxBC16:
+			dispatch.b = wordcodeDecodeAD(op, wordcodeSlotB, aux)
+			dispatch.c = wordcodeDecodeAD(op, wordcodeSlotC, aux>>16)
+		case wordcodeAuxAC16:
+			dispatch.a = wordcodeDecodeAD(op, wordcodeSlotA, aux)
+			dispatch.c = wordcodeDecodeAD(op, wordcodeSlotC, aux>>16)
+		case wordcodeAuxBD16:
+			dispatch.b = wordcodeDecodeAD(op, wordcodeSlotB, aux)
+			dispatch.d = wordcodeDecodeAD(op, wordcodeSlotD, aux>>16)
+		case wordcodeAuxCD16:
+			dispatch.c = wordcodeDecodeAD(op, wordcodeSlotC, aux)
+			dispatch.d = wordcodeDecodeAD(op, wordcodeSlotD, aux>>16)
+		default:
+			return wordcodeDispatch{}, fmt.Errorf("wordcode pc %d %s has unsupported AUX mode %d", pc, opcodeName(op), meta.wordcode.aux)
+		}
+		nextWord++
+	}
+	if jumpTarget := opcodeJumpTarget(op); jumpTarget != opcodeJumpTargetNone {
+		switch jumpTarget {
+		case opcodeJumpTargetB:
+			dispatch.b += nextWord
+		case opcodeJumpTargetD:
+			dispatch.d += nextWord
+		}
+	}
+	dispatch.nextWord = nextWord
+	return dispatch, nil
+}
+
+func setWordcodeDispatchSlot(dispatch *wordcodeDispatch, slot wordcodeOperandSlot, value int) {
+	switch slot {
+	case wordcodeSlotA:
+		dispatch.a = value
+	case wordcodeSlotB:
+		dispatch.b = value
+	case wordcodeSlotC:
+		dispatch.c = value
+	case wordcodeSlotD:
+		dispatch.d = value
+	}
+}
+
 // resumeDirectFrameChild applies a returned nested callee result while the
 // direct dispatcher is still active. It is intentionally bounded by the
 // entry depth: frames owned by the surrounding cold dispatcher remain its
@@ -3614,7 +3708,7 @@ func runDirectFrameInstrumentedLoop(thread *vmThread, frameRef **vmFrame) direct
 	rootDepth := len(thread.frames) - 1
 	var (
 		proto                *Proto
-		code                 []packedInstruction
+		words                []wordcodeWord
 		constants            []Value
 		constantKeys         []tableKey
 		constantKeyOK        []bool
@@ -3632,7 +3726,10 @@ reload:
 	*frameRef = frame
 	directChildActive = len(thread.frames)-1 > rootDepth
 	proto = frame.proto
-	code = proto.packedCode
+	if proto.verifyErr != nil {
+		return directFrameExitAt(frame, frame.pc, directFrameFail(fmt.Errorf("run: invalid prototype: %w", proto.verifyErr)))
+	}
+	words = proto.words
 	constants = proto.constants
 	constantKeys = proto.constantKeys
 	constantKeyOK = proto.constantKeyOK
@@ -3645,7 +3742,7 @@ reload:
 	runCountHook = thread.debugCountInterval > 0 && thread.debugHook != nil
 	runInstructionBudget = thread.instructionBudget >= 0
 
-	for uint(pc) < uint(len(code)) {
+	for uint(pc) < uint(len(words)) {
 		if runInstructionBudget || runLineHook || runCountHook {
 			frame.pc = pc
 		}
@@ -3662,19 +3759,96 @@ reload:
 				return directFrameFail(err)
 			}
 		}
-		packed := code[pc]
-		op := packed.op
-		a := int(packed.a)
-		b := int(packed.b)
-		c := int(packed.c)
-		d := int(packed.d)
+		raw := words[pc]
+		rawOp := uint8(raw)
+		hasAux := raw&wordcodeAuxBit != 0
+		op := opcode(rawOp & uint8(wordcodeOpcodeMask))
+		wordMeta, ok := opcodeMetadata(op)
+		if !ok {
+			return directFrameFail(fmt.Errorf("wordcode pc %d has unknown opcode byte 0x%02x", pc, rawOp))
+		}
+		encoding := wordMeta.wordcode
+		if encoding.aux == wordcodeAuxNone && hasAux {
+			return directFrameFail(fmt.Errorf("wordcode pc %d %s has unexpected AUX", pc, opcodeName(op)))
+		}
+		if encoding.auxRequired && !hasAux {
+			return directFrameFail(fmt.Errorf("wordcode pc %d %s is missing AUX", pc, opcodeName(op)))
+		}
+		a, b, c, d := 0, 0, 0, 0
+		switch encoding.format {
+		case wordcodeFormatABC:
+			a = wordcodeDecodeByte(op, wordcodeSlotA, raw>>8)
+			b = wordcodeDecodeByte(op, wordcodeSlotB, raw>>16)
+			c = wordcodeDecodeByte(op, wordcodeSlotC, raw>>24)
+		case wordcodeFormatAD:
+			a = wordcodeDecodeByte(op, wordcodeSlotA, raw>>8)
+			value := wordcodeDecodeAD(op, encoding.adOperand, raw>>16)
+			switch encoding.adOperand {
+			case wordcodeSlotA:
+				a = value
+			case wordcodeSlotB:
+				b = value
+			case wordcodeSlotC:
+				c = value
+			case wordcodeSlotD:
+				d = value
+			}
+		case wordcodeFormatE:
+			value := wordcodeDecodeE(raw >> 8)
+			switch opcodeJumpTarget(op) {
+			case opcodeJumpTargetB:
+				b = value
+			case opcodeJumpTargetD:
+				d = value
+			}
+		default:
+			return directFrameFail(fmt.Errorf("wordcode pc %d %s has unsupported format %d", pc, opcodeName(op), encoding.format))
+		}
+		nextWord := pc + 1
+		if hasAux {
+			if nextWord >= len(words) {
+				return directFrameFail(fmt.Errorf("wordcode pc %d %s AUX is truncated", pc, opcodeName(op)))
+			}
+			aux := words[nextWord]
+			switch encoding.aux {
+			case wordcodeAuxA:
+				a = int(int32(aux))
+			case wordcodeAuxB:
+				b = int(int32(aux))
+			case wordcodeAuxC:
+				c = int(int32(aux))
+			case wordcodeAuxD:
+				d = int(int32(aux))
+			case wordcodeAuxBC16:
+				b = wordcodeDecodeAD(op, wordcodeSlotB, aux)
+				c = wordcodeDecodeAD(op, wordcodeSlotC, aux>>16)
+			case wordcodeAuxAC16:
+				a = wordcodeDecodeAD(op, wordcodeSlotA, aux)
+				c = wordcodeDecodeAD(op, wordcodeSlotC, aux>>16)
+			case wordcodeAuxBD16:
+				b = wordcodeDecodeAD(op, wordcodeSlotB, aux)
+				d = wordcodeDecodeAD(op, wordcodeSlotD, aux>>16)
+			case wordcodeAuxCD16:
+				c = wordcodeDecodeAD(op, wordcodeSlotC, aux)
+				d = wordcodeDecodeAD(op, wordcodeSlotD, aux>>16)
+			default:
+				return directFrameFail(fmt.Errorf("wordcode pc %d %s has unsupported AUX mode %d", pc, opcodeName(op), encoding.aux))
+			}
+			nextWord++
+		}
+		switch opcodeJumpTarget(op) {
+		case opcodeJumpTargetB:
+			b += nextWord
+		case opcodeJumpTargetD:
+			d += nextWord
+		}
 		if counts := thread.directFrameOpcodeCounts; counts != nil {
 			counts[uint8(op)]++
 		}
 		if pcCounts := thread.directFramePCCounts; pcCounts != nil {
 			perProto := pcCounts[proto]
 			if perProto == nil {
-				perProto = make([]uint64, len(code))
+				perProto = make([]uint64, len(words))
 				pcCounts[proto] = perProto
 			}
 			perProto[pc]++
@@ -3727,7 +3901,7 @@ reload:
 				frame.openResultStart = a
 				frame.openResults = vmAdjustedBorrowedResultWindow(frame.varargs)
 				registers[a] = frame.openResults.at(0)
-				pc++
+				pc = nextWord
 				continue
 			}
 			frame.openResultStart = -1
@@ -4890,7 +5064,7 @@ reload:
 			if closure, ok := callee.scriptFunction(); ok && c >= 0 {
 				destination := vmResultDestination{register: a, count: d}
 				args := registers[b+1 : b+1+c]
-				pc++
+				pc = nextWord
 				frame.pc = pc
 				result, err := thread.runInlineScriptCall(closure, args)
 				if err != nil {
@@ -4944,7 +5118,7 @@ reload:
 			if borrowHint {
 				if closure, ok := callee.scriptFunction(); ok {
 					if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, b+1, argCount); borrowed {
-						pc++
+						pc = nextWord
 						frame.pc = pc
 						installFixedResultPendingCall(frame, vmResultDestination{register: a, count: 1})
 						thread.pushFrame(child)
@@ -4964,7 +5138,7 @@ reload:
 				return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
 			}
 			argCount, borrowHint := decodeFixedCallCount(d)
-			pc++
+			pc = nextWord
 			frame.pc = pc
 			if borrowHint {
 				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, c, argCount); borrowed {
@@ -5012,7 +5186,7 @@ reload:
 				return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
 			}
 			argCount, borrowHint := decodeFixedCallCount(d)
-			pc++
+			pc = nextWord
 			frame.pc = pc
 			var value Value
 			var callErr error
@@ -5073,7 +5247,7 @@ reload:
 				return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
 			}
 			registers[a+1] = receiver
-			pc++
+			pc = nextWord
 			frame.pc = pc
 			explicitCount, borrowHint := decodeFixedCallCount(d)
 			argCount := explicitCount + 1
@@ -5173,7 +5347,7 @@ reload:
 		default:
 			return directFrameEnterGenericFrame()
 		}
-		pc++
+		pc = nextWord
 	}
 	result := vmReturnedValues(nil)
 	if directChildActive && thread.resumeDirectFrameChild(rootDepth, &frame, result) {
@@ -5188,7 +5362,7 @@ func runDirectFrameProductionLoop(thread *vmThread, frameRef **vmFrame) directFr
 	rootDepth := len(thread.frames) - 1
 	var (
 		proto             *Proto
-		code              []packedInstruction
+		words             []wordcodeWord
 		constants         []Value
 		constantKeys      []tableKey
 		constantKeyOK     []bool
@@ -5202,7 +5376,10 @@ reload:
 	*frameRef = frame
 	directChildActive = len(thread.frames)-1 > rootDepth
 	proto = frame.proto
-	code = proto.packedCode
+	if proto.verifyErr != nil {
+		return directFrameExitAt(frame, frame.pc, directFrameFail(fmt.Errorf("run: invalid prototype: %w", proto.verifyErr)))
+	}
+	words = proto.words
 	constants = proto.constants
 	constantKeys = proto.constantKeys
 	constantKeyOK = proto.constantKeyOK
@@ -5211,13 +5388,72 @@ reload:
 	registers = frame.registers
 	pc = frame.pc
 
-	for uint(pc) < uint(len(code)) {
-		packed := code[pc]
-		op := packed.op
-		a := int(packed.a)
-		b := int(packed.b)
-		c := int(packed.c)
-		d := int(packed.d)
+	for uint(pc) < uint(len(words)) {
+		raw := words[pc]
+		hasAux := raw&wordcodeAuxBit != 0
+		op := opcode(uint8(raw) & uint8(wordcodeOpcodeMask))
+		encoding := wordcodeEncodingTable[op]
+		a, b, c, d := 0, 0, 0, 0
+		switch encoding.format {
+		case wordcodeFormatABC:
+			a = wordcodeHotDecodeByte(raw>>8, wordcodeHotSlotSigned(encoding, wordcodeSlotA))
+			b = wordcodeHotDecodeByte(raw>>16, wordcodeHotSlotSigned(encoding, wordcodeSlotB))
+			c = wordcodeHotDecodeByte(raw>>24, wordcodeHotSlotSigned(encoding, wordcodeSlotC))
+		case wordcodeFormatAD:
+			a = wordcodeHotDecodeByte(raw>>8, wordcodeHotSlotSigned(encoding, wordcodeSlotA))
+			value := wordcodeHotDecodeAD(raw>>16, wordcodeHotSlotSigned(encoding, encoding.adOperand))
+			switch encoding.adOperand {
+			case wordcodeSlotA:
+				a = value
+			case wordcodeSlotB:
+				b = value
+			case wordcodeSlotC:
+				c = value
+			case wordcodeSlotD:
+				d = value
+			}
+		case wordcodeFormatE:
+			value := wordcodeHotDecodeE(raw >> 8)
+			switch encoding.jumpSlot {
+			case opcodeJumpTargetB:
+				b = value
+			case opcodeJumpTargetD:
+				d = value
+			}
+		}
+		nextWord := pc + 1
+		if hasAux {
+			aux := words[nextWord]
+			switch encoding.aux {
+			case wordcodeAuxA:
+				a = int(int32(aux))
+			case wordcodeAuxB:
+				b = int(int32(aux))
+			case wordcodeAuxC:
+				c = int(int32(aux))
+			case wordcodeAuxD:
+				d = int(int32(aux))
+			case wordcodeAuxBC16:
+				b = wordcodeHotDecodeAD(aux, wordcodeHotSlotSigned(encoding, wordcodeSlotB))
+				c = wordcodeHotDecodeAD(aux>>16, wordcodeHotSlotSigned(encoding, wordcodeSlotC))
+			case wordcodeAuxAC16:
+				a = wordcodeHotDecodeAD(aux, wordcodeHotSlotSigned(encoding, wordcodeSlotA))
+				c = wordcodeHotDecodeAD(aux>>16, wordcodeHotSlotSigned(encoding, wordcodeSlotC))
+			case wordcodeAuxBD16:
+				b = wordcodeHotDecodeAD(aux, wordcodeHotSlotSigned(encoding, wordcodeSlotB))
+				d = wordcodeHotDecodeAD(aux>>16, wordcodeHotSlotSigned(encoding, wordcodeSlotD))
+			case wordcodeAuxCD16:
+				c = wordcodeHotDecodeAD(aux, wordcodeHotSlotSigned(encoding, wordcodeSlotC))
+				d = wordcodeHotDecodeAD(aux>>16, wordcodeHotSlotSigned(encoding, wordcodeSlotD))
+			}
+			nextWord++
+		}
+		switch encoding.jumpSlot {
+		case opcodeJumpTargetB:
+			b += nextWord
+		case opcodeJumpTargetD:
+			d += nextWord
+		}
 		switch op {
 		case opLoadConst:
 			registers[a] = constants[b]
@@ -5261,7 +5497,7 @@ reload:
 				frame.openResultStart = a
 				frame.openResults = vmAdjustedBorrowedResultWindow(frame.varargs)
 				registers[a] = frame.openResults.at(0)
-				pc++
+				pc = nextWord
 				frame.pc = pc
 				continue
 			}
@@ -6373,7 +6609,7 @@ reload:
 			if closure, ok := callee.scriptFunction(); ok && c >= 0 {
 				destination := vmResultDestination{register: a, count: d}
 				args := registers[b+1 : b+1+c]
-				pc++
+				pc = nextWord
 				frame.pc = pc
 				result, err := thread.runInlineScriptCall(closure, args)
 				if err != nil {
@@ -6427,7 +6663,7 @@ reload:
 			if borrowHint {
 				if closure, ok := callee.scriptFunction(); ok {
 					if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, b+1, argCount); borrowed {
-						pc++
+						pc = nextWord
 						frame.pc = pc
 						installFixedResultPendingCall(frame, vmResultDestination{register: a, count: 1})
 						thread.pushFrame(child)
@@ -6446,7 +6682,7 @@ reload:
 				return directFrameExitAt(frame, pc, directFrameEnterGenericFrameFor(directFrameSideExitReasonCall))
 			}
 			argCount, borrowHint := decodeFixedCallCount(d)
-			pc++
+			pc = nextWord
 			frame.pc = pc
 			if borrowHint {
 				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, c, argCount); borrowed {
@@ -6493,7 +6729,7 @@ reload:
 				return directFrameExitAt(frame, pc, directFrameEnterGenericFrameFor(directFrameSideExitReasonCall))
 			}
 			argCount, borrowHint := decodeFixedCallCount(d)
-			pc++
+			pc = nextWord
 			frame.pc = pc
 			var value Value
 			var callErr error
@@ -6552,7 +6788,7 @@ reload:
 				return directFrameExitAt(frame, pc, directFrameEnterGenericFrameFor(directFrameSideExitReasonCall))
 			}
 			registers[a+1] = receiver
-			pc++
+			pc = nextWord
 			frame.pc = pc
 			explicitCount, borrowHint := decodeFixedCallCount(d)
 			argCount := explicitCount + 1
@@ -6652,7 +6888,7 @@ reload:
 		default:
 			return directFrameExitAt(frame, pc, directFrameEnterGenericFrame())
 		}
-		pc++
+		pc = nextWord
 	}
 	result := vmReturnedValues(nil)
 	if directChildActive && thread.resumeDirectFrameChild(rootDepth, &frame, result) {
@@ -6743,7 +6979,16 @@ func (thread *vmThread) runDebugHook(event vmDebugEvent) error {
 }
 
 func (frame *vmFrame) protoLine(pc int) int {
-	if frame == nil || frame.proto == nil || pc < 0 || pc >= len(frame.proto.lines) {
+	if frame == nil || frame.proto == nil || pc < 0 {
+		return -1
+	}
+	if len(frame.proto.wordLines) != 0 {
+		if pc >= len(frame.proto.wordLines) {
+			return -1
+		}
+		return frame.proto.wordLines[pc]
+	}
+	if pc >= len(frame.proto.lines) {
 		return -1
 	}
 	return frame.proto.lines[pc]

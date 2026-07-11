@@ -11,7 +11,7 @@ type CompilerBenchmarkMetrics struct {
 	Constants           int
 	RegisterSlots       int
 	ChildProtos         int
-	PackedBytes         int64
+	WordcodeBytes       int64
 	ProtoOwnedBytes     int64
 	RetainedStringBytes int64
 }
@@ -90,10 +90,12 @@ func compilerBenchmarkMetrics(roots []*Proto) CompilerBenchmarkMetrics {
 			return
 		}
 		seen[proto] = true
-		metrics.Instructions += len(proto.code)
+		if code, err := protoDecodedInstructions(proto); err == nil {
+			metrics.Instructions += len(code)
+		}
 		metrics.Constants += len(proto.constants)
 		metrics.RegisterSlots += proto.registers
-		metrics.PackedBytes += int64(len(proto.packedCode)) * int64(reflect.TypeOf(packedInstruction{}).Size())
+		metrics.WordcodeBytes += int64(len(proto.words)) * int64(reflect.TypeOf(wordcodeWord(0)).Size())
 		owned, retainedStrings := protoOwnedBenchmarkBytesWithStrings(proto, strings)
 		metrics.ProtoOwnedBytes += owned
 		metrics.RetainedStringBytes += retainedStrings

@@ -250,7 +250,7 @@ func reportCompilerBenchmarkMetrics(b *testing.B, metrics ember.CompilerBenchmar
 	b.ReportMetric(float64(metrics.Constants), "constants/op")
 	b.ReportMetric(float64(metrics.RegisterSlots), "register_slots/op")
 	b.ReportMetric(float64(metrics.ChildProtos), "child_protos/op")
-	b.ReportMetric(float64(metrics.PackedBytes), "packed_B/op")
+	b.ReportMetric(float64(metrics.WordcodeBytes), "wordcode_B/op")
 	b.ReportMetric(float64(metrics.ProtoOwnedBytes), "proto_owned_B/op")
 	b.ReportMetric(float64(metrics.RetainedStringBytes), "retained_string_B/op")
 }

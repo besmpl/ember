@@ -11,7 +11,11 @@ func TestCompileRunConditionTemporaries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if got := len(proto.code); got != 1282 {
+	code, err := protoDecodedInstructions(proto)
+	if err != nil {
+		t.Fatalf("decodeProtoInstructions returned error: %v", err)
+	}
+	if got := len(code); got != 1282 {
 		t.Fatalf("instruction count = %d, want 1282", got)
 	}
 	if got := len(proto.constants); got != 4 {
@@ -20,8 +24,8 @@ func TestCompileRunConditionTemporaries(t *testing.T) {
 	if got := proto.registers; got > 2 {
 		t.Fatalf("frame register count = %d, want at most 2", got)
 	}
-	if len(proto.lines) != len(proto.code) {
-		t.Fatalf("line table length = %d, want %d", len(proto.lines), len(proto.code))
+	if len(proto.lines) != len(code) {
+		t.Fatalf("line table length = %d, want %d", len(proto.lines), len(code))
 	}
 	lineCount := strings.Count(source, "\n")
 	for index, line := range proto.lines {

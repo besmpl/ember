@@ -11,15 +11,15 @@ var compilerComplexityProtoSink *Proto
 
 func TestCompilerComplexityBudgets(t *testing.T) {
 	tests := []struct {
-		name                  string
-		source                string
-		globals               map[string]Value
-		want                  []Value
-		maxInstructions       int
-		maxConstants          int
-		maxRegisterSlots      int
-		wantChildProtos       int
-		maxPackedInstructions int64
+		name             string
+		source           string
+		globals          map[string]Value
+		want             []Value
+		maxInstructions  int
+		maxConstants     int
+		maxRegisterSlots int
+		wantChildProtos  int
+		maxWordcodeWords int64
 	}{
 		{
 			name: "branch_dense",
@@ -30,13 +30,13 @@ else
     x = x + 3
 end
 return x`,
-			globals:               map[string]Value{"flag": BoolValue(false)},
-			want:                  []Value{NumberValue(4)},
-			maxInstructions:       7,
-			maxConstants:          4,
-			maxRegisterSlots:      2,
-			wantChildProtos:       0,
-			maxPackedInstructions: 7,
+			globals:          map[string]Value{"flag": BoolValue(false)},
+			want:             []Value{NumberValue(4)},
+			maxInstructions:  7,
+			maxConstants:     4,
+			maxRegisterSlots: 2,
+			wantChildProtos:  0,
+			maxWordcodeWords: 8,
 		},
 		{
 			name: "closure_upvalue",
@@ -45,12 +45,12 @@ local function add(x)
     return base + x
 end
 return add(3)`,
-			want:                  []Value{NumberValue(7)},
-			maxInstructions:       9,
-			maxConstants:          2,
-			maxRegisterSlots:      7,
-			wantChildProtos:       1,
-			maxPackedInstructions: 9,
+			want:             []Value{NumberValue(7)},
+			maxInstructions:  9,
+			maxConstants:     2,
+			maxRegisterSlots: 7,
+			wantChildProtos:  1,
+			maxWordcodeWords: 10,
 		},
 		{
 			name: "vararg_multi_return",
@@ -59,24 +59,24 @@ return add(3)`,
     return a, b, select("#", ...)
 end
 return collect(1, 2, 3)`,
-			want:                  []Value{NumberValue(1), NumberValue(2), NumberValue(3)},
-			maxInstructions:       11,
-			maxConstants:          3,
-			maxRegisterSlots:      10,
-			wantChildProtos:       1,
-			maxPackedInstructions: 11,
+			want:             []Value{NumberValue(1), NumberValue(2), NumberValue(3)},
+			maxInstructions:  11,
+			maxConstants:     3,
+			maxRegisterSlots: 10,
+			wantChildProtos:  1,
+			maxWordcodeWords: 13,
 		},
 		{
 			name: "table_string_fields",
 			source: `local value = {name = "ember", hp = 10}
 value.hp = value.hp + 5
 return value.name, value.hp`,
-			want:                  []Value{StringValue("ember"), NumberValue(15)},
-			maxInstructions:       12,
-			maxConstants:          6,
-			maxRegisterSlots:      5,
-			wantChildProtos:       0,
-			maxPackedInstructions: 12,
+			want:             []Value{StringValue("ember"), NumberValue(15)},
+			maxInstructions:  12,
+			maxConstants:     6,
+			maxRegisterSlots: 5,
+			wantChildProtos:  0,
+			maxWordcodeWords: 12,
 		},
 	}
 
@@ -105,9 +105,16 @@ return value.name, value.hp`,
 			if metrics.ChildProtos != tt.wantChildProtos {
 				t.Fatalf("%s has %d child protos, want %d", tt.name, metrics.ChildProtos, tt.wantChildProtos)
 			}
-			packedInstructionBytes := int64(reflect.TypeOf(packedInstruction{}).Size())
-			if got := metrics.PackedBytes / packedInstructionBytes; got > tt.maxPackedInstructions {
-				t.Fatalf("%s has %d packed instructions, want at most %d", tt.name, got, tt.maxPackedInstructions)
+			wordcodeBytes := int64(reflect.TypeOf(wordcodeWord(0)).Size())
+			if got := metrics.WordcodeBytes / wordcodeBytes; got > tt.maxWordcodeWords {
+				t.Fatalf("%s has %d wordcode words, want at most %d", tt.name, got, tt.maxWordcodeWords)
+			}
+			// The replaced executable representation used one 16-byte packed
+			// instruction per logical instruction. AUX expansion must still leave
+			// the published word stream at least 60% smaller than that baseline.
+			legacyBytes := int64(metrics.Instructions) * 16
+			if legacyBytes > 0 && metrics.WordcodeBytes*100 > legacyBytes*40 {
+				t.Fatalf("%s wordcode uses %d bytes versus %d legacy bytes, want at least 60%% reduction", tt.name, metrics.WordcodeBytes, legacyBytes)
 			}
 		})
 	}
@@ -155,8 +162,12 @@ return read({hp = 7})`)
 		t.Fatalf("compiled root has %d child prototypes, want 1", len(proto.prototypes))
 	}
 	child := proto.prototypes[0]
-	if len(child.lines) != len(child.code) {
-		t.Fatalf("child line table has %d entries for %d instructions", len(child.lines), len(child.code))
+	childCode, err := protoDecodedInstructions(child)
+	if err != nil {
+		t.Fatalf("decode child wordcode: %v", err)
+	}
+	if len(child.lines) != len(childCode) {
+		t.Fatalf("child line table has %d entries for %d instructions", len(child.lines), len(childCode))
 	}
 
 	results, err := Run(proto)

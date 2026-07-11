@@ -76,7 +76,6 @@ func sealFunctionDraft(draft *functionDraft) (*Proto, error) {
 
 	proto := &Proto{
 		constants:  draft.constants,
-		code:       draft.assembly.code,
 		prototypes: children,
 		upvalues:   draft.upvalues,
 		lines:      draft.assembly.lines,
@@ -91,25 +90,35 @@ func sealFunctionDraft(draft *functionDraft) (*Proto, error) {
 }
 
 func sealFunctionProto(proto *Proto, assembly *assembledBytecodeIR) error {
-	assignProtoGlobalSlots(proto)
-	artifact := buildExecutionArtifact(proto)
+	assignProtoGlobalSlots(proto, assembly.code)
+	artifact := buildExecutionArtifact(proto, assembly.code)
 	artifact.apply(proto)
 	assembly.code = markBorrowableFixedCallWindows(assembly.code, proto.registers, artifact.capturedLocals)
-	proto.code = assembly.code
-	markReusableZeroCaptureClosures(proto)
-	if err := assembly.pack(); err != nil {
+	markReusableZeroCaptureClosures(proto, assembly.code)
+	proto.verifyErr = verifyFunctionProtoWithCode(proto, assembly.code)
+	if proto.verifyErr != nil {
+		return proto.verifyErr
+	}
+	if err := encodeProtoWords(proto, assembly.code); err != nil {
 		proto.verifyErr = err
 		return err
 	}
-	proto.packedCode = assembly.packedCode
-	proto.verifyErr = verifyFunctionProto(proto)
+	applyProtoWordIndexCaches(proto, assembly.code)
 	return proto.verifyErr
 }
 
 func verifyFunctionProto(proto *Proto) error {
+	code, err := protoDecodedInstructions(proto)
+	if err != nil {
+		return err
+	}
+	return verifyFunctionProtoWithCode(proto, code)
+}
+
+func verifyFunctionProtoWithCode(proto *Proto, code []instruction) error {
 	sealedChildren := make(map[*Proto]bool, len(proto.prototypes))
 	for _, child := range proto.prototypes {
 		sealedChildren[child] = true
 	}
-	return verifyProtoSeen(proto, sealedChildren)
+	return verifyProtoSeenWithCode(proto, sealedChildren, code)
 }

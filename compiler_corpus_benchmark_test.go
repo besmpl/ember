@@ -139,7 +139,7 @@ func reportCompilerCorpusMetrics(b *testing.B, fixture compilerCorpusFixture, me
 	b.ReportMetric(float64(metrics.Constants), "constants/op")
 	b.ReportMetric(float64(metrics.RegisterSlots), "register_slots/op")
 	b.ReportMetric(float64(metrics.ChildProtos), "child_protos/op")
-	b.ReportMetric(float64(metrics.PackedBytes), "packed_B/op")
+	b.ReportMetric(float64(metrics.WordcodeBytes), "wordcode_B/op")
 	b.ReportMetric(float64(metrics.ProtoOwnedBytes), "proto_owned_B/op")
 	b.ReportMetric(float64(metrics.RetainedStringBytes), "retained_string_B/op")
 }
@@ -560,7 +560,7 @@ func (metrics compilerCorpusGraphReport) report(b *testing.B, graph compilerCorp
 	b.ReportMetric(float64(metrics.program.Constants), "constants/op")
 	b.ReportMetric(float64(metrics.program.RegisterSlots), "register_slots/op")
 	b.ReportMetric(float64(metrics.program.ChildProtos), "child_protos/op")
-	b.ReportMetric(float64(metrics.program.PackedBytes), "packed_B/op")
+	b.ReportMetric(float64(metrics.program.WordcodeBytes), "wordcode_B/op")
 	b.ReportMetric(float64(metrics.program.ProtoOwnedBytes), "proto_owned_B/op")
 	b.ReportMetric(float64(metrics.program.RetainedStringBytes), "retained_string_B/op")
 }

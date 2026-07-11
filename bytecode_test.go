@@ -34,7 +34,7 @@ func TestDisassembleProtoNamesInstructions(t *testing.T) {
 }
 
 func TestInstructionSizeBudget(t *testing.T) {
-	if got, want := reflect.TypeOf(packedInstruction{}).Size(), uintptr(16); got > want {
+	if got, want := reflect.TypeOf(wordcodeWord(0)).Size(), uintptr(4); got > want {
 		t.Fatalf("instruction size is %d bytes, want at most %d", got, want)
 	}
 }
@@ -47,8 +47,11 @@ func TestFixedCallCountEncodingBoundaries(t *testing.T) {
 			if decoded != count || gotBorrow != borrow {
 				t.Fatalf("fixed call count (%d, %t) encoded as %d and decoded as (%d, %t)", count, borrow, raw, decoded, gotBorrow)
 			}
-			if _, err := packInstruction(instruction{op: opCallOne, a: 0, b: 0, c: raw}); err != nil {
-				t.Fatalf("fixed call count (%d, %t) did not fit packed operand: %v", count, borrow, err)
+			if _, err := wordcodeEncodeInstruction(
+				instruction{op: opCallOne, a: 0, b: 0, c: raw, d: 1},
+				0, 2, []int{0, 2},
+			); err != nil {
+				t.Fatalf("fixed call count (%d, %t) did not fit wordcode operand: %v", count, borrow, err)
 			}
 		}
 	}
@@ -67,27 +70,14 @@ func TestFixedCallCountEncodingBoundaries(t *testing.T) {
 }
 
 func TestDisassembleFixedCallBorrowMarker(t *testing.T) {
-	proto := &Proto{code: []instruction{{op: opCallLocalOne, a: 0, b: 1, c: 2, d: encodeFixedCallCount(3, true)}}}
+	proto := newProto(nil, []instruction{{op: opCallLocalOne, a: 0, b: 1, c: 2, d: encodeFixedCallCount(3, true)}}, nil, nil, 8, 0, false)
 	got := disassembleProto(proto)
 	if len(got) != 1 || !strings.Contains(got[0], "CALL_LOCAL_ONE r0 r1 r2 3 borrow") {
 		t.Fatalf("fixed-call borrow disassembly = %#v", got)
 	}
 }
 
-func TestPackedInstructionRoundTripsAllOpcodes(t *testing.T) {
-	for _, op := range allOpcodes {
-		ins := instruction{op: op, a: 1, b: 2, c: 3, d: 4}
-		packed, err := packInstruction(ins)
-		if err != nil {
-			t.Fatalf("packInstruction(%s) returned error: %v", opcodeName(op), err)
-		}
-		if got := packed.unpack(); got != ins {
-			t.Fatalf("packed %s round trip = %#v, want %#v", opcodeName(op), got, ins)
-		}
-	}
-}
-
-func TestFinalizeProtoRejectsPackedInstructionOperandOverflow(t *testing.T) {
+func TestFinalizeProtoRejectsWordcodeRegisterOverflow(t *testing.T) {
 	proto := newProto(
 		[]Value{NumberValue(1)},
 		[]instruction{
@@ -101,10 +91,10 @@ func TestFinalizeProtoRejectsPackedInstructionOperandOverflow(t *testing.T) {
 		false,
 	)
 	if proto.verifyErr == nil {
-		t.Fatal("newProto accepted an instruction operand outside the packed int16 range")
+		t.Fatal("newProto accepted an instruction register outside the wordcode range")
 	}
-	if got := proto.verifyErr.Error(); !strings.Contains(got, "instruction 0 LOAD_CONST") || !strings.Contains(got, "operand a value 32768 out of int16 range") {
-		t.Fatalf("packed operand overflow error is %q", got)
+	if got := proto.verifyErr.Error(); !strings.Contains(got, "instruction 0 LOAD_CONST") || !strings.Contains(got, "register index 32768 out of range") {
+		t.Fatalf("wordcode register overflow error is %q", got)
 	}
 }
 
@@ -2645,8 +2635,17 @@ return value()
 	defer restore()
 
 	parent := newVMFrame(proto, nil, nil)
-	parent.pc = len(proto.code) - 1
-	returnRegister := proto.code[parent.pc].a
+	code, err := protoDecodedInstructions(proto)
+	if err != nil {
+		t.Fatalf("decode prototype wordcode: %v", err)
+	}
+	returnPC := len(code) - 1
+	boundaries, err := wordcodeBoundaries(code)
+	if err != nil {
+		t.Fatalf("wordcodeBoundaries returned error: %v", err)
+	}
+	parent.pc = boundaries[returnPC]
+	returnRegister := code[returnPC].a
 	parent.pendingCall = vmPendingCall{
 		destination: vmResultDestination{
 			register: returnRegister,

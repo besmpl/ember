@@ -7,7 +7,7 @@ import (
 // coldInstructionAction is the small result protocol between the direct
 // dispatcher and the side-exit interpreter.  The direct loop has already
 // charged the current instruction and run its hooks; the cold island only
-// executes the operation that caused the exit and publishes the next pc.
+// executes the operation that caused the exit and publishes the next word pc.
 type coldInstructionActionKind uint8
 
 const (
@@ -26,7 +26,8 @@ type coldInstructionAction struct {
 }
 
 func coldInstructionResume(frame *vmFrame) coldInstructionAction {
-	frame.pc++
+	// runColdInstruction publishes the decoded fallthrough word before the
+	// operation switch, so AUX-bearing instructions advance by two words.
 	return coldInstructionAction{kind: coldInstructionActionResume}
 }
 
@@ -56,17 +57,35 @@ func coldInstructionCallResult(result vmFrameResult, done bool, err error) coldI
 	return coldInstructionAction{kind: coldInstructionActionCall}
 }
 
-func (thread *vmThread) runColdInstruction(frame *vmFrame) coldInstructionAction {
-	if frame == nil || frame.proto == nil || frame.pc < 0 || frame.pc >= len(frame.proto.packedCode) {
-		return coldInstructionError(fmt.Errorf("run: cold instruction pc %d out of range", frame.pc))
+func (thread *vmThread) runColdInstruction(frame *vmFrame) (action coldInstructionAction) {
+	if frame == nil || frame.proto == nil || frame.pc < 0 || frame.pc >= len(frame.proto.words) {
+		pc := -1
+		if frame != nil {
+			pc = frame.pc
+		}
+		return coldInstructionError(fmt.Errorf("run: cold instruction pc %d out of range", pc))
 	}
+	currentPC := frame.pc
+	defer func() {
+		if action.kind == coldInstructionActionError {
+			frame.pc = currentPC
+		}
+	}()
 
 	proto := frame.proto
 	globals := thread.globals
-	packed := proto.packedCode[frame.pc]
-	a, b, c, d := int(packed.a), int(packed.b), int(packed.c), int(packed.d)
+	dispatch, err := decodeWordcodeDispatch(proto.words, frame.pc)
+	if err != nil {
+		return coldInstructionError(err)
+	}
+	// Publish fallthrough before executing the cold operation. Branches and
+	// returns overwrite it explicitly; call/yield paths can resume without
+	// needing to understand AUX width themselves.
+	frame.pc = dispatch.nextWord
+	op := dispatch.op
+	a, b, c, d := dispatch.a, dispatch.b, dispatch.c, dispatch.d
 
-	switch packed.op {
+	switch op {
 	case opSetField:
 		table, ok := frame.register(a).Table()
 		if !ok {
@@ -180,7 +199,7 @@ func (thread *vmThread) runColdInstruction(frame *vmFrame) coldInstructionAction
 	case opArrayNext, opArrayNextJump2:
 		callee := frame.register(b)
 		destination := vmResultDestination{register: a, count: d}
-		if packed.op == opArrayNextJump2 {
+		if op == opArrayNextJump2 {
 			destination.count = 2
 		}
 		results, count, ok, err := inlineNativeIteratorNext(callee, frame.register(c), frame.register(a))
@@ -203,7 +222,7 @@ func (thread *vmThread) runColdInstruction(frame *vmFrame) coldInstructionAction
 				return coldInstructionCallResult(callResult, done, callErr)
 			}
 		}
-		if packed.op == opArrayNextJump2 && frame.register(a).IsNil() {
+		if op == opArrayNextJump2 && frame.register(a).IsNil() {
 			return coldInstructionContinue(frame, d)
 		}
 		return coldInstructionResume(frame)
@@ -345,7 +364,7 @@ func (thread *vmThread) runColdInstruction(frame *vmFrame) coldInstructionAction
 		return coldInstructionResume(frame)
 
 	default:
-		return coldInstructionError(fmt.Errorf("run: unsupported cold opcode %d", packed.op))
+		return coldInstructionError(fmt.Errorf("run: unsupported cold opcode %d", op))
 	}
 }
 

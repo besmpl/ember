@@ -6,8 +6,8 @@ import (
 )
 
 // wordcodeWord is the storage unit for the verifier-first wordcode contract.
-// The VM still executes the canonical instruction representation; this file
-// only defines and validates the future stream.
+// The direct VM loops consume this stream in place; canonical instruction
+// materialization is limited to verifier/disassembly paths.
 type wordcodeWord = uint32
 
 const (
@@ -60,6 +60,83 @@ type wordcodeEncodingMetadata struct {
 	adOperand   wordcodeOperandSlot
 	aux         wordcodeAuxMode
 	auxRequired bool
+}
+
+// wordcodeHotEncoding is the compact runtime view of the central opcode
+// metadata. The verifier and encoder use wordcodeEncodingMetadata, while the
+// production dispatcher only needs these scalar fields. In particular,
+// signedSlots avoids consulting the large opcode metadata table for every
+// operand and jumpSlot avoids a control-flow metadata lookup in the hot loop.
+type wordcodeHotEncoding struct {
+	format      wordcodeFormat
+	adOperand   wordcodeOperandSlot
+	aux         wordcodeAuxMode
+	flags       uint8
+	signedSlots uint8
+	jumpSlot    opcodeJumpTargetSlot
+}
+
+const wordcodeHotAuxRequired uint8 = 1 << 0
+
+var wordcodeEncodingTable = func() [128]wordcodeHotEncoding {
+	var table [128]wordcodeHotEncoding
+	for _, op := range allOpcodes {
+		encoding := wordcodeMetadataFor(op)
+		opcodeMeta, _ := opcodeMetadata(op)
+		flags := uint8(0)
+		if encoding.auxRequired {
+			flags = wordcodeHotAuxRequired
+		}
+		table[op] = wordcodeHotEncoding{
+			format:      encoding.format,
+			adOperand:   encoding.adOperand,
+			aux:         encoding.aux,
+			flags:       flags,
+			signedSlots: wordcodeHotSignedSlots(op),
+			jumpSlot:    opcodeMeta.jumpTarget,
+		}
+	}
+	return table
+}()
+
+func wordcodeHotSignedSlots(op opcode) uint8 {
+	var slots uint8
+	for _, slot := range []wordcodeOperandSlot{wordcodeSlotA, wordcodeSlotB, wordcodeSlotC, wordcodeSlotD} {
+		if wordcodeSlotSigned(op, slot) {
+			slots |= 1 << uint(slot)
+		}
+	}
+	return slots
+}
+
+// These tiny sign-extension helpers are deliberately scalar so the compiler
+// can inline them into the production dispatcher's primary/AUX decode.
+func wordcodeHotDecodeByte(value wordcodeWord, signed bool) int {
+	decoded := int(uint8(value))
+	if signed && decoded&0x80 != 0 {
+		return decoded - 0x100
+	}
+	return decoded
+}
+
+func wordcodeHotDecodeAD(value wordcodeWord, signed bool) int {
+	decoded := int(uint16(value))
+	if signed && decoded&0x8000 != 0 {
+		return decoded - 0x10000
+	}
+	return decoded
+}
+
+func wordcodeHotDecodeE(value wordcodeWord) int {
+	decoded := value & 0x00ffffff
+	if decoded&(1<<23) != 0 {
+		decoded |= 0xff000000
+	}
+	return int(int32(decoded))
+}
+
+func wordcodeHotSlotSigned(meta wordcodeHotEncoding, slot wordcodeOperandSlot) bool {
+	return meta.signedSlots&(1<<uint(slot)) != 0
 }
 
 func wordcodeMetadataFor(op opcode) wordcodeEncodingMetadata {
@@ -793,6 +870,9 @@ func verifyWordcodeInstruction(ins instruction, registerCount, constantCount, pr
 	}
 	for _, slot := range []wordcodeOperandSlot{wordcodeSlotA, wordcodeSlotB, wordcodeSlotC, wordcodeSlotD} {
 		value := wordcodeSlotValue(ins, slot)
+		if ins.op == opReturn && ins.b == 0 && slot == wordcodeSlotA {
+			continue
+		}
 		switch wordcodeOperandKindFor(ins.op, slot) {
 		case bytecodeOperandRegister:
 			if err := checkRegister(slot, value); err != nil {
@@ -966,9 +1046,8 @@ func verifyWordcodeForProto(proto *Proto, words []wordcodeWord) error {
 		return err
 	}
 	candidate := *proto
-	candidate.code = code
 	for pc, ins := range code {
-		if err := verifyInstruction(&candidate, pc, ins); err != nil {
+		if err := verifyInstruction(&candidate, pc, ins, len(code)); err != nil {
 			return fmt.Errorf("instruction %d %s: %w", pc, opcodeName(ins.op), err)
 		}
 	}

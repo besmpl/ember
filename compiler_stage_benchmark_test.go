@@ -40,7 +40,7 @@ type compilerStageMetrics struct {
 	irInstructions      int
 	cfgBlocks           int
 	peakRegisters       int
-	packedBytes         int64
+	wordcodeBytes       int64
 	protoOwnedBytes     int64
 	retainedStringBytes int64
 }
@@ -238,7 +238,7 @@ func benchmarkCompilerStageAssembleSeal(b *testing.B, fixture compilerStageFixtu
 		irInstructions:      len(fixture.optimized.ir),
 		cfgBlocks:           len(bytecodeIRBlockOrder(fixture.optimized.ir)),
 		peakRegisters:       fixture.stageMetrics.RegisterSlots,
-		packedBytes:         fixture.stageMetrics.PackedBytes,
+		wordcodeBytes:       fixture.stageMetrics.WordcodeBytes,
 		protoOwnedBytes:     fixture.stageMetrics.ProtoOwnedBytes,
 		retainedStringBytes: fixture.stageMetrics.RetainedStringBytes,
 	})
@@ -261,7 +261,7 @@ func benchmarkCompilerStageCompile(b *testing.B, fixture compilerStageFixture) {
 		irInstructions:      fixture.outputMetrics.Instructions,
 		cfgBlocks:           len(bytecodeIRBlockOrder(fixture.optimized.ir)),
 		peakRegisters:       fixture.outputMetrics.RegisterSlots,
-		packedBytes:         fixture.outputMetrics.PackedBytes,
+		wordcodeBytes:       fixture.outputMetrics.WordcodeBytes,
 		protoOwnedBytes:     fixture.outputMetrics.ProtoOwnedBytes,
 		retainedStringBytes: fixture.outputMetrics.RetainedStringBytes,
 	})
@@ -295,7 +295,7 @@ func benchmarkCompilerStageLoadProgram(b *testing.B, fixture compilerStageFixtur
 		irInstructions:      fixture.outputMetrics.Instructions,
 		cfgBlocks:           len(bytecodeIRBlockOrder(fixture.optimized.ir)),
 		peakRegisters:       fixture.outputMetrics.RegisterSlots,
-		packedBytes:         fixture.outputMetrics.PackedBytes,
+		wordcodeBytes:       fixture.outputMetrics.WordcodeBytes,
 		protoOwnedBytes:     fixture.outputMetrics.ProtoOwnedBytes,
 		retainedStringBytes: fixture.outputMetrics.RetainedStringBytes,
 	})
@@ -307,7 +307,7 @@ func reportCompilerStageMetrics(b *testing.B, fixture compilerStageFixture, metr
 	b.ReportMetric(float64(metrics.irInstructions), "ir_instructions/op")
 	b.ReportMetric(float64(metrics.cfgBlocks), "cfg_blocks/op")
 	b.ReportMetric(float64(metrics.peakRegisters), "peak_registers/op")
-	b.ReportMetric(float64(metrics.packedBytes), "packed_B/op")
+	b.ReportMetric(float64(metrics.wordcodeBytes), "wordcode_B/op")
 	b.ReportMetric(float64(metrics.protoOwnedBytes), "proto_owned_B/op")
 	b.ReportMetric(float64(metrics.retainedStringBytes), "retained_string_B/op")
 }
@@ -525,7 +525,7 @@ func BenchmarkSourceArtifactStoreHits(b *testing.B) {
 			b.ReportMetric(float64(metrics.Instructions), "instructions/op")
 			b.ReportMetric(float64(metrics.Constants), "constants/op")
 			b.ReportMetric(float64(metrics.RegisterSlots), "register_slots/op")
-			b.ReportMetric(float64(metrics.PackedBytes), "packed_B/op")
+			b.ReportMetric(float64(metrics.WordcodeBytes), "wordcode_B/op")
 			b.ReportMetric(float64(metrics.ProtoOwnedBytes), "proto_owned_B/op")
 			b.ReportMetric(float64(metrics.RetainedStringBytes), "retained_string_B/op")
 		})
