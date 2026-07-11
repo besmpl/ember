@@ -17,7 +17,11 @@ for script in scripts/*; do
     sh -n "$script"
 done
 
+scripts/bench-summary-test
+
 go test -vet=off -count=1 ./...
+
+scripts/check-purego
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     git diff --check

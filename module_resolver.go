@@ -92,13 +92,11 @@ type moduleDiagnostic struct {
 }
 
 func buildModuleGraphWithStore(resolver moduleResolver, root moduleKey, store *sourceArtifactStore) (moduleGraph, error) {
-	snapshot := store.snapshot()
 	graph := moduleGraph{
 		Root:  root,
 		Nodes: make(map[moduleKey]moduleGraphNode),
 	}
 	if err := graph.visit(resolver, store, root, nil); err != nil {
-		store.restore(snapshot)
 		return moduleGraph{}, err
 	}
 	return graph, nil
@@ -165,8 +163,7 @@ func (g *moduleGraph) visit(resolver moduleResolver, store *sourceArtifactStore,
 		RequireFieldBindings: make(map[string]moduleRequireFieldBinding),
 	}
 	node.ReturnLocal, node.ReturnField = moduleReturnLocalReference(artifact.program)
-	lowered := lowerProgram(artifact.program)
-	requests := collectLoweredRequireRequests(lowered)
+	requests := collectRequireRequests(artifact.program)
 	for _, request := range requests {
 		required, err := resolver.Resolve(key, request)
 		if err != nil {
@@ -284,6 +281,49 @@ func collectExpressionsRequireRequests(expressions []expression, requests *[]str
 	}
 }
 
+func collectRequireRequests(prog program) []string {
+	var requests []string
+	collectStatementsRequireRequests(prog.statements, &requests)
+	return requests
+}
+
+func collectStatementsRequireRequests(statements []statement, requests *[]string) {
+	for _, stmt := range statements {
+		switch {
+		case stmt.local != nil:
+			collectExpressionsRequireRequests(stmt.local.values, requests)
+		case stmt.assign != nil:
+			collectExpressionsRequireRequests(stmt.assign.values, requests)
+		case stmt.call != nil:
+			collectTermRequireRequests(*stmt.call, requests)
+		case stmt.ifStmt != nil:
+			collectExpressionRequireRequests(stmt.ifStmt.condition, requests)
+			collectStatementsRequireRequests(stmt.ifStmt.thenStatements, requests)
+			collectStatementsRequireRequests(stmt.ifStmt.elseStatements, requests)
+		case stmt.while != nil:
+			collectExpressionRequireRequests(stmt.while.condition, requests)
+			collectStatementsRequireRequests(stmt.while.statements, requests)
+		case stmt.forLoop != nil:
+			collectExpressionRequireRequests(stmt.forLoop.start, requests)
+			collectExpressionRequireRequests(stmt.forLoop.limit, requests)
+			if stmt.forLoop.step != nil {
+				collectExpressionRequireRequests(*stmt.forLoop.step, requests)
+			}
+			collectStatementsRequireRequests(stmt.forLoop.statements, requests)
+		case stmt.genericFor != nil:
+			collectExpressionsRequireRequests(stmt.genericFor.values, requests)
+			collectStatementsRequireRequests(stmt.genericFor.statements, requests)
+		case stmt.repeat != nil:
+			collectStatementsRequireRequests(stmt.repeat.statements, requests)
+			collectExpressionRequireRequests(stmt.repeat.condition, requests)
+		case stmt.block != nil:
+			collectStatementsRequireRequests(stmt.block.statements, requests)
+		case stmt.ret != nil:
+			collectExpressionsRequireRequests(stmt.ret.values, requests)
+		}
+	}
+}
+
 func collectExpressionRequireRequests(expr expression, requests *[]string) {
 	if call, ok := expressionSingleCall(expr); ok {
 		collectCallRequireRequest(call, requests)
@@ -307,7 +347,7 @@ func collectTermRequireRequests(value term, requests *[]string) {
 		}
 	}
 	if value.function != nil {
-		collectLoweredStatementsRequireRequests(lowerStatements(value.function.statements), requests)
+		collectStatementsRequireRequests(value.function.statements, requests)
 	}
 	if value.ifExpr != nil {
 		collectExpressionRequireRequests(value.ifExpr.condition, requests)

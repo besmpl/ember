@@ -149,6 +149,10 @@ type HookCallReport struct {
 // LoadProgram loads, parses, checks if requested, and compiles an immutable
 // module graph. Top-level script code is not executed during loading.
 func LoadProgram(ctx context.Context, loader ModuleLoader, options ProgramOptions) (*Program, LoadReport, error) {
+	return loadProgramWithArtifactStore(ctx, loader, options, newSourceArtifactStore())
+}
+
+func loadProgramWithArtifactStore(ctx context.Context, loader ModuleLoader, options ProgramOptions, artifacts *sourceArtifactStore) (*Program, LoadReport, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -171,7 +175,7 @@ func LoadProgram(ctx context.Context, loader ModuleLoader, options ProgramOption
 		return nil, report, err
 	}
 
-	combined, err := loadProgramGraph(ctx, loader, entrypoints, parallelism)
+	combined, err := loadProgramGraph(ctx, loader, entrypoints, parallelism, artifacts)
 	if err != nil {
 		if cycle, ok := err.(moduleCycleError); ok {
 			report.Diagnostics = []Diagnostic{diagnosticFromModuleDiagnostic(cycle.Diagnostic())}
@@ -180,14 +184,13 @@ func LoadProgram(ctx context.Context, loader ModuleLoader, options ProgramOption
 		return nil, report, err
 	}
 
-	cache := newSourceArtifactStore()
-	protos, err := compileProgramModules(ctx, combined, cache, parallelism)
+	protos, err := compileProgramModules(ctx, combined, artifacts, parallelism)
 	if err != nil {
 		return nil, report, err
 	}
 	var summaries map[moduleKey]moduleSummaryArtifact
 	if options.Check {
-		checkReport, err := checkProgramModules(ctx, combined, cache, parallelism)
+		checkReport, err := checkProgramModules(ctx, combined, artifacts, parallelism)
 		if err != nil {
 			return nil, report, err
 		}
@@ -376,22 +379,21 @@ func programParallelism(value int) (int, error) {
 	return value, nil
 }
 
-func loadProgramGraph(ctx context.Context, loader ModuleLoader, entrypoints []programEntrypoint, parallelism int) (moduleGraph, error) {
+func loadProgramGraph(ctx context.Context, loader ModuleLoader, entrypoints []programEntrypoint, parallelism int, artifacts *sourceArtifactStore) (moduleGraph, error) {
 	if parallelism <= 1 || len(entrypoints) <= 1 {
-		return loadProgramGraphSequential(ctx, loader, entrypoints)
+		return loadProgramGraphSequential(ctx, loader, entrypoints, artifacts)
 	}
-	return loadProgramGraphParallel(ctx, loader, entrypoints, parallelism)
+	return loadProgramGraphParallel(ctx, loader, entrypoints, parallelism, artifacts)
 }
 
-func loadProgramGraphSequential(ctx context.Context, loader ModuleLoader, entrypoints []programEntrypoint) (moduleGraph, error) {
+func loadProgramGraphSequential(ctx context.Context, loader ModuleLoader, entrypoints []programEntrypoint, artifacts *sourceArtifactStore) (moduleGraph, error) {
 	resolver := newProgramModuleResolver(ctx, loader)
-	cache := newSourceArtifactStore()
 	combined := moduleGraph{Nodes: make(map[moduleKey]moduleGraphNode)}
 	for i, entrypoint := range entrypoints {
 		if err := ctx.Err(); err != nil {
 			return moduleGraph{}, err
 		}
-		graph, err := buildModuleGraphWithStore(resolver, entrypoint.key, cache)
+		graph, err := buildModuleGraphWithStore(resolver, entrypoint.key, artifacts)
 		if err != nil {
 			return moduleGraph{}, err
 		}
@@ -405,7 +407,7 @@ type programGraphResult struct {
 	err   error
 }
 
-func loadProgramGraphParallel(ctx context.Context, loader ModuleLoader, entrypoints []programEntrypoint, parallelism int) (moduleGraph, error) {
+func loadProgramGraphParallel(ctx context.Context, loader ModuleLoader, entrypoints []programEntrypoint, parallelism int, artifacts *sourceArtifactStore) (moduleGraph, error) {
 	resolver := newProgramModuleResolver(ctx, loader)
 	jobs := make(chan int)
 	results := make([]programGraphResult, len(entrypoints))
@@ -420,7 +422,7 @@ func loadProgramGraphParallel(ctx context.Context, loader ModuleLoader, entrypoi
 		go func() {
 			defer wg.Done()
 			for index := range jobs {
-				graph, err := buildProgramEntrypointGraph(ctx, resolver, entrypoints[index])
+				graph, err := buildProgramEntrypointGraph(ctx, resolver, entrypoints[index], artifacts)
 				results[index] = programGraphResult{graph: graph, err: err}
 			}
 		}()
@@ -448,11 +450,11 @@ func loadProgramGraphParallel(ctx context.Context, loader ModuleLoader, entrypoi
 	return combined, nil
 }
 
-func buildProgramEntrypointGraph(ctx context.Context, resolver *programModuleResolver, entrypoint programEntrypoint) (moduleGraph, error) {
+func buildProgramEntrypointGraph(ctx context.Context, resolver *programModuleResolver, entrypoint programEntrypoint, artifacts *sourceArtifactStore) (moduleGraph, error) {
 	if err := ctx.Err(); err != nil {
 		return moduleGraph{}, err
 	}
-	return buildModuleGraphWithStore(resolver, entrypoint.key, newSourceArtifactStore())
+	return buildModuleGraphWithStore(resolver, entrypoint.key, artifacts)
 }
 
 func mergeProgramGraph(combined *moduleGraph, graph moduleGraph, setRoot bool) {

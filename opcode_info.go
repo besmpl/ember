@@ -41,39 +41,40 @@ func opcodeHasJumpTarget(op opcode) bool {
 	return opcodeJumpTarget(op) != opcodeJumpTargetNone
 }
 
-func opcodeMayCall(op opcode) bool {
+func opcodeEffect(op opcode) opcodeEffects {
 	meta, ok := opcodeMetadata(op)
-	return ok && meta.mayCall
+	if !ok {
+		return opcodeEffects{}
+	}
+	return meta.effects
+}
+
+func opcodeMayCall(op opcode) bool {
+	return opcodeEffect(op).invokesScriptOrHostCode
 }
 
 func opcodeMayYield(op opcode) bool {
-	meta, ok := opcodeMetadata(op)
-	return ok && meta.mayYield
+	return opcodeEffect(op).mayYield
 }
 
 func opcodeReadsTable(op opcode) bool {
-	meta, ok := opcodeMetadata(op)
-	return ok && meta.readsTable
+	return opcodeEffect(op).readsTables
 }
 
 func opcodeWritesTable(op opcode) bool {
-	meta, ok := opcodeMetadata(op)
-	return ok && meta.writesTable
+	return opcodeEffect(op).writesTables
 }
 
 func opcodeReadsGlobal(op opcode) bool {
-	meta, ok := opcodeMetadata(op)
-	return ok && meta.readsGlobal
+	return opcodeEffect(op).readsGlobals
 }
 
 func opcodeWritesGlobal(op opcode) bool {
-	meta, ok := opcodeMetadata(op)
-	return ok && meta.writesGlobal
+	return opcodeEffect(op).writesGlobals
 }
 
 func opcodeAllocates(op opcode) bool {
-	meta, ok := opcodeMetadata(op)
-	return ok && meta.allocates
+	return opcodeEffect(op).allocatesOrObservesIdentity
 }
 
 func instructionJumpTarget(ins instruction) (int, bool) {

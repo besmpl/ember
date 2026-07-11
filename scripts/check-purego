@@ -1,0 +1,78 @@
+#!/bin/sh
+set -eu
+
+cd "$(dirname "$0")/.."
+
+CGO_ENABLED=0 go build ./...
+CGO_ENABLED=0 go test ./...
+
+cgo_packages="$(CGO_ENABLED=1 go list -f '{{if .CgoFiles}}{{.ImportPath}}: {{join .CgoFiles ", "}}{{end}}' ./...)"
+if [ -n "$cgo_packages" ]; then
+	printf '%s\n' "repository packages report CgoFiles with CGO_ENABLED=1:" >&2
+	printf '%s\n' "$cgo_packages" >&2
+	exit 1
+fi
+
+cgo_imports="$(find . -type f -name '*.go' ! -path './.git/*' -exec awk '
+function strip_comments(line, start, end, slash, block_start, prefix, rest) {
+    while (1) {
+        if (in_block_comment) {
+            end = index(line, "*/")
+            if (end == 0) {
+                return ""
+            }
+            line = substr(line, end + 2)
+            in_block_comment = 0
+        }
+        block_start = index(line, "/*")
+        slash = index(line, "//")
+        if (slash > 0 && (block_start == 0 || slash < block_start)) {
+            return substr(line, 1, slash - 1)
+        }
+        if (block_start == 0) {
+            return line
+        }
+        prefix = substr(line, 1, block_start - 1)
+        rest = substr(line, block_start + 2)
+        end = index(rest, "*/")
+        if (end == 0) {
+            in_block_comment = 1
+            return prefix
+        }
+        line = prefix substr(rest, end + 2)
+    }
+}
+
+function report(line) {
+    print FILENAME ":" FNR ":" line
+}
+
+FNR == 1 {
+    in_import_block = 0
+    in_block_comment = 0
+}
+
+{
+    line = strip_comments($0)
+    if (line ~ /^[[:space:]]*import[[:space:]]*\(/) {
+        in_import_block = 1
+        next
+    }
+    if (in_import_block && line ~ /^[[:space:]]*([[:alnum:]_.]+[[:space:]]+)?"C"[[:space:]]*$/) {
+        report(line)
+        next
+    }
+    if (line ~ /^[[:space:]]*import[[:space:]]*([[:alnum:]_.]+[[:space:]]+)?"C"[[:space:]]*$/) {
+        report(line)
+        next
+    }
+    if (in_import_block && line ~ /^[[:space:]]*\)/) {
+        in_import_block = 0
+    }
+}
+' {} +)"
+if [ -n "$cgo_imports" ]; then
+	printf '%s\n' 'repository Go source imports "C":' >&2
+	printf '%s\n' "$cgo_imports" >&2
+	exit 1
+fi

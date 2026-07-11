@@ -2,6 +2,8 @@ package ember
 
 import "fmt"
 
+const metatableWalkInlineLimit = 8
+
 type tableAccess struct {
 	globals             *globalEnv
 	functionMetamethods bool
@@ -33,47 +35,48 @@ func (a tableAccess) getString(table *Table, key string, keyValue Value) (Value,
 }
 
 func (a tableAccess) getSeen(table *Table, key Value, seen map[*Table]bool) (Value, error) {
-	value, err := table.rawGet(key)
-	if err != nil {
-		return NilValue(), err
-	}
-	if !value.IsNil() {
-		return value, nil
-	}
-	if table == nil || table.metatable == nil {
-		return NilValue(), nil
-	}
-	if seen != nil && seen[table] {
-		return NilValue(), fmt.Errorf("table: cyclic __index chain")
-	}
-	if seen == nil {
-		seen = make(map[*Table]bool)
-	}
-	seen[table] = true
+	depth := 0
+	for {
+		value, err := table.rawGet(key)
+		if err != nil {
+			return NilValue(), err
+		}
+		if !value.IsNil() {
+			return value, nil
+		}
+		if table == nil || table.metatable == nil {
+			return NilValue(), nil
+		}
+		if seen != nil {
+			if seen[table] {
+				return NilValue(), fmt.Errorf("table: cyclic __index chain")
+			}
+			seen[table] = true
+		} else if depth >= metatableWalkInlineLimit {
+			seen = make(map[*Table]bool)
+			seen[table] = true
+		}
 
-	if indexTable, ok, err := table.cachedIndexTable(); err != nil {
-		return NilValue(), err
-	} else if ok {
-		return a.getSeen(indexTable, key, seen)
+		index, ok, err := table.cachedIndexFallback()
+		if err != nil {
+			return NilValue(), err
+		}
+		if !ok {
+			return NilValue(), nil
+		}
+		if indexTable, ok := index.Table(); ok {
+			table = indexTable
+			depth++
+			continue
+		}
+		if a.functionMetamethods && callableValue(index) {
+			return a.callIndex(index, table, key)
+		}
+		if a.functionMetamethods {
+			return NilValue(), fmt.Errorf("table: __index is %s, want table or function", index.Kind())
+		}
+		return NilValue(), fmt.Errorf("table: __index is %s, want table", index.Kind())
 	}
-
-	index, err := table.metatable.rawGet(StringValue("__index"))
-	if err != nil {
-		return NilValue(), err
-	}
-	if index.IsNil() {
-		return NilValue(), nil
-	}
-	if indexTable, ok := index.Table(); ok {
-		return a.getSeen(indexTable, key, seen)
-	}
-	if a.functionMetamethods && callableValue(index) {
-		return a.callIndex(index, table, key)
-	}
-	if a.functionMetamethods {
-		return NilValue(), fmt.Errorf("table: __index is %s, want table or function", index.Kind())
-	}
-	return NilValue(), fmt.Errorf("table: __index is %s, want table", index.Kind())
 }
 
 func (a tableAccess) set(table *Table, key Value, value Value) error {
@@ -81,38 +84,45 @@ func (a tableAccess) set(table *Table, key Value, value Value) error {
 }
 
 func (a tableAccess) setSeen(table *Table, key Value, value Value, seen map[*Table]bool) error {
-	current, err := table.rawGet(key)
-	if err != nil {
-		return err
-	}
-	if !current.IsNil() || table == nil || table.metatable == nil {
-		return table.rawSet(key, value)
-	}
-	if seen != nil && seen[table] {
-		return fmt.Errorf("table: cyclic __newindex chain")
-	}
-	if seen == nil {
-		seen = make(map[*Table]bool)
-	}
-	seen[table] = true
+	depth := 0
+	for {
+		current, err := table.rawGet(key)
+		if err != nil {
+			return err
+		}
+		if !current.IsNil() || table == nil || table.metatable == nil {
+			return table.rawSet(key, value)
+		}
+		if seen != nil {
+			if seen[table] {
+				return fmt.Errorf("table: cyclic __newindex chain")
+			}
+			seen[table] = true
+		} else if depth >= metatableWalkInlineLimit {
+			seen = make(map[*Table]bool)
+			seen[table] = true
+		}
 
-	newIndex, err := table.metatable.rawGet(StringValue("__newindex"))
-	if err != nil {
-		return err
+		newIndex, ok, err := table.cachedNewIndexFallback()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return table.rawSet(key, value)
+		}
+		if newIndexTable, ok := newIndex.Table(); ok {
+			table = newIndexTable
+			depth++
+			continue
+		}
+		if a.functionMetamethods && callableValue(newIndex) {
+			return a.callNewIndex(newIndex, table, key, value)
+		}
+		if a.functionMetamethods {
+			return fmt.Errorf("table: __newindex is %s, want table or function", newIndex.Kind())
+		}
+		return fmt.Errorf("table: __newindex is %s, want table", newIndex.Kind())
 	}
-	if newIndex.IsNil() {
-		return table.rawSet(key, value)
-	}
-	if newIndexTable, ok := newIndex.Table(); ok {
-		return a.setSeen(newIndexTable, key, value, seen)
-	}
-	if a.functionMetamethods && callableValue(newIndex) {
-		return a.callNewIndex(newIndex, table, key, value)
-	}
-	if a.functionMetamethods {
-		return fmt.Errorf("table: __newindex is %s, want table or function", newIndex.Kind())
-	}
-	return fmt.Errorf("table: __newindex is %s, want table", newIndex.Kind())
 }
 
 func (a tableAccess) protectedMetatable(table *Table) (Value, error) {
@@ -123,14 +133,30 @@ func (a tableAccess) protectedMetatable(table *Table) (Value, error) {
 }
 
 func (a tableAccess) callIndex(fn Value, table *Table, key Value) (Value, error) {
-	results, err := callRuntimeMetamethod2(fn, a.globals, TableValue(table), key)
+	if a.globals != nil && a.globals.thread != nil {
+		if closure, ok := fn.scriptFunction(); ok {
+			restore := a.globals.thread.enterNonYieldable()
+			value, err := a.globals.thread.runInlineScriptCallFixedOneNoHook(closure, TableValue(table), key, NilValue(), 2)
+			restore()
+			return value, err
+		}
+	}
+	results, err := callRuntimeMetamethodWindow2(fn, a.globals, TableValue(table), key)
 	if err != nil {
 		return NilValue(), err
 	}
-	return adjustedResultAt(results, 0), nil
+	return results.at(0), nil
 }
 
 func (a tableAccess) callNewIndex(fn Value, table *Table, key Value, value Value) error {
-	_, err := callRuntimeMetamethod3(fn, a.globals, TableValue(table), key, value)
+	if a.globals != nil && a.globals.thread != nil {
+		if closure, ok := fn.scriptFunction(); ok {
+			restore := a.globals.thread.enterNonYieldable()
+			_, err := a.globals.thread.runInlineScriptCallFixedOneNoHook(closure, TableValue(table), key, value, 3)
+			restore()
+			return err
+		}
+	}
+	_, err := callRuntimeMetamethodWindow3(fn, a.globals, TableValue(table), key, value)
 	return err
 }

@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-func TestVMValueListOwnsInlineBorrowedAndAdjustedValues(t *testing.T) {
-	inline := vmInlineValueList(NumberValue(4))
+func TestVMResultWindowOwnsInlineBorrowedAndAdjustedValues(t *testing.T) {
+	inline := vmInlineResultWindow(NumberValue(4))
 	if inline.len() != 1 {
 		t.Fatalf("inline len = %d, want 1", inline.len())
 	}
@@ -18,22 +18,22 @@ func TestVMValueListOwnsInlineBorrowedAndAdjustedValues(t *testing.T) {
 	}
 
 	backing := []Value{NumberValue(1), NumberValue(2)}
-	borrowed := vmBorrowedValueList(backing)
+	borrowed := vmBorrowedResultWindow(backing)
 	owned := borrowed.ownedValues()
 	backing[0] = NumberValue(9)
 	if got, _ := owned[0].Number(); got != 1 {
 		t.Fatalf("owned borrowed copy changed to %v, want 1", got)
 	}
 
-	empty := vmBorrowedValueList(nil)
+	empty := vmBorrowedResultWindow(nil)
 	adjusted := empty.adjustedOwnedValues()
 	if len(adjusted) != 1 || !adjusted[0].IsNil() {
 		t.Fatalf("adjusted empty values = %#v, want single nil", adjusted)
 	}
 }
 
-func TestVMInlineArrayValueListPreservesFixedResultCount(t *testing.T) {
-	list := vmInlineArrayValueList([2]Value{StringValue("left"), StringValue("right")}, 2)
+func TestVMInlineArrayResultWindowPreservesFixedResultCount(t *testing.T) {
+	list := vmInlineArrayResultWindow([2]Value{StringValue("left"), StringValue("right")}, 2)
 	if list.len() != 2 {
 		t.Fatalf("inline array len = %d, want 2", list.len())
 	}
@@ -44,7 +44,7 @@ func TestVMInlineArrayValueListPreservesFixedResultCount(t *testing.T) {
 		t.Fatalf("second inline array value is %q, want right", got)
 	}
 
-	empty := vmInlineArrayValueList([2]Value{NumberValue(1)}, 0)
+	empty := vmInlineArrayResultWindow([2]Value{NumberValue(1)}, 0)
 	if !empty.at(0).IsNil() {
 		t.Fatalf("empty inline array first value is %s, want nil", empty.at(0).Kind())
 	}
@@ -66,14 +66,13 @@ func TestVMFrameFixedArgWindowsBorrowOnlySafeRegisters(t *testing.T) {
 	}
 
 	frame.registers[0] = NumberValue(1)
-	frame.registerCell(1).value = NumberValue(7)
-	frame.directRegisters = false
+	frame.registerCell(1).set(NumberValue(7))
 	withCell := frame.borrowedFixedCallArgs(0, 2)
 	if withCell.borrowed {
 		t.Fatalf("captured-register fixed args borrowed, want copied window")
 	}
 	frame.registers[0] = NumberValue(9)
-	frame.registerCell(1).value = NumberValue(11)
+	frame.registerCell(1).set(NumberValue(11))
 	first, _ := withCell.values[0].Number()
 	second, _ := withCell.values[1].Number()
 	if first != 1 || second != 7 {
@@ -83,6 +82,30 @@ func TestVMFrameFixedArgWindowsBorrowOnlySafeRegisters(t *testing.T) {
 	retained := frame.retainedFixedCallArgs(0, 2)
 	if retained.borrowed {
 		t.Fatalf("retained fixed args borrowed, want copied window")
+	}
+}
+
+func TestVMFrameCellsAliasLiveRegistersAndDetachOnRelease(t *testing.T) {
+	proto := newProto(nil, []instruction{{op: opReturnOne}}, nil, nil, 2, 0, false)
+	proto.capturedLocals = []bool{true, false}
+	thread := newVMThread(runtimeGlobals(nil))
+	frame := thread.newFrame(proto, nil, nil)
+	cell := frame.registerCell(0)
+
+	frame.registers[0] = NumberValue(4)
+	if got, ok := cell.get().Number(); !ok || got != 4 {
+		t.Fatalf("live cell value is %v (%t), want register value 4", cell.get(), ok)
+	}
+
+	cell.set(NumberValue(7))
+	if got, ok := frame.registers[0].Number(); !ok || got != 7 {
+		t.Fatalf("register after cell set is %v (%t), want 7", frame.registers[0], ok)
+	}
+
+	thread.releaseFrameWindow(frame)
+	frame.registers[0] = NumberValue(11)
+	if got, ok := cell.get().Number(); !ok || got != 7 {
+		t.Fatalf("detached cell value is %v (%t), want owned value 7", cell.get(), ok)
 	}
 }
 
@@ -115,7 +138,7 @@ func TestDirectFrameSideExitContractMapsFrameResults(t *testing.T) {
 	if complete || err != nil {
 		t.Fatalf("generic-frame exit returned complete %t err %v, want incomplete nil", complete, err)
 	}
-	if result.state != vmCallStateReturned || result.valuesList.len() != 0 || result.scriptCall.closure != nil {
+	if result.state != vmCallStateReturned || result.window.len() != 0 || result.scriptCall.closure != nil {
 		t.Fatalf("generic-frame exit returned result %#v, want zero result", result)
 	}
 
@@ -124,7 +147,7 @@ func TestDirectFrameSideExitContractMapsFrameResults(t *testing.T) {
 	if !complete || err != nil {
 		t.Fatalf("return exit returned complete %t err %v, want complete nil", complete, err)
 	}
-	if got, ok := result.valuesList.at(0).Number(); result.state != vmCallStateReturned || result.valuesList.len() != 1 || !ok || got != 7 {
+	if got, ok := result.window.at(0).Number(); result.state != vmCallStateReturned || result.window.len() != 1 || !ok || got != 7 {
 		t.Fatalf("return exit result = %#v, want returned number 7", result)
 	}
 
@@ -142,7 +165,7 @@ func TestDirectFrameSideExitContractMapsFrameResults(t *testing.T) {
 	if !complete || err != nil {
 		t.Fatalf("yield exit returned complete %t err %v, want complete nil", complete, err)
 	}
-	if result.state != vmCallStateYielded || result.valuesList.len() != 1 || result.valuesList.at(0).str != "pause" {
+	if text, ok := result.window.at(0).String(); result.state != vmCallStateYielded || result.window.len() != 1 || !ok || text != "pause" {
 		t.Fatalf("yield exit result = %#v, want yielded pause value", result)
 	}
 
@@ -151,7 +174,7 @@ func TestDirectFrameSideExitContractMapsFrameResults(t *testing.T) {
 	if !complete || !errors.Is(err, failure) {
 		t.Fatalf("fail exit returned complete %t err %v, want complete boom", complete, err)
 	}
-	if result.state != vmCallStateReturned || result.valuesList.len() != 0 || result.scriptCall.closure != nil {
+	if result.state != vmCallStateReturned || result.window.len() != 0 || result.scriptCall.closure != nil {
 		t.Fatalf("fail exit returned result %#v, want zero result", result)
 	}
 
