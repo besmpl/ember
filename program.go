@@ -118,8 +118,12 @@ type HostCall struct {
 	Hook       string
 }
 
-// Runtime owns mutable execution state for one Program owner.
+// Runtime owns mutable execution state for one Program owner. RunHook and
+// captured Callback calls must not overlap. Close may run concurrently; it
+// reports an active runtime without tearing down the in-flight call.
 type Runtime struct {
+	closeMu         sync.Mutex
+	owner           *runtimeOwner
 	program         *Program
 	host            RuntimeHost
 	entrypoints     map[moduleKey]Value
@@ -217,6 +221,7 @@ func (p *Program) NewRuntime(options RuntimeOptions) (*Runtime, error) {
 		return nil, err
 	}
 	return &Runtime{
+		owner:           newRuntimeOwner(),
 		program:         p,
 		host:            options.Host,
 		entrypoints:     make(map[moduleKey]Value),
@@ -235,9 +240,14 @@ func (r *Runtime) RunHook(ctx context.Context, hook string, args ...Value) (Hook
 	if r == nil {
 		return report, fmt.Errorf("runtime: nil runtime")
 	}
-	if r.closed {
+	lease, err := r.beginRun()
+	if err == errRuntimeOwnerClosed {
 		return report, fmt.Errorf("runtime: closed")
 	}
+	if err != nil {
+		return report, fmt.Errorf("runtime: begin run: %w", err)
+	}
+	defer lease.end()
 	if hook == "" {
 		return report, fmt.Errorf("runtime: empty hook")
 	}
@@ -305,10 +315,38 @@ func (r *Runtime) RunHook(ctx context.Context, hook string, args ...Value) (Hook
 	return report, nil
 }
 
+func (r *Runtime) beginRun() (*runtimeRunLease, error) {
+	if r == nil {
+		return nil, errRuntimeOwnerReleased
+	}
+	r.closeMu.Lock()
+	closed := r.closed
+	owner := r.owner
+	r.closeMu.Unlock()
+	if closed {
+		return nil, errRuntimeOwnerClosed
+	}
+	if owner == nil {
+		return nil, errRuntimeOwnerInvalid
+	}
+	return owner.beginRun()
+}
+
 // Close releases mutable runtime references. It is safe to call repeatedly.
 func (r *Runtime) Close() error {
-	if r == nil || r.closed {
+	if r == nil {
 		return nil
+	}
+	r.closeMu.Lock()
+	defer r.closeMu.Unlock()
+	if r.closed {
+		return nil
+	}
+	if err := r.owner.close(); err != nil {
+		if err == errRuntimeOwnerActive {
+			return fmt.Errorf("runtime: active")
+		}
+		return fmt.Errorf("runtime: close: %w", err)
 	}
 	r.closed = true
 	r.program = nil

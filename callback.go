@@ -22,9 +22,14 @@ func CaptureCallback(ctx context.Context, value Value) (Callback, error) {
 	if !ok || call.runtime == nil {
 		return Callback{}, fmt.Errorf("callback: missing runtime context")
 	}
-	if call.runtime.closed {
+	lease, err := call.runtime.beginRun()
+	if err == errRuntimeOwnerClosed {
 		return Callback{}, fmt.Errorf("callback: runtime is closed")
 	}
+	if err != nil {
+		return Callback{}, fmt.Errorf("callback: capture runtime: %w", err)
+	}
+	lease.end()
 	if _, ok := value.scriptFunction(); !ok {
 		return Callback{}, fmt.Errorf("callback: value is %s, want script function", value.Kind())
 	}
@@ -41,9 +46,14 @@ func (cb Callback) Call(ctx context.Context, args ...Value) ([]Value, error) {
 	if cb.call.runtime == nil {
 		return nil, fmt.Errorf("callback: not captured")
 	}
-	if cb.call.runtime.closed {
+	lease, err := cb.call.runtime.beginRun()
+	if err == errRuntimeOwnerClosed {
 		return nil, fmt.Errorf("callback: runtime is closed")
 	}
+	if err != nil {
+		return nil, fmt.Errorf("callback: begin call: %w", err)
+	}
+	defer lease.end()
 	if _, ok := cb.value.scriptFunction(); !ok {
 		return nil, fmt.Errorf("callback: value is %s, want script function", cb.value.Kind())
 	}
