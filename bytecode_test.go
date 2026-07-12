@@ -1784,7 +1784,8 @@ local function sum(n)
 	end
 	return n + sum(n - 1)
 end
-return sum(4)
+local result = sum(4)
+return result
 `)
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
@@ -1805,8 +1806,8 @@ return sum(4)
 	if !ok || got != 10 {
 		t.Fatalf("thread.run result is %v (%t), want number 10", got, ok)
 	}
-	if got, want := thread.maxFrames, 2; got != want {
-		t.Fatalf("thread max physical frame depth is %d, want %d while the captured root remains bridged", got, want)
+	if got, want := thread.maxFrames, 1; got != want {
+		t.Fatalf("thread max physical frame depth is %d, want %d with captured record-only recursion", got, want)
 	}
 	if got, wantAtLeast := thread.maxFrameRecords, 4; got < wantAtLeast {
 		t.Fatalf("thread max compact frame-record depth is %d, want at least %d", got, wantAtLeast)

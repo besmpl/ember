@@ -1323,6 +1323,7 @@ func (collector *runtimeHeapCollector) clearInactiveFrameSlots(thread *vmThread,
 			continue
 		}
 		frame.proto = nil
+		frame.currentClosure = nil
 		frame.window = vmRegisterWindow{}
 		frame.owner = nil
 		frame.registers = nil
@@ -1348,7 +1349,7 @@ func (collector *runtimeHeapCollector) scanSuspendedFrames(value vmSuspendedFram
 		collector.scanFrame(frame)
 	}
 	for _, record := range value.frameRecords {
-		collector.scanProto(record.proto)
+		collector.scanClosure(record.closure)
 	}
 	collector.scanCoroutine(value.coroutine)
 }
@@ -1375,7 +1376,7 @@ func (collector *runtimeHeapCollector) scanThread(value *vmThread) {
 		collector.scanFrame(frame)
 	}
 	for _, record := range value.frameRecords {
-		collector.scanProto(record.proto)
+		collector.scanClosure(record.closure)
 	}
 	collector.scanCoroutine(value.coroutine)
 	// Function instances and their canonical closures are accelerators. Every
@@ -1400,6 +1401,7 @@ func (collector *runtimeHeapCollector) scanFrame(value *vmFrame) {
 	}
 	collector.frames[value] = struct{}{}
 	collector.scanProto(value.proto)
+	collector.scanClosure(value.currentClosure)
 	collector.scanStackOwner(value.owner)
 	collector.scanStackOwner(value.window.owner)
 	collector.scanValues(value.registers)

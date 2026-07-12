@@ -170,6 +170,7 @@ func (coroutine *vmCoroutine) disposeFrames() {
 	coroutine.thread.dropFrames(0)
 	coroutine.thread.closeAllOpenUpvalues()
 	coroutine.thread.clearFrameRecords()
+	coroutine.thread.clearRootClosureSlots()
 	for _, frame := range coroutine.thread.frameSlots {
 		if frame != nil {
 			frame.resetForPool()
@@ -177,6 +178,7 @@ func (coroutine *vmCoroutine) disposeFrames() {
 	}
 	coroutine.thread.frames = nil
 	coroutine.thread.frameSlots = nil
+	coroutine.thread.rootClosureSlots = nil
 	coroutine.thread.stack = nil
 	coroutine.thread.stackOwner = nil
 	coroutine.thread.globals = nil

@@ -23,8 +23,9 @@ func TestVMFrameRecordFitsCompactCallStateBudget(t *testing.T) {
 	}
 
 	proto := &Proto{}
+	identity := &closure{proto: proto}
 	record := vmFrameRecord{
-		proto:             proto,
+		closure:           identity,
 		returnPC:          0x10203040,
 		base:              17,
 		top:               31,
@@ -39,8 +40,8 @@ func TestVMFrameRecordFitsCompactCallStateBudget(t *testing.T) {
 		flags:             vmFrameRecordFlagProtected | vmFrameRecordFlagOpenResults,
 	}
 
-	if record.proto != proto {
-		t.Fatal("vmFrameRecord lost its proto reference")
+	if record.closure != identity || record.closure.proto != proto {
+		t.Fatal("vmFrameRecord lost its closure identity")
 	}
 	if record.returnPC != 0x10203040 || record.base != 17 || record.top != 31 {
 		t.Fatalf("vmFrameRecord control state = %#v", record)
@@ -185,5 +186,69 @@ return result
 	}
 	if got := snapshot.picCounts.fixedCallFrameReuses; got != 0 {
 		t.Fatalf("fixed-call pooled frame reuses = %d, want zero", got)
+	}
+}
+
+func TestRecursiveCapturedCallsUseOnePhysicalFrameAndRestoreClosureState(t *testing.T) {
+	proto, err := Compile(`
+function makeCounter()
+	local count = 0
+	local function recurse(n)
+		if n == 0 then
+			return count
+		end
+		count = count + 1
+		local nested = recurse(n - 1) + 0
+		return nested
+	end
+	local result = recurse(64)
+	return result + count
+end
+local result = makeCounter()
+return result
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	thread := newVMThread(runtimeGlobals(nil))
+	results, err := thread.run(proto, nil, nil)
+	if err != nil {
+		t.Fatalf("thread.run returned error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("thread.run returned %d results, want 1", len(results))
+	}
+	if got, ok := results[0].Number(); !ok || got != 128 {
+		t.Fatalf("result is %v (%t), want number 128", results[0], ok)
+	}
+	if got, want := thread.maxFrames, 1; got != want {
+		t.Fatalf("thread max physical frame depth is %d, want %d", got, want)
+	}
+	if got, wantAtLeast := thread.maxFrameRecords, 65; got < wantAtLeast {
+		t.Fatalf("thread max compact frame-record depth is %d, want at least %d", got, wantAtLeast)
+	}
+	if len(thread.frames) != 0 || len(thread.frameRecords) != 0 || len(thread.openUpvalues) != 0 {
+		t.Fatalf("thread retained %d frames, %d records, and %d open upvalues", len(thread.frames), len(thread.frameRecords), len(thread.openUpvalues))
+	}
+	if len(thread.rootClosureSlots) == 0 || thread.rootClosureSlots[0] == nil {
+		t.Fatal("thread did not retain its pooled root closure slot")
+	}
+	root := thread.rootClosureSlots[0]
+	if root.proto != nil || root.upvalues != nil || root.upvalueValues != nil || root.upvalueValueOK != nil {
+		t.Fatalf("pooled root closure retained live state: %#v", root)
+	}
+	if !allocationInstrumentedTest() {
+		allocs := testing.AllocsPerRun(50, func() {
+			results, runErr := thread.run(proto, nil, nil)
+			if runErr != nil {
+				t.Fatalf("warm captured record-only run returned error: %v", runErr)
+			}
+			if got, ok := results[0].Number(); !ok || got != 128 {
+				t.Fatalf("warm captured record-only result is %v (%t), want number 128", results[0], ok)
+			}
+		})
+		if allocs > 8 {
+			t.Fatalf("warm captured record-only recursion allocated %.0f times per run, want boundary allocations only", allocs)
+		}
 	}
 }

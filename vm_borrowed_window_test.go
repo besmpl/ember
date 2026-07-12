@@ -129,8 +129,8 @@ func TestMarkedUpvalueFixedCallBorrowsRegisterWindow(t *testing.T) {
 	if snapshot.picCounts.fixedCallArgCopies != 0 || snapshot.picCounts.fixedCallFrameMaterializations != 0 {
 		t.Fatalf("marked upvalue copies/materializations = %d/%d, want zero", snapshot.picCounts.fixedCallArgCopies, snapshot.picCounts.fixedCallFrameMaterializations)
 	}
-	if snapshot.picCounts.fixedCallFrameReuses == 0 {
-		t.Fatal("marked upvalue frame reuses = 0, want borrowed frame reuse")
+	if snapshot.picCounts.fixedCallFrameReuses != 0 {
+		t.Fatalf("marked upvalue pooled frame reuses = %d, want zero", snapshot.picCounts.fixedCallFrameReuses)
 	}
 	if snapshot.picCounts.fixedCallTrampolineEntries == 0 || snapshot.picCounts.fixedCallRecursiveEntries != 0 {
 		t.Fatalf("marked upvalue trampoline/recursive entries = %d/%d, want iterative only", snapshot.picCounts.fixedCallTrampolineEntries, snapshot.picCounts.fixedCallRecursiveEntries)

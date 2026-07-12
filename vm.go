@@ -129,9 +129,12 @@ type vmThread struct {
 	// frameRecords is the compact continuation stack used by the borrowed
 	// fixed-result call bridge. The vmFrame remains the execution bridge until
 	// the rest of the call ABI moves onto records.
-	frameRecords    []vmFrameRecord
-	maxFrameRecords int
-	stackOwner      *vmStackOwner
+	frameRecords []vmFrameRecord
+	// rootClosureSlots keep stable synthetic identities for physical frame
+	// roots without widening vmFrameRecord.
+	rootClosureSlots []*closure
+	maxFrameRecords  int
+	stackOwner       *vmStackOwner
 	// openUpvalues is the thread-owned index of cells that still point into a
 	// stack owner. Entries are kept in insertion order and keyed by the owner
 	// identity plus the cell's absolute register index.
@@ -580,7 +583,7 @@ func (counts *directFrameOpcodeCounts) ranked() []directFrameOpcodeCount {
 // decoded slices and loop counters in locals rather than in the call stack.
 // resultCount uses max uint32 for an open result range.
 type vmFrameRecord struct {
-	proto             *Proto
+	closure           *closure
 	returnPC          uint32
 	base              uint32
 	top               uint32
@@ -633,7 +636,7 @@ func (thread *vmThread) peekFrameRecord(frame *vmFrame) (vmFrameRecord, bool) {
 	if record.flags&vmFrameRecordFlagRecordOnly != 0 {
 		return vmFrameRecord{}, false
 	}
-	if record.proto != frame.proto || uint64(frame.registerBase) != uint64(record.base) ||
+	if record.closure == nil || record.closure != frame.currentClosure || record.closure.proto != frame.proto || uint64(frame.registerBase) != uint64(record.base) ||
 		frame.depth < 0 || uint64(frame.depth) != uint64(record.frameDepth) {
 		return vmFrameRecord{}, false
 	}
@@ -658,6 +661,35 @@ func (thread *vmThread) clearFrameRecords() {
 	thread.maxFrameRecords = 0
 }
 
+func (thread *vmThread) clearRootClosureSlots() {
+	if thread == nil {
+		return
+	}
+	for _, identity := range thread.rootClosureSlots {
+		if identity == nil {
+			continue
+		}
+		identity.proto = nil
+		identity.upvalues = nil
+		identity.upvalueValues = nil
+		identity.upvalueValueOK = nil
+	}
+}
+
+func (thread *vmThread) clearRootClosureSlot(depth int) {
+	if thread == nil || depth < 0 || depth >= len(thread.rootClosureSlots) {
+		return
+	}
+	identity := thread.rootClosureSlots[depth]
+	if identity == nil {
+		return
+	}
+	identity.proto = nil
+	identity.upvalues = nil
+	identity.upvalueValues = nil
+	identity.upvalueValueOK = nil
+}
+
 func (thread *vmThread) truncateFrameRecords(depth int) {
 	if thread == nil {
 		return
@@ -674,6 +706,7 @@ func (thread *vmThread) truncateFrameRecords(depth int) {
 
 type vmFrame struct {
 	proto           *Proto
+	currentClosure  *closure
 	depth           int
 	window          vmRegisterWindow
 	registerBase    int
@@ -778,6 +811,7 @@ type vmSuspendedFrames struct {
 	globals               *globalEnv
 	frames                []*vmFrame
 	frameRecords          []vmFrameRecord
+	rootClosureSlots      []*closure
 	maxFrameRecords       int
 	owner                 *vmStackOwner
 	openUpvalues          []*cell
@@ -1254,6 +1288,7 @@ func (thread *vmThread) resetForRun(ctx context.Context, globals *globalEnv) {
 	}
 	thread.frames = thread.frames[:0]
 	thread.clearFrameRecords()
+	thread.clearRootClosureSlots()
 	thread.closeAllOpenUpvalues()
 	if thread.stackOwner == nil {
 		thread.stackOwner = &vmStackOwner{}
@@ -1290,6 +1325,7 @@ func (thread *vmThread) resetForPool() {
 	owned := thread.ownerBound
 	thread.dropFrames(0)
 	thread.clearFrameRecords()
+	thread.clearRootClosureSlots()
 	thread.closeAllOpenUpvalues()
 	if owned {
 		for _, frame := range thread.frameSlots {
@@ -1670,6 +1706,7 @@ func (thread *vmThread) suspendFrames() vmSuspendedFrames {
 		globals:               thread.globals,
 		frames:                thread.frames,
 		frameRecords:          thread.frameRecords,
+		rootClosureSlots:      thread.rootClosureSlots,
 		maxFrameRecords:       thread.maxFrameRecords,
 		owner:                 thread.stackOwner,
 		openUpvalues:          thread.openUpvalues,
@@ -1688,6 +1725,7 @@ func (thread *vmThread) suspendFrames() vmSuspendedFrames {
 	}
 	thread.frames = nil
 	thread.frameRecords = nil
+	thread.rootClosureSlots = nil
 	thread.stackOwner = nil
 	thread.stack = nil
 	thread.openUpvalues = nil
@@ -1700,6 +1738,7 @@ func (thread *vmThread) resumeFrames(suspended vmSuspendedFrames) {
 	thread.globals = suspended.globals
 	thread.frames = suspended.frames
 	thread.frameRecords = suspended.frameRecords
+	thread.rootClosureSlots = suspended.rootClosureSlots
 	thread.maxFrameRecords = suspended.maxFrameRecords
 	thread.stackOwner = suspended.owner
 	thread.openUpvalues = suspended.openUpvalues
@@ -2163,6 +2202,10 @@ func (thread *vmThread) pushFrame(frame *vmFrame) {
 
 func (thread *vmThread) popFrame() {
 	frame := thread.frames[len(thread.frames)-1]
+	depth := -1
+	if frame != nil {
+		depth = frame.depth
+	}
 	thread.clearPendingCall(frame)
 	thread.frames = thread.frames[:len(thread.frames)-1]
 	if frame != nil && frame.recordBaseDepth >= 0 {
@@ -2171,6 +2214,7 @@ func (thread *vmThread) popFrame() {
 	thread.popFrameRecordFor(frame)
 	thread.releaseFrameWindow(frame)
 	frame.resetForReuse()
+	thread.clearRootClosureSlot(depth)
 }
 
 func newVMFrame(proto *Proto, args []Value, upvalues []*cell) *vmFrame {
@@ -2186,6 +2230,7 @@ func (thread *vmThread) newFrame(proto *Proto, args []Value, upvalues []*cell) *
 func (thread *vmThread) newFrameWithUpvalues(proto *Proto, args []Value, upvalues []*cell, upvalueValues []Value, upvalueValueOK []bool) *vmFrame {
 	frame := thread.frameSlot(len(thread.frames))
 	thread.resetFrame(frame, proto, args, upvalues, upvalueValues, upvalueValueOK)
+	frame.currentClosure = thread.rootClosureSlot(len(thread.frames), proto, upvalues, upvalueValues, upvalueValueOK)
 	return frame
 }
 
@@ -2194,11 +2239,14 @@ func (thread *vmThread) newCallFrame(proto *Proto, args []Value, upvalues []*cel
 }
 
 func (thread *vmThread) newClosureCallFrame(closure *closure, args []Value) *vmFrame {
-	return thread.newCallFrameWithUpvalues(closure.proto, args, closure.upvalues, closure.upvalueValues, closure.upvalueValueOK)
+	frame := thread.newCallFrameWithUpvalues(closure.proto, args, closure.upvalues, closure.upvalueValues, closure.upvalueValueOK)
+	frame.currentClosure = closure
+	return frame
 }
 
 func (thread *vmThread) newClosureCallFrameFixed(closure *closure, first Value, second Value, third Value, count int) *vmFrame {
 	frame := thread.newCallFrameWithUpvalues(closure.proto, nil, closure.upvalues, closure.upvalueValues, closure.upvalueValueOK)
+	frame.currentClosure = closure
 	paramCount := closure.proto.params
 	if paramCount > closure.proto.registers {
 		paramCount = closure.proto.registers
@@ -2275,6 +2323,7 @@ func (thread *vmThread) newBorrowedClosureCallFrame(closure *closure, caller *vm
 	args := owner.values[base : base+paramCount]
 	registers := owner.values[base:end]
 	frame.resetFrameIntoRegisters(proto, args, closure.upvalues, closure.upvalueValues, closure.upvalueValueOK, owner, base, registers)
+	frame.currentClosure = closure
 	thread.indexFrameOpenUpvalues(frame)
 	frame.window = vmRegisterWindow{
 		owner:               owner,
@@ -2332,7 +2381,7 @@ func (thread *vmThread) newBorrowedFixedFrameRecord(
 		flags |= vmFrameRecordFlagOpenResults
 	}
 	record := vmFrameRecord{
-		proto:             child.proto,
+		closure:           closure,
 		returnPC:          returnPCValue,
 		base:              baseValue,
 		top:               topValue,
@@ -2350,10 +2399,9 @@ func (thread *vmThread) newBorrowedFixedFrameRecord(
 }
 
 // enterRecordOnlyFixedCall switches the live physical frame to a fixed-result
-// callee and leaves the caller continuation entirely in a compact record. The
-// first cut deliberately requires cell-free frames and identical closure
-// state; shapes that need additional surviving state retain the pooled-frame
-// bridge until the upvalue and vararg record slices land.
+// callee and leaves the caller continuation entirely in a compact record.
+// Caller cells remain indexed on the thread and are reconstructed when the
+// physical frame is rebound to the saved closure.
 func (thread *vmThread) maybeEnterRecordOnlyFixedCall(
 	closure *closure,
 	frame *vmFrame,
@@ -2362,7 +2410,7 @@ func (thread *vmThread) maybeEnterRecordOnlyFixedCall(
 	argumentCount int,
 	destination vmResultDestination,
 ) (vmFrameRecord, bool) {
-	if frame == nil || len(frame.cells) != 0 {
+	if frame == nil {
 		return vmFrameRecord{}, false
 	}
 	return thread.enterRecordOnlyFixedCall(closure, frame, returnPC, argumentStart, argumentCount, destination)
@@ -2380,11 +2428,10 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 		return vmFrameRecord{}, false
 	}
 	proto := closure.proto
-	if proto.variadic || len(proto.capturedLocals) != 0 || len(frame.cells) != 0 || len(frame.varargs) != 0 ||
+	if proto.variadic || len(frame.varargs) != 0 ||
 		thread.debugHook != nil || thread.instructionBudget >= 0 || thread.coroutine != nil ||
 		thread.nonYieldableDepth != 0 || thread.nearestProtectedFrame != noProtectedFrame ||
-		frame.hasPendingCall || frame.openResultStart >= 0 ||
-		!sameClosureState(frame, closure) {
+		frame.hasPendingCall || frame.openResultStart >= 0 {
 		return vmFrameRecord{}, false
 	}
 	if destination.count != 1 || argumentCount < 0 || argumentStart < 0 ||
@@ -2403,7 +2450,7 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 		return vmFrameRecord{}, false
 	}
 
-	callerProto := frame.proto
+	callerClosure := thread.currentClosureForFrame(frame)
 	callerBase, callerBaseOK := vmFrameRecordUint32(frame.registerBase)
 	callerTop, callerTopOK := vmFrameRecordAddUint32(frame.registerBase, frame.registerCount)
 	returnPCValue, returnPCOK := vmFrameRecordUint32(returnPC)
@@ -2450,6 +2497,7 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 		childBase,
 		registers,
 	)
+	frame.currentClosure = closure
 	thread.indexFrameOpenUpvalues(frame)
 	frame.depth = physicalDepth
 	if recordBaseDepth < 0 {
@@ -2468,7 +2516,7 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 		flags |= vmFrameRecordFlagCallerBorrowed
 	}
 	return vmFrameRecord{
-		proto:             callerProto,
+		closure:           callerClosure,
 		returnPC:          returnPCValue,
 		base:              callerBase,
 		top:               callerTop,
@@ -2480,27 +2528,6 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 		argumentCount:     argumentCountValue,
 		flags:             flags,
 	}, true
-}
-
-func sameClosureState(frame *vmFrame, closure *closure) bool {
-	if frame == nil || closure == nil {
-		return false
-	}
-	return sameCellSlice(frame.upvalues, closure.upvalues) &&
-		sameValueSlice(frame.upvalueValues, closure.upvalueValues) &&
-		sameBoolSlice(frame.upvalueValueOK, closure.upvalueValueOK)
-}
-
-func sameCellSlice(left, right []*cell) bool {
-	return len(left) == len(right) && (len(left) == 0 || &left[0] == &right[0])
-}
-
-func sameValueSlice(left, right []Value) bool {
-	return len(left) == len(right) && (len(left) == 0 || &left[0] == &right[0])
-}
-
-func sameBoolSlice(left, right []bool) bool {
-	return len(left) == len(right) && (len(left) == 0 || &left[0] == &right[0])
 }
 
 func vmFrameRecordUint32(value int) (uint32, bool) {
@@ -2586,6 +2613,35 @@ func (thread *vmThread) frameSlot(depth int) *vmFrame {
 	return thread.frameSlots[depth]
 }
 
+func (thread *vmThread) rootClosureSlot(depth int, proto *Proto, upvalues []*cell, upvalueValues []Value, upvalueValueOK []bool) *closure {
+	if thread == nil || depth < 0 {
+		return nil
+	}
+	for len(thread.rootClosureSlots) <= depth {
+		thread.rootClosureSlots = append(thread.rootClosureSlots, nil)
+	}
+	identity := thread.rootClosureSlots[depth]
+	if identity == nil {
+		identity = &closure{}
+		thread.rootClosureSlots[depth] = identity
+	}
+	identity.proto = proto
+	identity.upvalues = upvalues
+	identity.upvalueValues = upvalueValues
+	identity.upvalueValueOK = upvalueValueOK
+	return identity
+}
+
+func (thread *vmThread) currentClosureForFrame(frame *vmFrame) *closure {
+	if frame == nil {
+		return nil
+	}
+	if frame.currentClosure != nil {
+		return frame.currentClosure
+	}
+	return thread.rootClosureSlot(frame.depth, frame.proto, frame.upvalues, frame.upvalueValues, frame.upvalueValueOK)
+}
+
 func (thread *vmThread) resetFrame(frame *vmFrame, proto *Proto, args []Value, upvalues []*cell, upvalueValues []Value, upvalueValueOK []bool) {
 	thread.clearPendingCall(frame)
 	owner := thread.ensureStackOwner()
@@ -2627,6 +2683,38 @@ func (thread *vmThread) openUpvalue(owner *vmStackOwner, index int) *cell {
 	cell.openAt(owner, index)
 	thread.openUpvalues = append(thread.openUpvalues, cell)
 	return cell
+}
+
+func (thread *vmThread) lookupOpenUpvalue(owner *vmStackOwner, index int) *cell {
+	if thread == nil || owner == nil || index < 0 {
+		return nil
+	}
+	for _, candidate := range thread.openUpvalues {
+		if candidate != nil && candidate.owner == owner && candidate.index == index {
+			return candidate
+		}
+	}
+	return nil
+}
+
+func (thread *vmThread) restoreFrameCells(frame *vmFrame, proto *Proto, owner *vmStackOwner, base int) []*cell {
+	if frame == nil || proto == nil || len(proto.capturedLocals) == 0 {
+		return nil
+	}
+	var cells []*cell
+	if cap(frame.cells) >= proto.registers {
+		cells = frame.cells[:proto.registers]
+		clear(cells)
+	} else {
+		cells = make([]*cell, proto.registers)
+	}
+	for index, captured := range proto.capturedLocals {
+		if !captured {
+			continue
+		}
+		cells[index] = thread.lookupOpenUpvalue(owner, base+index)
+	}
+	return cells
 }
 
 // indexFrameOpenUpvalues replaces a frame's compatibility cell slots with the
@@ -2808,6 +2896,10 @@ func (thread *vmThread) dropFrames(depth int) {
 	}
 	for i := len(thread.frames) - 1; i >= depth; i-- {
 		frame := thread.frames[i]
+		frameDepth := -1
+		if frame != nil {
+			frameDepth = frame.depth
+		}
 		thread.clearPendingCall(frame)
 		if frame != nil && frame.recordBaseDepth >= 0 {
 			thread.truncateFrameRecords(frame.recordBaseDepth)
@@ -2817,6 +2909,7 @@ func (thread *vmThread) dropFrames(depth int) {
 		if frame != nil {
 			frame.resetForReuse()
 		}
+		thread.clearRootClosureSlot(frameDepth)
 	}
 	thread.frames = thread.frames[:depth]
 	if depth == 0 {
@@ -2860,6 +2953,7 @@ func (thread *vmThread) newClosureCallFramePrependedFromFrame(closure *closure, 
 	thread.growStack(base + proto.registers)
 	registers := owner.values[base : base+proto.registers]
 	frame.resetFrameIntoRegisters(proto, nil, closure.upvalues, closure.upvalueValues, closure.upvalueValueOK, owner, base, registers)
+	frame.currentClosure = closure
 	thread.indexFrameOpenUpvalues(frame)
 	frame.window = vmRegisterWindow{
 		owner:               owner,
@@ -2887,6 +2981,7 @@ func (thread *vmThread) newClosureCallFramePrependedFromFrame(closure *closure, 
 }
 
 func (frame *vmFrame) resetFrameIntoRegisters(proto *Proto, args []Value, upvalues []*cell, upvalueValues []Value, upvalueValueOK []bool, owner *vmStackOwner, base int, registers []Value) {
+	frame.currentClosure = nil
 	for _, register := range proto.entryNilRegisters {
 		registers[register] = NilValue()
 	}
@@ -2944,6 +3039,7 @@ func (frame *vmFrame) resetFrameIntoRegisters(proto *Proto, args []Value, upvalu
 func (frame *vmFrame) resetForReuse() {
 	frame.closeCells()
 	frame.proto = nil
+	frame.currentClosure = nil
 	frame.depth = noProtectedFrame
 	frame.window = vmRegisterWindow{}
 	frame.registerBase = 0
@@ -4391,7 +4487,7 @@ func (thread *vmThread) resumeRecordOnlyFixedCallOne(rootRecordDepth int, frame 
 		return false
 	}
 	record := thread.frameRecords[len(thread.frameRecords)-1]
-	if record.flags&vmFrameRecordFlagRecordOnly == 0 || record.proto == nil || record.resultCount != 1 {
+	if record.flags&vmFrameRecordFlagRecordOnly == 0 || record.closure == nil || record.resultCount != 1 {
 		return false
 	}
 	base, baseOK := vmFrameRecordUint32ToInt(record.base)
@@ -4400,6 +4496,7 @@ func (thread *vmThread) resumeRecordOnlyFixedCallOne(rootRecordDepth int, frame 
 	destination, destinationOK := vmFrameRecordUint32ToInt(record.resultDestination)
 	previousStackLength, previousStackLengthOK := vmFrameRecordUint32ToInt(record.varargBase)
 	if !baseOK || !topOK || !returnPCOK || !destinationOK || !previousStackLengthOK ||
+		record.closure == nil || record.closure.proto == nil ||
 		base < 0 || top < base || destination < base || destination >= top {
 		return false
 	}
@@ -4420,18 +4517,23 @@ func (thread *vmThread) resumeRecordOnlyFixedCallOne(rootRecordDepth int, frame 
 		childEnd = len(owner.values)
 	}
 	if childStart < childEnd {
+		thread.closeOpenUpvalues(owner, childStart, childEnd)
 		clear(owner.values[childStart:childEnd])
 	}
 	owner.values = owner.values[:top]
 	thread.stack = owner.values
 	_, _ = thread.popFrameRecord()
 
-	current.proto = record.proto
+	current.proto = record.closure.proto
+	current.currentClosure = record.closure
 	current.registerBase = base
 	current.registerCount = top - base
 	current.owner = owner
 	current.registers = owner.values[base:top]
-	current.cells = nil
+	current.cells = thread.restoreFrameCells(current, record.closure.proto, owner, base)
+	current.upvalues = record.closure.upvalues
+	current.upvalueValues = record.closure.upvalueValues
+	current.upvalueValueOK = record.closure.upvalueValueOK
 	current.varargs = nil
 	current.pc = returnPC
 	current.debugLine = -1
