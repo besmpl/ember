@@ -4210,6 +4210,27 @@ func directFrameApplyCallIslandResults(frame *vmFrame, registers []Value, start 
 	}
 }
 
+// directFrameApplySingleCallIslandResult publishes a native result without
+// constructing an escaping one-element []Value. The open-result form stays in
+// the result window's inline storage; fixed multi-result destinations are
+// nil-filled directly in the register file.
+func directFrameApplySingleCallIslandResult(frame *vmFrame, registers []Value, start int, count int, result Value) {
+	frame.clearOpenResultState()
+	if count < 0 {
+		frame.openResultStart = start
+		frame.openResults = vmSingleResultWindow(result)
+		registers[start] = result
+		return
+	}
+	if count == 0 {
+		count = 1
+	}
+	registers[start] = result
+	for i := 1; i < count; i++ {
+		registers[start+i] = NilValue()
+	}
+}
+
 func (thread *vmThread) runDirectFastCall(frame *vmFrame, nativeID nativeFuncID, start int, argCount int, resultCount int, counts *directFramePICCounts) directFrameSideExit {
 	if nativeID == nativeFuncCoroutineResume {
 		return directFrameEnterGenericFrameFor(directFrameSideExitReasonYield)
@@ -4258,7 +4279,7 @@ func (thread *vmThread) runDirectFastCall(frame *vmFrame, nativeID nativeFuncID,
 				return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
 			}
 		}
-		directFrameApplyCallIslandResults(frame, registers, start, resultCount, []Value{removed})
+		directFrameApplySingleCallIslandResult(frame, registers, start, resultCount, removed)
 	case nativeFuncMathMin:
 		if resultCount != 1 {
 			return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
@@ -4267,28 +4288,15 @@ func (thread *vmThread) runDirectFastCall(frame *vmFrame, nativeID nativeFuncID,
 		if err != nil {
 			return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
 		}
-		directFrameApplyCallIslandResults(frame, registers, start, resultCount, []Value{NumberValue(minimum)})
+		directFrameApplySingleCallIslandResult(frame, registers, start, resultCount, NumberValue(minimum))
 	case nativeFuncRawLen:
 		value, err := baseRawLenValue(registers[start : start+argCount])
 		if err != nil {
 			return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
 		}
-		directFrameApplyCallIslandResults(frame, registers, start, resultCount, []Value{value})
+		directFrameApplySingleCallIslandResult(frame, registers, start, resultCount, value)
 	case nativeFuncSelect:
-		count := NumberValue(float64(frame.varargLen()))
-		frame.clearOpenResultState()
-		if resultCount < 0 {
-			frame.openResultStart = start
-			frame.openResults = vmSingleResultWindow(count)
-			registers[start] = frame.openResults.at(0)
-			return directFrameResume()
-		}
-		if resultCount == 0 {
-			resultCount = 1
-		}
-		for i := 0; i < resultCount; i++ {
-			registers[start+i] = adjustedResultAt([]Value{count}, i)
-		}
+		directFrameApplySingleCallIslandResult(frame, registers, start, resultCount, NumberValue(float64(frame.varargLen())))
 	default:
 		return directFrameEnterGenericFrameFor(directFrameSideExitReasonCall)
 	}
