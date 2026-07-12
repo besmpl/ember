@@ -51,13 +51,7 @@ type runtimeOwnerPinState struct {
 
 func newRuntimeOwner() *runtimeOwner {
 	return &runtimeOwner{
-		heap:          &runtimeHeap{},
-		threads:       make(map[*vmThread]struct{}),
-		coroutines:    make(map[*vmCoroutine]struct{}),
-		coroutineRefs: make(map[*vmCoroutine]struct{}),
-		roots:         make(map[uint64]*runtimeRoot),
-		pins:          make(map[uint64]*runtimePin),
-		pinStates:     make(map[slot]runtimeOwnerPinState),
+		heap: &runtimeHeap{},
 	}
 }
 
@@ -141,6 +135,9 @@ func (owner *runtimeOwner) checkoutVMThread(thread *vmThread) (vmCacheBundle, er
 	if owner.state == runtimeOwnerClosed {
 		return vmCacheBundle{}, errRuntimeOwnerClosed
 	}
+	if owner.threads == nil {
+		owner.threads = make(map[*vmThread]struct{})
+	}
 	owner.threads[thread] = struct{}{}
 	if len(owner.idleVMCaches) == 0 {
 		return vmCacheBundle{}, nil
@@ -188,6 +185,9 @@ func (owner *runtimeOwner) root(handle slot) (*runtimeRoot, error) {
 	}
 	owner.nextToken++
 	root := &runtimeRoot{owner: owner, handle: handle, tokenID: owner.nextToken}
+	if owner.roots == nil {
+		owner.roots = make(map[uint64]*runtimeRoot)
+	}
 	owner.roots[root.tokenID] = root
 	return root, nil
 }
@@ -300,6 +300,9 @@ func (owner *runtimeOwner) pin(value Value) (*runtimePin, error) {
 	addedPin := false
 	if slotIsLiveHandle(handle) {
 		addedPin = (found && !wasPinned) || (!found && !valueHasDefaultOpaquePin(value))
+		if owner.pinStates == nil {
+			owner.pinStates = make(map[slot]runtimeOwnerPinState)
+		}
 		state := owner.pinStates[handle]
 		if state.count == 0 {
 			state.addedPin = addedPin
@@ -316,6 +319,9 @@ func (owner *runtimeOwner) pin(value Value) (*runtimePin, error) {
 	}
 	owner.nextToken++
 	pin := &runtimePin{owner: owner, handle: handle, tokenID: owner.nextToken}
+	if owner.pins == nil {
+		owner.pins = make(map[uint64]*runtimePin)
+	}
 	owner.pins[pin.tokenID] = pin
 	return pin, nil
 }
@@ -515,6 +521,9 @@ func (owner *runtimeOwner) registerThread(thread *vmThread) error {
 	if owner.state == runtimeOwnerClosed {
 		return errRuntimeOwnerClosed
 	}
+	if owner.threads == nil {
+		owner.threads = make(map[*vmThread]struct{})
+	}
 	owner.threads[thread] = struct{}{}
 	return nil
 }
@@ -536,6 +545,9 @@ func (owner *runtimeOwner) registerCoroutine(coroutine *vmCoroutine) error {
 	defer owner.mu.Unlock()
 	if owner.state == runtimeOwnerClosed {
 		return errRuntimeOwnerClosed
+	}
+	if owner.coroutines == nil {
+		owner.coroutines = make(map[*vmCoroutine]struct{})
 	}
 	owner.coroutines[coroutine] = struct{}{}
 	return nil
