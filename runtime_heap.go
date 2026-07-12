@@ -1341,6 +1341,9 @@ func (collector *runtimeHeapCollector) scanSuspendedFrames(value vmSuspendedFram
 	collector.scanGlobal(value.globals)
 	collector.scanStackOwner(value.owner)
 	collector.scanValues(value.stack)
+	for _, cell := range value.openUpvalues {
+		collector.markCell(cell)
+	}
 	for _, frame := range value.frames {
 		collector.scanFrame(frame)
 	}
@@ -1365,6 +1368,9 @@ func (collector *runtimeHeapCollector) scanThread(value *vmThread) {
 	collector.scanGlobal(&value.baseGlobals)
 	collector.scanStackOwner(value.stackOwner)
 	collector.scanValues(value.stack)
+	for _, cell := range value.openUpvalues {
+		collector.markCell(cell)
+	}
 	for _, frame := range value.frames {
 		collector.scanFrame(frame)
 	}

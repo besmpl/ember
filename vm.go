@@ -132,6 +132,10 @@ type vmThread struct {
 	frameRecords    []vmFrameRecord
 	maxFrameRecords int
 	stackOwner      *vmStackOwner
+	// openUpvalues is the thread-owned index of cells that still point into a
+	// stack owner. Entries are kept in insertion order and keyed by the owner
+	// identity plus the cell's absolute register index.
+	openUpvalues []*cell
 	// stack is kept as a short-lived view for existing runtime helpers and
 	// diagnostics.  stackOwner.values is the owning storage; both slices are
 	// updated together whenever the window grows or is truncated.
@@ -776,6 +780,7 @@ type vmSuspendedFrames struct {
 	frameRecords          []vmFrameRecord
 	maxFrameRecords       int
 	owner                 *vmStackOwner
+	openUpvalues          []*cell
 	stack                 []Value
 	nearestProtectedFrame int
 	instructionBudget     int
@@ -1249,6 +1254,7 @@ func (thread *vmThread) resetForRun(ctx context.Context, globals *globalEnv) {
 	}
 	thread.frames = thread.frames[:0]
 	thread.clearFrameRecords()
+	thread.closeAllOpenUpvalues()
 	if thread.stackOwner == nil {
 		thread.stackOwner = &vmStackOwner{}
 	}
@@ -1284,6 +1290,7 @@ func (thread *vmThread) resetForPool() {
 	owned := thread.ownerBound
 	thread.dropFrames(0)
 	thread.clearFrameRecords()
+	thread.closeAllOpenUpvalues()
 	if owned {
 		for _, frame := range thread.frameSlots {
 			frame.resetForPool()
@@ -1665,6 +1672,7 @@ func (thread *vmThread) suspendFrames() vmSuspendedFrames {
 		frameRecords:          thread.frameRecords,
 		maxFrameRecords:       thread.maxFrameRecords,
 		owner:                 thread.stackOwner,
+		openUpvalues:          thread.openUpvalues,
 		stack:                 thread.stack,
 		nearestProtectedFrame: thread.nearestProtectedFrame,
 		instructionBudget:     thread.instructionBudget,
@@ -1682,6 +1690,7 @@ func (thread *vmThread) suspendFrames() vmSuspendedFrames {
 	thread.frameRecords = nil
 	thread.stackOwner = nil
 	thread.stack = nil
+	thread.openUpvalues = nil
 	thread.nearestProtectedFrame = noProtectedFrame
 	return suspended
 }
@@ -1693,6 +1702,7 @@ func (thread *vmThread) resumeFrames(suspended vmSuspendedFrames) {
 	thread.frameRecords = suspended.frameRecords
 	thread.maxFrameRecords = suspended.maxFrameRecords
 	thread.stackOwner = suspended.owner
+	thread.openUpvalues = suspended.openUpvalues
 	if thread.stackOwner != nil {
 		thread.stack = thread.stackOwner.values
 	} else {
@@ -2265,6 +2275,7 @@ func (thread *vmThread) newBorrowedClosureCallFrame(closure *closure, caller *vm
 	args := owner.values[base : base+paramCount]
 	registers := owner.values[base:end]
 	frame.resetFrameIntoRegisters(proto, args, closure.upvalues, closure.upvalueValues, closure.upvalueValueOK, owner, base, registers)
+	thread.indexFrameOpenUpvalues(frame)
 	frame.window = vmRegisterWindow{
 		owner:               owner,
 		base:                base,
@@ -2439,6 +2450,7 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 		childBase,
 		registers,
 	)
+	thread.indexFrameOpenUpvalues(frame)
 	frame.depth = physicalDepth
 	if recordBaseDepth < 0 {
 		recordBaseDepth = len(thread.frameRecords)
@@ -2582,6 +2594,7 @@ func (thread *vmThread) resetFrame(frame *vmFrame, proto *Proto, args []Value, u
 	thread.growStack(base + proto.registers)
 	registers := owner.values[base : base+proto.registers]
 	frame.resetFrameIntoRegisters(proto, args, upvalues, upvalueValues, upvalueValueOK, owner, base, registers)
+	thread.indexFrameOpenUpvalues(frame)
 	frame.window = vmRegisterWindow{
 		owner:               owner,
 		base:                base,
@@ -2596,6 +2609,88 @@ func (thread *vmThread) ensureStackOwner() *vmStackOwner {
 	}
 	thread.stack = thread.stackOwner.values
 	return thread.stackOwner
+}
+
+// openUpvalue returns the unique live cell for an absolute stack slot on this
+// thread. Keeping the index on the thread makes captures from the same slot
+// share one cell even when multiple closures observe it.
+func (thread *vmThread) openUpvalue(owner *vmStackOwner, index int) *cell {
+	if thread == nil || owner == nil || index < 0 {
+		return nil
+	}
+	for _, candidate := range thread.openUpvalues {
+		if candidate != nil && candidate.owner == owner && candidate.index == index {
+			return candidate
+		}
+	}
+	cell := &cell{}
+	cell.openAt(owner, index)
+	thread.openUpvalues = append(thread.openUpvalues, cell)
+	return cell
+}
+
+// indexFrameOpenUpvalues replaces a frame's compatibility cell slots with the
+// thread-owned cells for their absolute stack positions. The frame.cells slice
+// remains available to existing helpers and tests, while the thread index
+// provides cross-capture identity and a single close point.
+func (thread *vmThread) indexFrameOpenUpvalues(frame *vmFrame) {
+	if thread == nil || frame == nil || frame.owner == nil {
+		return
+	}
+	for index, candidate := range frame.cells {
+		if candidate == nil {
+			continue
+		}
+		absoluteIndex := frame.registerBase + index
+		var indexed *cell
+		for _, open := range thread.openUpvalues {
+			if open != nil && open.owner == frame.owner && open.index == absoluteIndex {
+				indexed = open
+				break
+			}
+		}
+		if indexed == nil {
+			thread.openUpvalues = append(thread.openUpvalues, candidate)
+			continue
+		}
+		if indexed != candidate {
+			candidate.close()
+			frame.cells[index] = indexed
+		}
+	}
+}
+
+// closeOpenUpvalues closes and removes cells in [start, end) before the stack
+// owner is truncated. This ordering is required because a cell reads its live
+// value from the owner's current slice.
+func (thread *vmThread) closeOpenUpvalues(owner *vmStackOwner, start, end int) {
+	if thread == nil || owner == nil || start < 0 || end <= start {
+		return
+	}
+	entries := thread.openUpvalues
+	kept := entries[:0]
+	for _, candidate := range entries {
+		if candidate != nil && candidate.owner == owner && candidate.index >= start && candidate.index < end {
+			candidate.close()
+			continue
+		}
+		kept = append(kept, candidate)
+	}
+	clear(entries[len(kept):])
+	thread.openUpvalues = kept
+}
+
+func (thread *vmThread) closeAllOpenUpvalues() {
+	if thread == nil {
+		return
+	}
+	for _, candidate := range thread.openUpvalues {
+		if candidate != nil {
+			candidate.close()
+		}
+	}
+	clear(thread.openUpvalues)
+	thread.openUpvalues = thread.openUpvalues[:0]
 }
 
 func (thread *vmThread) growStack(size int) {
@@ -2649,7 +2744,6 @@ func (thread *vmThread) releaseFrameWindow(frame *vmFrame) {
 	if frame == nil || frame.registerCount == 0 {
 		return
 	}
-	frame.closeCells()
 	window := frame.window
 	owner := window.owner
 	if owner == nil {
@@ -2662,6 +2756,14 @@ func (thread *vmThread) releaseFrameWindow(frame *vmFrame) {
 		previousLength = frame.registerBase
 	}
 	if owner != nil {
+		start := window.base
+		end := start + window.length
+		if window.length == 0 {
+			start = frame.registerBase
+			end = frame.registerBase + frame.registerCount
+		}
+		thread.closeOpenUpvalues(owner, start, end)
+		frame.closeCells()
 		// Borrowed windows can overlap the caller's dead suffix. Clear only the
 		// window itself, after its result has been applied, then restore the
 		// caller's prior logical length. Materialized windows retain the old
@@ -2689,6 +2791,7 @@ func (thread *vmThread) releaseFrameWindow(frame *vmFrame) {
 			}
 		}
 	} else if frame.registerBase <= len(thread.stack) {
+		frame.closeCells()
 		thread.stack = thread.stack[:frame.registerBase]
 	}
 	if owner != nil && owner == thread.stackOwner {
@@ -2757,6 +2860,7 @@ func (thread *vmThread) newClosureCallFramePrependedFromFrame(closure *closure, 
 	thread.growStack(base + proto.registers)
 	registers := owner.values[base : base+proto.registers]
 	frame.resetFrameIntoRegisters(proto, nil, closure.upvalues, closure.upvalueValues, closure.upvalueValueOK, owner, base, registers)
+	thread.indexFrameOpenUpvalues(frame)
 	frame.window = vmRegisterWindow{
 		owner:               owner,
 		base:                base,
@@ -2903,13 +3007,33 @@ func (frame *vmFrame) registerCell(index int) *cell {
 		frame.cells = cells
 	}
 	if frame.cells[index] == nil {
-		frame.cells[index] = &cell{}
 		owner := frame.owner
 		if owner == nil {
 			owner = &vmStackOwner{values: frame.registers}
 			frame.owner = owner
 		}
+		frame.cells[index] = &cell{}
 		frame.cells[index].openAt(owner, frame.registerBase+index)
+	}
+	return frame.cells[index]
+}
+
+func (thread *vmThread) registerCell(frame *vmFrame, index int) *cell {
+	if thread == nil || frame == nil {
+		return nil
+	}
+	if len(frame.cells) < len(frame.registers) {
+		cells := make([]*cell, len(frame.registers))
+		copy(cells, frame.cells)
+		frame.cells = cells
+	}
+	if frame.cells[index] == nil {
+		owner := frame.owner
+		if owner == nil {
+			owner = thread.stackOwner
+			frame.owner = owner
+		}
+		frame.cells[index] = thread.openUpvalue(owner, frame.registerBase+index)
 	}
 	return frame.cells[index]
 }
@@ -4946,7 +5070,7 @@ reload:
 
 		case opClosure:
 			child := proto.prototypes[b]
-			captured := captureUpvalues(child, frame)
+			captured := thread.captureUpvalues(child, frame)
 			registers[a] = thread.functionValueWithCapturedUpvalues(child, captured)
 
 		case opPrepareIter:
@@ -6624,7 +6748,7 @@ reload:
 
 		case opClosure:
 			child := proto.prototypes[b]
-			captured := captureUpvalues(child, frame)
+			captured := thread.captureUpvalues(child, frame)
 			registers[a] = thread.functionValueWithCapturedUpvalues(child, captured)
 
 		case opPrepareIter:
@@ -8785,7 +8909,7 @@ func hasCallMetamethod(value Value) (bool, error) {
 	return !metamethod.IsNil(), nil
 }
 
-func captureUpvalues(proto *Proto, frame *vmFrame) capturedUpvalueSet {
+func (thread *vmThread) captureUpvalues(proto *Proto, frame *vmFrame) capturedUpvalueSet {
 	if len(proto.upvalues) == 0 {
 		return capturedUpvalueSet{}
 	}
@@ -8802,7 +8926,7 @@ func captureUpvalues(proto *Proto, frame *vmFrame) capturedUpvalueSet {
 				captured.setValue(i, frame.register(desc.index))
 				continue
 			}
-			captured.setCell(i, frame.registerCell(desc.index))
+			captured.setCell(i, thread.registerCell(frame, desc.index))
 			continue
 		}
 

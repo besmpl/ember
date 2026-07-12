@@ -284,3 +284,34 @@ func TestRuntimeHeapCollectClearsOnlyInactiveCoroutineFrameSlots(t *testing.T) {
 		t.Fatalf("inactive frame retained references: %#v", stale)
 	}
 }
+
+func TestRuntimeHeapCollectMarksThreadOpenUpvalues(t *testing.T) {
+	var heap runtimeHeap
+	table := NewTable()
+	tableHandle, err := heap.importTable(table)
+	if err != nil {
+		t.Fatalf("import open-upvalue table: %v", err)
+	}
+	owner := &vmStackOwner{values: []Value{TableValue(table)}}
+	open := &cell{}
+	open.openAt(owner, 0)
+	cellHandle, err := heap.importCell(open)
+	if err != nil {
+		t.Fatalf("import open upvalue: %v", err)
+	}
+	coroutine := &vmCoroutine{thread: vmThread{openUpvalues: []*cell{open}}}
+	root, err := heap.importUserData(NewUserData(coroutine))
+	if err != nil {
+		t.Fatalf("import coroutine userdata: %v", err)
+	}
+
+	if _, err := heap.collect([]slot{root}); err != nil {
+		t.Fatalf("collect thread open upvalues: %v", err)
+	}
+	if err := heap.validateSlot(cellHandle); err != nil {
+		t.Fatalf("thread open upvalue was swept: %v", err)
+	}
+	if err := heap.validateSlot(tableHandle); err != nil {
+		t.Fatalf("value reachable through open upvalue was swept: %v", err)
+	}
+}

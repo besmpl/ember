@@ -168,6 +168,7 @@ func (coroutine *vmCoroutine) disposeFrames() {
 		coroutine.suspended = vmSuspendedFrames{}
 	}
 	coroutine.thread.dropFrames(0)
+	coroutine.thread.closeAllOpenUpvalues()
 	coroutine.thread.clearFrameRecords()
 	for _, frame := range coroutine.thread.frameSlots {
 		if frame != nil {
