@@ -2,6 +2,125 @@ package ember
 
 import "testing"
 
+func TestOpenResultRangeUsesSharedOwnerAndClearsLogicalTop(t *testing.T) {
+	thread := newVMThread(runtimeGlobals(nil))
+	proto := newProto(nil, []instruction{{op: opReturn, a: 0, b: -1}}, nil, nil, 2, 0, true)
+	frame := thread.newFrame(proto, nil, nil)
+	thread.pushFrame(frame)
+	owner := thread.stackOwner
+	logicalTop := len(owner.values)
+	frame.openResultStart = 0
+	if !frame.publishOpenResultRange(&thread, frame.varargs) {
+		t.Fatal("publishOpenResultRange returned false")
+	}
+	if got, want := frame.openRangeBase, logicalTop; got != want {
+		t.Fatalf("open range base = %d, want logical top %d", got, want)
+	}
+	if got, want := frame.openRangeCount, 1; got != want {
+		t.Fatalf("empty open range count = %d, want adjusted count %d", got, want)
+	}
+	if !frame.openResultAt(0).IsNil() {
+		t.Fatalf("empty open result = %v, want nil", frame.openResultAt(0))
+	}
+	if len(thread.stack) != len(owner.values) {
+		t.Fatalf("thread stack length %d differs from owner length %d", len(thread.stack), len(owner.values))
+	}
+
+	frame.clearOpenResultState()
+	if got := len(owner.values); got != logicalTop {
+		t.Fatalf("cleared owner length = %d, want %d", got, logicalTop)
+	}
+	if got := len(thread.stack); got != logicalTop {
+		t.Fatalf("cleared thread stack length = %d, want %d", got, logicalTop)
+	}
+}
+
+func TestOpenResultRangeRebindsAfterStackGrowth(t *testing.T) {
+	thread := newVMThread(runtimeGlobals(nil))
+	proto := newProto(nil, []instruction{{op: opReturn, a: 0, b: -1}}, nil, nil, 2, 0, true)
+	frame := thread.newFrame(proto, []Value{NumberValue(1), NumberValue(2), NumberValue(3)}, nil)
+	thread.pushFrame(frame)
+	oldRegisters := frame.registers
+	thread.growStack(cap(thread.stack) + 32)
+	if &oldRegisters[0] == &frame.registers[0] && cap(oldRegisters) == cap(frame.registers) {
+		t.Fatal("stack growth did not force a rebind")
+	}
+	frame.openResultStart = 0
+	if !frame.publishOpenResultRange(&thread, frame.varargs) {
+		t.Fatal("publishOpenResultRange returned false after growth")
+	}
+	values := frame.openResultRangeValues()
+	if len(values) != 3 {
+		t.Fatalf("open range length = %d, want 3", len(values))
+	}
+	if got, ok := values[1].Number(); !ok || got != 2 {
+		t.Fatalf("rebound open range second value = %v (%t), want 2", values[1], ok)
+	}
+	frame.clearOpenResultState()
+}
+
+func TestOpenVarargRangePrefixForwardingParity(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   []Value
+	}{
+		{
+			name: "empty",
+			source: `local function identity(...) return ... end
+return identity()`,
+			want: []Value{NilValue()},
+		},
+		{
+			name: "many",
+			source: `local function identity(...) return ... end
+return identity(1, 2, 3)`,
+			want: []Value{NumberValue(1), NumberValue(2), NumberValue(3)},
+		},
+		{
+			name: "prefix",
+			source: `local function source(...) return 7, ... end
+local function forward(...) return source(...) end
+return forward(1, 2, 3)`,
+			want: []Value{NumberValue(7), NumberValue(1), NumberValue(2), NumberValue(3)},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			proto, err := Compile(test.source)
+			if err != nil {
+				t.Fatalf("Compile returned error: %v", err)
+			}
+			got, err := Run(proto)
+			if err != nil {
+				t.Fatalf("Run returned error: %v", err)
+			}
+			instrumented, _, err := runWithDirectFrameMechanismCounters(proto, nil)
+			if err != nil {
+				t.Fatalf("instrumented Run returned error: %v", err)
+			}
+			modes := []struct {
+				name    string
+				results []Value
+			}{
+				{name: "production", results: got},
+				{name: "instrumented", results: instrumented},
+			}
+			for _, mode := range modes {
+				results := mode.results
+				if len(results) != len(test.want) {
+					t.Fatalf("%s result count = %d, want %d (%v)", mode.name, len(results), len(test.want), results)
+				}
+				for index := range test.want {
+					if results[index] != test.want[index] {
+						t.Fatalf("%s result %d = %v, want %v", mode.name, index, results[index], test.want[index])
+					}
+				}
+			}
+		})
+	}
+}
+
 func rebuildProtoExecutionCodeForTest(t *testing.T, proto *Proto, code []instruction) {
 	t.Helper()
 	if err := encodeProtoWords(proto, code); err != nil {

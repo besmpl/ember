@@ -722,8 +722,17 @@ type vmFrame struct {
 	debugLine       int
 	openResultStart int
 	openResults     vmResultWindow
-	pendingCall     vmPendingCall
-	hasPendingCall  bool
+	// openRangeOwner/base/count describe a contiguous, owner-backed open
+	// result range.  openRangeLogicalTop is the owner length before the range
+	// was published; it lets the range be cleared and the shared stack be
+	// rebound without retaining a separate result slice.  The owner pointer is
+	// the existing frame/thread stack owner, never a newly allocated object.
+	openRangeOwner      *vmStackOwner
+	openRangeBase       int
+	openRangeCount      int
+	openRangeLogicalTop int
+	pendingCall         vmPendingCall
+	hasPendingCall      bool
 	// recordBaseDepth is the compact continuation depth owned by this physical
 	// frame. It survives direct-loop side exits so a resumed logical callee can
 	// still unwind record-only callers.
@@ -1293,6 +1302,7 @@ func (thread *vmThread) resetForRun(ctx context.Context, globals *globalEnv) {
 	if thread.stackOwner == nil {
 		thread.stackOwner = &vmStackOwner{}
 	}
+	thread.stackOwner.thread = thread
 	thread.stackOwner.values = thread.stackOwner.values[:0]
 	thread.stack = thread.stackOwner.values
 	thread.nearestProtectedFrame = noProtectedFrame
@@ -1342,6 +1352,7 @@ func (thread *vmThread) resetForPool() {
 		if thread.stackOwner == nil {
 			thread.stackOwner = &vmStackOwner{}
 		}
+		thread.stackOwner.thread = thread
 		thread.stackOwner.values = values[:0]
 		thread.stack = thread.stackOwner.values
 	}
@@ -1741,6 +1752,9 @@ func (thread *vmThread) resumeFrames(suspended vmSuspendedFrames) {
 	thread.rootClosureSlots = suspended.rootClosureSlots
 	thread.maxFrameRecords = suspended.maxFrameRecords
 	thread.stackOwner = suspended.owner
+	if thread.stackOwner != nil {
+		thread.stackOwner.thread = thread
+	}
 	thread.openUpvalues = suspended.openUpvalues
 	if thread.stackOwner != nil {
 		thread.stack = thread.stackOwner.values
@@ -2664,6 +2678,7 @@ func (thread *vmThread) ensureStackOwner() *vmStackOwner {
 	if thread.stackOwner == nil {
 		thread.stackOwner = &vmStackOwner{values: thread.stack}
 	}
+	thread.stackOwner.thread = thread
 	thread.stack = thread.stackOwner.values
 	return thread.stackOwner
 }
@@ -2833,6 +2848,7 @@ func (thread *vmThread) releaseFrameWindow(frame *vmFrame) {
 	if frame == nil || frame.registerCount == 0 {
 		return
 	}
+	frame.clearOpenResultRange()
 	window := frame.window
 	owner := window.owner
 	if owner == nil {
@@ -2982,6 +2998,7 @@ func (thread *vmThread) newClosureCallFramePrependedFromFrame(closure *closure, 
 }
 
 func (frame *vmFrame) resetFrameIntoRegisters(proto *Proto, args []Value, upvalues []*cell, upvalueValues []Value, upvalueValueOK []bool, owner *vmStackOwner, base int, registers []Value) {
+	frame.clearOpenResultRange()
 	frame.currentClosure = nil
 	for _, register := range proto.entryNilRegisters {
 		registers[register] = NilValue()
@@ -3033,12 +3050,17 @@ func (frame *vmFrame) resetFrameIntoRegisters(proto *Proto, args []Value, upvalu
 	frame.debugLine = -1
 	frame.openResultStart = -1
 	frame.openResults = vmResultWindow{}
+	frame.openRangeOwner = nil
+	frame.openRangeBase = -1
+	frame.openRangeCount = 0
+	frame.openRangeLogicalTop = -1
 	frame.resetPendingCallState()
 	frame.recordBaseDepth = -1
 }
 
 func (frame *vmFrame) resetForReuse() {
 	frame.closeCells()
+	frame.clearOpenResultRange()
 	frame.proto = nil
 	frame.currentClosure = nil
 	frame.depth = noProtectedFrame
@@ -3054,6 +3076,10 @@ func (frame *vmFrame) resetForReuse() {
 	frame.debugLine = -1
 	frame.openResultStart = -1
 	frame.openResults = vmResultWindow{}
+	frame.openRangeOwner = nil
+	frame.openRangeBase = -1
+	frame.openRangeCount = 0
+	frame.openRangeLogicalTop = -1
 	frame.resetPendingCallState()
 	frame.recordBaseDepth = -1
 }
@@ -3095,6 +3121,123 @@ func (frame *vmFrame) register(index int) Value {
 
 func (frame *vmFrame) setRegister(index int, value Value) {
 	frame.registers[index] = value
+}
+
+// clearOpenResultRange releases an owner-backed open result range and restores
+// the shared stack's logical top from before the range was published. It uses
+// the existing frame/thread stack owner and never allocates a result object.
+func (frame *vmFrame) clearOpenResultRange() {
+	if frame == nil {
+		return
+	}
+	owner := frame.openRangeOwner
+	base := frame.openRangeBase
+	count := frame.openRangeCount
+	logicalTop := frame.openRangeLogicalTop
+	if owner != nil && base >= 0 && count > 0 && base <= len(owner.values) {
+		end := base + count
+		if end > len(owner.values) {
+			end = len(owner.values)
+		}
+		if end > base {
+			clear(owner.values[base:end])
+		}
+		if logicalTop >= 0 && logicalTop <= len(owner.values) {
+			owner.values = owner.values[:logicalTop]
+			if owner.thread != nil && owner.thread.stackOwner == owner {
+				owner.thread.stack = owner.values
+			}
+		}
+	}
+	frame.openRangeOwner = nil
+	frame.openRangeBase = -1
+	frame.openRangeCount = 0
+	frame.openRangeLogicalTop = -1
+}
+
+// clearOpenResultState clears either open-result representation. Keeping range
+// cleanup here prevents stale stack-backed values from surviving a subsequent
+// fixed-result or host result.
+func (frame *vmFrame) clearOpenResultState() {
+	if frame == nil {
+		return
+	}
+	frame.clearOpenResultRange()
+	frame.openResultStart = -1
+	frame.openResults = vmResultWindow{}
+}
+
+// publishOpenResultRange copies values into the existing stack owner and
+// publishes the resulting absolute range. Empty varargs retain Luau's open
+// result adjustment by materializing one nil value.
+func (frame *vmFrame) publishOpenResultRange(thread *vmThread, values []Value) bool {
+	if frame == nil {
+		return false
+	}
+	frame.clearOpenResultRange()
+	owner := frame.window.owner
+	if owner == nil {
+		owner = frame.owner
+	}
+	if owner == nil && thread != nil {
+		owner = thread.ensureStackOwner()
+		frame.owner = owner
+	}
+	if owner == nil {
+		return false
+	}
+	if thread == nil || owner != thread.ensureStackOwner() {
+		return false
+	}
+	count := len(values)
+	if count == 0 {
+		count = 1
+	}
+	logicalTop := len(owner.values)
+	end := logicalTop + count
+	if end < logicalTop {
+		return false
+	}
+	thread.growStack(end)
+	owner = thread.stackOwner
+	copy(owner.values[logicalTop:logicalTop+len(values)], values)
+	if len(values) == 0 {
+		owner.values[logicalTop] = NilValue()
+	}
+	frame.openRangeOwner = owner
+	frame.openRangeBase = logicalTop
+	frame.openRangeCount = count
+	frame.openRangeLogicalTop = logicalTop
+	return true
+}
+
+func (frame *vmFrame) openResultRangeValues() []Value {
+	if frame == nil || frame.openResultStart < 0 || frame.openRangeOwner == nil || frame.openRangeBase < 0 || frame.openRangeCount <= 0 {
+		return nil
+	}
+	start := frame.openRangeBase
+	end := start + frame.openRangeCount
+	if start > len(frame.openRangeOwner.values) || end > len(frame.openRangeOwner.values) || end < start {
+		return nil
+	}
+	return frame.openRangeOwner.values[start:end]
+}
+
+func (frame *vmFrame) openResultAt(index int) Value {
+	if values := frame.openResultRangeValues(); values != nil {
+		if index < 0 || index >= len(values) {
+			return NilValue()
+		}
+		return values[index]
+	}
+	return frame.openResults.at(index)
+}
+
+func (frame *vmFrame) openResultWindow() vmResultWindow {
+	if values := frame.openResultRangeValues(); values != nil {
+		return vmBorrowedResultWindow(values)
+	}
+	return frame.openResults
 }
 
 func (frame *vmFrame) registerCell(index int) *cell {
@@ -3291,6 +3434,7 @@ func (frame *vmFrame) applyResultDestination(destination vmResultDestination, re
 }
 
 func (frame *vmFrame) applyValueListDestination(destination vmResultDestination, results vmResultWindow) {
+	frame.clearOpenResultRange()
 	resultCount := destination.count
 	if resultCount < 0 {
 		frame.openResultStart = destination.register
@@ -4914,14 +5058,17 @@ reload:
 				resultCount = 1
 			}
 			if resultCount < 0 {
+				frame.clearOpenResultState()
 				frame.openResultStart = a
-				frame.openResults = vmAdjustedBorrowedResultWindow(frame.varargs)
-				registers[a] = frame.openResults.at(0)
+				if !frame.publishOpenResultRange(thread, frame.varargs) {
+					frame.openResults = vmAdjustedBorrowedResultWindow(frame.varargs)
+				}
+				registers = frame.registers
+				registers[a] = frame.openResultAt(0)
 				pc = nextWord
 				continue
 			}
-			frame.openResultStart = -1
-			frame.openResults = vmResultWindow{}
+			frame.clearOpenResultState()
 			for i := 0; i < resultCount; i++ {
 				if i >= len(frame.varargs) {
 					registers[a+i] = NilValue()
@@ -6413,21 +6560,22 @@ reload:
 			if count < 0 {
 				prefixCount := -count - 1
 				if frame.openResultStart == a+prefixCount {
+					openResults := frame.openResultWindow()
 					if directChildActive {
-						if thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, a, prefixCount, &frame.openResults) {
+						if thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, a, prefixCount, &openResults) {
 							goto reload
 						}
 						value := NilValue()
 						if prefixCount > 0 {
 							value = registers[a]
 						} else {
-							value = frame.openResults.at(0)
+							value = frame.openResultAt(0)
 						}
 						if thread.resumeRecordOnlyFixedCallOne(rootRecordDepth, &frame, value) {
 							goto reload
 						}
 					}
-					result := vmReturnedPrefixAndWindow(registers[a:a+prefixCount], frame.openResults)
+					result := vmReturnedPrefixAndWindow(registers[a:a+prefixCount], openResults)
 					if directChildActive && thread.resumeDirectFrameChild(rootDepth, &frame, result) {
 						goto reload
 					}
@@ -6646,15 +6794,18 @@ reload:
 				resultCount = 1
 			}
 			if resultCount < 0 {
+				frame.clearOpenResultState()
 				frame.openResultStart = a
-				frame.openResults = vmAdjustedBorrowedResultWindow(frame.varargs)
-				registers[a] = frame.openResults.at(0)
+				if !frame.publishOpenResultRange(thread, frame.varargs) {
+					frame.openResults = vmAdjustedBorrowedResultWindow(frame.varargs)
+				}
+				registers = frame.registers
+				registers[a] = frame.openResultAt(0)
 				pc = nextWord
 				frame.pc = pc
 				continue
 			}
-			frame.openResultStart = -1
-			frame.openResults = vmResultWindow{}
+			frame.clearOpenResultState()
 			for i := 0; i < resultCount; i++ {
 				if i >= len(frame.varargs) {
 					registers[a+i] = NilValue()
@@ -8085,21 +8236,22 @@ reload:
 			if count < 0 {
 				prefixCount := -count - 1
 				if frame.openResultStart == a+prefixCount {
+					openResults := frame.openResultWindow()
 					if directChildActive {
-						if thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, a, prefixCount, &frame.openResults) {
+						if thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, a, prefixCount, &openResults) {
 							goto reload
 						}
 						value := NilValue()
 						if prefixCount > 0 {
 							value = registers[a]
 						} else {
-							value = frame.openResults.at(0)
+							value = frame.openResultAt(0)
 						}
 						if thread.resumeRecordOnlyFixedCallOne(rootRecordDepth, &frame, value) {
 							goto reload
 						}
 					}
-					result := vmReturnedPrefixAndWindow(registers[a:a+prefixCount], frame.openResults)
+					result := vmReturnedPrefixAndWindow(registers[a:a+prefixCount], openResults)
 					if directChildActive && thread.resumeDirectFrameChild(rootDepth, &frame, result) {
 						goto reload
 					}

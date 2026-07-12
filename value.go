@@ -170,6 +170,10 @@ type hostCallable struct {
 // current backing array.
 type vmStackOwner struct {
 	values []Value
+	// thread is set for the active shared owner so stack-backed range cleanup
+	// can keep the thread's short-lived stack view synchronized with values.
+	// It is not a semantic root; the thread already owns the stack owner.
+	thread *vmThread
 }
 
 type cell struct {

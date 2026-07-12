@@ -1322,6 +1322,7 @@ func (collector *runtimeHeapCollector) clearInactiveFrameSlots(thread *vmThread,
 		if _, ok := active[frame]; ok {
 			continue
 		}
+		frame.clearOpenResultRange()
 		frame.proto = nil
 		frame.currentClosure = nil
 		frame.window = vmRegisterWindow{}
@@ -1333,6 +1334,10 @@ func (collector *runtimeHeapCollector) clearInactiveFrameSlots(thread *vmThread,
 		frame.upvalueValueOK = nil
 		frame.varargs = nil
 		frame.openResults = vmResultWindow{}
+		frame.openRangeOwner = nil
+		frame.openRangeBase = -1
+		frame.openRangeCount = 0
+		frame.openRangeLogicalTop = -1
 		frame.pendingCall = vmPendingCall{}
 		frame.hasPendingCall = false
 	}
@@ -1404,6 +1409,7 @@ func (collector *runtimeHeapCollector) scanFrame(value *vmFrame) {
 	collector.scanClosure(value.currentClosure)
 	collector.scanStackOwner(value.owner)
 	collector.scanStackOwner(value.window.owner)
+	collector.scanStackOwner(value.openRangeOwner)
 	collector.scanValues(value.registers)
 	for _, cell := range value.cells {
 		collector.markCell(cell)

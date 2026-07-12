@@ -267,13 +267,18 @@ func (thread *vmThread) runColdInstruction(frame *vmFrame) (action coldInstructi
 			prefixCount := -c - 1
 			if frame.openResultStart == b+1+prefixCount {
 				if _, ok := callee.scriptFunction(); ok && prefixCount == 0 && globals != nil && globals.thread != nil {
-					args = frame.openResults.borrowedValues()
+					if values := frame.openResultRangeValues(); values != nil {
+						args = values
+					} else {
+						args = frame.openResults.borrowedValues()
+					}
 				} else {
-					args = make([]Value, 0, prefixCount+frame.openResults.len())
+					openResults := frame.openResultWindow()
+					args = make([]Value, 0, prefixCount+openResults.len())
 					for register := b + 1; register <= b+prefixCount; register++ {
 						args = append(args, frame.register(register))
 					}
-					args = frame.openResults.appendTo(args)
+					args = openResults.appendTo(args)
 				}
 			} else {
 				args = frame.retainedFixedCallArgs(b+1, prefixCount).values
