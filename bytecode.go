@@ -1556,7 +1556,11 @@ type Proto struct {
 	cacheIndex              *wordcodeCacheIndex
 	entryNilRegisters       []int
 	reuseZeroCaptureClosure bool
-	verifyErr               error
+	// slotExecutionEligible is sealed with the immutable wordcode artifact.
+	// The conservative first slot runner only admits immediate LOAD/MOVE/RETURN
+	// programs; richer prototypes use the established VM until Slice 4.3.
+	slotExecutionEligible bool
+	verifyErr             error
 }
 
 func (proto *Proto) globalSlot(slot int, name string) int {
@@ -1755,6 +1759,7 @@ func encodeProtoWords(proto *Proto, code []instruction) error {
 	} else {
 		proto.wordLines = wordcodeLinesFromWords(proto.lines, words)
 	}
+	proto.slotExecutionEligible = slotExecutionEligible(proto, code)
 	return nil
 }
 
