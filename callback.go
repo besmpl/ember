@@ -3,6 +3,7 @@ package ember
 import (
 	"context"
 	"fmt"
+	"sync"
 )
 
 // Callback is a script function captured from an active runtime call.
@@ -12,6 +13,13 @@ import (
 type Callback struct {
 	call  runtimeCallContext
 	value Value
+	state *callbackState
+}
+
+type callbackState struct {
+	mu       sync.Mutex
+	roots    []*runtimeRoot
+	released bool
 }
 
 // CaptureCallback validates value as a callback and captures the active
@@ -33,9 +41,19 @@ func CaptureCallback(ctx context.Context, value Value) (Callback, error) {
 	if _, ok := value.scriptFunction(); !ok {
 		return Callback{}, fmt.Errorf("callback: value is %s, want script function", value.Kind())
 	}
+	rootValues := make([]Value, 0, 1+len(call.globals))
+	rootValues = append(rootValues, value)
+	for _, global := range call.globals {
+		rootValues = append(rootValues, global)
+	}
+	roots, err := call.runtime.owner.rootValues(rootValues)
+	if err != nil {
+		return Callback{}, fmt.Errorf("callback: retain values: %w", err)
+	}
 	return Callback{
 		call:  call,
 		value: value,
+		state: &callbackState{roots: roots},
 	}, nil
 }
 
@@ -46,6 +64,9 @@ func (cb Callback) Call(ctx context.Context, args ...Value) ([]Value, error) {
 	if cb.call.runtime == nil {
 		return nil, fmt.Errorf("callback: not captured")
 	}
+	if cb.state == nil {
+		return nil, fmt.Errorf("callback: not retained")
+	}
 	lease, err := cb.call.runtime.beginRun()
 	if err == errRuntimeOwnerClosed {
 		return nil, fmt.Errorf("callback: runtime is closed")
@@ -54,6 +75,12 @@ func (cb Callback) Call(ctx context.Context, args ...Value) ([]Value, error) {
 		return nil, fmt.Errorf("callback: begin call: %w", err)
 	}
 	defer lease.end()
+	cb.state.mu.Lock()
+	released := cb.state.released
+	cb.state.mu.Unlock()
+	if released {
+		return nil, fmt.Errorf("callback: released")
+	}
 	if _, ok := cb.value.scriptFunction(); !ok {
 		return nil, fmt.Errorf("callback: value is %s, want script function", cb.value.Kind())
 	}
@@ -68,6 +95,27 @@ func (cb Callback) Call(ctx context.Context, args ...Value) ([]Value, error) {
 	call.ctx = ctx
 	callCtx := contextWithRuntimeCallContext(ctx, call)
 	return callValueWithContextBudget(callCtx, cb.value, call.envWithRequire(), args, call.maxInstructions)
+}
+
+// Close releases the callback's collector roots. Callback copies share the
+// same capture state, so closing any copy invalidates all of them. Hosts should
+// serialize Close with Call, as they already must serialize callback calls
+// with other work on the owning Runtime.
+func (cb Callback) Close() error {
+	if cb.state == nil {
+		return nil
+	}
+	cb.state.mu.Lock()
+	defer cb.state.mu.Unlock()
+	if cb.state.released {
+		return nil
+	}
+	for _, root := range cb.state.roots {
+		root.release()
+	}
+	cb.state.roots = nil
+	cb.state.released = true
+	return nil
 }
 
 type runtimeCallContextKey struct{}

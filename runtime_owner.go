@@ -10,6 +10,7 @@ var (
 	errRuntimeOwnerClosed   = errors.New("runtime owner is closed")
 	errRuntimeOwnerReleased = errors.New("runtime owner token is released")
 	errRuntimeOwnerInvalid  = errors.New("runtime owner argument is invalid")
+	errRuntimeOwnerOpaque   = errors.New("runtime owner has opaque suspended roots")
 )
 
 type runtimeOwnerState uint8
@@ -155,6 +156,106 @@ func (owner *runtimeOwner) close() error {
 	return nil
 }
 
+// collect performs one stop-the-world collection while the owner is idle.
+// Holding owner.mu across the heap walk closes the admission gate for runs,
+// slot runs, thread registrations, roots, and pins. Callers may contribute
+// roots that still use the public Value representation through scan.
+func (owner *runtimeOwner) collect(scan func(*runtimeHeapCollector)) (runtimeHeapStats, error) {
+	if owner == nil {
+		return runtimeHeapStats{}, errRuntimeOwnerReleased
+	}
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if owner.state == runtimeOwnerClosed {
+		return runtimeHeapStats{}, errRuntimeOwnerClosed
+	}
+	if owner.activeRuns != 0 || owner.activeSlotRuns != 0 || len(owner.threads) != 0 || len(owner.coroutines) != 0 {
+		return runtimeHeapStats{}, errRuntimeOwnerActive
+	}
+	if runtimeCoroutinesHaveOpaqueRoots(owner.coroutineRefs) {
+		return runtimeHeapStats{}, errRuntimeOwnerOpaque
+	}
+
+	roots := make([]slot, 0, len(owner.roots)+len(owner.pins))
+	for _, root := range owner.roots {
+		if root != nil && !root.released {
+			roots = append(roots, root.handle)
+		}
+	}
+	// Pin metadata lives on typed slabs, but boxed NaN payloads have no pin
+	// bit. Treat every live pin token as an explicit root so all slot families
+	// receive the same external-lifetime guarantee.
+	for _, pin := range owner.pins {
+		if pin != nil && !pin.released {
+			roots = append(roots, pin.handle)
+		}
+	}
+	// These bundles contain only weak accelerators. Keeping them across a
+	// collection would accidentally retain tables, strings, and closures.
+	owner.idleVMCaches = nil
+	stats, err := owner.heap.collectWithScanner(roots, func(collector *runtimeHeapCollector) {
+		for coroutine := range owner.coroutineRefs {
+			collector.scanCoroutine(coroutine)
+		}
+		if scan != nil {
+			scan(collector)
+		}
+	})
+	return stats, err
+}
+
+func runtimeCoroutinesHaveOpaqueRoots(coroutines map[*vmCoroutine]struct{}) bool {
+	if len(coroutines) == 0 {
+		return false
+	}
+	seenCoroutines := make(map[*vmCoroutine]struct{}, len(coroutines))
+	seenFrames := make(map[*vmFrame]struct{})
+	var frameOpaque func(*vmFrame) bool
+	frameOpaque = func(frame *vmFrame) bool {
+		if frame == nil {
+			return false
+		}
+		if _, seen := seenFrames[frame]; seen {
+			return false
+		}
+		seenFrames[frame] = struct{}{}
+		if frame.hasPendingCall && frame.pendingCall.host != nil {
+			return true
+		}
+		return frameOpaque(frame.caller)
+	}
+	var coroutineOpaque func(*vmCoroutine) bool
+	coroutineOpaque = func(coroutine *vmCoroutine) bool {
+		if coroutine == nil {
+			return false
+		}
+		if _, seen := seenCoroutines[coroutine]; seen {
+			return false
+		}
+		seenCoroutines[coroutine] = struct{}{}
+		if coroutine.thread.debugHook != nil || coroutine.suspended.debugHook != nil {
+			return true
+		}
+		for _, frame := range coroutine.thread.frames {
+			if frameOpaque(frame) {
+				return true
+			}
+		}
+		for _, frame := range coroutine.suspended.frames {
+			if frameOpaque(frame) {
+				return true
+			}
+		}
+		return coroutineOpaque(coroutine.thread.coroutine) || coroutineOpaque(coroutine.suspended.coroutine)
+	}
+	for coroutine := range coroutines {
+		if coroutineOpaque(coroutine) {
+			return true
+		}
+	}
+	return false
+}
+
 const maxIdleVMCacheBundles = 4
 
 func (owner *runtimeOwner) checkoutVMThread(thread *vmThread) (vmCacheBundle, error) {
@@ -221,6 +322,50 @@ func (owner *runtimeOwner) root(handle slot) (*runtimeRoot, error) {
 	}
 	owner.roots[root.tokenID] = root
 	return root, nil
+}
+
+// rootValues imports and registers a group of public Values atomically. It is
+// used by owner-bearing escape wrappers such as Callback so collection cannot
+// observe a partially rooted capture.
+func (owner *runtimeOwner) rootValues(values []Value) ([]*runtimeRoot, error) {
+	if owner == nil {
+		return nil, errRuntimeOwnerReleased
+	}
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if owner.state == runtimeOwnerClosed {
+		return nil, errRuntimeOwnerClosed
+	}
+	roots := make([]*runtimeRoot, 0, len(values))
+	created := make([]slot, 0, len(values))
+	for _, value := range values {
+		_, found, _ := owner.heap.lookupExistingValue(value)
+		handle, err := owner.heap.importValue(value)
+		if err != nil {
+			for _, root := range roots {
+				delete(owner.roots, root.tokenID)
+				root.released = true
+			}
+			for _, createdHandle := range created {
+				if pinned, pinErr := owner.heap.handlePinned(createdHandle); pinErr == nil && pinned {
+					_ = owner.heap.unpinHandle(createdHandle)
+				}
+				_ = owner.heap.releaseHandle(createdHandle)
+			}
+			return nil, err
+		}
+		if !found && slotIsLiveHandle(handle) {
+			created = append(created, handle)
+		}
+		owner.nextToken++
+		root := &runtimeRoot{owner: owner, handle: handle, tokenID: owner.nextToken}
+		if owner.roots == nil {
+			owner.roots = make(map[uint64]*runtimeRoot)
+		}
+		owner.roots[root.tokenID] = root
+		roots = append(roots, root)
+	}
+	return roots, nil
 }
 
 func (root *runtimeRoot) value() (slot, error) {

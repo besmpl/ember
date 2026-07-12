@@ -3,6 +3,8 @@ package ember
 import (
 	"fmt"
 	"math"
+	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -14,6 +16,7 @@ type slotNumberEntry struct {
 	generation uint16
 	live       bool
 	retired    bool
+	mark       bool
 }
 
 // slotNumberSlab is the first typed generation-checked slab. Index zero is
@@ -29,6 +32,7 @@ type slotSlabEntry[T comparable] struct {
 	live       bool
 	retired    bool
 	pinned     bool
+	mark       bool
 }
 
 // slotSlab owns one typed family of Go references. The slab keeps references
@@ -48,6 +52,24 @@ type runtimeHeap struct {
 	upvalues      slotSlab[*cell]
 	userdata      slotSlab[*UserData]
 	hostCallables slotSlab[*hostCallable]
+
+	// collectMu is the heap/world stop-the-world gate. Runtime ownership is
+	// responsible for calling collect only when no VM execution is active; the
+	// gate still serializes collection requests made by independent owners.
+	collectMu sync.Mutex
+	lastStats runtimeHeapStats
+}
+
+// runtimeHeapStats describes the last stop-the-world collection. The heap is
+// private, so the fields intentionally stay small and package-local. allocated
+// is the number of live entries observed before sweeping; live is the number
+// that survived; reclaimed is the number returned to free lists.
+type runtimeHeapStats struct {
+	allocated    uint64
+	live         uint64
+	reclaimed    uint64
+	pause        time.Duration
+	staleHandles uint64
 }
 
 // resetForReuse drops every Go reference held by a run while retaining slab
@@ -127,6 +149,7 @@ func resetSlotNumberSlab(slab *slotNumberSlab) {
 		entry := &slab.entries[index]
 		entry.bits = 0
 		entry.live = false
+		entry.mark = false
 		if entry.retired {
 			continue
 		}
@@ -157,6 +180,7 @@ func resetSlotSlab[T comparable](slab *slotSlab[T]) {
 		entry.value = zero
 		entry.live = false
 		entry.pinned = false
+		entry.mark = false
 		if entry.retired {
 			continue
 		}
@@ -200,6 +224,7 @@ func (slab *slotSlab[T]) add(value T, pinned bool) (uint32, uint16, error) {
 		entry.value = value
 		entry.live = true
 		entry.pinned = pinned
+		entry.mark = false
 		slab.byValue[value] = index
 		return index, entry.generation, nil
 	}
@@ -212,6 +237,7 @@ func (slab *slotSlab[T]) add(value T, pinned bool) (uint32, uint16, error) {
 		generation: 1,
 		live:       true,
 		pinned:     pinned,
+		mark:       false,
 	})
 	slab.byValue[value] = index
 	return index, 1, nil
@@ -245,6 +271,7 @@ func (slab *slotSlab[T]) release(index uint32, generation uint16) error {
 	entry.value = zero
 	entry.live = false
 	entry.pinned = false
+	entry.mark = false
 	if generation == slotMaxGeneration {
 		entry.retired = true
 		return nil
@@ -599,6 +626,7 @@ func (heap *runtimeHeap) boxNumberBits(bits uint64) (slot, error) {
 		}
 		entry.bits = bits
 		entry.live = true
+		entry.mark = false
 		return slotPackHandle(slotTagBoxedNumber, index, entry.generation)
 	}
 	if len(slab.entries) > int(slotIndexMask) {
@@ -609,6 +637,7 @@ func (heap *runtimeHeap) boxNumberBits(bits uint64) (slot, error) {
 		bits:       bits,
 		generation: 1,
 		live:       true,
+		mark:       false,
 	})
 	return slotPackHandle(slotTagBoxedNumber, index, 1)
 }
@@ -631,6 +660,7 @@ func (heap *runtimeHeap) releaseBoxedNumber(value slot) error {
 	}
 	entry.bits = 0
 	entry.live = false
+	entry.mark = false
 	if generation == slotMaxGeneration {
 		entry.retired = true
 		return nil
@@ -665,4 +695,799 @@ func slotNumberBits(value slot, heap *runtimeHeap) (uint64, error) {
 		return entry.bits, nil
 	}
 	return 0, fmt.Errorf("slot: tagged %v is not an inline number", slotTagOf(value))
+}
+
+// runtimeHeapCollector is the small stop-the-world mark/sweep engine used by
+// runtimeHeap.collect. Public Values still contain Go pointers during the
+// migration, so scanners translate those pointers back to handles through
+// the typed slab maps. Missing references are imported at the boundary; this
+// keeps a reachable graph sound even when a caller supplied a public object
+// before its first explicit heap import.
+type runtimeHeapCollector struct {
+	heap  *runtimeHeap
+	work  []slot
+	stats *runtimeHeapStats
+	err   error
+
+	protos      map[*Proto]struct{}
+	frames      map[*vmFrame]struct{}
+	threads     map[*vmThread]struct{}
+	coroutines  map[*vmCoroutine]struct{}
+	stackOwners map[*vmStackOwner]struct{}
+	globals     map[*globalEnv]struct{}
+}
+
+// collect performs one complete stop-the-world collection from explicit slot
+// roots. The owner is responsible for ensuring that no VM execution is active
+// while this method runs; collectMu only serializes collection requests.
+func (heap *runtimeHeap) collect(roots []slot) (runtimeHeapStats, error) {
+	return heap.collectWithScanner(roots, nil)
+}
+
+// collectWithScanner performs one collection while allowing the runtime owner
+// to contribute roots that have not migrated to slots yet. The callback runs
+// after explicit handles and pins are marked but before the worklist drains,
+// so Values, threads, coroutines, and prototypes all join the same graph walk.
+// The owner must keep its world lock held for the entire call.
+func (heap *runtimeHeap) collectWithScanner(roots []slot, scan func(*runtimeHeapCollector)) (runtimeHeapStats, error) {
+	if heap == nil {
+		return runtimeHeapStats{}, errRuntimeOwnerReleased
+	}
+	heap.collectMu.Lock()
+	defer heap.collectMu.Unlock()
+
+	started := time.Now()
+	stats := runtimeHeapStats{}
+	collector := runtimeHeapCollector{heap: heap, stats: &stats}
+	collector.clearMarks()
+	for _, root := range roots {
+		collector.markSlot(root)
+	}
+	collector.markPinned()
+	if scan != nil {
+		scan(&collector)
+	}
+	collector.drain()
+	// Scanning a still-Value-backed runtime may import a reachable object at
+	// this boundary. Count that object as allocated for this cycle so the
+	// published relationship allocated = live + reclaimed remains meaningful.
+	stats.allocated = heap.liveEntryCount()
+	if collector.err != nil {
+		stats.live = stats.allocated
+		stats.pause = time.Since(started)
+		heap.lastStats = stats
+		return stats, collector.err
+	}
+	stats.reclaimed = collector.sweep()
+	stats.live = heap.liveEntryCount()
+	stats.pause = time.Since(started)
+	heap.lastStats = stats
+	return stats, nil
+}
+
+// collectWithRoots is a convenience for callers that naturally hold roots as
+// variadic arguments. It intentionally remains private with the heap seam.
+func (heap *runtimeHeap) collectWithRoots(roots ...slot) (runtimeHeapStats, error) {
+	return heap.collect(roots)
+}
+
+func (collector *runtimeHeapCollector) fail(err error) {
+	if err != nil && collector.err == nil {
+		collector.err = fmt.Errorf("runtime heap collect: %w", err)
+	}
+}
+
+func (heap *runtimeHeap) collectionStats() runtimeHeapStats {
+	if heap == nil {
+		return runtimeHeapStats{}
+	}
+	heap.collectMu.Lock()
+	defer heap.collectMu.Unlock()
+	return heap.lastStats
+}
+
+func (collector *runtimeHeapCollector) clearMarks() {
+	heap := collector.heap
+	for index := 1; index < len(heap.boxedNumbers.entries); index++ {
+		heap.boxedNumbers.entries[index].mark = false
+	}
+	clearSlabMarks(&heap.strings)
+	clearSlabMarks(&heap.tables)
+	clearSlabMarks(&heap.closures)
+	clearSlabMarks(&heap.upvalues)
+	clearSlabMarks(&heap.userdata)
+	clearSlabMarks(&heap.hostCallables)
+}
+
+func clearSlabMarks[T comparable](slab *slotSlab[T]) {
+	if slab == nil {
+		return
+	}
+	for index := 1; index < len(slab.entries); index++ {
+		slab.entries[index].mark = false
+	}
+}
+
+func (collector *runtimeHeapCollector) markPinned() {
+	heap := collector.heap
+	for index := 1; index < len(heap.strings.entries); index++ {
+		entry := heap.strings.entries[index]
+		if entry.live && entry.pinned {
+			collector.markHandle(slotTagString, uint32(index), entry.generation)
+		}
+	}
+	for index := 1; index < len(heap.tables.entries); index++ {
+		entry := heap.tables.entries[index]
+		if entry.live && entry.pinned {
+			collector.markHandle(slotTagTable, uint32(index), entry.generation)
+		}
+	}
+	for index := 1; index < len(heap.closures.entries); index++ {
+		entry := heap.closures.entries[index]
+		if entry.live && entry.pinned {
+			collector.markHandle(slotTagClosure, uint32(index), entry.generation)
+		}
+	}
+	for index := 1; index < len(heap.upvalues.entries); index++ {
+		entry := heap.upvalues.entries[index]
+		if entry.live && entry.pinned {
+			collector.markHandle(slotTagUpvalue, uint32(index), entry.generation)
+		}
+	}
+	for index := 1; index < len(heap.userdata.entries); index++ {
+		entry := heap.userdata.entries[index]
+		if entry.live && entry.pinned {
+			collector.markHandle(slotTagUserdata, uint32(index), entry.generation)
+		}
+	}
+	for index := 1; index < len(heap.hostCallables.entries); index++ {
+		entry := heap.hostCallables.entries[index]
+		if entry.live && entry.pinned {
+			collector.markHandle(slotTagHostCallable, uint32(index), entry.generation)
+		}
+	}
+}
+
+func (collector *runtimeHeapCollector) markSlot(value slot) {
+	if !slotIsTagged(value) {
+		return
+	}
+	kind := slotTagOf(value)
+	if !slotHandleKind(kind) {
+		return
+	}
+	_, index, generation, err := slotUnpackHandle(value)
+	if err != nil {
+		collector.stats.staleHandles++
+		return
+	}
+	// Typed nil handles are deliberately not slab entries.
+	if index == 0 && generation == 0 {
+		return
+	}
+	if index == 0 || generation == 0 || !collector.markHandle(kind, index, generation) {
+		collector.stats.staleHandles++
+	}
+}
+
+func (collector *runtimeHeapCollector) markHandle(kind slotTag, index uint32, generation uint16) bool {
+	if index == 0 || generation == 0 {
+		return false
+	}
+	heap := collector.heap
+	var marked *bool
+	switch kind {
+	case slotTagBoxedNumber:
+		if int(index) >= len(heap.boxedNumbers.entries) {
+			return false
+		}
+		entry := &heap.boxedNumbers.entries[index]
+		if !entry.live || entry.retired || entry.generation != generation {
+			return false
+		}
+		marked = &entry.mark
+	case slotTagString:
+		marked = slabMark(&heap.strings, index, generation)
+	case slotTagTable:
+		marked = slabMark(&heap.tables, index, generation)
+	case slotTagClosure:
+		marked = slabMark(&heap.closures, index, generation)
+	case slotTagUpvalue:
+		marked = slabMark(&heap.upvalues, index, generation)
+	case slotTagUserdata:
+		marked = slabMark(&heap.userdata, index, generation)
+	case slotTagHostCallable:
+		marked = slabMark(&heap.hostCallables, index, generation)
+	default:
+		return false
+	}
+	if marked == nil {
+		return false
+	}
+	if *marked {
+		return true
+	}
+	*marked = true
+	handle, err := slotPackHandle(kind, index, generation)
+	if err != nil {
+		return false
+	}
+	collector.work = append(collector.work, handle)
+	return true
+}
+
+func slabMark[T comparable](slab *slotSlab[T], index uint32, generation uint16) *bool {
+	if slab == nil || index == 0 || int(index) >= len(slab.entries) {
+		return nil
+	}
+	entry := &slab.entries[index]
+	if !entry.live || entry.retired || entry.generation != generation {
+		return nil
+	}
+	return &entry.mark
+}
+
+func (collector *runtimeHeapCollector) drain() {
+	for len(collector.work) != 0 {
+		last := len(collector.work) - 1
+		handle := collector.work[last]
+		collector.work = collector.work[:last]
+		kind, index, generation, err := slotUnpackHandle(handle)
+		if err != nil {
+			continue
+		}
+		switch kind {
+		case slotTagString, slotTagBoxedNumber:
+			// Leaf entries.
+		case slotTagTable:
+			if table, err := collector.heap.tables.resolve(index, generation); err == nil {
+				collector.scanTable(table)
+			}
+		case slotTagClosure:
+			if closure, err := collector.heap.closures.resolve(index, generation); err == nil {
+				collector.scanClosure(closure)
+			}
+		case slotTagUpvalue:
+			if cell, err := collector.heap.upvalues.resolve(index, generation); err == nil {
+				collector.scanCell(cell)
+			}
+		case slotTagUserdata:
+			if userdata, err := collector.heap.userdata.resolve(index, generation); err == nil {
+				collector.scanUserData(userdata)
+			}
+		case slotTagHostCallable:
+			// Host function closures are opaque and are pinned at import.
+		}
+	}
+}
+
+func (collector *runtimeHeapCollector) scanValue(value Value) {
+	switch valueKind(value) {
+	case NumberKind:
+		// Public Values still carry colliding NaN bits directly and therefore do
+		// not identify one particular box. Preserve every live box for those
+		// bits; boxed numbers have scalar semantics, so duplicates are
+		// interchangeable and future migration can deduplicate them separately.
+		if slotIsTagged(slot(value.bits)) {
+			for index := 1; index < len(collector.heap.boxedNumbers.entries); index++ {
+				entry := collector.heap.boxedNumbers.entries[index]
+				if entry.live && !entry.retired && entry.bits == value.bits {
+					collector.markHandle(slotTagBoxedNumber, uint32(index), entry.generation)
+				}
+			}
+		}
+	case StringKind:
+		collector.markString(value.stringBox())
+	case TableKind:
+		collector.markTable(value.tableRef())
+	case FunctionKind:
+		closure, ok := value.scriptFunction()
+		if ok {
+			collector.markClosure(closure)
+		}
+	case UserDataKind:
+		collector.markUserData(value.userdataRef())
+	case HostFuncKind:
+		collector.markHostCallable(value.hostCallableRef())
+	}
+}
+
+func slabHandle[T comparable](slab *slotSlab[T], kind slotTag, value T) (slot, bool) {
+	if slab == nil || slab.byValue == nil {
+		return 0, false
+	}
+	index, ok := slab.byValue[value]
+	if !ok || index == 0 || int(index) >= len(slab.entries) {
+		return 0, false
+	}
+	entry := slab.entries[index]
+	if !entry.live || entry.retired || entry.value != value {
+		return 0, false
+	}
+	handle, err := slotPackHandle(kind, index, entry.generation)
+	return handle, err == nil
+}
+
+func (collector *runtimeHeapCollector) markString(box *stringBox) {
+	if box == nil {
+		return
+	}
+	if handle, ok := slabHandle(&collector.heap.strings, slotTagString, box); ok {
+		collector.markSlot(handle)
+		return
+	}
+	if handle, err := collector.heap.importString(box); err == nil {
+		collector.markSlot(handle)
+	} else {
+		collector.fail(err)
+	}
+}
+
+func (collector *runtimeHeapCollector) markTable(table *Table) {
+	if table == nil {
+		return
+	}
+	if handle, ok := slabHandle(&collector.heap.tables, slotTagTable, table); ok {
+		collector.markSlot(handle)
+		return
+	}
+	if handle, err := collector.heap.importTable(table); err == nil {
+		collector.markSlot(handle)
+	} else {
+		collector.fail(err)
+	}
+}
+
+func (collector *runtimeHeapCollector) markClosure(closure *closure) {
+	if closure == nil {
+		return
+	}
+	if handle, ok := slabHandle(&collector.heap.closures, slotTagClosure, closure); ok {
+		collector.markSlot(handle)
+		return
+	}
+	if handle, err := collector.heap.importClosure(closure); err == nil {
+		collector.markSlot(handle)
+	} else {
+		collector.fail(err)
+	}
+}
+
+func (collector *runtimeHeapCollector) markCell(cell *cell) {
+	if cell == nil {
+		return
+	}
+	if handle, ok := slabHandle(&collector.heap.upvalues, slotTagUpvalue, cell); ok {
+		collector.markSlot(handle)
+		return
+	}
+	if handle, err := collector.heap.importCell(cell); err == nil {
+		collector.markSlot(handle)
+	} else {
+		collector.fail(err)
+	}
+}
+
+func (collector *runtimeHeapCollector) markUserData(userdata *UserData) {
+	if userdata == nil {
+		return
+	}
+	if handle, ok := slabHandle(&collector.heap.userdata, slotTagUserdata, userdata); ok {
+		collector.markSlot(handle)
+		return
+	}
+	if handle, err := collector.heap.importUserData(userdata); err == nil {
+		collector.markSlot(handle)
+	} else {
+		collector.fail(err)
+	}
+}
+
+func (collector *runtimeHeapCollector) markHostCallable(callable *hostCallable) {
+	if callable == nil {
+		return
+	}
+	if handle, ok := slabHandle(&collector.heap.hostCallables, slotTagHostCallable, callable); ok {
+		collector.markSlot(handle)
+		return
+	}
+	if handle, err := collector.heap.importHostCallable(callable); err == nil {
+		collector.markSlot(handle)
+	} else {
+		collector.fail(err)
+	}
+}
+
+func (collector *runtimeHeapCollector) scanTable(table *Table) {
+	if table == nil {
+		return
+	}
+	for _, value := range table.array {
+		collector.scanValue(value)
+	}
+	for _, field := range table.stringFields {
+		collector.markString(field.box)
+		collector.scanValue(field.value)
+	}
+	if table.inlineFields != nil {
+		for _, field := range table.inlineFields[:] {
+			collector.markString(field.box)
+			collector.scanValue(field.value)
+		}
+	}
+	collector.markTable(table.metatable)
+	if table.cold == nil {
+		return
+	}
+	if fields := &table.cold.fields; fields != nil {
+		for _, entry := range fields.entries {
+			if entry.state != tableHashFull || entry.value.IsNil() {
+				continue
+			}
+			collector.scanTableKey(entry.key)
+			collector.scanValue(entry.value)
+		}
+	}
+	if table.iteration != nil {
+		for _, entry := range table.iteration.keys {
+			collector.scanTableKey(entry.key)
+		}
+		for key := range table.iteration.index {
+			collector.scanTableKey(key)
+		}
+	}
+	// Metamethod lookup records are weak caches. Clear them while the table is
+	// stopped so a dead table/string cannot remain reachable through a cache.
+	table.cold.indexCache = tableMetamethodCache{}
+	table.cold.newIndexCache = tableMetamethodCache{}
+}
+
+func (collector *runtimeHeapCollector) scanTableKey(key tableKey) {
+	switch key.kind {
+	case StringKind:
+		collector.markString(key.strBox)
+	case TableKind:
+		collector.markTable(key.table)
+	case UserDataKind:
+		collector.markUserData(key.userdata)
+	}
+}
+
+func (collector *runtimeHeapCollector) scanClosure(value *closure) {
+	if value == nil {
+		return
+	}
+	collector.scanProto(value.proto)
+	for _, cell := range value.upvalues {
+		collector.markCell(cell)
+	}
+	for index, item := range value.upvalueValues {
+		if index < len(value.upvalueValueOK) && value.upvalueValueOK[index] {
+			collector.scanValue(item)
+		}
+	}
+	for index, cell := range value.inlineUpvalues {
+		collector.markCell(cell)
+		if index < len(value.inlineUpvalueOK) && value.inlineUpvalueOK[index] {
+			collector.scanValue(value.inlineUpvalueValues[index])
+		}
+	}
+}
+
+func (collector *runtimeHeapCollector) scanProto(proto *Proto) {
+	if proto == nil {
+		return
+	}
+	if collector.protos == nil {
+		collector.protos = make(map[*Proto]struct{})
+	}
+	if _, seen := collector.protos[proto]; seen {
+		return
+	}
+	collector.protos[proto] = struct{}{}
+	for _, value := range proto.constants {
+		collector.scanValue(value)
+	}
+	for index, key := range proto.constantKeys {
+		if index < len(proto.constantKeyOK) && proto.constantKeyOK[index] {
+			collector.scanTableKey(key)
+		}
+	}
+	for _, child := range proto.prototypes {
+		collector.scanProto(child)
+	}
+}
+
+func (collector *runtimeHeapCollector) scanCell(value *cell) {
+	if value == nil {
+		return
+	}
+	collector.scanValue(value.get())
+	collector.scanStackOwner(value.owner)
+}
+
+func (collector *runtimeHeapCollector) scanUserData(value *UserData) {
+	if value == nil {
+		return
+	}
+	// UserData payloads are opaque by default. vmCoroutine is the one runtime
+	// payload whose graph is known and therefore has a private scanner.
+	if coroutine, ok := value.payload.(*vmCoroutine); ok {
+		collector.scanCoroutine(coroutine)
+	}
+}
+
+func (collector *runtimeHeapCollector) scanCoroutine(value *vmCoroutine) {
+	if value == nil {
+		return
+	}
+	if collector.coroutines == nil {
+		collector.coroutines = make(map[*vmCoroutine]struct{})
+	}
+	if _, seen := collector.coroutines[value]; seen {
+		return
+	}
+	collector.coroutines[value] = struct{}{}
+	collector.markClosure(value.root)
+	collector.markUserData(value.userdata)
+	collector.scanThread(&value.thread)
+	collector.scanSuspendedFrames(value.suspended)
+	collector.scanValues(value.yieldedValues)
+	collector.scanValues(value.resumeArgs)
+	collector.scanValues(value.resumeResults)
+	collector.clearInactiveFrameSlots(&value.thread, value.suspended.frames)
+}
+
+// clearInactiveFrameSlots drops references from reusable frame descriptors
+// without clearing their backing arrays: a stale register slice can alias the
+// live shared stack. Active and suspended frames remain semantic roots and are
+// left intact.
+func (collector *runtimeHeapCollector) clearInactiveFrameSlots(thread *vmThread, suspended []*vmFrame) {
+	if thread == nil || len(thread.frameSlots) == 0 {
+		return
+	}
+	active := make(map[*vmFrame]struct{}, len(thread.frames)+len(suspended))
+	for _, frame := range thread.frames {
+		active[frame] = struct{}{}
+	}
+	for _, frame := range suspended {
+		active[frame] = struct{}{}
+	}
+	for _, frame := range thread.frameSlots {
+		if frame == nil {
+			continue
+		}
+		if _, ok := active[frame]; ok {
+			continue
+		}
+		frame.proto = nil
+		frame.caller = nil
+		frame.window = vmRegisterWindow{}
+		frame.owner = nil
+		frame.registers = nil
+		frame.cells = nil
+		frame.upvalues = nil
+		frame.upvalueValues = nil
+		frame.upvalueValueOK = nil
+		frame.varargs = nil
+		frame.openResults = vmResultWindow{}
+		frame.pendingCall = vmPendingCall{}
+		frame.hasPendingCall = false
+	}
+}
+
+func (collector *runtimeHeapCollector) scanSuspendedFrames(value vmSuspendedFrames) {
+	collector.scanGlobal(value.globals)
+	collector.scanStackOwner(value.owner)
+	collector.scanValues(value.stack)
+	for _, frame := range value.frames {
+		collector.scanFrame(frame)
+	}
+	collector.scanCoroutine(value.coroutine)
+}
+
+func (collector *runtimeHeapCollector) scanThread(value *vmThread) {
+	if value == nil {
+		return
+	}
+	if collector.threads == nil {
+		collector.threads = make(map[*vmThread]struct{})
+	}
+	if _, seen := collector.threads[value]; seen {
+		return
+	}
+	collector.threads[value] = struct{}{}
+	collector.scanGlobal(value.globals)
+	collector.scanGlobal(&value.baseGlobals)
+	collector.scanStackOwner(value.stackOwner)
+	collector.scanValues(value.stack)
+	for _, frame := range value.frames {
+		collector.scanFrame(frame)
+	}
+	collector.scanCoroutine(value.coroutine)
+	// Function instances and their canonical closures are accelerators. Every
+	// semantic closure is reachable through a frame, stack, cell, or result;
+	// retaining this map would turn the cache into an accidental root.
+	value.functionInstances = nil
+	value.functionInstanceSites = 0
+	value.stringIntern = nil
+	value.stringConcatIntern = nil
+	value.intrinsicGuards = nil
+}
+
+func (collector *runtimeHeapCollector) scanFrame(value *vmFrame) {
+	if value == nil {
+		return
+	}
+	if collector.frames == nil {
+		collector.frames = make(map[*vmFrame]struct{})
+	}
+	if _, seen := collector.frames[value]; seen {
+		return
+	}
+	collector.frames[value] = struct{}{}
+	collector.scanProto(value.proto)
+	collector.scanFrame(value.caller)
+	collector.scanStackOwner(value.owner)
+	collector.scanStackOwner(value.window.owner)
+	collector.scanValues(value.registers)
+	for _, cell := range value.cells {
+		collector.markCell(cell)
+	}
+	for _, cell := range value.upvalues {
+		collector.markCell(cell)
+	}
+	for index, item := range value.upvalueValues {
+		if index < len(value.upvalueValueOK) && value.upvalueValueOK[index] {
+			collector.scanValue(item)
+		}
+	}
+	collector.scanValues(value.varargs)
+	collector.scanResultWindow(value.openResults)
+	if value.hasPendingCall && value.pendingCall.protected != nil && value.pendingCall.protected.hasHandler {
+		collector.scanValue(value.pendingCall.protected.handler)
+	}
+}
+
+func (collector *runtimeHeapCollector) scanResultWindow(value vmResultWindow) {
+	if value.usingInline {
+		if value.count < 0 || value.count > len(value.inline) {
+			return
+		}
+		collector.scanValues(value.inline[:value.count])
+		return
+	}
+	if value.count < 0 || value.count > len(value.values) {
+		return
+	}
+	collector.scanValues(value.values[:value.count])
+}
+
+func (collector *runtimeHeapCollector) scanGlobal(value *globalEnv) {
+	if value == nil {
+		return
+	}
+	if collector.globals == nil {
+		collector.globals = make(map[*globalEnv]struct{})
+	}
+	if _, seen := collector.globals[value]; seen {
+		return
+	}
+	collector.globals[value] = struct{}{}
+	for _, item := range value.values {
+		collector.scanValue(item)
+	}
+	for _, item := range value.host {
+		collector.scanValue(item)
+	}
+	for _, item := range value.slots {
+		collector.scanValue(item.value)
+	}
+	collector.scanThread(value.thread)
+}
+
+func (collector *runtimeHeapCollector) scanStackOwner(value *vmStackOwner) {
+	if value == nil {
+		return
+	}
+	if collector.stackOwners == nil {
+		collector.stackOwners = make(map[*vmStackOwner]struct{})
+	}
+	if _, seen := collector.stackOwners[value]; seen {
+		return
+	}
+	collector.stackOwners[value] = struct{}{}
+	collector.scanValues(value.values)
+}
+
+func (collector *runtimeHeapCollector) scanValues(values []Value) {
+	for _, value := range values {
+		collector.scanValue(value)
+	}
+}
+
+func (heap *runtimeHeap) liveEntryCount() uint64 {
+	if heap == nil {
+		return 0
+	}
+	var count uint64
+	for index := 1; index < len(heap.boxedNumbers.entries); index++ {
+		if heap.boxedNumbers.entries[index].live {
+			count++
+		}
+	}
+	count += liveSlabEntries(&heap.strings)
+	count += liveSlabEntries(&heap.tables)
+	count += liveSlabEntries(&heap.closures)
+	count += liveSlabEntries(&heap.upvalues)
+	count += liveSlabEntries(&heap.userdata)
+	count += liveSlabEntries(&heap.hostCallables)
+	return count
+}
+
+func liveSlabEntries[T comparable](slab *slotSlab[T]) uint64 {
+	if slab == nil {
+		return 0
+	}
+	var count uint64
+	for index := 1; index < len(slab.entries); index++ {
+		if slab.entries[index].live {
+			count++
+		}
+	}
+	return count
+}
+
+func (collector *runtimeHeapCollector) sweep() uint64 {
+	heap := collector.heap
+	var reclaimed uint64
+	for index := 1; index < len(heap.boxedNumbers.entries); index++ {
+		entry := &heap.boxedNumbers.entries[index]
+		if !entry.live || entry.mark {
+			continue
+		}
+		entry.bits = 0
+		entry.live = false
+		entry.mark = false
+		reclaimed++
+		if entry.generation == slotMaxGeneration {
+			entry.retired = true
+			continue
+		}
+		entry.generation++
+		heap.boxedNumbers.free = append(heap.boxedNumbers.free, uint32(index))
+	}
+	reclaimed += sweepSlab(&heap.strings)
+	reclaimed += sweepSlab(&heap.tables)
+	reclaimed += sweepSlab(&heap.closures)
+	reclaimed += sweepSlab(&heap.upvalues)
+	reclaimed += sweepSlab(&heap.userdata)
+	reclaimed += sweepSlab(&heap.hostCallables)
+	return reclaimed
+}
+
+func sweepSlab[T comparable](slab *slotSlab[T]) uint64 {
+	if slab == nil {
+		return 0
+	}
+	var reclaimed uint64
+	for index := 1; index < len(slab.entries); index++ {
+		entry := &slab.entries[index]
+		if !entry.live || entry.mark || entry.pinned {
+			continue
+		}
+		delete(slab.byValue, entry.value)
+		var zero T
+		entry.value = zero
+		entry.live = false
+		entry.mark = false
+		reclaimed++
+		if entry.generation == slotMaxGeneration {
+			entry.retired = true
+			continue
+		}
+		entry.generation++
+		slab.free = append(slab.free, uint32(index))
+	}
+	return reclaimed
 }

@@ -358,6 +358,36 @@ func (r *Runtime) Close() error {
 	return nil
 }
 
+// collect reclaims unreachable handle-heap entries at an idle runtime
+// boundary. It stays private until the allocation policy has enough profile
+// evidence for a stable public control surface.
+func (r *Runtime) collect() (runtimeHeapStats, error) {
+	if r == nil {
+		return runtimeHeapStats{}, errRuntimeOwnerReleased
+	}
+	r.closeMu.Lock()
+	defer r.closeMu.Unlock()
+	if r.closed {
+		return runtimeHeapStats{}, errRuntimeOwnerClosed
+	}
+	if r.owner == nil {
+		return runtimeHeapStats{}, errRuntimeOwnerInvalid
+	}
+	return r.owner.collect(func(collector *runtimeHeapCollector) {
+		for _, value := range r.entrypoints {
+			collector.scanValue(value)
+		}
+		for _, value := range r.loaded {
+			collector.scanValue(value)
+		}
+		if r.program != nil {
+			for _, proto := range r.program.protos {
+				collector.scanProto(proto)
+			}
+		}
+	})
+}
+
 func (r *Runtime) loadEntrypoint(ctx context.Context, entrypoint programEntrypoint, globals map[string]Value) (Value, bool, error) {
 	if value, ok := r.entrypoints[entrypoint.key]; ok {
 		return value, false, nil
