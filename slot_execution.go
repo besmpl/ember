@@ -61,9 +61,10 @@ func resetSlotExecutionBuffer(values []slot) []slot {
 }
 
 // slotExecutionEligible is sealed onto Proto by finalizeProtoExecutionArtifact.
-// This first slice deliberately admits only immediate LOAD/MOVE/RETURN code;
-// all richer bytecode remains on the established VM until Slice 4.3 migrates
-// those operations one coherent family at a time.
+// The scalar runner is deliberately restricted to pure operations whose
+// scratch-only restart cannot duplicate an externally visible effect.  In
+// particular, no global, table, reference, call, closure, upvalue, vararg,
+// yield, or mutation opcode is admitted here.
 func slotExecutionEligible(proto *Proto, code []instruction) bool {
 	if proto == nil || proto.registers < 0 || proto.params != 0 || proto.variadic ||
 		len(proto.upvalues) != 0 || len(proto.prototypes) != 0 {
@@ -81,6 +82,12 @@ func slotExecutionEligible(proto *Proto, code []instruction) bool {
 				return false
 			}
 		case opMove:
+		case opAdd:
+		case opAddK:
+			if ins.c < 0 || ins.c >= len(proto.constants) {
+				return false
+			}
+		case opNumericForCheck, opNumericForLoop:
 		case opReturnOne:
 		case opReturn:
 			// Negative counts are open returns (calls/varargs) and cannot be
@@ -194,45 +201,150 @@ func slotExecutionExportImmediate(value slot) (Value, bool) {
 }
 
 func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) {
+	words := proto.words
 	pc := 0
-	for pc < len(proto.words) {
-		dispatch, err := decodeWordcodeDispatch(proto.words, pc)
-		if err != nil {
+	for pc < len(words) {
+		raw := words[pc]
+		op := opcode(raw & wordcodeOpcodeMask)
+		hasAux := raw&wordcodeAuxBit != 0
+		a := int(uint8(raw >> 8))
+		b := int(uint8(raw >> 16))
+		c := int(uint8(raw >> 24))
+		d := 0
+		next := pc + 1
+		switch op {
+		case opLoadConst:
+			b = int(uint16(raw >> 16))
+			if hasAux {
+				if next >= len(words) {
+					return 0, false
+				}
+				b = int(int32(words[next]))
+				next++
+			}
+		case opMove, opAdd, opReturnOne:
+			if hasAux {
+				return 0, false
+			}
+		case opAddK:
+			if hasAux {
+				if next >= len(words) {
+					return 0, false
+				}
+				c = int(int32(words[next]))
+				next++
+			}
+		case opNumericForCheck, opNumericForLoop:
+			if !hasAux || next >= len(words) {
+				return 0, false
+			}
+			d = int(int32(words[next])) + next + 1
+			next++
+		case opReturn:
+			if hasAux {
+				return 0, false
+			}
+			b = int(int16(uint16(raw >> 16)))
+		default:
 			return 0, false
 		}
-		next := dispatch.nextWord
-		switch dispatch.op {
+		switch op {
 		case opLoadConst:
-			if dispatch.a < 0 || dispatch.a >= len(state.registers) || dispatch.b < 0 || dispatch.b >= len(state.constants) {
+			if a < 0 || a >= len(state.registers) || b < 0 || b >= len(state.constants) {
 				return 0, false
 			}
-			state.registers[dispatch.a] = state.constants[dispatch.b]
+			state.registers[a] = state.constants[b]
 		case opMove:
-			if dispatch.a < 0 || dispatch.a >= len(state.registers) || dispatch.b < 0 || dispatch.b >= len(state.registers) {
+			if a < 0 || a >= len(state.registers) || b < 0 || b >= len(state.registers) {
 				return 0, false
 			}
-			state.registers[dispatch.a] = state.registers[dispatch.b]
+			state.registers[a] = state.registers[b]
+		case opAdd:
+			if a < 0 || a >= len(state.registers) || b < 0 || b >= len(state.registers) || c < 0 || c >= len(state.registers) {
+				return 0, false
+			}
+			left, leftOK := slotExecutionNumber(state.registers[b])
+			right, rightOK := slotExecutionNumber(state.registers[c])
+			if !leftOK || !rightOK || !slotExecutionStoreNumber(state.registers, a, left+right) {
+				return 0, false
+			}
+		case opAddK:
+			if a < 0 || a >= len(state.registers) || b < 0 || b >= len(state.registers) || c < 0 || c >= len(state.constants) {
+				return 0, false
+			}
+			left, leftOK := slotExecutionNumber(state.registers[b])
+			right, rightOK := slotExecutionNumber(state.constants[c])
+			if !leftOK || !rightOK || !slotExecutionStoreNumber(state.registers, a, left+right) {
+				return 0, false
+			}
+		case opNumericForCheck:
+			if a < 0 || a >= len(state.registers) || b < 0 || b >= len(state.registers) || c < 0 || c >= len(state.registers) {
+				return 0, false
+			}
+			loopValue, loopOK := slotExecutionNumber(state.registers[a])
+			limitValue, limitOK := slotExecutionNumber(state.registers[b])
+			stepValue, stepOK := slotExecutionNumber(state.registers[c])
+			if !loopOK || !limitOK || !stepOK || math.IsNaN(loopValue) || math.IsNaN(limitValue) || math.IsNaN(stepValue) {
+				return 0, false
+			}
+			if (stepValue > 0 && loopValue > limitValue) || (stepValue <= 0 && loopValue < limitValue) {
+				if d < 0 || d > len(words) {
+					return 0, false
+				}
+				pc = d
+				continue
+			}
+		case opNumericForLoop:
+			if a < 0 || a >= len(state.registers) || b < 0 || b >= len(state.registers) {
+				return 0, false
+			}
+			loopValue, loopOK := slotExecutionNumber(state.registers[a])
+			stepValue, stepOK := slotExecutionNumber(state.registers[b])
+			if !loopOK || !stepOK || !slotExecutionStoreNumber(state.registers, a, loopValue+stepValue) {
+				return 0, false
+			}
+			if d < 0 || d > len(words) {
+				return 0, false
+			}
+			pc = d
+			continue
 		case opReturnOne:
-			if dispatch.a < 0 || dispatch.a >= len(state.registers) {
+			if a < 0 || a >= len(state.registers) {
 				return 0, false
 			}
-			state.results = append(state.results[:0], state.registers[dispatch.a])
+			state.results = append(state.results[:0], state.registers[a])
 			return 1, true
 		case opReturn:
-			if dispatch.b < 0 || dispatch.b > len(state.registers) || dispatch.a < 0 || dispatch.a+dispatch.b > len(state.registers) {
+			if b < 0 || b > len(state.registers) || a < 0 || a+b > len(state.registers) {
 				return 0, false
 			}
-			if dispatch.b == 0 {
+			if b == 0 {
 				return 0, true
 			}
-			state.results = append(state.results[:0], state.registers[dispatch.a:dispatch.a+dispatch.b]...)
-			return dispatch.b, true
+			state.results = append(state.results[:0], state.registers[a:a+b]...)
+			return b, true
 		default:
-			// Temporary Slice 4.3 migration seam: richer operations continue
-			// through the existing VM until their slot ABI is proven.
 			return 0, false
 		}
 		pc = next
 	}
 	return 0, true
+}
+
+// slotExecutionNumber accepts only untagged IEEE-754 numbers.  A tagged
+// immediate or a reference-like value is a safe restart signal, not an error:
+// the established VM owns coercions and diagnostics for those cases.
+func slotExecutionNumber(value slot) (float64, bool) {
+	if slotIsTagged(value) {
+		return 0, false
+	}
+	return math.Float64frombits(uint64(value)), true
+}
+
+func slotExecutionStoreNumber(registers []slot, index int, value float64) bool {
+	if index < 0 || index >= len(registers) || slotExecutionNumberNeedsBox(value) {
+		return false
+	}
+	registers[index] = slot(valueFloat64Bits(value))
+	return true
 }

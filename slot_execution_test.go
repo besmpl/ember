@@ -1,6 +1,7 @@
 package ember
 
 import (
+	"context"
 	"math"
 	"reflect"
 	"testing"
@@ -34,6 +35,155 @@ func TestSlotExecutionImmediateScalarParity(t *testing.T) {
 	}
 }
 
+func TestSlotExecutionNumericForAccumulatorParity(t *testing.T) {
+	proto, err := Compile(`
+local total = 0
+for i = 1, 5, 2 do
+	total = total + i
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if !proto.slotExecutionEligible {
+		t.Fatal("numeric accumulator prototype is not slot eligible")
+	}
+	values, handled, err := runSlotExecution(proto)
+	if err != nil || !handled {
+		t.Fatalf("slot execution = (%#v, %t, %v), want handled result", values, handled, err)
+	}
+	if len(values) != 1 || values[0] != NumberValue(9) {
+		t.Fatalf("slot result = %#v, want [9]", values)
+	}
+
+	public, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if !reflect.DeepEqual(public, values) {
+		t.Fatalf("Run result = %#v, slot result = %#v", public, values)
+	}
+}
+
+func TestSlotExecutionNumericForCheckBranchParity(t *testing.T) {
+	proto, err := Compile(`
+local total = 0
+for i = 3, 1 do
+	total = total + i
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if !proto.slotExecutionEligible {
+		t.Fatal("zero-iteration numeric loop is not slot eligible")
+	}
+	values, handled, err := runSlotExecution(proto)
+	if err != nil || !handled {
+		t.Fatalf("slot execution = (%#v, %t, %v), want handled result", values, handled, err)
+	}
+	if len(values) != 1 || values[0] != NumberValue(0) {
+		t.Fatalf("slot result = %#v, want [0]", values)
+	}
+}
+
+func TestSlotExecutionNumericForDescendingAccumulatorParity(t *testing.T) {
+	proto, err := Compile(`
+local total = 0
+for i = 5, 1, -2 do
+	total = total + i
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if !proto.slotExecutionEligible {
+		t.Fatal("descending numeric loop is not slot eligible")
+	}
+	got, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	want, err := runWithSlotExecutionDisabled(proto)
+	if err != nil {
+		t.Fatalf("established VM returned error: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) || len(got) != 1 || got[0] != NumberValue(9) {
+		t.Fatalf("descending results = (%#v, %#v), want exact [9] parity", got, want)
+	}
+}
+
+func TestSlotExecutionNumericForWrongTypeMatchesVM(t *testing.T) {
+	proto := newProto(
+		[]Value{NilValue(), NumberValue(3), NumberValue(1)},
+		[]instruction{
+			{op: opLoadConst, a: 0, b: 0},
+			{op: opLoadConst, a: 1, b: 1},
+			{op: opLoadConst, a: 2, b: 2},
+			{op: opNumericForCheck, a: 0, b: 1, c: 2, d: 4},
+			{op: opReturnOne, a: 0},
+		},
+		nil, nil, 3, 0, false,
+	)
+	if !proto.slotExecutionEligible {
+		t.Fatal("wrong-type numeric loop is not slot eligible")
+	}
+	if _, handled, err := runSlotExecution(proto); handled || err != nil {
+		t.Fatalf("slot wrong-type execution = (handled %t, err %v), want safe fallback", handled, err)
+	}
+
+	got, gotErr := Run(proto)
+	want, wantErr := runWithSlotExecutionDisabled(proto)
+	if got != nil || want != nil {
+		t.Fatalf("wrong-type results = (%#v, %#v), want nil", got, want)
+	}
+	if gotErr == nil || wantErr == nil || gotErr.Error() != wantErr.Error() {
+		t.Fatalf("wrong-type errors = (%v, %v), want exact parity", gotErr, wantErr)
+	}
+}
+
+func TestSlotExecutionTagCollidingNaNFallsBackBeforeResult(t *testing.T) {
+	const signalingNaN = uint64(0x7ff0_0000_0000_0001)
+	proto := newProto(
+		[]Value{
+			NumberValue(math.Float64frombits(signalingNaN)),
+			NumberValue(math.Float64frombits(signalingNaN)),
+		},
+		[]instruction{
+			{op: opLoadConst, a: 0, b: 0},
+			{op: opLoadConst, a: 1, b: 1},
+			{op: opAdd, a: 0, b: 0, c: 1},
+			{op: opReturnOne, a: 0},
+		},
+		nil, nil, 2, 0, false,
+	)
+	if !proto.slotExecutionEligible {
+		t.Fatal("safe signaling-NaN inputs are not slot eligible")
+	}
+	if values, handled, err := runSlotExecution(proto); handled || err != nil || values != nil {
+		t.Fatalf("tag-colliding NaN slot execution = (%#v, %t, %v), want safe fallback", values, handled, err)
+	}
+
+	got, gotErr := Run(proto)
+	want, wantErr := runWithSlotExecutionDisabled(proto)
+	if gotErr != nil || wantErr != nil {
+		t.Fatalf("NaN runs returned errors = (%v, %v)", gotErr, wantErr)
+	}
+	if len(got) != 1 || len(want) != 1 || valueFloat64Bits(valueNumber(got[0])) != valueFloat64Bits(valueNumber(want[0])) {
+		t.Fatalf("NaN results = (%#v, %#v), want exact parity", got, want)
+	}
+}
+
+func runWithSlotExecutionDisabled(proto *Proto) ([]Value, error) {
+	thread := acquireVMThread(context.Background(), nil)
+	defer releaseVMThread(thread)
+	thread.instructionBudget = -1
+	return thread.runWithUpvalues(proto, nil, nil, nil, nil)
+}
+
 func TestSlotExecutionImmediateScalarAllocationBudget(t *testing.T) {
 	proto, err := Compile(`return (1+2)*3-2`)
 	if err != nil {
@@ -46,6 +196,31 @@ func TestSlotExecutionImmediateScalarAllocationBudget(t *testing.T) {
 	})
 	if allocs > 1 {
 		t.Fatalf("warm scalar Run allocations = %.2f, want <= 1", allocs)
+	}
+}
+
+func TestSlotExecutionNumericForAllocationBudget(t *testing.T) {
+	proto, err := Compile(`
+local total = 0
+for i = 1, 5, 2 do
+	total = total + i
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if !proto.slotExecutionEligible {
+		t.Fatal("numeric accumulator prototype is not slot eligible")
+	}
+	allocs := testing.AllocsPerRun(100, func() {
+		values, err := Run(proto)
+		if err != nil || len(values) != 1 || values[0] != NumberValue(9) {
+			t.Fatalf("warm numeric Run = %#v, %v; want [9]", values, err)
+		}
+	})
+	if allocs > 1 {
+		t.Fatalf("warm numeric Run allocations = %.2f, want <= 1", allocs)
 	}
 }
 
@@ -139,6 +314,7 @@ func TestSlotExecutionRejectsReferenceAndRichPrototypes(t *testing.T) {
 		`return missingGlobal`,
 		`return tostring(1)`,
 		`return function() return 1 end`,
+		"sideEffect = 1\nreturn 1",
 	} {
 		proto, err := Compile(source)
 		if err != nil {
@@ -210,6 +386,46 @@ func BenchmarkRunSlotScalar(b *testing.B) {
 	b.ResetTimer()
 	for index := 0; index < b.N; index++ {
 		if _, err := Run(proto); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkRunSlotNumericFor(b *testing.B) {
+	proto, err := Compile(`
+local total = 0
+for i = 1, 100 do
+	total = total + i
+end
+return total
+`)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		if _, err := Run(proto); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkRunEstablishedNumericFor(b *testing.B) {
+	proto, err := Compile(`
+local total = 0
+for i = 1, 100 do
+	total = total + i
+end
+return total
+`)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		if _, err := runWithSlotExecutionDisabled(proto); err != nil {
 			b.Fatal(err)
 		}
 	}
