@@ -2448,9 +2448,14 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 		frame.hasPendingCall || frame.openResultStart >= 0 {
 		return vmFrameRecord{}, false
 	}
-	if destination.count < 1 || destination.register < 0 || destination.count > frame.registerCount-destination.register || (destination.count >= 2 && destination.register >= argumentStart) || argumentCount < 0 || argumentStart < 0 ||
+	openDestination := destination.count < 0
+	if destination.count < -1 || destination.count == 0 || destination.register < 0 ||
+		(openDestination && destination.register >= frame.registerCount) ||
+		(!openDestination && destination.count > frame.registerCount-destination.register) ||
+		((destination.count >= 2 || openDestination) && destination.register >= argumentStart) || argumentCount < 0 || argumentStart < 0 ||
 		argumentStart > frame.registerCount || argumentCount > frame.registerCount-argumentStart ||
-		frame.hasCellsInRange(argumentStart, frame.registerCount-argumentStart) {
+		frame.hasCellsInRange(argumentStart, frame.registerCount-argumentStart) ||
+		(openDestination && frame.hasCellsInRange(destination.register, frame.registerCount-destination.register)) {
 		return vmFrameRecord{}, false
 	}
 	if frame.registerBase < 0 || argumentStart > int(^uint(0)>>1)-frame.registerBase {
@@ -2471,6 +2476,10 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 	resultDestination, resultOK := vmFrameRecordAddUint32(frame.registerBase, destination.register)
 	argumentCountValue, argumentCountOK := vmFrameRecordUint16(argumentCount)
 	resultCountValue, resultCountOK := vmFrameRecordUint32(destination.count)
+	if openDestination {
+		resultCountValue = ^uint32(0)
+		resultCountOK = true
+	}
 	frameDepth, frameDepthOK := vmFrameRecordUint16(frame.depth)
 	previousStackLength, previousStackLengthOK := vmFrameRecordUint32(frame.window.previousStackLength)
 	childBase := frame.registerBase + argumentStart
@@ -2527,6 +2536,9 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 		borrowed:            true,
 	}
 	flags := vmFrameRecordFlagRecordOnly
+	if openDestination {
+		flags |= vmFrameRecordFlagOpenResults
+	}
 	if callerBorrowed {
 		flags |= vmFrameRecordFlagCallerBorrowed
 	}
@@ -3162,7 +3174,11 @@ func (frame *vmFrame) clearOpenResultState() {
 	if frame == nil {
 		return
 	}
-	frame.clearOpenResultRange()
+	// Fixed-result paths call this frequently. Avoid the slower owner cleanup
+	// unless a stack-backed range is actually live.
+	if frame.openRangeOwner != nil {
+		frame.clearOpenResultRange()
+	}
 	frame.openResultStart = -1
 	frame.openResults = vmResultWindow{}
 }
@@ -3337,8 +3353,7 @@ func (frame *vmFrame) applyFrameCallResults(thread *vmThread, result vmFrameResu
 
 func (frame *vmFrame) applySingleFrameCallResult(thread *vmThread, register int, result vmFrameResult) {
 	thread.clearPendingCall(frame)
-	frame.openResultStart = -1
-	frame.openResults = vmResultWindow{}
+	frame.clearOpenResultState()
 	frame.setRegister(register, result.window.at(0))
 }
 
@@ -3347,8 +3362,7 @@ func (frame *vmFrame) applyFrameResultDestination(destination vmResultDestinatio
 }
 
 func (frame *vmFrame) applySingleFrameResult(register int, result vmFrameResult) {
-	frame.openResultStart = -1
-	frame.openResults = vmResultWindow{}
+	frame.clearOpenResultState()
 	frame.registers[register] = result.window.at(0)
 }
 
@@ -3447,8 +3461,7 @@ func (frame *vmFrame) applyValueListDestination(destination vmResultDestination,
 		return
 	}
 
-	frame.openResultStart = -1
-	frame.openResults = vmResultWindow{}
+	frame.clearOpenResultState()
 	for i := 0; i < resultCount; i++ {
 		frame.setRegister(destination.register+i, results.at(i))
 	}
@@ -3757,11 +3770,14 @@ func directFrameNonYieldingCallIsland(callee Value, globals *globalEnv, args []V
 }
 
 func directFrameApplyCallIslandResults(frame *vmFrame, registers []Value, start int, count int, results []Value) {
-	frame.openResultStart = -1
-	frame.openResults = vmResultWindow{}
+	reuse := frame.openResults.values
+	if frame.openResults.borrowed {
+		reuse = nil
+	}
+	frame.clearOpenResultState()
 	if count < 0 {
 		frame.openResultStart = start
-		frame.openResults = vmBorrowedResultWindow(results).retainedAdjustedWindow(frame.openResults.values)
+		frame.openResults = vmBorrowedResultWindow(results).retainedAdjustedWindow(reuse)
 		registers[start] = frame.openResults.at(0)
 		return
 	}
@@ -3839,8 +3855,7 @@ func (thread *vmThread) runDirectFastCall(frame *vmFrame, nativeID nativeFuncID,
 		directFrameApplyCallIslandResults(frame, registers, start, resultCount, []Value{value})
 	case nativeFuncSelect:
 		count := NumberValue(float64(len(frame.varargs)))
-		frame.openResultStart = -1
-		frame.openResults = vmResultWindow{}
+		frame.clearOpenResultState()
 		if resultCount < 0 {
 			frame.openResultStart = start
 			frame.openResults = vmSingleResultWindow(count)
@@ -3861,8 +3876,7 @@ func (thread *vmThread) runDirectFastCall(frame *vmFrame, nativeID nativeFuncID,
 
 func (thread *vmThread) runColdFastCall(frame *vmFrame, nativeID nativeFuncID, start int, argCount int, resultCount int) (vmFrameResult, bool, error) {
 	destination := vmResultDestination{register: start, count: resultCount}
-	frame.openResultStart = -1
-	frame.openResults = vmResultWindow{}
+	frame.clearOpenResultState()
 	if nativeID == nativeFuncSelect {
 		callee, nativeUnchanged, err := fastCallCallee(thread.globals, nativeID)
 		if err != nil {
@@ -4684,6 +4698,10 @@ func (thread *vmThread) resumeRecordOnlyFixedCallOne(rootRecordDepth int, frame 
 	current.debugLine = -1
 	current.openResultStart = -1
 	current.openResults = vmResultWindow{}
+	current.openRangeOwner = nil
+	current.openRangeBase = -1
+	current.openRangeCount = 0
+	current.openRangeLogicalTop = -1
 	current.resetPendingCallState()
 	current.window = vmRegisterWindow{
 		owner:               owner,
@@ -4699,6 +4717,184 @@ func (thread *vmThread) resumeRecordOnlyFixedCallOne(rootRecordDepth int, frame 
 	return true
 }
 
+// resumeRecordOnlyOpenCall transfers a callee's fixed prefix plus its dynamic
+// open-result range into the caller's owner-backed open window. The caller's
+// static register frame ends at record.top; dynamic results live immediately
+// after that boundary, while A receives the first value for ordinary register
+// reads. The temporary stack tail is used only when source and destination
+// ranges overlap in a way that would corrupt a later source segment.
+func (thread *vmThread) resumeRecordOnlyOpenCall(rootRecordDepth int, frame **vmFrame, sourceRegister, sourceCount int, openResults *vmResultWindow) bool {
+	if thread == nil || frame == nil || *frame == nil || len(thread.frameRecords) <= rootRecordDepth || sourceRegister < 0 || sourceCount < 0 {
+		return false
+	}
+	record := thread.frameRecords[len(thread.frameRecords)-1]
+	if record.flags&vmFrameRecordFlagRecordOnly == 0 || record.flags&vmFrameRecordFlagOpenResults == 0 || record.closure == nil || record.closure.proto == nil || record.resultCount != ^uint32(0) {
+		return false
+	}
+	base, baseOK := vmFrameRecordUint32ToInt(record.base)
+	top, topOK := vmFrameRecordUint32ToInt(record.top)
+	returnPC, returnPCOK := vmFrameRecordUint32ToInt(record.returnPC)
+	destination, destinationOK := vmFrameRecordUint32ToInt(record.resultDestination)
+	previousStackLength, previousStackLengthOK := vmFrameRecordUint32ToInt(record.varargBase)
+	if !baseOK || !topOK || !returnPCOK || !destinationOK || !previousStackLengthOK || base < 0 || top < base || destination < base || destination >= top {
+		return false
+	}
+	current := *frame
+	owner := current.window.owner
+	if owner == nil {
+		owner = current.owner
+	}
+	if owner == nil || owner != thread.stackOwner {
+		return false
+	}
+	childStart := current.window.base
+	childEnd := childStart + current.window.length
+	if childStart < 0 || childEnd < childStart || childEnd > len(owner.values) || sourceRegister > current.window.length || sourceCount > current.window.length-sourceRegister {
+		return false
+	}
+	sourceStart := childStart + sourceRegister
+	if sourceStart < childStart || sourceStart > len(owner.values)-sourceCount {
+		return false
+	}
+	window := vmResultWindow{}
+	if openResults != nil {
+		window = *openResults
+	}
+	openCount := window.len()
+	openBase := -1
+	if openResults != nil && current.openRangeOwner == owner && current.openRangeBase >= 0 && current.openRangeCount == openCount && current.openRangeBase <= len(owner.values)-openCount {
+		openBase = current.openRangeBase
+	}
+	total := sourceCount + openCount
+	if total < sourceCount {
+		return false
+	}
+	if total == 0 {
+		total = 1
+	}
+	targetBase := top
+	if targetBase < 0 || total > int(^uint(0)>>1)-targetBase {
+		return false
+	}
+	targetEnd := targetBase + total
+	rangesOverlap := func(left, leftCount, right, rightCount int) bool {
+		if leftCount <= 0 || rightCount <= 0 {
+			return false
+		}
+		return left < right+rightCount && right < left+leftCount
+	}
+	needsTemp := rangesOverlap(targetBase, total, sourceStart, sourceCount) || rangesOverlap(targetBase, total, openBase, openCount)
+	thread.closeOpenUpvalues(owner, childStart, childEnd)
+	tempBase := -1
+	if needsTemp {
+		tempBase = len(owner.values)
+		if tempBase < targetEnd {
+			tempBase = targetEnd
+		}
+		if total > int(^uint(0)>>1)-tempBase {
+			return false
+		}
+		thread.growStack(tempBase + total)
+		owner = thread.stackOwner
+		if owner == nil || tempBase+total > len(owner.values) {
+			return false
+		}
+		for index := 0; index < sourceCount; index++ {
+			owner.values[tempBase+index] = owner.values[sourceStart+index]
+		}
+		for index := 0; index < openCount; index++ {
+			if openBase >= 0 {
+				owner.values[tempBase+sourceCount+index] = owner.values[openBase+index]
+			} else {
+				owner.values[tempBase+sourceCount+index] = window.at(index)
+			}
+		}
+		if sourceCount+openCount == 0 {
+			owner.values[tempBase] = NilValue()
+		}
+		copy(owner.values[targetBase:targetEnd], owner.values[tempBase:tempBase+total])
+	} else {
+		if targetEnd > len(owner.values) {
+			thread.growStack(targetEnd)
+		}
+		owner = thread.stackOwner
+		if owner == nil || targetEnd > len(owner.values) {
+			return false
+		}
+		for index := 0; index < sourceCount; index++ {
+			owner.values[targetBase+index] = owner.values[sourceStart+index]
+		}
+		for index := 0; index < openCount; index++ {
+			if openBase >= 0 {
+				owner.values[targetBase+sourceCount+index] = owner.values[openBase+index]
+			} else {
+				owner.values[targetBase+sourceCount+index] = window.at(index)
+			}
+		}
+		if sourceCount+openCount == 0 {
+			owner.values[targetBase] = NilValue()
+		}
+	}
+	clearExcept := func(start, end, preserveStart, preserveEnd int) {
+		if start < 0 {
+			start = 0
+		}
+		if end > len(owner.values) {
+			end = len(owner.values)
+		}
+		if start >= end {
+			return
+		}
+		if preserveEnd <= start || preserveStart >= end {
+			clear(owner.values[start:end])
+			return
+		}
+		if preserveStart > start {
+			clear(owner.values[start:preserveStart])
+		}
+		if preserveEnd < end {
+			clear(owner.values[preserveEnd:end])
+		}
+	}
+	clearExcept(childStart, childEnd, targetBase, targetEnd)
+	if openBase >= 0 {
+		clearExcept(openBase, openBase+openCount, targetBase, targetEnd)
+	}
+	if tempBase >= 0 {
+		clear(owner.values[tempBase : tempBase+total])
+	}
+	owner.values = owner.values[:targetEnd]
+	thread.stack = owner.values
+	_, _ = thread.popFrameRecord()
+
+	current.proto = record.closure.proto
+	current.currentClosure = record.closure
+	current.registerBase = base
+	current.registerCount = top - base
+	current.owner = owner
+	current.registers = owner.values[base:top]
+	current.cells = thread.restoreFrameCells(current, record.closure.proto, owner, base)
+	current.upvalues = record.closure.upvalues
+	current.upvalueValues = record.closure.upvalueValues
+	current.upvalueValueOK = record.closure.upvalueValueOK
+	current.varargs = nil
+	current.pc = returnPC
+	current.debugLine = -1
+	current.openResultStart = destination - base
+	current.openResults = vmResultWindow{}
+	current.openRangeOwner = owner
+	current.openRangeBase = targetBase
+	current.openRangeCount = total
+	current.openRangeLogicalTop = targetBase
+	current.resetPendingCallState()
+	current.window = vmRegisterWindow{owner: owner, base: base, length: top - base, previousStackLength: previousStackLength, borrowed: record.flags&vmFrameRecordFlagCallerBorrowed != 0}
+	if current.recordBaseDepth >= 0 && len(thread.frameRecords) == current.recordBaseDepth {
+		current.recordBaseDepth = -1
+	}
+	current.setRegister(destination-base, owner.values[targetBase])
+	return true
+}
+
 // resumeRecordOnlyFixedCall copies a fixed result range directly between the
 // shared slot stack and the caller destination, then restores the caller in
 // the same physical frame.  The copy is overlap-safe because compiler
@@ -4709,6 +4905,9 @@ func (thread *vmThread) resumeRecordOnlyFixedCall(rootRecordDepth int, frame **v
 		return false
 	}
 	record := thread.frameRecords[len(thread.frameRecords)-1]
+	if record.flags&vmFrameRecordFlagOpenResults != 0 && record.resultCount == ^uint32(0) {
+		return thread.resumeRecordOnlyOpenCall(rootRecordDepth, frame, sourceRegister, sourceCount, openResults)
+	}
 	if record.flags&vmFrameRecordFlagRecordOnly == 0 || record.closure == nil || record.closure.proto == nil || record.resultCount < 2 {
 		return false
 	}
@@ -4798,6 +4997,10 @@ func (thread *vmThread) resumeRecordOnlyFixedCall(rootRecordDepth int, frame **v
 	current.debugLine = -1
 	current.openResultStart = -1
 	current.openResults = vmResultWindow{}
+	current.openRangeOwner = nil
+	current.openRangeBase = -1
+	current.openRangeCount = 0
+	current.openRangeLogicalTop = -1
 	current.resetPendingCallState()
 	current.window = vmRegisterWindow{
 		owner:               owner,
@@ -4841,8 +5044,7 @@ func (thread *vmThread) resumeDirectFrameChildOne(rootDepth int, frame **vmFrame
 	thread.popFrame()
 	caller.pendingCall = vmPendingCall{}
 	caller.hasPendingCall = false
-	caller.openResultStart = -1
-	caller.openResults = vmResultWindow{}
+	caller.clearOpenResultState()
 	caller.setRegister(destination.register, value)
 	*frame = caller
 	return true
@@ -5058,7 +5260,11 @@ reload:
 				resultCount = 1
 			}
 			if resultCount < 0 {
-				frame.clearOpenResultState()
+				if frame.openRangeOwner != nil {
+					frame.clearOpenResultRange()
+				}
+				frame.openResultStart = -1
+				frame.openResults = vmResultWindow{}
 				frame.openResultStart = a
 				if !frame.publishOpenResultRange(thread, frame.varargs) {
 					frame.openResults = vmAdjustedBorrowedResultWindow(frame.varargs)
@@ -5068,7 +5274,11 @@ reload:
 				pc = nextWord
 				continue
 			}
-			frame.clearOpenResultState()
+			if frame.openRangeOwner != nil {
+				frame.clearOpenResultRange()
+			}
+			frame.openResultStart = -1
+			frame.openResults = vmResultWindow{}
 			for i := 0; i < resultCount; i++ {
 				if i >= len(frame.varargs) {
 					registers[a+i] = NilValue()
@@ -5509,6 +5719,9 @@ reload:
 			if err != nil {
 				return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
 			}
+			if frame.openRangeOwner != nil {
+				frame.clearOpenResultRange()
+			}
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
 			for i := 0; i < d; i++ {
@@ -5543,6 +5756,9 @@ reload:
 					}
 				}
 				picCounts.addArrayIteratorFastStep()
+				if frame.openRangeOwner != nil {
+					frame.clearOpenResultRange()
+				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
 				next := index + 1
@@ -5562,6 +5778,9 @@ reload:
 			}
 			if err != nil {
 				return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
+			}
+			if frame.openRangeOwner != nil {
+				frame.clearOpenResultRange()
 			}
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
@@ -6222,6 +6441,10 @@ reload:
 
 		case opCall:
 			resultCount, fixedMultiBorrow := decodeFixedMultiResultCount(d, frame.proto.registers)
+			openResultBorrow := decodeOpenResultCallMarker(d)
+			if openResultBorrow {
+				resultCount = -1
+			}
 			if !fixedMultiBorrow && resultCount == 0 {
 				resultCount = 1
 			}
@@ -6231,6 +6454,9 @@ reload:
 				if ok {
 					if err != nil {
 						return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
+					}
+					if frame.openRangeOwner != nil {
+						frame.clearOpenResultRange()
 					}
 					frame.openResultStart = -1
 					frame.openResults = vmResultWindow{}
@@ -6251,6 +6477,9 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
 				}
+				if frame.openRangeOwner != nil {
+					frame.clearOpenResultRange()
+				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
 				registers[a] = value
@@ -6265,6 +6494,9 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
 				}
+				if frame.openRangeOwner != nil {
+					frame.clearOpenResultRange()
+				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
 				registers[a] = result
@@ -6272,7 +6504,7 @@ reload:
 			}
 			if closure, ok := callee.scriptFunction(); ok && c >= 0 {
 				destinationCount := d
-				if fixedMultiBorrow {
+				if fixedMultiBorrow || openResultBorrow {
 					destinationCount = resultCount
 					if record, entered := thread.maybeEnterRecordOnlyFixedCall(closure, frame, nextWord, b+1, c, vmResultDestination{register: a, count: destinationCount}); entered {
 						thread.pushFrameRecord(record)
@@ -6315,6 +6547,9 @@ reload:
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
 				}
+				if frame.openRangeOwner != nil {
+					frame.clearOpenResultRange()
+				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
 				registers[a] = value
@@ -6328,6 +6563,9 @@ reload:
 				result, err := baseToStringValue(thread.globals, value)
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
+				}
+				if frame.openRangeOwner != nil {
+					frame.clearOpenResultRange()
 				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
@@ -6403,6 +6641,9 @@ reload:
 				}
 				return directFrameFail(callErr)
 			}
+			if frame.openRangeOwner != nil {
+				frame.clearOpenResultRange()
+			}
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
 			registers = frame.registers
@@ -6457,6 +6698,9 @@ reload:
 					return directFrameYield(vmYieldedValues(yield.values))
 				}
 				return directFrameFail(callErr)
+			}
+			if frame.openRangeOwner != nil {
+				frame.clearOpenResultRange()
 			}
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
@@ -6527,6 +6771,9 @@ reload:
 					return directFrameYield(vmYieldedValues(yield.values))
 				}
 				return directFrameFail(err)
+			}
+			if frame.openRangeOwner != nil {
+				frame.clearOpenResultRange()
 			}
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
@@ -6794,7 +7041,11 @@ reload:
 				resultCount = 1
 			}
 			if resultCount < 0 {
-				frame.clearOpenResultState()
+				if frame.openRangeOwner != nil {
+					frame.clearOpenResultRange()
+				}
+				frame.openResultStart = -1
+				frame.openResults = vmResultWindow{}
 				frame.openResultStart = a
 				if !frame.publishOpenResultRange(thread, frame.varargs) {
 					frame.openResults = vmAdjustedBorrowedResultWindow(frame.varargs)
@@ -7221,8 +7472,7 @@ reload:
 			if err != nil {
 				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
 			}
-			frame.openResultStart = -1
-			frame.openResults = vmResultWindow{}
+			frame.clearOpenResultState()
 			for i := 0; i < d; i++ {
 				if i >= count {
 					registers[a+i] = NilValue()
@@ -7254,6 +7504,9 @@ reload:
 						return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: index is %s, want integer", controlValue.Kind())))
 					}
 				}
+				if frame.openRangeOwner != nil {
+					frame.clearOpenResultRange()
+				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
 				next := index + 1
@@ -7273,6 +7526,9 @@ reload:
 			}
 			if err != nil {
 				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
+			}
+			if frame.openRangeOwner != nil {
+				frame.clearOpenResultRange()
 			}
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
@@ -7907,6 +8163,10 @@ reload:
 
 		case opCall:
 			resultCount, fixedMultiBorrow := decodeFixedMultiResultCount(d, frame.proto.registers)
+			openResultBorrow := decodeOpenResultCallMarker(d)
+			if openResultBorrow {
+				resultCount = -1
+			}
 			if !fixedMultiBorrow && resultCount == 0 {
 				resultCount = 1
 			}
@@ -7916,6 +8176,9 @@ reload:
 				if ok {
 					if err != nil {
 						return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
+					}
+					if frame.openRangeOwner != nil {
+						frame.clearOpenResultRange()
 					}
 					frame.openResultStart = -1
 					frame.openResults = vmResultWindow{}
@@ -7936,6 +8199,9 @@ reload:
 				if err != nil {
 					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
 				}
+				if frame.openRangeOwner != nil {
+					frame.clearOpenResultRange()
+				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
 				registers[a] = value
@@ -7950,6 +8216,9 @@ reload:
 				if err != nil {
 					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
 				}
+				if frame.openRangeOwner != nil {
+					frame.clearOpenResultRange()
+				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
 				registers[a] = result
@@ -7957,7 +8226,7 @@ reload:
 			}
 			if closure, ok := callee.scriptFunction(); ok && c >= 0 {
 				destinationCount := d
-				if fixedMultiBorrow {
+				if fixedMultiBorrow || openResultBorrow {
 					destinationCount = resultCount
 					if record, entered := thread.maybeEnterRecordOnlyFixedCall(closure, frame, nextWord, b+1, c, vmResultDestination{register: a, count: destinationCount}); entered {
 						thread.pushFrameRecord(record)
@@ -7999,6 +8268,9 @@ reload:
 				if err != nil {
 					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
 				}
+				if frame.openRangeOwner != nil {
+					frame.clearOpenResultRange()
+				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
 				registers[a] = value
@@ -8012,6 +8284,9 @@ reload:
 				result, err := baseToStringValue(thread.globals, value)
 				if err != nil {
 					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
+				}
+				if frame.openRangeOwner != nil {
+					frame.clearOpenResultRange()
 				}
 				frame.openResultStart = -1
 				frame.openResults = vmResultWindow{}
@@ -8083,6 +8358,9 @@ reload:
 				}
 				return directFrameExitAt(frame, pc, directFrameFail(callErr))
 			}
+			if frame.openRangeOwner != nil {
+				frame.clearOpenResultRange()
+			}
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
 			registers = frame.registers
@@ -8135,6 +8413,9 @@ reload:
 					return directFrameExitAt(frame, pc, directFrameYield(vmYieldedValues(yield.values)))
 				}
 				return directFrameExitAt(frame, pc, directFrameFail(callErr))
+			}
+			if frame.openRangeOwner != nil {
+				frame.clearOpenResultRange()
 			}
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}
@@ -8202,6 +8483,9 @@ reload:
 					return directFrameExitAt(frame, pc, directFrameYield(vmYieldedValues(yield.values)))
 				}
 				return directFrameExitAt(frame, pc, directFrameFail(err))
+			}
+			if frame.openRangeOwner != nil {
+				frame.clearOpenResultRange()
 			}
 			frame.openResultStart = -1
 			frame.openResults = vmResultWindow{}

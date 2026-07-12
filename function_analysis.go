@@ -119,6 +119,7 @@ type fixedCallBorrowFact struct {
 	argumentCount int
 	result        int
 	resultCount   int
+	openResults   bool
 	suffixStart   int
 	suffixEnd     int
 	eligible      bool
@@ -131,7 +132,7 @@ func fixedCallBorrowShape(ins instruction) (argumentStart, argumentCount, result
 		// Generic CALL is eligible only for fixed arguments and a fixed
 		// multi-result destination.  A one-result CALL has no marker space
 		// distinct from its ordinary encoding and keeps the existing path.
-		if ins.c < 0 || ins.d < 2 {
+		if ins.c < 0 || (ins.d < 2 && ins.d >= 0) {
 			return 0, 0, 0, 0, false
 		}
 		return ins.b + 1, ins.c, ins.a, ins.c, true
@@ -161,7 +162,12 @@ func fixedCallBorrowFactForInstruction(ins instruction, pc int, registers int, c
 	fact.argumentCount = argumentCount
 	fact.result = result
 	if ins.op == opCall {
-		fact.resultCount = ins.d
+		fact.openResults = ins.d < 0
+		if fact.openResults {
+			fact.resultCount = -1
+		} else {
+			fact.resultCount = ins.d
+		}
 	}
 	fact.suffixStart = argumentStart + argumentCount
 	if rawCount < -32768 || rawCount > 32767 {
@@ -172,16 +178,35 @@ func fixedCallBorrowFactForInstruction(ins instruction, pc int, registers int, c
 		fact.reason = "argument window is outside caller registers"
 		return fact
 	}
-	if fact.resultCount < 1 || result < 0 || result+fact.resultCount > registers {
+	if result < 0 || result >= registers {
 		fact.reason = "result destination is outside caller registers"
 		return fact
 	}
-	if (ins.op != opCall && result+fact.resultCount > fact.suffixStart) ||
-		(ins.op == opCall && result >= argumentStart) {
-		fact.reason = "result destination overlaps the scratch suffix"
-		return fact
+	if fact.openResults {
+		if result >= argumentStart {
+			fact.reason = "open result destination overlaps the scratch suffix"
+			return fact
+		}
+	} else {
+		if fact.resultCount < 1 || result+fact.resultCount > registers {
+			fact.reason = "result destination is outside caller registers"
+			return fact
+		}
+		if (ins.op != opCall && result+fact.resultCount > fact.suffixStart) ||
+			(ins.op == opCall && result >= argumentStart) {
+			fact.reason = "result destination overlaps the scratch suffix"
+			return fact
+		}
 	}
-	for destination := result; destination < result+fact.resultCount; destination++ {
+	resultEnd := result + fact.resultCount
+	if fact.openResults {
+		// An open result may occupy any caller register through the static
+		// register limit. Treat that whole span as the destination for capture
+		// safety and liveness; the runtime stores the values in the owner-backed
+		// range and only publishes the first value into A.
+		resultEnd = registers
+	}
+	for destination := result; destination < resultEnd; destination++ {
 		if len(capturedLocals) > destination && capturedLocals[destination] {
 			fact.reason = "result destination is captured"
 			return fact
@@ -192,7 +217,7 @@ func fixedCallBorrowFactForInstruction(ins instruction, pc int, registers int, c
 			fact.reason = "borrowed suffix contains a captured local"
 			return fact
 		}
-		if register < result || register >= result+fact.resultCount {
+		if !fact.openResults && (register < result || register >= resultEnd) {
 			if liveAfter.contains(register) {
 				fact.reason = "borrowed suffix remains live after the call"
 				return fact
@@ -218,7 +243,17 @@ func analyzeFixedCallBorrowFacts(code []instruction, registers int, capturedLoca
 		if pc < len(analysis.liveAfter) {
 			liveAfter = analysis.liveAfter[pc]
 		}
-		facts = append(facts, fixedCallBorrowFactForInstruction(ins, pc, registers, capturedLocals, liveAfter))
+		fact := fixedCallBorrowFactForInstruction(ins, pc, registers, capturedLocals, liveAfter)
+		if fact.openResults {
+			// An open destination is only safe for the compact record bridge when
+			// the call immediately feeds an open RETURN.  This proves that no
+			// unrelated suffix locals survive the dynamic result span.
+			if !openResultCallFeedsOpenReturn(code, pc, ins.a) {
+				fact.eligible = false
+				fact.reason = "open result call is not consumed by an open return"
+			}
+		}
+		facts = append(facts, fact)
 	}
 	return facts
 }
@@ -245,6 +280,9 @@ func markBorrowableFixedCallWindows(code []instruction, registers int, capturedL
 		switch marked[fact.pc].op {
 		case opCall:
 			marker := encodeFixedMultiResultCount(fact.resultCount, registers)
+			if fact.openResults {
+				marker = encodeOpenResultCallMarker()
+			}
 			if marker >= -32768 && marker <= 32767 {
 				marked[fact.pc].d = marker
 			}

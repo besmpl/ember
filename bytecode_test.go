@@ -1892,7 +1892,7 @@ return total
 	}
 }
 
-func TestDeepRecursionGrowsStackWithoutCorruption(t *testing.T) {
+func TestDeepTailRecursionUsesCompactFrameRecordsWithoutCorruption(t *testing.T) {
 	proto, err := Compile(`
 local function sum(n, acc)
 	if n == 0 then
@@ -1918,11 +1918,14 @@ return sum(256, 0)
 	if !ok || got != 32896 {
 		t.Fatalf("thread.run result is %v (%t), want number 32896", got, ok)
 	}
-	if thread.maxFrames < 250 {
-		t.Fatalf("thread max frame depth is %d, want deep recursion to grow frame stack", thread.maxFrames)
+	if got, want := thread.maxFrames, 1; got != want {
+		t.Fatalf("thread max physical frame depth is %d, want %d", got, want)
 	}
-	if len(thread.frames) != 0 {
-		t.Fatalf("thread kept %d frames after return, want empty stack", len(thread.frames))
+	if got, wantAtLeast := thread.maxFrameRecords, 257; got < wantAtLeast {
+		t.Fatalf("thread max compact frame-record depth is %d, want at least %d", got, wantAtLeast)
+	}
+	if len(thread.frames) != 0 || len(thread.frameRecords) != 0 {
+		t.Fatalf("thread kept %d physical frames and %d compact records after return", len(thread.frames), len(thread.frameRecords))
 	}
 	if len(thread.stack) != 0 {
 		t.Fatalf("thread kept %d stack values after return, want empty stack", len(thread.stack))

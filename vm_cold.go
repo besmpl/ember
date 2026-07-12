@@ -207,8 +207,7 @@ func (thread *vmThread) runColdInstruction(frame *vmFrame) (action coldInstructi
 			if err != nil {
 				return coldInstructionError(fmt.Errorf("run: call failed: host function failed: %w", err))
 			}
-			frame.openResultStart = -1
-			frame.openResults = vmResultWindow{}
+			frame.clearOpenResultState()
 			for i := 0; i < destination.count; i++ {
 				if i >= count {
 					frame.setRegister(a+i, NilValue())
@@ -249,6 +248,9 @@ func (thread *vmThread) runColdInstruction(frame *vmFrame) (action coldInstructi
 	case opCall:
 		callee := frame.register(b)
 		destinationCount := d
+		if decodeOpenResultCallMarker(d) {
+			destinationCount = -1
+		}
 		if count, marked := decodeFixedMultiResultCount(d, frame.proto.registers); marked {
 			destinationCount = count
 		}

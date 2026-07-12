@@ -1235,6 +1235,15 @@ func verifyWordcodeInstruction(ins instruction, registerCount, constantCount, pr
 		return fmt.Errorf("concat chain register span is invalid")
 	}
 	if ins.op == opCall {
+		if decodeOpenResultCallMarker(ins.d) {
+			if ins.c < 0 {
+				return fmt.Errorf("open-result call marker requires fixed arguments")
+			}
+			if registerCount >= 0 && ins.b+ins.c >= registerCount {
+				return fmt.Errorf("call argument register range out of range")
+			}
+			return nil
+		}
 		if ins.c < 0 {
 			prefixCount := -ins.c - 1
 			openArgStart := ins.b + 1 + prefixCount
@@ -1317,6 +1326,9 @@ func verifyWordcode(words []wordcodeWord, limits ...int) error {
 	for pc, ins := range code {
 		if err := verifyWordcodeInstruction(ins, registerCount, constantCount, prototypeCount, upvalueCount, len(code)); err != nil {
 			return fmt.Errorf("instruction %d %s: %w", pc, opcodeName(ins.op), err)
+		}
+		if ins.op == opCall && decodeOpenResultCallMarker(ins.d) && !openResultCallFeedsOpenReturn(code, pc, ins.a) {
+			return fmt.Errorf("instruction %d CALL open-result marker is not consumed by a matching open RETURN", pc)
 		}
 		if ins.op == opCall && ins.c < 0 && !wordcodeOpenResultProducer(code, pc, ins.b+1+(-ins.c-1), registerCount) {
 			return fmt.Errorf("instruction %d CALL open call has no preceding open-result producer", pc)

@@ -652,6 +652,9 @@ func encodeFixedMultiResultCount(count, registers int) int {
 }
 
 func decodeFixedMultiResultCount(raw, registers int) (count int, borrowHint bool) {
+	if decodeOpenResultCallMarker(raw) {
+		return raw, false
+	}
 	if raw >= -(registers + 1) {
 		return raw, false
 	}
@@ -660,6 +663,46 @@ func decodeFixedMultiResultCount(raw, registers int) (count int, borrowHint bool
 		return raw, false
 	}
 	return count, true
+}
+
+// openResultCallMarker is reserved for fixed-argument CALLs whose result
+// destination is semantically open. Valid open-result counts are bounded by
+// the caller register span, while fixed-multi markers occupy the range just
+// below that span; the signed int16 minimum leaves a distinct, verifier-visible
+// marker for the record-only bridge.
+const openResultCallMarker = -1 << 15
+
+func encodeOpenResultCallMarker() int { return openResultCallMarker }
+
+func decodeOpenResultCallMarker(raw int) bool { return raw == openResultCallMarker }
+
+func openResultCallFeedsOpenReturn(code []instruction, pc, result int) bool {
+	if pc < 0 || pc+1 >= len(code) {
+		return false
+	}
+	next := code[pc+1]
+	if next.op != opReturn || next.b >= 0 {
+		return false
+	}
+	prefixCount := -next.b - 1
+	return prefixCount >= 0 && next.a+prefixCount == result
+}
+
+func normalizeOpenResultCallMarkers(code []instruction) []instruction {
+	var normalized []instruction
+	for index, ins := range code {
+		if ins.op != opCall || !decodeOpenResultCallMarker(ins.d) {
+			continue
+		}
+		if normalized == nil {
+			normalized = append([]instruction(nil), code...)
+		}
+		normalized[index].d = -1
+	}
+	if normalized != nil {
+		return normalized
+	}
+	return code
 }
 
 // normalizeFixedMultiResultCounts removes internal borrow markers before
@@ -1711,6 +1754,7 @@ func finalizeProtoExecutionArtifact(proto *Proto, sourceCode ...[]instruction) e
 		}
 		code = decoded
 	}
+	code = normalizeOpenResultCallMarkers(code)
 	code = normalizeFixedMultiResultCounts(code, proto.registers)
 	assignProtoGlobalSlots(proto, code)
 	artifact := buildExecutionArtifact(proto, code)
@@ -2577,6 +2621,9 @@ func verifyProtoSeenWithCode(proto *Proto, seen map[*Proto]bool, code []instruct
 		if err := verifyInstruction(proto, pc, ins, len(code)); err != nil {
 			return fmt.Errorf("instruction %d %s(%d,%d,%d,%d): %w", pc, opcodeName(ins.op), ins.a, ins.b, ins.c, ins.d, err)
 		}
+		if ins.op == opCall && decodeOpenResultCallMarker(ins.d) && !openResultCallFeedsOpenReturn(code, pc, ins.a) {
+			return fmt.Errorf("instruction %d CALL open-result marker is not consumed by a matching open RETURN", pc)
+		}
 	}
 	if proto.lines != nil && len(proto.lines) != len(code) {
 		return fmt.Errorf("line table length %d does not match code length %d", len(proto.lines), len(code))
@@ -2939,6 +2986,15 @@ func verifyInstruction(proto *Proto, pc int, ins instruction, codeLen ...int) er
 	case opCall:
 		if err := verifyRegisters(proto, ins.a, ins.b); err != nil {
 			return err
+		}
+		if decodeOpenResultCallMarker(ins.d) {
+			if ins.c < 0 {
+				return fmt.Errorf("open-result call marker requires fixed arguments")
+			}
+			if ins.b+ins.c >= proto.registers {
+				return fmt.Errorf("call argument register range out of range")
+			}
+			return verifyRegister(proto, ins.a)
 		}
 		if ins.c < 0 {
 			prefixCount := -ins.c - 1

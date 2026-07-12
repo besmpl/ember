@@ -59,6 +59,39 @@ func TestOpenResultRangeRebindsAfterStackGrowth(t *testing.T) {
 	frame.clearOpenResultState()
 }
 
+func TestFixedResultOverwriteClearsOwnerBackedOpenRange(t *testing.T) {
+	thread := newVMThread(runtimeGlobals(nil))
+	proto := newProto(nil, []instruction{{op: opReturnOne, a: 0}}, nil, nil, 2, 0, false)
+	frame := thread.newFrame(proto, nil, nil)
+	thread.pushFrame(frame)
+	owner := thread.stackOwner
+	logicalTop := len(owner.values)
+	frame.openResultStart = 0
+	if !frame.publishOpenResultRange(&thread, []Value{NumberValue(1), NumberValue(2)}) {
+		t.Fatal("publishOpenResultRange returned false")
+	}
+	rangeBase, rangeCount := frame.openRangeBase, frame.openRangeCount
+	if got := len(owner.values); got <= logicalTop {
+		t.Fatalf("owner length = %d, want range above logical top %d", got, logicalTop)
+	}
+	frame.applySingleFrameResult(0, vmFrameResult{window: vmSingleResultWindow(NumberValue(9))})
+	if got := len(owner.values); got != logicalTop {
+		t.Fatalf("fixed result left owner length %d, want logical top %d", got, logicalTop)
+	}
+	backing := owner.values[:cap(owner.values)]
+	for index := 0; index < rangeCount; index++ {
+		if !backing[rangeBase+index].IsNil() {
+			t.Fatalf("cleared owner range slot %d = %v, want nil", rangeBase+index, backing[rangeBase+index])
+		}
+	}
+	if frame.openResultStart != -1 || frame.openRangeOwner != nil || frame.openRangeBase != -1 || frame.openRangeCount != 0 || frame.openRangeLogicalTop != -1 {
+		t.Fatalf("fixed result left stale open state: start=%d owner=%p base=%d count=%d top=%d", frame.openResultStart, frame.openRangeOwner, frame.openRangeBase, frame.openRangeCount, frame.openRangeLogicalTop)
+	}
+	if got, ok := frame.register(0).Number(); !ok || got != 9 {
+		t.Fatalf("fixed result register = %v (%t), want 9", frame.register(0), ok)
+	}
+}
+
 func TestOpenVarargRangePrefixForwardingParity(t *testing.T) {
 	tests := []struct {
 		name   string
