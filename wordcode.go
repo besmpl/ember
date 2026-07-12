@@ -1244,7 +1244,11 @@ func verifyWordcodeInstruction(ins instruction, registerCount, constantCount, pr
 		} else if ins.b+ins.c >= registerCount {
 			return fmt.Errorf("call argument register range out of range")
 		}
-		if ins.d > 0 && ins.a+ins.d > registerCount {
+		resultCount := ins.d
+		if decoded, marked := decodeFixedMultiResultCount(ins.d, registerCount); marked {
+			resultCount = decoded
+		}
+		if resultCount > 0 && (resultCount > registerCount-ins.a) {
 			return fmt.Errorf("call result register range out of range")
 		}
 	}
@@ -1314,17 +1318,17 @@ func verifyWordcode(words []wordcodeWord, limits ...int) error {
 		if err := verifyWordcodeInstruction(ins, registerCount, constantCount, prototypeCount, upvalueCount, len(code)); err != nil {
 			return fmt.Errorf("instruction %d %s: %w", pc, opcodeName(ins.op), err)
 		}
-		if ins.op == opCall && ins.c < 0 && !wordcodeOpenResultProducer(code, pc, ins.b+1+(-ins.c-1)) {
+		if ins.op == opCall && ins.c < 0 && !wordcodeOpenResultProducer(code, pc, ins.b+1+(-ins.c-1), registerCount) {
 			return fmt.Errorf("instruction %d CALL open call has no preceding open-result producer", pc)
 		}
-		if ins.op == opReturn && ins.b < 0 && !wordcodeOpenResultProducer(code, pc, ins.a+(-ins.b-1)) {
+		if ins.op == opReturn && ins.b < 0 && !wordcodeOpenResultProducer(code, pc, ins.a+(-ins.b-1), registerCount) {
 			return fmt.Errorf("instruction %d RETURN open result has no preceding open-result producer", pc)
 		}
 	}
 	return nil
 }
 
-func wordcodeOpenResultProducer(code []instruction, pc, start int) bool {
+func wordcodeOpenResultProducer(code []instruction, pc, start, registerCount int) bool {
 	if pc <= 0 || start < 0 {
 		return false
 	}
@@ -1333,7 +1337,15 @@ func wordcodeOpenResultProducer(code []instruction, pc, start int) bool {
 	case opVararg:
 		return prev.b < 0 && prev.a == start
 	case opCall:
-		return prev.d < 0 && prev.a == start
+		if prev.d < 0 && prev.a == start {
+			if registerCount >= 0 {
+				if _, marked := decodeFixedMultiResultCount(prev.d, registerCount); marked {
+					return false
+				}
+			}
+			return true
+		}
+		return false
 	case opFastCall:
 		return prev.d < 0 && prev.a == start
 	default:

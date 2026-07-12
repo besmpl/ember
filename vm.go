@@ -2434,7 +2434,7 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 		frame.hasPendingCall || frame.openResultStart >= 0 {
 		return vmFrameRecord{}, false
 	}
-	if destination.count != 1 || argumentCount < 0 || argumentStart < 0 ||
+	if destination.count < 1 || destination.register < 0 || destination.count > frame.registerCount-destination.register || (destination.count >= 2 && destination.register >= argumentStart) || argumentCount < 0 || argumentStart < 0 ||
 		argumentStart > frame.registerCount || argumentCount > frame.registerCount-argumentStart ||
 		frame.hasCellsInRange(argumentStart, frame.registerCount-argumentStart) {
 		return vmFrameRecord{}, false
@@ -2456,11 +2456,12 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 	returnPCValue, returnPCOK := vmFrameRecordUint32(returnPC)
 	resultDestination, resultOK := vmFrameRecordAddUint32(frame.registerBase, destination.register)
 	argumentCountValue, argumentCountOK := vmFrameRecordUint16(argumentCount)
+	resultCountValue, resultCountOK := vmFrameRecordUint32(destination.count)
 	frameDepth, frameDepthOK := vmFrameRecordUint16(frame.depth)
 	previousStackLength, previousStackLengthOK := vmFrameRecordUint32(frame.window.previousStackLength)
 	childBase := frame.registerBase + argumentStart
 	childBaseValue, childBaseOK := vmFrameRecordUint32(childBase)
-	if !callerBaseOK || !callerTopOK || !returnPCOK || !resultOK || !argumentCountOK ||
+	if !callerBaseOK || !callerTopOK || !returnPCOK || !resultOK || !argumentCountOK || !resultCountOK ||
 		!frameDepthOK || !previousStackLengthOK || !childBaseOK || proto.registers < 0 ||
 		childBase > int(^uint(0)>>1)-proto.registers {
 		return vmFrameRecord{}, false
@@ -2521,7 +2522,7 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 		base:              callerBase,
 		top:               callerTop,
 		resultDestination: resultDestination,
-		resultCount:       1,
+		resultCount:       resultCountValue,
 		argumentBase:      childBaseValue,
 		varargBase:        previousStackLength,
 		frameDepth:        frameDepth,
@@ -4554,6 +4555,119 @@ func (thread *vmThread) resumeRecordOnlyFixedCallOne(rootRecordDepth int, frame 
 	return true
 }
 
+// resumeRecordOnlyFixedCall copies a fixed result range directly between the
+// shared slot stack and the caller destination, then restores the caller in
+// the same physical frame.  The copy is overlap-safe because compiler
+// liveness marks prove the destination starts before the borrowed child
+// window; nil-fill covers short returns without constructing a result window.
+func (thread *vmThread) resumeRecordOnlyFixedCall(rootRecordDepth int, frame **vmFrame, sourceRegister, sourceCount int, openResults *vmResultWindow) bool {
+	if thread == nil || frame == nil || *frame == nil || len(thread.frameRecords) <= rootRecordDepth || sourceRegister < 0 || sourceCount < 0 {
+		return false
+	}
+	record := thread.frameRecords[len(thread.frameRecords)-1]
+	if record.flags&vmFrameRecordFlagRecordOnly == 0 || record.closure == nil || record.closure.proto == nil || record.resultCount < 2 {
+		return false
+	}
+	base, baseOK := vmFrameRecordUint32ToInt(record.base)
+	top, topOK := vmFrameRecordUint32ToInt(record.top)
+	returnPC, returnPCOK := vmFrameRecordUint32ToInt(record.returnPC)
+	destination, destinationOK := vmFrameRecordUint32ToInt(record.resultDestination)
+	previousStackLength, previousStackLengthOK := vmFrameRecordUint32ToInt(record.varargBase)
+	requested, requestedOK := vmFrameRecordUint32ToInt(record.resultCount)
+	if !baseOK || !topOK || !returnPCOK || !destinationOK || !previousStackLengthOK || !requestedOK ||
+		requested < 2 || base < 0 || top < base || destination < base || requested > top-destination {
+		return false
+	}
+	current := *frame
+	owner := current.window.owner
+	if owner == nil {
+		owner = current.owner
+	}
+	if owner == nil || owner != thread.stackOwner || top > len(owner.values) {
+		return false
+	}
+	sourceStart := current.window.base + sourceRegister
+	if sourceStart < current.window.base || sourceRegister > current.window.length || sourceCount > current.window.length-sourceRegister || sourceStart > len(owner.values)-sourceCount {
+		return false
+	}
+	childStart := current.window.base
+	childEnd := childStart + current.window.length
+	if childStart < 0 || childEnd < childStart || childEnd > len(owner.values) {
+		return false
+	}
+	thread.closeOpenUpvalues(owner, childStart, childEnd)
+	available := sourceCount
+	if openResults != nil {
+		available += openResults.len()
+	}
+	copyCount := available
+	if copyCount > requested {
+		copyCount = requested
+	}
+	if openResults == nil {
+		copy(owner.values[destination:destination+copyCount], owner.values[sourceStart:sourceStart+copyCount])
+	} else {
+		for index := 0; index < copyCount; index++ {
+			if index < sourceCount {
+				owner.values[destination+index] = owner.values[sourceStart+index]
+			} else {
+				owner.values[destination+index] = openResults.at(index - sourceCount)
+			}
+		}
+	}
+	for index := copyCount; index < requested; index++ {
+		owner.values[destination+index] = NilValue()
+	}
+	// Release the child window while preserving any caller destination slots
+	// that overlap it.  Destination slots outside the child are untouched.
+	preserveStart, preserveEnd := destination, destination+requested
+	if childStart < preserveStart {
+		end := preserveStart
+		if end > childEnd {
+			end = childEnd
+		}
+		clear(owner.values[childStart:end])
+	}
+	if preserveEnd < childEnd {
+		start := preserveEnd
+		if start < childStart {
+			start = childStart
+		}
+		clear(owner.values[start:childEnd])
+	}
+	owner.values = owner.values[:top]
+	thread.stack = owner.values
+	_, _ = thread.popFrameRecord()
+
+	current.proto = record.closure.proto
+	current.currentClosure = record.closure
+	current.registerBase = base
+	current.registerCount = top - base
+	current.owner = owner
+	current.registers = owner.values[base:top]
+	current.cells = thread.restoreFrameCells(current, record.closure.proto, owner, base)
+	current.upvalues = record.closure.upvalues
+	current.upvalueValues = record.closure.upvalueValues
+	current.upvalueValueOK = record.closure.upvalueValueOK
+	current.varargs = nil
+	current.pc = returnPC
+	current.debugLine = -1
+	current.openResultStart = -1
+	current.openResults = vmResultWindow{}
+	current.resetPendingCallState()
+	current.window = vmRegisterWindow{
+		owner:               owner,
+		base:                base,
+		length:              top - base,
+		previousStackLength: previousStackLength,
+		borrowed:            record.flags&vmFrameRecordFlagCallerBorrowed != 0,
+	}
+	if current.recordBaseDepth >= 0 && len(thread.frameRecords) == current.recordBaseDepth {
+		current.recordBaseDepth = -1
+	}
+	return true
+}
+
 // resumeDirectFrameChildOne is the fixed-one-result fast return. The scalar
 // result is copied before releasing the borrowed callee window, then written
 // directly into the caller's destination without constructing a result window
@@ -5960,8 +6074,8 @@ reload:
 			continue
 
 		case opCall:
-			resultCount := d
-			if resultCount == 0 {
+			resultCount, fixedMultiBorrow := decodeFixedMultiResultCount(d, frame.proto.registers)
+			if !fixedMultiBorrow && resultCount == 0 {
 				resultCount = 1
 			}
 			callee := registers[b]
@@ -6010,7 +6124,17 @@ reload:
 				break
 			}
 			if closure, ok := callee.scriptFunction(); ok && c >= 0 {
-				destination := vmResultDestination{register: a, count: d}
+				destinationCount := d
+				if fixedMultiBorrow {
+					destinationCount = resultCount
+					if record, entered := thread.maybeEnterRecordOnlyFixedCall(closure, frame, nextWord, b+1, c, vmResultDestination{register: a, count: destinationCount}); entered {
+						thread.pushFrameRecord(record)
+						thread.directFramePICCounts.addFixedCallTrampolineEntry()
+						directChildActive = true
+						goto reload
+					}
+				}
+				destination := vmResultDestination{register: a, count: destinationCount}
 				args := registers[b+1 : b+1+c]
 				pc = nextWord
 				frame.pc = pc
@@ -6271,6 +6395,9 @@ reload:
 			return exit
 
 		case opReturnOne:
+			if directChildActive && thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, a, 1, nil) {
+				goto reload
+			}
 			if directChildActive && (thread.resumeRecordOnlyFixedCallOne(rootRecordDepth, &frame, registers[a]) ||
 				thread.resumeDirectFrameChildOne(rootDepth, &frame, registers[a])) {
 				goto reload
@@ -6287,6 +6414,9 @@ reload:
 				prefixCount := -count - 1
 				if frame.openResultStart == a+prefixCount {
 					if directChildActive {
+						if thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, a, prefixCount, &frame.openResults) {
+							goto reload
+						}
 						value := NilValue()
 						if prefixCount > 0 {
 							value = registers[a]
@@ -6303,6 +6433,9 @@ reload:
 					}
 					return directFrameReturn(result)
 				}
+				if directChildActive && thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, a, 1, nil) {
+					goto reload
+				}
 				if directChildActive && thread.resumeRecordOnlyFixedCallOne(rootRecordDepth, &frame, registers[a]) {
 					goto reload
 				}
@@ -6313,6 +6446,9 @@ reload:
 				return directFrameReturn(result)
 			}
 			if count == 0 {
+				if directChildActive && thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, a, 0, nil) {
+					goto reload
+				}
 				if directChildActive && thread.resumeRecordOnlyFixedCallOne(rootRecordDepth, &frame, NilValue()) {
 					goto reload
 				}
@@ -6323,6 +6459,9 @@ reload:
 				return directFrameReturn(result)
 			}
 			if count == 1 {
+				if directChildActive && thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, a, 1, nil) {
+					goto reload
+				}
 				if directChildActive && (thread.resumeRecordOnlyFixedCallOne(rootRecordDepth, &frame, registers[a]) ||
 					thread.resumeDirectFrameChildOne(rootDepth, &frame, registers[a])) {
 					goto reload
@@ -6332,6 +6471,9 @@ reload:
 					goto reload
 				}
 				return directFrameReturn(result)
+			}
+			if directChildActive && thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, a, count, nil) {
+				goto reload
 			}
 			if directChildActive && thread.resumeRecordOnlyFixedCallOne(rootRecordDepth, &frame, registers[a]) {
 				goto reload
@@ -6346,6 +6488,9 @@ reload:
 			return directFrameEnterGenericFrame()
 		}
 		pc = nextWord
+	}
+	if directChildActive && thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, 0, 0, nil) {
+		goto reload
 	}
 	if directChildActive && thread.resumeRecordOnlyFixedCallOne(rootRecordDepth, &frame, NilValue()) {
 		goto reload
@@ -7610,8 +7755,8 @@ reload:
 			continue
 
 		case opCall:
-			resultCount := d
-			if resultCount == 0 {
+			resultCount, fixedMultiBorrow := decodeFixedMultiResultCount(d, frame.proto.registers)
+			if !fixedMultiBorrow && resultCount == 0 {
 				resultCount = 1
 			}
 			callee := registers[b]
@@ -7660,7 +7805,16 @@ reload:
 				break
 			}
 			if closure, ok := callee.scriptFunction(); ok && c >= 0 {
-				destination := vmResultDestination{register: a, count: d}
+				destinationCount := d
+				if fixedMultiBorrow {
+					destinationCount = resultCount
+					if record, entered := thread.maybeEnterRecordOnlyFixedCall(closure, frame, nextWord, b+1, c, vmResultDestination{register: a, count: destinationCount}); entered {
+						thread.pushFrameRecord(record)
+						directChildActive = true
+						goto reload
+					}
+				}
+				destination := vmResultDestination{register: a, count: destinationCount}
 				args := registers[b+1 : b+1+c]
 				pc = nextWord
 				frame.pc = pc
@@ -7913,6 +8067,9 @@ reload:
 			return exit
 
 		case opReturnOne:
+			if directChildActive && thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, a, 1, nil) {
+				goto reload
+			}
 			if directChildActive && (thread.resumeRecordOnlyFixedCallOne(rootRecordDepth, &frame, registers[a]) ||
 				thread.resumeDirectFrameChildOne(rootDepth, &frame, registers[a])) {
 				goto reload
@@ -7929,6 +8086,9 @@ reload:
 				prefixCount := -count - 1
 				if frame.openResultStart == a+prefixCount {
 					if directChildActive {
+						if thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, a, prefixCount, &frame.openResults) {
+							goto reload
+						}
 						value := NilValue()
 						if prefixCount > 0 {
 							value = registers[a]
@@ -7945,6 +8105,9 @@ reload:
 					}
 					return directFrameExitAt(frame, pc, directFrameReturn(result))
 				}
+				if directChildActive && thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, a, 1, nil) {
+					goto reload
+				}
 				if directChildActive && thread.resumeRecordOnlyFixedCallOne(rootRecordDepth, &frame, registers[a]) {
 					goto reload
 				}
@@ -7955,6 +8118,9 @@ reload:
 				return directFrameExitAt(frame, pc, directFrameReturn(result))
 			}
 			if count == 0 {
+				if directChildActive && thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, a, 0, nil) {
+					goto reload
+				}
 				if directChildActive && thread.resumeRecordOnlyFixedCallOne(rootRecordDepth, &frame, NilValue()) {
 					goto reload
 				}
@@ -7965,6 +8131,9 @@ reload:
 				return directFrameExitAt(frame, pc, directFrameReturn(result))
 			}
 			if count == 1 {
+				if directChildActive && thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, a, 1, nil) {
+					goto reload
+				}
 				if directChildActive && (thread.resumeRecordOnlyFixedCallOne(rootRecordDepth, &frame, registers[a]) ||
 					thread.resumeDirectFrameChildOne(rootDepth, &frame, registers[a])) {
 					goto reload
@@ -7974,6 +8143,9 @@ reload:
 					goto reload
 				}
 				return directFrameExitAt(frame, pc, directFrameReturn(result))
+			}
+			if directChildActive && thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, a, count, nil) {
+				goto reload
 			}
 			if directChildActive && thread.resumeRecordOnlyFixedCallOne(rootRecordDepth, &frame, registers[a]) {
 				goto reload
@@ -7988,6 +8160,9 @@ reload:
 			return directFrameExitAt(frame, pc, directFrameEnterGenericFrame())
 		}
 		pc = nextWord
+	}
+	if directChildActive && thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, 0, 0, nil) {
+		goto reload
 	}
 	if directChildActive && thread.resumeRecordOnlyFixedCallOne(rootRecordDepth, &frame, NilValue()) {
 		goto reload

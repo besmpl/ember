@@ -338,6 +338,13 @@ func TestWordcodeProtoVerifierReusesSemanticValidation(t *testing.T) {
 }
 
 func TestWordcodeVerifierRejectsRegistersConstantsJumpsAndOpenCalls(t *testing.T) {
+	forgedFixedMulti := instruction{
+		op: opCall,
+		a:  0,
+		b:  0,
+		c:  0,
+		d:  encodeFixedMultiResultCount(5, 4),
+	}
 	cases := []struct {
 		name string
 		code []instruction
@@ -347,6 +354,7 @@ func TestWordcodeVerifierRejectsRegistersConstantsJumpsAndOpenCalls(t *testing.T
 		{name: "constant", code: []instruction{{op: opLoadConst, a: 0, b: 4}}, want: "constant"},
 		{name: "jump", code: []instruction{{op: opJump, b: 2}}, want: "jump target"},
 		{name: "open call", code: []instruction{{op: opCall, a: 0, b: 1, c: -2, d: 1}}, want: "open call"},
+		{name: "forged fixed multi span", code: []instruction{forgedFixedMulti}, want: "call result register range"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -358,6 +366,10 @@ func TestWordcodeVerifierRejectsRegistersConstantsJumpsAndOpenCalls(t *testing.T
 				t.Fatalf("wordcode verification error = %v, want %q", err, tc.want)
 			}
 		})
+	}
+	proto := &Proto{registers: 4}
+	if err := verifyInstruction(proto, 0, forgedFixedMulti, 1); err == nil || !strings.Contains(err.Error(), "register range") {
+		t.Fatalf("semantic verifier accepted forged fixed-multi result span: %v", err)
 	}
 }
 

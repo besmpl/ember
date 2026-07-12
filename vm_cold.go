@@ -248,7 +248,11 @@ func (thread *vmThread) runColdInstruction(frame *vmFrame) (action coldInstructi
 
 	case opCall:
 		callee := frame.register(b)
-		destination := vmResultDestination{register: a, count: d}
+		destinationCount := d
+		if count, marked := decodeFixedMultiResultCount(d, frame.proto.registers); marked {
+			destinationCount = count
+		}
+		destination := vmResultDestination{register: a, count: destinationCount}
 		if c >= 0 {
 			done, err := frame.callFixedTableScriptCallMetamethod(callee, globals, b+1, c, destination)
 			if err != nil {

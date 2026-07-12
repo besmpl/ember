@@ -144,7 +144,7 @@ func TestFixedCallBorrowFactsHandleMissingExtraArgsAndRecursion(t *testing.T) {
 	}
 }
 
-func TestMarkBorrowableFixedCallWindowsUsesOnlyFixedOpcodes(t *testing.T) {
+func TestMarkBorrowableFixedCallWindowsEncodesEligibleCallShapes(t *testing.T) {
 	callOne := markBorrowableFixedCallWindows([]instruction{
 		{op: opCallOne, a: 0, b: 3, c: 2}, {op: opReturnOne, a: 0},
 	}, 6, nil)
@@ -181,5 +181,25 @@ func TestMarkBorrowableFixedCallWindowsUsesOnlyFixedOpcodes(t *testing.T) {
 	markedGeneric := markBorrowableFixedCallWindows(generic, 6, nil)
 	if markedGeneric[0].c != generic[0].c {
 		t.Fatalf("generic CALL count changed from %d to %d", generic[0].c, markedGeneric[0].c)
+	}
+	fixedMulti := []instruction{
+		{op: opCall, a: 0, b: 2, c: 0, d: 2},
+		{op: opReturn, a: 0, b: 2},
+	}
+	markedMulti := markBorrowableFixedCallWindows(fixedMulti, 4, nil)
+	if got, borrow := decodeFixedMultiResultCount(markedMulti[0].d, 4); got != 2 || !borrow {
+		t.Fatalf("fixed-multi CALL result count = (%d, %t), want (2, true)", got, borrow)
+	}
+	normalized := normalizeFixedMultiResultCounts(markedMulti, 4)
+	if normalized[0].d != 2 {
+		t.Fatalf("normalized fixed-multi result count = %d, want 2", normalized[0].d)
+	}
+	remarked := markBorrowableFixedCallWindows(normalized, 4, nil)
+	if remarked[0].d != markedMulti[0].d {
+		t.Fatalf("re-finalized marker = %d, want stable %d", remarked[0].d, markedMulti[0].d)
+	}
+	capturedDestination := analyzeFixedCallBorrowFacts(fixedMulti, 4, []bool{false, true})
+	if len(capturedDestination) != 1 || capturedDestination[0].eligible || capturedDestination[0].reason != "result destination is captured" {
+		t.Fatalf("captured multi-result fact = %#v, want rejection", capturedDestination)
 	}
 }

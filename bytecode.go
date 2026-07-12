@@ -642,6 +642,48 @@ func decodeFixedCallCount(raw int) (count int, borrowHint bool) {
 	return raw, false
 }
 
+// encodeFixedMultiResultCount reserves the negative result-count space below
+// the valid open-prefix range.  An open CALL result count is -prefix-1, where
+// prefix is bounded by the caller register count.  Values below that bound
+// therefore unambiguously carry a fixed positive result count and a compiler
+// liveness proof that the caller suffix may be borrowed.
+func encodeFixedMultiResultCount(count, registers int) int {
+	return -(registers + count + 1)
+}
+
+func decodeFixedMultiResultCount(raw, registers int) (count int, borrowHint bool) {
+	if raw >= -(registers + 1) {
+		return raw, false
+	}
+	count = -raw - registers - 1
+	if count < 2 {
+		return raw, false
+	}
+	return count, true
+}
+
+// normalizeFixedMultiResultCounts removes internal borrow markers before
+// rebuilding analysis artifacts. This keeps finalization idempotent: decoded
+// wordcode is analyzed with the CALL's semantic fixed result span, then the
+// liveness pass may encode the marker again.
+func normalizeFixedMultiResultCounts(code []instruction, registers int) []instruction {
+	var normalized []instruction
+	for index, ins := range code {
+		count, marked := decodeFixedMultiResultCount(ins.d, registers)
+		if ins.op != opCall || !marked {
+			continue
+		}
+		if normalized == nil {
+			normalized = append([]instruction(nil), code...)
+		}
+		normalized[index].d = count
+	}
+	if normalized != nil {
+		return normalized
+	}
+	return code
+}
+
 type bytecodeOperandKind int
 
 const (
@@ -1669,6 +1711,7 @@ func finalizeProtoExecutionArtifact(proto *Proto, sourceCode ...[]instruction) e
 		}
 		code = decoded
 	}
+	code = normalizeFixedMultiResultCounts(code, proto.registers)
 	assignProtoGlobalSlots(proto, code)
 	artifact := buildExecutionArtifact(proto, code)
 	artifact.apply(proto)
@@ -2906,8 +2949,12 @@ func verifyInstruction(proto *Proto, pc int, ins instruction, codeLen ...int) er
 		} else if ins.b+ins.c >= proto.registers {
 			return fmt.Errorf("call argument register range out of range")
 		}
-		if ins.d > 0 {
-			return verifyRegisterSpan(proto, ins.a, ins.d)
+		resultCount := ins.d
+		if decoded, marked := decodeFixedMultiResultCount(ins.d, proto.registers); marked {
+			resultCount = decoded
+		}
+		if resultCount > 0 {
+			return verifyRegisterSpan(proto, ins.a, resultCount)
 		}
 		return verifyRegister(proto, ins.a)
 	case opCallOne:

@@ -118,6 +118,7 @@ type fixedCallBorrowFact struct {
 	argumentStart int
 	argumentCount int
 	result        int
+	resultCount   int
 	suffixStart   int
 	suffixEnd     int
 	eligible      bool
@@ -126,6 +127,14 @@ type fixedCallBorrowFact struct {
 
 func fixedCallBorrowShape(ins instruction) (argumentStart, argumentCount, result, rawCount int, ok bool) {
 	switch ins.op {
+	case opCall:
+		// Generic CALL is eligible only for fixed arguments and a fixed
+		// multi-result destination.  A one-result CALL has no marker space
+		// distinct from its ordinary encoding and keeps the existing path.
+		if ins.c < 0 || ins.d < 2 {
+			return 0, 0, 0, 0, false
+		}
+		return ins.b + 1, ins.c, ins.a, ins.c, true
 	case opCallOne:
 		argumentCount, _ = decodeFixedCallCount(ins.c)
 		return ins.b + 1, argumentCount, ins.a, ins.c, true
@@ -143,7 +152,7 @@ func fixedCallBorrowShape(ins instruction) (argumentStart, argumentCount, result
 }
 
 func fixedCallBorrowFactForInstruction(ins instruction, pc int, registers int, capturedLocals []bool, liveAfter registerSet) fixedCallBorrowFact {
-	fact := fixedCallBorrowFact{pc: pc, op: ins.op, suffixEnd: registers}
+	fact := fixedCallBorrowFact{pc: pc, op: ins.op, suffixEnd: registers, resultCount: 1}
 	argumentStart, argumentCount, result, rawCount, ok := fixedCallBorrowShape(ins)
 	if !ok {
 		return fact
@@ -151,6 +160,9 @@ func fixedCallBorrowFactForInstruction(ins instruction, pc int, registers int, c
 	fact.argumentStart = argumentStart
 	fact.argumentCount = argumentCount
 	fact.result = result
+	if ins.op == opCall {
+		fact.resultCount = ins.d
+	}
 	fact.suffixStart = argumentStart + argumentCount
 	if rawCount < -32768 || rawCount > 32767 {
 		fact.reason = "argument count is outside packed int16 range"
@@ -160,26 +172,31 @@ func fixedCallBorrowFactForInstruction(ins instruction, pc int, registers int, c
 		fact.reason = "argument window is outside caller registers"
 		return fact
 	}
-	if result < 0 || result >= registers {
+	if fact.resultCount < 1 || result < 0 || result+fact.resultCount > registers {
 		fact.reason = "result destination is outside caller registers"
 		return fact
 	}
-	if result >= fact.suffixStart && result < registers {
+	if (ins.op != opCall && result+fact.resultCount > fact.suffixStart) ||
+		(ins.op == opCall && result >= argumentStart) {
 		fact.reason = "result destination overlaps the scratch suffix"
 		return fact
 	}
-	if len(capturedLocals) > result && capturedLocals[result] {
-		fact.reason = "result destination is captured"
-		return fact
+	for destination := result; destination < result+fact.resultCount; destination++ {
+		if len(capturedLocals) > destination && capturedLocals[destination] {
+			fact.reason = "result destination is captured"
+			return fact
+		}
 	}
 	for register := argumentStart; register < registers; register++ {
 		if register < len(capturedLocals) && capturedLocals[register] {
 			fact.reason = "borrowed suffix contains a captured local"
 			return fact
 		}
-		if register != result && liveAfter.contains(register) {
-			fact.reason = "borrowed suffix remains live after the call"
-			return fact
+		if register < result || register >= result+fact.resultCount {
+			if liveAfter.contains(register) {
+				fact.reason = "borrowed suffix remains live after the call"
+				return fact
+			}
 		}
 	}
 	fact.eligible = true
@@ -226,6 +243,11 @@ func markBorrowableFixedCallWindows(code []instruction, registers int, capturedL
 			continue
 		}
 		switch marked[fact.pc].op {
+		case opCall:
+			marker := encodeFixedMultiResultCount(fact.resultCount, registers)
+			if marker >= -32768 && marker <= 32767 {
+				marked[fact.pc].d = marker
+			}
 		case opCallOne:
 			marked[fact.pc].c = encodeFixedCallCount(fact.argumentCount, true)
 		case opCallLocalOne, opCallUpvalueOne:
