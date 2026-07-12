@@ -5,13 +5,16 @@ import (
 	"sync"
 )
 
-// slotExecutionState is the scratch storage for the conservative scalar
-// runner.  It intentionally owns only unboxed slots: references to a VM
-// owner, runtime heap, or Value must never survive a pooled run.
+// slotExecutionState is the scratch storage for the conservative slot
+// runner. Slots are always scalar bits; heap is activated only while a run
+// needs an out-of-line handle (for example a string or a tag-colliding NaN).
+// The heap is retained empty by the pool for reference-run reuse.
 type slotExecutionState struct {
-	registers []slot
-	constants []slot
-	results   []slot
+	registers  []slot
+	constants  []slot
+	results    []slot
+	heap       *runtimeHeap
+	heapActive bool
 }
 
 const maxPooledSlotExecutionCapacity = 4 * 1024
@@ -31,6 +34,7 @@ func acquireSlotExecutionState(registers, constants int) *slotExecutionState {
 	}
 	state.constants = state.constants[:constants]
 	state.results = state.results[:0]
+	state.heapActive = false
 	return state
 }
 
@@ -51,6 +55,28 @@ func (state *slotExecutionState) resetForPool() {
 	state.registers = resetSlotExecutionBuffer(state.registers)
 	state.constants = resetSlotExecutionBuffer(state.constants)
 	state.results = resetSlotExecutionBuffer(state.results)
+	if state.heapActive && state.heap != nil {
+		if runtimeHeapExceedsPooledCapacity(state.heap) {
+			state.heap = nil
+		} else if !state.heap.resetForReuse() {
+			state.heap = nil
+		}
+	}
+	state.heapActive = false
+}
+
+func runtimeHeapExceedsPooledCapacity(heap *runtimeHeap) bool {
+	if heap == nil {
+		return false
+	}
+	capacity := cap(heap.boxedNumbers.entries) +
+		cap(heap.strings.entries) +
+		cap(heap.tables.entries) +
+		cap(heap.closures.entries) +
+		cap(heap.upvalues.entries) +
+		cap(heap.userdata.entries) +
+		cap(heap.hostCallables.entries)
+	return capacity > maxPooledSlotExecutionCapacity
 }
 
 func resetSlotExecutionBuffer(values []slot) []slot {
@@ -71,7 +97,7 @@ func slotExecutionEligible(proto *Proto, code []instruction) bool {
 		return false
 	}
 	for _, constant := range proto.constants {
-		if !slotExecutionImmediateValue(constant) {
+		if !slotExecutionValueSupported(constant) {
 			return false
 		}
 	}
@@ -116,12 +142,25 @@ func slotExecutionImmediateValue(value Value) bool {
 	}
 }
 
+// slotExecutionValueSupported describes the complete public Value set that
+// runtimeHeap can import. Immediate-only values stay on the allocation-free
+// path; the remaining supported values use a per-run heap adapter.
+func slotExecutionValueSupported(value Value) bool {
+	switch valueKind(value) {
+	case NilKind, BoolKind, NumberKind, StringKind, TableKind, FunctionKind, UserDataKind, HostFuncKind:
+		return true
+	default:
+		return false
+	}
+}
+
 func slotExecutionNumberNeedsBox(value float64) bool {
 	return math.Float64bits(value)&slotTaggedMask == slotTaggedPrefix
 }
 
-// runSlotExecution attempts the canonical immediate-only runner.  handled is
-// false for a safe fallback to the established VM; it is not a user-visible
+// runSlotExecution attempts the canonical slot runner. Constants are imported
+// once at the public/host seam; opcode bodies operate only on slots. handled
+// is false for a safe fallback to the established VM; it is not a user-visible
 // execution error.
 func runSlotExecution(proto *Proto) (values []Value, handled bool, err error) {
 	if proto == nil || !proto.slotExecutionEligible {
@@ -130,12 +169,8 @@ func runSlotExecution(proto *Proto) (values []Value, handled bool, err error) {
 	state := acquireSlotExecutionState(proto.registers, len(proto.constants))
 	defer releaseSlotExecutionState(state)
 
-	for index, constant := range proto.constants {
-		encoded, ok := slotExecutionImportImmediate(constant)
-		if !ok {
-			return nil, false, nil
-		}
-		state.constants[index] = encoded
+	if !slotExecutionImportConstants(state, proto.constants) {
+		return nil, false, nil
 	}
 	for index := range state.registers {
 		state.registers[index] = slotNil
@@ -150,13 +185,47 @@ func runSlotExecution(proto *Proto) (values []Value, handled bool, err error) {
 	}
 	values = make([]Value, count)
 	for index := range values {
-		value, ok := slotExecutionExportImmediate(state.results[index])
+		value, ok := slotExecutionExport(state, state.results[index])
 		if !ok {
 			return nil, false, nil
 		}
 		values[index] = value
 	}
 	return values, true, nil
+}
+
+// slotExecutionImportConstants keeps the common immediate-only path free of
+// heap allocation. A reference run lazily activates the pooled heap and
+// imports all constants through the public/host seam before opcode execution.
+func slotExecutionImportConstants(state *slotExecutionState, constants []Value) bool {
+	if state == nil {
+		return false
+	}
+	state.heapActive = false
+	needsHeap := false
+	for index, constant := range constants {
+		encoded, ok := slotExecutionImportImmediate(constant)
+		if !ok {
+			needsHeap = true
+			break
+		}
+		state.constants[index] = encoded
+	}
+	if !needsHeap {
+		return true
+	}
+	if state.heap == nil {
+		state.heap = &runtimeHeap{}
+	}
+	state.heapActive = true
+	for index, constant := range constants {
+		encoded, err := state.heap.importValue(constant)
+		if err != nil {
+			return false
+		}
+		state.constants[index] = encoded
+	}
+	return true
 }
 
 func slotExecutionImportImmediate(value Value) (slot, bool) {
@@ -198,6 +267,17 @@ func slotExecutionExportImmediate(value slot) (Value, bool) {
 	default:
 		return Value{}, false
 	}
+}
+
+func slotExecutionExport(state *slotExecutionState, value slot) (Value, bool) {
+	if state == nil || !state.heapActive || state.heap == nil {
+		return slotExecutionExportImmediate(value)
+	}
+	exported, err := state.heap.exportValue(value)
+	if err != nil {
+		return Value{}, false
+	}
+	return exported, true
 }
 
 func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) {

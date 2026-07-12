@@ -2,8 +2,11 @@ package ember
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"reflect"
+	"runtime"
+	"sync"
 	"testing"
 )
 
@@ -199,6 +202,70 @@ func TestSlotExecutionImmediateScalarAllocationBudget(t *testing.T) {
 	}
 }
 
+func TestSlotExecutionReferenceAllocationBudget(t *testing.T) {
+	proto, err := Compile(`return "slot-reference"`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	allocs := testing.AllocsPerRun(100, func() {
+		values, err := Run(proto)
+		var got string
+		var ok bool
+		if len(values) == 1 {
+			got, ok = values[0].String()
+		}
+		if err != nil || len(values) != 1 || !ok || got != "slot-reference" {
+			t.Fatalf("warm reference Run = %#v, %v; want [slot-reference]", values, err)
+		}
+	})
+	if allocs > 1 {
+		t.Fatalf("warm reference Run allocations = %.2f, want <= 1", allocs)
+	}
+}
+
+func TestSlotExecutionInactiveHeapSurvivesImmediateRuns(t *testing.T) {
+	reference := newProto(
+		[]Value{StringValue("reference")},
+		[]instruction{{op: opLoadConst, a: 0, b: 0}, {op: opReturnOne, a: 0}},
+		nil, nil, 1, 0, false,
+	)
+	immediate := newProto(
+		[]Value{NumberValue(7)},
+		[]instruction{{op: opLoadConst, a: 0, b: 0}, {op: opReturnOne, a: 0}},
+		nil, nil, 1, 0, false,
+	)
+	state := acquireSlotExecutionState(1, 1)
+	defer releaseSlotExecutionState(state)
+	if !slotExecutionImportConstants(state, reference.constants) || !state.heapActive {
+		t.Fatal("reference import did not activate pooled heap")
+	}
+	_, index, generation, err := slotUnpackHandle(state.constants[0])
+	if err != nil {
+		t.Fatalf("unpack reference handle: %v", err)
+	}
+	state.resetForPool()
+	if state.heap == nil || state.heapActive {
+		t.Fatal("reference reset did not retain an inactive heap")
+	}
+	baseline := state.heap.strings.entries[index].generation
+	if baseline == generation {
+		t.Fatalf("reset did not advance string generation: still %d", baseline)
+	}
+	for run := 0; run < 100; run++ {
+		state.constants = state.constants[:1]
+		if !slotExecutionImportConstants(state, immediate.constants) {
+			t.Fatalf("immediate import %d failed", run)
+		}
+		if state.heapActive {
+			t.Fatalf("immediate import %d activated pooled heap", run)
+		}
+		state.resetForPool()
+		if got := state.heap.strings.entries[index].generation; got != baseline {
+			t.Fatalf("immediate reset %d changed string generation to %d, want %d", run, got, baseline)
+		}
+	}
+}
+
 func TestSlotExecutionNumericForAllocationBudget(t *testing.T) {
 	proto, err := Compile(`
 local total = 0
@@ -263,15 +330,15 @@ func TestSlotExecutionImmediateScalarBitsAndSafeNaN(t *testing.T) {
 		}
 	}
 
-	// Quiet NaNs in the tag prefix are safely rejected by the scalar runner;
-	// the established VM still preserves their bits through the public API.
+	// Quiet NaNs in the tag prefix use a rare boxed-number handle. The slot
+	// runner preserves their bits through the same public seam as references.
 	proto := newProto(
 		[]Value{NumberValue(math.Float64frombits(0x7ff8_0000_0000_0042))},
 		[]instruction{{op: opLoadConst, a: 0, b: 0}, {op: opReturnOne, a: 0}},
 		nil, nil, 1, 0, false,
 	)
-	if proto.slotExecutionEligible {
-		t.Fatal("tag-colliding NaN unexpectedly slot eligible")
+	if !proto.slotExecutionEligible {
+		t.Fatal("tag-colliding NaN is not slot eligible")
 	}
 	got, err := Run(proto)
 	if err != nil {
@@ -307,24 +374,163 @@ func TestSlotExecutionLoadConstAuxUsesPhysicalWordPC(t *testing.T) {
 	}
 }
 
-func TestSlotExecutionRejectsReferenceAndRichPrototypes(t *testing.T) {
-	for _, source := range []string{
-		`return "reference"`,
-		`return {value = 1}`,
-		`return missingGlobal`,
-		`return tostring(1)`,
-		`return function() return 1 end`,
-		"sideEffect = 1\nreturn 1",
+func TestSlotExecutionHeapStringRoundTripIdentityAndLifetime(t *testing.T) {
+	box := newStringBox("slot-reference")
+	proto := newProto(
+		[]Value{stringValueFromBox(box)},
+		[]instruction{{op: opLoadConst, a: 0, b: 0}, {op: opReturnOne, a: 0}},
+		nil, nil, 1, 0, false,
+	)
+	if !proto.slotExecutionEligible {
+		t.Fatal("string constant is not slot eligible")
+	}
+	values, handled, err := runSlotExecution(proto)
+	if err != nil || !handled || len(values) != 1 {
+		t.Fatalf("slot string execution = (%#v, %t, %v), want one handled result", values, handled, err)
+	}
+	if got := values[0].stringBox(); got != box {
+		t.Fatalf("slot string box = %p, want %p", got, box)
+	}
+
+	runtime.GC()
+	if got, ok := values[0].String(); !ok || got != "slot-reference" {
+		t.Fatalf("slot string after GC = (%q, %t), want slot-reference", got, ok)
+	}
+	public, err := Run(proto)
+	if err != nil || len(public) != 1 || public[0].stringBox() != box {
+		t.Fatalf("public string result = (%#v, %v), want original box", public, err)
+	}
+}
+
+func TestSlotExecutionHeapReferenceKindsPreserveIdentity(t *testing.T) {
+	table := NewTable()
+	userdata := NewUserData("slot-userdata")
+	closure := &closure{}
+	host := HostFuncValue(func([]Value) ([]Value, error) { return nil, nil })
+	cases := []struct {
+		name  string
+		want  Value
+		check func(t *testing.T, got Value)
+	}{
+		{name: "table", want: TableValue(table), check: func(t *testing.T, got Value) {
+			value, ok := got.Table()
+			if !ok || value != table {
+				t.Fatalf("table identity = (%p, %t), want (%p, true)", value, ok, table)
+			}
+		}},
+		{name: "userdata", want: UserDataValue(userdata), check: func(t *testing.T, got Value) {
+			value, ok := got.UserData()
+			if !ok || value != userdata {
+				t.Fatalf("userdata identity = (%p, %t), want (%p, true)", value, ok, userdata)
+			}
+		}},
+		{name: "closure", want: closureFunctionValue(closure), check: func(t *testing.T, got Value) {
+			value, ok := got.scriptFunction()
+			if !ok || value != closure {
+				t.Fatalf("closure identity = (%p, %t), want (%p, true)", value, ok, closure)
+			}
+		}},
+		{name: "host callable", want: host, check: func(t *testing.T, got Value) {
+			if got.hostCallableRef() != host.hostCallableRef() {
+				t.Fatalf("host callable identity = %p, want %p", got.hostCallableRef(), host.hostCallableRef())
+			}
+		}},
+	}
+	for _, test := range cases {
+		proto := newProto(
+			[]Value{test.want},
+			[]instruction{{op: opLoadConst, a: 0, b: 0}, {op: opReturnOne, a: 0}},
+			nil, nil, 1, 0, false,
+		)
+		if !proto.slotExecutionEligible {
+			t.Fatalf("%s constant is not slot eligible", test.name)
+		}
+		values, handled, err := runSlotExecution(proto)
+		if err != nil || !handled || len(values) != 1 {
+			t.Fatalf("%s slot execution = (%#v, %t, %v), want one handled result", test.name, values, handled, err)
+		}
+		test.check(t, values[0])
+		public, err := Run(proto)
+		if err != nil || len(public) != 1 {
+			t.Fatalf("%s public execution = (%#v, %v), want one result", test.name, public, err)
+		}
+		test.check(t, public[0])
+	}
+	runtime.GC()
+}
+
+func TestSlotExecutionHeapBoxedNaNPreservesBits(t *testing.T) {
+	const wantBits = uint64(0x7ff8_0000_0000_0042)
+	proto := newProto(
+		[]Value{NumberValue(math.Float64frombits(wantBits))},
+		[]instruction{{op: opLoadConst, a: 0, b: 0}, {op: opReturnOne, a: 0}},
+		nil, nil, 1, 0, false,
+	)
+	values, handled, err := runSlotExecution(proto)
+	if err != nil || !handled || len(values) != 1 {
+		t.Fatalf("slot boxed NaN execution = (%#v, %t, %v), want one handled result", values, handled, err)
+	}
+	if got := valueFloat64Bits(valueNumber(values[0])); got != wantBits {
+		t.Fatalf("slot boxed NaN bits = %#x, want %#x", got, wantBits)
+	}
+	public, err := Run(proto)
+	if err != nil || len(public) != 1 || valueFloat64Bits(valueNumber(public[0])) != wantBits {
+		t.Fatalf("public boxed NaN result = (%#v, %v), want bits %#x", public, err, wantBits)
+	}
+}
+
+func TestSlotExecutionHeapReferenceConcurrentRuns(t *testing.T) {
+	box := newStringBox("concurrent-slot-reference")
+	proto := newProto(
+		[]Value{stringValueFromBox(box)},
+		[]instruction{{op: opLoadConst, a: 0, b: 0}, {op: opReturnOne, a: 0}},
+		nil, nil, 1, 0, false,
+	)
+	const workers = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			values, err := Run(proto)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if len(values) != 1 || values[0].stringBox() != box {
+				errs <- fmt.Errorf("result = %#v, want original string box", values)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+}
+
+func TestSlotExecutionReferenceAndRichPrototypeEligibility(t *testing.T) {
+	for _, test := range []struct {
+		source   string
+		eligible bool
+	}{
+		{source: `return "reference"`, eligible: true},
+		{source: `return {value = 1}`},
+		{source: `return missingGlobal`},
+		{source: `return tostring(1)`},
+		{source: `return function() return 1 end`},
+		{source: "sideEffect = 1\nreturn 1"},
 	} {
-		proto, err := Compile(source)
+		proto, err := Compile(test.source)
 		if err != nil {
-			t.Fatalf("Compile(%q) returned error: %v", source, err)
+			t.Fatalf("Compile(%q) returned error: %v", test.source, err)
 		}
-		if proto.slotExecutionEligible {
-			t.Fatalf("rich prototype %q unexpectedly slot eligible", source)
+		if proto.slotExecutionEligible != test.eligible {
+			t.Fatalf("prototype %q eligibility = %t, want %t", test.source, proto.slotExecutionEligible, test.eligible)
 		}
-		if _, err := Run(proto); err == nil && source == `return missingGlobal` {
-			t.Fatalf("global prototype %q unexpectedly succeeded", source)
+		if _, err := Run(proto); err == nil && test.source == `return missingGlobal` {
+			t.Fatalf("global prototype %q unexpectedly succeeded", test.source)
 		}
 	}
 }
@@ -332,11 +538,26 @@ func TestSlotExecutionRejectsReferenceAndRichPrototypes(t *testing.T) {
 func TestSlotExecutionPoolResetOwnsNoRuntimeReferences(t *testing.T) {
 	typ := reflect.TypeOf(slotExecutionState{})
 	for index := 0; index < typ.NumField(); index++ {
-		if typ.Field(index).Type != reflect.TypeOf([]slot(nil)) {
-			t.Fatalf("slot state field %q has type %s, want []slot", typ.Field(index).Name, typ.Field(index).Type)
+		field := typ.Field(index)
+		if field.Name == "heap" {
+			if field.Type != reflect.TypeOf((*runtimeHeap)(nil)) {
+				t.Fatalf("slot state field %q has type %s, want *runtimeHeap", field.Name, field.Type)
+			}
+			continue
+		}
+		if field.Name == "heapActive" {
+			if field.Type.Kind() != reflect.Bool {
+				t.Fatalf("slot state field %q has type %s, want bool", field.Name, field.Type)
+			}
+			continue
+		}
+		if field.Type != reflect.TypeOf([]slot(nil)) {
+			t.Fatalf("slot state field %q has type %s, want []slot", field.Name, field.Type)
 		}
 	}
 	state := acquireSlotExecutionState(2, 2)
+	state.heap = &runtimeHeap{}
+	state.heapActive = true
 	state.registers[0] = slotNil
 	state.constants[0] = slotBool(true)
 	state.results = append(state.results, slot(1))
@@ -344,6 +565,12 @@ func TestSlotExecutionPoolResetOwnsNoRuntimeReferences(t *testing.T) {
 	constantBacking := state.constants[:cap(state.constants)]
 	resultBacking := state.results[:cap(state.results)]
 	state.resetForPool()
+	if state.heap == nil {
+		t.Fatal("reset state discarded reusable runtime heap")
+	}
+	if state.heapActive {
+		t.Fatal("reset state left heap active")
+	}
 	if len(state.registers) != 0 || len(state.constants) != 0 || len(state.results) != 0 {
 		t.Fatalf("reset state lengths = (%d, %d, %d), want all zero", len(state.registers), len(state.constants), len(state.results))
 	}
@@ -370,10 +597,35 @@ func TestSlotExecutionPoolResetOwnsNoRuntimeReferences(t *testing.T) {
 		registers: make([]slot, maxPooledSlotExecutionCapacity+1),
 		constants: make([]slot, maxPooledSlotExecutionCapacity+1),
 		results:   make([]slot, maxPooledSlotExecutionCapacity+1),
+		heap: &runtimeHeap{strings: slotSlab[*stringBox]{
+			entries: make([]slotSlabEntry[*stringBox], maxPooledSlotExecutionCapacity+1),
+		}},
+		heapActive: true,
 	}
 	oversized.resetForPool()
 	if oversized.registers != nil || oversized.constants != nil || oversized.results != nil {
 		t.Fatal("pool reset retained oversized slot buffers")
+	}
+	if oversized.heap != nil {
+		t.Fatal("pool reset retained oversized runtime heap")
+	}
+}
+
+func TestSlotExecutionPoolDropsGenerationExhaustedHeap(t *testing.T) {
+	state := &slotExecutionState{
+		heap: &runtimeHeap{
+			strings: slotSlab[*stringBox]{
+				entries: []slotSlabEntry[*stringBox]{
+					{},
+					{value: newStringBox("exhausted"), generation: slotMaxGeneration, live: true},
+				},
+			},
+		},
+		heapActive: true,
+	}
+	state.resetForPool()
+	if state.heap != nil {
+		t.Fatal("generation-exhausted heap was retained")
 	}
 }
 
@@ -406,6 +658,34 @@ return total
 	b.ResetTimer()
 	for index := 0; index < b.N; index++ {
 		if _, err := Run(proto); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkRunSlotStringReference(b *testing.B) {
+	proto, err := Compile(`return "slot-reference"`)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		if _, err := Run(proto); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkRunEstablishedStringReference(b *testing.B) {
+	proto, err := Compile(`return "slot-reference"`)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		if _, err := runWithSlotExecutionDisabled(proto); err != nil {
 			b.Fatal(err)
 		}
 	}

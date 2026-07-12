@@ -50,6 +50,125 @@ type runtimeHeap struct {
 	hostCallables slotSlab[*hostCallable]
 }
 
+// resetForReuse drops every Go reference held by a run while retaining slab
+// backing arrays, free-list capacity, and import-map capacity for the next
+// reference run. Generation advancement makes every handle issued by the
+// previous run stale, even when its slot index is recycled immediately. It
+// returns false when a reusable entry has exhausted its generation space;
+// callers must discard that heap rather than accumulating retired entries.
+func (heap *runtimeHeap) resetForReuse() bool {
+	if heap == nil {
+		return true
+	}
+	if runtimeHeapGenerationExhausted(heap) {
+		return false
+	}
+	resetSlotNumberSlab(&heap.boxedNumbers)
+	resetSlotSlab(&heap.strings)
+	resetSlotSlab(&heap.tables)
+	resetSlotSlab(&heap.closures)
+	resetSlotSlab(&heap.upvalues)
+	resetSlotSlab(&heap.userdata)
+	resetSlotSlab(&heap.hostCallables)
+	return true
+}
+
+func runtimeHeapGenerationExhausted(heap *runtimeHeap) bool {
+	if heap == nil {
+		return false
+	}
+	if slotNumberSlabGenerationExhausted(&heap.boxedNumbers) {
+		return true
+	}
+	return slotSlabGenerationExhausted(&heap.strings) ||
+		slotSlabGenerationExhausted(&heap.tables) ||
+		slotSlabGenerationExhausted(&heap.closures) ||
+		slotSlabGenerationExhausted(&heap.upvalues) ||
+		slotSlabGenerationExhausted(&heap.userdata) ||
+		slotSlabGenerationExhausted(&heap.hostCallables)
+}
+
+func slotNumberSlabGenerationExhausted(slab *slotNumberSlab) bool {
+	if slab == nil {
+		return false
+	}
+	for index := 1; index < len(slab.entries); index++ {
+		entry := slab.entries[index]
+		if !entry.retired && entry.generation == slotMaxGeneration {
+			return true
+		}
+	}
+	return false
+}
+
+func slotSlabGenerationExhausted[T comparable](slab *slotSlab[T]) bool {
+	if slab == nil {
+		return false
+	}
+	for index := 1; index < len(slab.entries); index++ {
+		entry := slab.entries[index]
+		if !entry.retired && entry.generation == slotMaxGeneration {
+			return true
+		}
+	}
+	return false
+}
+
+func resetSlotNumberSlab(slab *slotNumberSlab) {
+	if slab == nil {
+		return
+	}
+	slab.free = slab.free[:0]
+	if len(slab.entries) == 0 {
+		return
+	}
+	slab.entries[0] = slotNumberEntry{}
+	for index := 1; index < len(slab.entries); index++ {
+		entry := &slab.entries[index]
+		entry.bits = 0
+		entry.live = false
+		if entry.retired {
+			continue
+		}
+		if entry.generation == slotMaxGeneration {
+			entry.retired = true
+			continue
+		}
+		entry.generation++
+		slab.free = append(slab.free, uint32(index))
+	}
+}
+
+func resetSlotSlab[T comparable](slab *slotSlab[T]) {
+	if slab == nil {
+		return
+	}
+	if slab.byValue != nil {
+		clear(slab.byValue)
+	}
+	slab.free = slab.free[:0]
+	if len(slab.entries) == 0 {
+		return
+	}
+	slab.entries[0] = slotSlabEntry[T]{}
+	for index := 1; index < len(slab.entries); index++ {
+		entry := &slab.entries[index]
+		var zero T
+		entry.value = zero
+		entry.live = false
+		entry.pinned = false
+		if entry.retired {
+			continue
+		}
+		if entry.generation == slotMaxGeneration {
+			entry.retired = true
+			continue
+		}
+		entry.generation++
+		slab.free = append(slab.free, uint32(index))
+	}
+}
+
 func (slab *slotSlab[T]) add(value T, pinned bool) (uint32, uint16, error) {
 	if slab.byValue == nil {
 		slab.byValue = make(map[T]uint32)
