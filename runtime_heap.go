@@ -1323,7 +1323,6 @@ func (collector *runtimeHeapCollector) clearInactiveFrameSlots(thread *vmThread,
 			continue
 		}
 		frame.proto = nil
-		frame.caller = nil
 		frame.window = vmRegisterWindow{}
 		frame.owner = nil
 		frame.registers = nil
@@ -1389,7 +1388,6 @@ func (collector *runtimeHeapCollector) scanFrame(value *vmFrame) {
 	}
 	collector.frames[value] = struct{}{}
 	collector.scanProto(value.proto)
-	collector.scanFrame(value.caller)
 	collector.scanStackOwner(value.owner)
 	collector.scanStackOwner(value.window.owner)
 	collector.scanValues(value.registers)

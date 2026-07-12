@@ -3681,8 +3681,8 @@ func TestVMFrameRecordsCallMetadataForFutureControlFlow(t *testing.T) {
 	if parent.debugLine != -1 {
 		t.Fatalf("parent debug line is %d, want -1 placeholder", parent.debugLine)
 	}
-	if child.caller != parent {
-		t.Fatal("child caller is not parent frame")
+	if len(thread.frames) != 2 || thread.frames[0] != parent || thread.frames[1] != child {
+		t.Fatal("thread frame stack did not preserve parent/child order")
 	}
 
 	child.pendingCall = vmPendingCall{

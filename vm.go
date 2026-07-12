@@ -566,9 +566,34 @@ func (counts *directFrameOpcodeCounts) ranked() []directFrameOpcodeCount {
 	return ranked
 }
 
+// vmFrameRecord is the state that survives a dispatch-loop frame switch. Its
+// fixed-width indices keep the record dense and leave the current frame's
+// decoded slices and loop counters in locals rather than in the call stack.
+// resultCount uses max uint32 for an open result range.
+type vmFrameRecord struct {
+	proto             *Proto
+	returnPC          uint32
+	base              uint32
+	top               uint32
+	resultDestination uint32
+	resultCount       uint32
+	argumentBase      uint32
+	varargBase        uint32
+	protectedDepth    uint32
+	argumentCount     uint16
+	varargCount       uint16
+	flags             vmFrameRecordFlags
+}
+
+type vmFrameRecordFlags uint16
+
+const (
+	vmFrameRecordFlagProtected vmFrameRecordFlags = 1 << iota
+	vmFrameRecordFlagOpenResults
+)
+
 type vmFrame struct {
 	proto           *Proto
-	caller          *vmFrame
 	depth           int
 	window          vmRegisterWindow
 	registerBase    int
@@ -2027,9 +2052,6 @@ func (thread *vmThread) pushFrame(frame *vmFrame) {
 	}
 	pending := frame.pendingCall
 	needsProtectedLink := frame.hasPendingCall && pending.protected != nil && !pending.protectedBoundary
-	if len(thread.frames) > 0 {
-		frame.caller = thread.frames[len(thread.frames)-1]
-	}
 	frame.depth = len(thread.frames)
 	thread.frames = append(thread.frames, frame)
 	if needsProtectedLink {
@@ -2462,7 +2484,6 @@ func (frame *vmFrame) resetFrameIntoRegisters(proto *Proto, args []Value, upvalu
 	}
 
 	frame.proto = proto
-	frame.caller = nil
 	frame.depth = noProtectedFrame
 	frame.registerBase = base
 	frame.registerCount = len(registers)
@@ -2483,7 +2504,6 @@ func (frame *vmFrame) resetFrameIntoRegisters(proto *Proto, args []Value, upvalu
 func (frame *vmFrame) resetForReuse() {
 	frame.closeCells()
 	frame.proto = nil
-	frame.caller = nil
 	frame.depth = noProtectedFrame
 	frame.window = vmRegisterWindow{}
 	frame.registerBase = 0

@@ -209,20 +209,11 @@ func runtimeCoroutinesHaveOpaqueRoots(coroutines map[*vmCoroutine]struct{}) bool
 		return false
 	}
 	seenCoroutines := make(map[*vmCoroutine]struct{}, len(coroutines))
-	seenFrames := make(map[*vmFrame]struct{})
-	var frameOpaque func(*vmFrame) bool
-	frameOpaque = func(frame *vmFrame) bool {
+	frameOpaque := func(frame *vmFrame) bool {
 		if frame == nil {
 			return false
 		}
-		if _, seen := seenFrames[frame]; seen {
-			return false
-		}
-		seenFrames[frame] = struct{}{}
-		if frame.hasPendingCall && frame.pendingCall.host != nil {
-			return true
-		}
-		return frameOpaque(frame.caller)
+		return frame.hasPendingCall && frame.pendingCall.host != nil
 	}
 	var coroutineOpaque func(*vmCoroutine) bool
 	coroutineOpaque = func(coroutine *vmCoroutine) bool {
