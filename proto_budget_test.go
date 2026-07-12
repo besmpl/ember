@@ -26,6 +26,7 @@ func TestProtoFieldClassificationBudget(t *testing.T) {
 		"capturedLocals":          {},
 		"cacheSiteCount":          {},
 		"cacheIndex":              {},
+		"directLoopKernels":       {},
 		"reuseZeroCaptureClosure": {},
 		"slotExecutionEligible":   {},
 		"verifyErr":               {},

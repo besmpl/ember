@@ -1718,6 +1718,7 @@ type Proto struct {
 	capturedLocals          []bool
 	cacheSiteCount          int
 	cacheIndex              *wordcodeCacheIndex
+	directLoopKernels       *directLoopKernelSet
 	entryNilRegisters       []int
 	reuseZeroCaptureClosure bool
 	// slotExecutionEligible is sealed with the immutable wordcode artifact.
@@ -1908,20 +1909,31 @@ func encodeProtoWords(proto *Proto, code []instruction) error {
 	if err != nil {
 		return err
 	}
-	var cacheIndex *wordcodeCacheIndex
-	if wordcodeCacheSiteCount(code) != 0 {
-		boundaries, boundaryErr := wordcodeBoundaries(code)
+	cacheSiteCount := wordcodeCacheSiteCount(code)
+	needsKernelBoundaries := hasDirectLoopKernelCandidate(code)
+	var boundaries []int
+	if cacheSiteCount != 0 || needsKernelBoundaries {
+		var boundaryErr error
+		boundaries, boundaryErr = wordcodeBoundaries(code)
 		if boundaryErr != nil {
 			return boundaryErr
 		}
+	}
+	var cacheIndex *wordcodeCacheIndex
+	if cacheSiteCount != 0 {
 		cacheIndex, err = buildWordcodeCacheIndex(code, boundaries, len(words))
 		if err != nil {
 			return err
 		}
 	}
+	directLoopKernels, err := buildDirectLoopKernels(code, boundaries, words, cacheIndex)
+	if err != nil {
+		return err
+	}
 	proto.words = words
-	proto.cacheSiteCount = wordcodeCacheSiteCount(code)
+	proto.cacheSiteCount = cacheSiteCount
 	proto.cacheIndex = cacheIndex
+	proto.directLoopKernels = directLoopKernels
 	if len(proto.lines) == 0 {
 		proto.wordLines = nil
 	} else {
@@ -1929,6 +1941,15 @@ func encodeProtoWords(proto *Proto, code []instruction) error {
 	}
 	proto.slotExecutionEligible = slotExecutionEligible(proto, code)
 	return nil
+}
+
+func hasDirectLoopKernelCandidate(code []instruction) bool {
+	for _, ins := range code {
+		if ins.op == opArrayNextJump2 {
+			return true
+		}
+	}
+	return false
 }
 
 // wordcodeLinesFromWords maps logical source lines onto physical words without

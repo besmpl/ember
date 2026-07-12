@@ -8036,6 +8036,16 @@ reload:
 			}
 
 		case opArrayNextJump2:
+			if proto.directLoopKernels != nil {
+				if kernel := proto.directLoopKernels.kernelAt(pc); kernel != nil {
+					exit := runDirectLoopKernel(thread, frame, kernel)
+					if !exit.resumesDirectFrame() {
+						return exit
+					}
+					pc = frame.pc
+					continue
+				}
+			}
 			callee := registers[b]
 			if valueNativeID(callee) == nativeFuncArrayNext {
 				tableValue := registers[c]
