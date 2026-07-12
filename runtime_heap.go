@@ -1344,6 +1344,9 @@ func (collector *runtimeHeapCollector) scanSuspendedFrames(value vmSuspendedFram
 	for _, frame := range value.frames {
 		collector.scanFrame(frame)
 	}
+	for _, record := range value.frameRecords {
+		collector.scanProto(record.proto)
+	}
 	collector.scanCoroutine(value.coroutine)
 }
 
@@ -1364,6 +1367,9 @@ func (collector *runtimeHeapCollector) scanThread(value *vmThread) {
 	collector.scanValues(value.stack)
 	for _, frame := range value.frames {
 		collector.scanFrame(frame)
+	}
+	for _, record := range value.frameRecords {
+		collector.scanProto(record.proto)
 	}
 	collector.scanCoroutine(value.coroutine)
 	// Function instances and their canonical closures are accelerators. Every

@@ -163,11 +163,12 @@ func (coroutine *vmCoroutine) disposeFrames() {
 	if coroutine == nil {
 		return
 	}
-	if len(coroutine.suspended.frames) != 0 || coroutine.suspended.owner != nil {
+	if len(coroutine.suspended.frames) != 0 || len(coroutine.suspended.frameRecords) != 0 || coroutine.suspended.owner != nil {
 		coroutine.thread.resumeFrames(coroutine.suspended)
 		coroutine.suspended = vmSuspendedFrames{}
 	}
 	coroutine.thread.dropFrames(0)
+	coroutine.thread.clearFrameRecords()
 	for _, frame := range coroutine.thread.frameSlots {
 		if frame != nil {
 			frame.resetForPool()
@@ -230,7 +231,7 @@ func resumeCoroutine(coroutine *vmCoroutine, globals *globalEnv, args []Value) (
 		coroutine.thread.coroutine = previousCoroutine
 	}()
 
-	if len(coroutine.suspended.frames) > 0 {
+	if len(coroutine.suspended.frames) > 0 || len(coroutine.suspended.frameRecords) > 0 {
 		coroutine.thread.resumeFrames(coroutine.suspended)
 		coroutine.thread.coroutine = coroutine
 		coroutine.suspended = vmSuspendedFrames{}

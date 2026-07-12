@@ -126,7 +126,12 @@ type vmThread struct {
 	ownerBound  bool
 	frames      []*vmFrame
 	frameSlots  []*vmFrame
-	stackOwner  *vmStackOwner
+	// frameRecords is the compact continuation stack used by the borrowed
+	// fixed-result call bridge. The vmFrame remains the execution bridge until
+	// the rest of the call ABI moves onto records.
+	frameRecords    []vmFrameRecord
+	maxFrameRecords int
+	stackOwner      *vmStackOwner
 	// stack is kept as a short-lived view for existing runtime helpers and
 	// diagnostics.  stackOwner.values is the owning storage; both slices are
 	// updated together whenever the window grows or is truncated.
@@ -579,7 +584,8 @@ type vmFrameRecord struct {
 	resultCount       uint32
 	argumentBase      uint32
 	varargBase        uint32
-	protectedDepth    uint32
+	protectedDepth    uint16
+	frameDepth        uint16
 	argumentCount     uint16
 	varargCount       uint16
 	flags             vmFrameRecordFlags
@@ -591,6 +597,57 @@ const (
 	vmFrameRecordFlagProtected vmFrameRecordFlags = 1 << iota
 	vmFrameRecordFlagOpenResults
 )
+
+func (thread *vmThread) pushFrameRecord(record vmFrameRecord) {
+	if thread == nil {
+		return
+	}
+	thread.frameRecords = append(thread.frameRecords, record)
+	if len(thread.frameRecords) > thread.maxFrameRecords {
+		thread.maxFrameRecords = len(thread.frameRecords)
+	}
+}
+
+func (thread *vmThread) popFrameRecord() (vmFrameRecord, bool) {
+	if thread == nil || len(thread.frameRecords) == 0 {
+		return vmFrameRecord{}, false
+	}
+	last := len(thread.frameRecords) - 1
+	record := thread.frameRecords[last]
+	thread.frameRecords[last] = vmFrameRecord{}
+	thread.frameRecords = thread.frameRecords[:last]
+	return record, true
+}
+
+func (thread *vmThread) peekFrameRecord(frame *vmFrame) (vmFrameRecord, bool) {
+	if thread == nil || frame == nil || len(thread.frameRecords) == 0 || frame.registerBase < 0 {
+		return vmFrameRecord{}, false
+	}
+	record := thread.frameRecords[len(thread.frameRecords)-1]
+	if record.proto != frame.proto || uint64(frame.registerBase) != uint64(record.base) ||
+		frame.depth < 0 || uint64(frame.depth) != uint64(record.frameDepth) {
+		return vmFrameRecord{}, false
+	}
+	return record, true
+}
+
+func (thread *vmThread) popFrameRecordFor(frame *vmFrame) (vmFrameRecord, bool) {
+	record, ok := thread.peekFrameRecord(frame)
+	if !ok {
+		return vmFrameRecord{}, false
+	}
+	_, _ = thread.popFrameRecord()
+	return record, true
+}
+
+func (thread *vmThread) clearFrameRecords() {
+	if thread == nil {
+		return
+	}
+	clear(thread.frameRecords)
+	thread.frameRecords = thread.frameRecords[:0]
+	thread.maxFrameRecords = 0
+}
 
 type vmFrame struct {
 	proto           *Proto
@@ -693,6 +750,8 @@ type vmSuspendedFrames struct {
 	ctx                   context.Context
 	globals               *globalEnv
 	frames                []*vmFrame
+	frameRecords          []vmFrameRecord
+	maxFrameRecords       int
 	owner                 *vmStackOwner
 	stack                 []Value
 	nearestProtectedFrame int
@@ -1166,6 +1225,7 @@ func (thread *vmThread) resetForRun(ctx context.Context, globals *globalEnv) {
 		thread.owner = globals.owner
 	}
 	thread.frames = thread.frames[:0]
+	thread.clearFrameRecords()
 	if thread.stackOwner == nil {
 		thread.stackOwner = &vmStackOwner{}
 	}
@@ -1200,6 +1260,7 @@ func (thread *vmThread) resetForRun(ctx context.Context, globals *globalEnv) {
 func (thread *vmThread) resetForPool() {
 	owned := thread.ownerBound
 	thread.dropFrames(0)
+	thread.clearFrameRecords()
 	if owned {
 		for _, frame := range thread.frameSlots {
 			frame.resetForPool()
@@ -1578,6 +1639,8 @@ func (thread *vmThread) suspendFrames() vmSuspendedFrames {
 		ctx:                   thread.ctx,
 		globals:               thread.globals,
 		frames:                thread.frames,
+		frameRecords:          thread.frameRecords,
+		maxFrameRecords:       thread.maxFrameRecords,
 		owner:                 thread.stackOwner,
 		stack:                 thread.stack,
 		nearestProtectedFrame: thread.nearestProtectedFrame,
@@ -1593,6 +1656,7 @@ func (thread *vmThread) suspendFrames() vmSuspendedFrames {
 		maxFrames:             thread.maxFrames,
 	}
 	thread.frames = nil
+	thread.frameRecords = nil
 	thread.stackOwner = nil
 	thread.stack = nil
 	thread.nearestProtectedFrame = noProtectedFrame
@@ -1603,6 +1667,8 @@ func (thread *vmThread) resumeFrames(suspended vmSuspendedFrames) {
 	thread.ctx = suspended.ctx
 	thread.globals = suspended.globals
 	thread.frames = suspended.frames
+	thread.frameRecords = suspended.frameRecords
+	thread.maxFrameRecords = suspended.maxFrameRecords
 	thread.stackOwner = suspended.owner
 	if thread.stackOwner != nil {
 		thread.stack = thread.stackOwner.values
@@ -2066,6 +2132,7 @@ func (thread *vmThread) popFrame() {
 	frame := thread.frames[len(thread.frames)-1]
 	thread.clearPendingCall(frame)
 	thread.frames = thread.frames[:len(thread.frames)-1]
+	thread.popFrameRecordFor(frame)
 	thread.releaseFrameWindow(frame)
 	frame.resetForReuse()
 }
@@ -2181,6 +2248,91 @@ func (thread *vmThread) newBorrowedClosureCallFrame(closure *closure, caller *vm
 	}
 	thread.directFramePICCounts.addFixedCallFrameReuse()
 	return frame, true
+}
+
+// newBorrowedFixedFrameRecord builds the compact continuation metadata for a
+// fixed one-result call while retaining the existing vmFrame as an execution
+// bridge. The record is pushed only after the borrowed window has passed all
+// runtime guards, so cold/generic calls keep their established path.
+func (thread *vmThread) newBorrowedFixedFrameRecord(
+	closure *closure,
+	caller *vmFrame,
+	returnPC int,
+	argumentStart int,
+	argumentCount int,
+	destination vmResultDestination,
+) (*vmFrame, vmFrameRecord, bool) {
+	child, borrowed := thread.newBorrowedClosureCallFrame(closure, caller, argumentStart, argumentCount)
+	if !borrowed || child == nil || child.proto == nil {
+		return nil, vmFrameRecord{}, false
+	}
+	returnPCValue, returnPCOK := vmFrameRecordUint32(returnPC)
+	baseValue, baseOK := vmFrameRecordUint32(child.registerBase)
+	topValue, topOK := vmFrameRecordAddUint32(child.registerBase, child.registerCount)
+	resultDestination, resultOK := vmFrameRecordAddUint32(caller.registerBase, destination.register)
+	argumentCountValue, argumentCountOK := vmFrameRecordUint16(argumentCount)
+	resultCountValue, resultCountOK := vmFrameRecordUint32(destination.count)
+	frameDepth, frameDepthOK := vmFrameRecordUint16(len(thread.frames))
+	if !returnPCOK || !baseOK || !topOK || !resultOK || !argumentCountOK || !resultCountOK || !frameDepthOK {
+		thread.releaseFrameWindow(child)
+		child.resetForReuse()
+		return nil, vmFrameRecord{}, false
+	}
+
+	flags := vmFrameRecordFlags(0)
+	protectedDepth := uint16(0)
+	if thread.nearestProtectedFrame >= 0 {
+		var protectedOK bool
+		protectedDepth, protectedOK = vmFrameRecordUint16(thread.nearestProtectedFrame)
+		if !protectedOK {
+			thread.releaseFrameWindow(child)
+			child.resetForReuse()
+			return nil, vmFrameRecord{}, false
+		}
+		flags |= vmFrameRecordFlagProtected
+	}
+	if destination.count < 0 {
+		flags |= vmFrameRecordFlagOpenResults
+	}
+	record := vmFrameRecord{
+		proto:             child.proto,
+		returnPC:          returnPCValue,
+		base:              baseValue,
+		top:               topValue,
+		resultDestination: resultDestination,
+		resultCount:       resultCountValue,
+		argumentBase:      baseValue,
+		varargBase:        0,
+		protectedDepth:    protectedDepth,
+		frameDepth:        frameDepth,
+		argumentCount:     argumentCountValue,
+		varargCount:       0,
+		flags:             flags,
+	}
+	return child, record, true
+}
+
+func vmFrameRecordUint32(value int) (uint32, bool) {
+	if value < 0 || uint64(value) > uint64(^uint32(0)) {
+		return 0, false
+	}
+	return uint32(value), true
+}
+
+func vmFrameRecordUint16(value int) (uint16, bool) {
+	if value < 0 || uint64(value) > uint64(^uint16(0)) {
+		return 0, false
+	}
+	return uint16(value), true
+}
+
+func vmFrameRecordAddUint32(left, right int) (uint32, bool) {
+	leftValue, leftOK := vmFrameRecordUint32(left)
+	rightValue, rightOK := vmFrameRecordUint32(right)
+	if !leftOK || !rightOK || uint64(leftValue)+uint64(rightValue) > uint64(^uint32(0)) {
+		return 0, false
+	}
+	return leftValue + rightValue, true
 }
 
 func installFixedResultPendingCall(frame *vmFrame, destination vmResultDestination) {
@@ -2375,6 +2527,7 @@ func (thread *vmThread) dropFrames(depth int) {
 	for i := len(thread.frames) - 1; i >= depth; i-- {
 		frame := thread.frames[i]
 		thread.clearPendingCall(frame)
+		thread.popFrameRecordFor(frame)
 		thread.releaseFrameWindow(frame)
 		if frame != nil {
 			frame.resetForReuse()
@@ -3941,6 +4094,16 @@ func (thread *vmThread) resumeDirectFrameChildOne(rootDepth int, frame **vmFrame
 		return false
 	}
 	destination := caller.pendingCall.destination
+	if record, ok := thread.peekFrameRecord(*frame); ok {
+		absoluteDestination, destinationOK := vmFrameRecordUint32ToInt(record.resultDestination)
+		returnPC, returnPCOK := vmFrameRecordUint32ToInt(record.returnPC)
+		if !destinationOK || !returnPCOK || record.resultCount != 1 ||
+			absoluteDestination < caller.registerBase || absoluteDestination-caller.registerBase >= caller.registerCount {
+			return false
+		}
+		destination.register = absoluteDestination - caller.registerBase
+		caller.pc = returnPC
+	}
 	thread.popFrame()
 	caller.pendingCall = vmPendingCall{}
 	caller.hasPendingCall = false
@@ -3949,6 +4112,13 @@ func (thread *vmThread) resumeDirectFrameChildOne(rootDepth int, frame **vmFrame
 	caller.setRegister(destination.register, value)
 	*frame = caller
 	return true
+}
+
+func vmFrameRecordUint32ToInt(value uint32) (int, bool) {
+	if uint64(value) > uint64(^uint(0)>>1) {
+		return 0, false
+	}
+	return int(value), true
 }
 
 func runDirectFrameInstrumentedLoop(thread *vmThread, frameRef **vmFrame) directFrameSideExit {
@@ -5415,9 +5585,10 @@ reload:
 			}
 			if borrowHint {
 				if closure, ok := callee.scriptFunction(); ok {
-					if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, b+1, argCount); borrowed {
+					if child, record, borrowed := thread.newBorrowedFixedFrameRecord(closure, frame, nextWord, b+1, argCount, vmResultDestination{register: a, count: 1}); borrowed {
 						pc = nextWord
 						frame.pc = pc
+						thread.pushFrameRecord(record)
 						installFixedResultPendingCall(frame, vmResultDestination{register: a, count: 1})
 						thread.pushFrame(child)
 						thread.directFramePICCounts.addFixedCallTrampolineEntry()
@@ -5439,7 +5610,8 @@ reload:
 			pc = nextWord
 			frame.pc = pc
 			if borrowHint {
-				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, c, argCount); borrowed {
+				if child, record, borrowed := thread.newBorrowedFixedFrameRecord(closure, frame, nextWord, c, argCount, vmResultDestination{register: a, count: 1}); borrowed {
+					thread.pushFrameRecord(record)
 					installFixedResultPendingCall(frame, vmResultDestination{register: a, count: 1})
 					thread.pushFrame(child)
 					thread.directFramePICCounts.addFixedCallTrampolineEntry()
@@ -5489,7 +5661,8 @@ reload:
 			var value Value
 			var callErr error
 			if borrowHint {
-				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, c, argCount); borrowed {
+				if child, record, borrowed := thread.newBorrowedFixedFrameRecord(closure, frame, nextWord, c, argCount, vmResultDestination{register: a, count: 1}); borrowed {
+					thread.pushFrameRecord(record)
 					installFixedResultPendingCall(frame, vmResultDestination{register: a, count: 1})
 					thread.pushFrame(child)
 					thread.directFramePICCounts.addFixedCallTrampolineEntry()
@@ -5552,7 +5725,8 @@ reload:
 			var value Value
 			var err error
 			if borrowHint && table.metatable == nil {
-				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, a+1, argCount); borrowed {
+				if child, record, borrowed := thread.newBorrowedFixedFrameRecord(closure, frame, nextWord, a+1, argCount, vmResultDestination{register: a, count: 1}); borrowed {
+					thread.pushFrameRecord(record)
 					installFixedResultPendingCall(frame, vmResultDestination{register: a, count: 1})
 					thread.pushFrame(child)
 					thread.directFramePICCounts.addFixedCallTrampolineEntry()
@@ -7008,9 +7182,10 @@ reload:
 			}
 			if borrowHint {
 				if closure, ok := callee.scriptFunction(); ok {
-					if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, b+1, argCount); borrowed {
+					if child, record, borrowed := thread.newBorrowedFixedFrameRecord(closure, frame, nextWord, b+1, argCount, vmResultDestination{register: a, count: 1}); borrowed {
 						pc = nextWord
 						frame.pc = pc
+						thread.pushFrameRecord(record)
 						installFixedResultPendingCall(frame, vmResultDestination{register: a, count: 1})
 						thread.pushFrame(child)
 						frame = child
@@ -7031,7 +7206,8 @@ reload:
 			pc = nextWord
 			frame.pc = pc
 			if borrowHint {
-				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, c, argCount); borrowed {
+				if child, record, borrowed := thread.newBorrowedFixedFrameRecord(closure, frame, nextWord, c, argCount, vmResultDestination{register: a, count: 1}); borrowed {
+					thread.pushFrameRecord(record)
 					installFixedResultPendingCall(frame, vmResultDestination{register: a, count: 1})
 					thread.pushFrame(child)
 					frame = child
@@ -7080,7 +7256,8 @@ reload:
 			var value Value
 			var callErr error
 			if borrowHint {
-				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, c, argCount); borrowed {
+				if child, record, borrowed := thread.newBorrowedFixedFrameRecord(closure, frame, nextWord, c, argCount, vmResultDestination{register: a, count: 1}); borrowed {
+					thread.pushFrameRecord(record)
 					installFixedResultPendingCall(frame, vmResultDestination{register: a, count: 1})
 					thread.pushFrame(child)
 					frame = child
@@ -7141,7 +7318,8 @@ reload:
 			var value Value
 			var err error
 			if borrowHint && table.metatable == nil {
-				if child, borrowed := thread.newBorrowedClosureCallFrame(closure, frame, a+1, argCount); borrowed {
+				if child, record, borrowed := thread.newBorrowedFixedFrameRecord(closure, frame, nextWord, a+1, argCount, vmResultDestination{register: a, count: 1}); borrowed {
+					thread.pushFrameRecord(record)
 					installFixedResultPendingCall(frame, vmResultDestination{register: a, count: 1})
 					thread.pushFrame(child)
 					frame = child
