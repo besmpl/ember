@@ -144,10 +144,12 @@ func TestRuntimeOwnerCacheBundlesStayWithTheirOwner(t *testing.T) {
 func TestVMThreadPoolResetDropsFrameReferences(t *testing.T) {
 	owner := newRuntimeOwner()
 	table := NewTable()
+	stackOwner := &vmStackOwner{values: []Value{TableValue(table)}}
 	frame := &vmFrame{
-		registers: []Value{TableValue(table)},
-		cells:     []*cell{{value: TableValue(table)}},
-		varargs:   []Value{TableValue(table)},
+		registers:   []Value{TableValue(table)},
+		cells:       []*cell{{value: TableValue(table)}},
+		varargOwner: stackOwner,
+		varargCount: 1,
 	}
 	thread := newVMThread(runtimeGlobalsWithOwner(nil, owner))
 	if err := thread.bindOwner(owner); err != nil {
@@ -158,8 +160,11 @@ func TestVMThreadPoolResetDropsFrameReferences(t *testing.T) {
 	if frame.registers != nil {
 		t.Fatalf("reset frame retained register window: %v", frame.registers)
 	}
-	if frame.varargs != nil {
-		t.Fatalf("reset frame retained varargs: %v", frame.varargs)
+	if frame.varargOwner != nil || frame.varargBase != 0 || frame.varargCount != 0 {
+		t.Fatalf("reset frame retained vararg storage: owner=%p base=%d count=%d", frame.varargOwner, frame.varargBase, frame.varargCount)
+	}
+	if !stackOwner.values[0].IsNil() {
+		t.Fatalf("reset frame retained vararg value: %v", stackOwner.values[0])
 	}
 	for i, cell := range frame.cells {
 		if cell != nil {

@@ -963,7 +963,7 @@ func TestVMFrameAppliesDirectFixedResultDestinations(t *testing.T) {
 	}
 }
 
-func TestVMFrameBorrowsVarargArgumentWindow(t *testing.T) {
+func TestVMFrameOwnsVarargArgumentWindow(t *testing.T) {
 	proto := newProto(
 		nil,
 		[]instruction{{op: opReturn, a: 0, b: 1}},
@@ -978,9 +978,12 @@ func TestVMFrameBorrowsVarargArgumentWindow(t *testing.T) {
 	frame := newVMFrame(proto, args, nil)
 	args[1] = NumberValue(99)
 
-	got, ok := frame.varargs[0].Number()
-	if !ok || got != 99 {
-		t.Fatalf("vararg frame copied argument value %v (%t), want borrowed number 99", got, ok)
+	if got, want := frame.varargLen(), 2; got != want {
+		t.Fatalf("vararg frame count is %d, want %d", got, want)
+	}
+	got, ok := frame.varargAt(0).Number()
+	if !ok || got != 1 {
+		t.Fatalf("vararg frame value is %v (%t), want owned number 1 after input mutation", got, ok)
 	}
 }
 
@@ -8941,9 +8944,21 @@ return pass()
 	}
 	hasOpenArgCall := false
 	for _, child := range proto.prototypes {
-		joined := strings.Join(disassembleProto(child), "\n")
-		if strings.Contains(joined, "CALL") && strings.Contains(joined, "-2") {
-			hasOpenArgCall = true
+		code, decodeErr := protoDecodedInstructions(child)
+		if decodeErr != nil {
+			t.Fatalf("decode child wordcode: %v", decodeErr)
+		}
+		for _, ins := range code {
+			if ins.op != opCall {
+				continue
+			}
+			prefixCount, marked := decodeOpenArgumentCallMarker(ins.c)
+			if (marked && prefixCount == 1) || ins.c == -2 {
+				hasOpenArgCall = true
+				break
+			}
+		}
+		if hasOpenArgCall {
 			break
 		}
 	}

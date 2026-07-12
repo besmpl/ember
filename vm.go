@@ -605,6 +605,7 @@ const (
 	vmFrameRecordFlagOpenResults
 	vmFrameRecordFlagRecordOnly
 	vmFrameRecordFlagCallerBorrowed
+	vmFrameRecordFlagOpenArguments
 )
 
 func (thread *vmThread) pushFrameRecord(record vmFrameRecord) {
@@ -717,7 +718,9 @@ type vmFrame struct {
 	upvalues        []*cell
 	upvalueValues   []Value
 	upvalueValueOK  []bool
-	varargs         []Value
+	varargOwner     *vmStackOwner
+	varargBase      int
+	varargCount     int
 	pc              int
 	debugLine       int
 	openResultStart int
@@ -2442,7 +2445,7 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 		return vmFrameRecord{}, false
 	}
 	proto := closure.proto
-	if proto.variadic || len(frame.varargs) != 0 ||
+	if frame.varargCount != 0 ||
 		thread.debugHook != nil || thread.instructionBudget >= 0 || thread.coroutine != nil ||
 		thread.nonYieldableDepth != 0 || thread.nearestProtectedFrame != noProtectedFrame ||
 		frame.hasPendingCall || frame.openResultStart >= 0 {
@@ -2499,6 +2502,22 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 		return vmFrameRecord{}, false
 	}
 
+	// Reserve the owner-backed vararg tail before taking any source slices.
+	// Stack growth may reallocate the owner, so the reset below passes absolute
+	// source offsets rather than retaining a pre-growth slice.
+	varargCount := 0
+	if proto.variadic && argumentCount > proto.params {
+		varargCount = argumentCount - proto.params
+		varargBase := childBase + proto.registers
+		if varargBase < childBase || varargCount > int(^uint(0)>>1)-varargBase {
+			return vmFrameRecord{}, false
+		}
+		thread.growStack(varargBase + varargCount)
+		owner = thread.stackOwner
+		if owner == nil || varargBase+varargCount > len(owner.values) {
+			return vmFrameRecord{}, false
+		}
+	}
 	paramCount := argumentCount
 	if paramCount > proto.params {
 		paramCount = proto.params
@@ -2511,16 +2530,31 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 	physicalDepth := frame.depth
 	recordBaseDepth := frame.recordBaseDepth
 	callerBorrowed := frame.window.borrowed
-	frame.resetFrameIntoRegisters(
-		proto,
-		args,
-		closure.upvalues,
-		closure.upvalueValues,
-		closure.upvalueValueOK,
-		owner,
-		childBase,
-		registers,
-	)
+	if proto.variadic && varargCount > 0 {
+		frame.resetFrameIntoRegistersWithVarargSource(
+			proto,
+			args,
+			closure.upvalues,
+			closure.upvalueValues,
+			closure.upvalueValueOK,
+			owner,
+			childBase,
+			registers,
+			childBase+proto.params,
+			varargCount,
+		)
+	} else {
+		frame.resetFrameIntoRegisters(
+			proto,
+			args,
+			closure.upvalues,
+			closure.upvalueValues,
+			closure.upvalueValueOK,
+			owner,
+			childBase,
+			registers,
+		)
+	}
 	frame.currentClosure = closure
 	thread.indexFrameOpenUpvalues(frame)
 	frame.depth = physicalDepth
@@ -2550,6 +2584,195 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 		resultDestination: resultDestination,
 		resultCount:       resultCountValue,
 		argumentBase:      childBaseValue,
+		varargBase:        previousStackLength,
+		frameDepth:        frameDepth,
+		argumentCount:     argumentCountValue,
+		flags:             flags,
+	}, true
+}
+
+// maybeEnterRecordOnlyOpenArgumentCall switches the physical frame to a
+// callee whose arguments are a fixed prefix followed by the caller's
+// owner-backed open-result range. The dynamic tail is deliberately borrowed:
+// only the fixed prefix is copied into the dead scratch slots immediately
+// before the range. This keeps open forwarding allocation-free while leaving
+// the existing compact return records in charge of restoring the caller.
+func (thread *vmThread) maybeEnterRecordOnlyOpenArgumentCall(
+	closure *closure,
+	frame *vmFrame,
+	returnPC int,
+	argumentStart int,
+	prefixCount int,
+	destination vmResultDestination,
+) (vmFrameRecord, bool) {
+	if thread == nil || closure == nil || closure.proto == nil || frame == nil || frame.proto == nil {
+		return vmFrameRecord{}, false
+	}
+	proto := closure.proto
+	// Variadic callers retain a separate vararg window which the compact
+	// record does not currently encode. They stay on the established cold
+	// materialized path until that ABI is widened.
+	if proto.variadic || frame.varargCount != 0 ||
+		thread.debugHook != nil || thread.instructionBudget >= 0 || thread.coroutine != nil ||
+		thread.nonYieldableDepth != 0 || thread.nearestProtectedFrame != noProtectedFrame ||
+		frame.hasPendingCall || frame.openResultStart < 0 || len(proto.capturedLocals) != 0 {
+		return vmFrameRecord{}, false
+	}
+	if prefixCount < 0 || argumentStart < 0 || argumentStart > frame.registerCount-prefixCount {
+		return vmFrameRecord{}, false
+	}
+	openStart := argumentStart + prefixCount
+	if openStart < argumentStart || frame.openResultStart != openStart || openStart >= frame.registerCount {
+		return vmFrameRecord{}, false
+	}
+	// The marker's proof reserves exactly the caller's suffix for the fixed
+	// prefix. The open range itself must begin at the static register top; an
+	// unrelated owner tail would make the physical child window ambiguous.
+	scratchStart := frame.registerCount - prefixCount
+	if scratchStart < 0 || scratchStart+prefixCount > frame.registerCount {
+		return vmFrameRecord{}, false
+	}
+	owner := frame.window.owner
+	if owner == nil {
+		owner = frame.owner
+	}
+	if owner == nil || owner != thread.stackOwner || frame.registerBase < 0 {
+		return vmFrameRecord{}, false
+	}
+	openBase := frame.openRangeBase
+	openCount := frame.openRangeCount
+	if frame.openRangeOwner != owner || openBase < 0 || openCount <= 0 ||
+		openBase != frame.registerBase+frame.registerCount ||
+		openBase > len(owner.values) || openCount > len(owner.values)-openBase {
+		return vmFrameRecord{}, false
+	}
+	childBase := openBase - prefixCount
+	if childBase < frame.registerBase || childBase != frame.registerBase+scratchStart ||
+		proto.registers < 0 || childBase > int(^uint(0)>>1)-proto.registers {
+		return vmFrameRecord{}, false
+	}
+	childEnd := childBase + proto.registers
+	if childEnd < childBase {
+		return vmFrameRecord{}, false
+	}
+	// Result slots must remain outside the scratch suffix. The open-result
+	// destination is checked in the same way; its dynamic tail is produced by
+	// the child and restored by resumeRecordOnlyOpenCall.
+	openDestination := destination.count < 0
+	if destination.count < -1 || destination.register < 0 || destination.register >= frame.registerCount ||
+		(openDestination && destination.register >= scratchStart) ||
+		(!openDestination && (destination.count == 0 || destination.register > frame.registerCount-destination.count ||
+			(destination.count > 0 && destination.register+destination.count > scratchStart))) {
+		return vmFrameRecord{}, false
+	}
+	if frame.hasCellsInRange(scratchStart, prefixCount) {
+		return vmFrameRecord{}, false
+	}
+	if openCount > int(^uint16(0))-prefixCount {
+		return vmFrameRecord{}, false
+	}
+	argumentCount := prefixCount + openCount
+	callerClosure := thread.currentClosureForFrame(frame)
+	callerBase, callerBaseOK := vmFrameRecordUint32(frame.registerBase)
+	callerTop, callerTopOK := vmFrameRecordAddUint32(frame.registerBase, frame.registerCount)
+	returnPCValue, returnPCOK := vmFrameRecordUint32(returnPC)
+	resultDestination, resultOK := vmFrameRecordAddUint32(frame.registerBase, destination.register)
+	argumentBase, argumentBaseOK := vmFrameRecordUint32(childBase)
+	argumentCountValue, argumentCountOK := vmFrameRecordUint16(argumentCount)
+	resultCountValue, resultCountOK := vmFrameRecordUint32(destination.count)
+	if openDestination {
+		resultCountValue = ^uint32(0)
+		resultCountOK = true
+	}
+	frameDepth, frameDepthOK := vmFrameRecordUint16(frame.depth)
+	previousStackLength, previousStackLengthOK := vmFrameRecordUint32(frame.window.previousStackLength)
+	if !callerBaseOK || !callerTopOK || !returnPCOK || !resultOK || !argumentBaseOK || !argumentCountOK ||
+		!resultCountOK || !frameDepthOK || !previousStackLengthOK || childEnd > int(^uint32(0)) {
+		return vmFrameRecord{}, false
+	}
+	previousLength := len(owner.values)
+	if childEnd > previousLength {
+		thread.growStack(childEnd)
+		owner = thread.stackOwner
+	}
+	if owner == nil || childEnd > len(owner.values) {
+		return vmFrameRecord{}, false
+	}
+	// Copy only the fixed prefix. The dynamic tail already starts at
+	// childBase+prefixCount and remains in place for the child parameters.
+	if prefixCount > 0 {
+		prefixSource := frame.registerBase + argumentStart
+		if prefixSource < 0 || prefixSource > len(owner.values)-prefixCount {
+			return vmFrameRecord{}, false
+		}
+		copy(owner.values[childBase:childBase+prefixCount], owner.values[prefixSource:prefixSource+prefixCount])
+	}
+	// Detach the caller's open metadata without clearing its owner range: that
+	// range is now the child's argument tail and will be released with the
+	// child window on return. resetFrameIntoRegisters aliases the contiguous
+	// owner range for parameter initialization, so no dynamic-tail copy occurs.
+	frame.openResultStart = -1
+	frame.openResults = vmResultWindow{}
+	frame.openRangeOwner = nil
+	frame.openRangeBase = -1
+	frame.openRangeCount = 0
+	frame.openRangeLogicalTop = -1
+	copyCount := proto.params
+	if copyCount > proto.registers {
+		copyCount = proto.registers
+	}
+	if copyCount > argumentCount {
+		copyCount = argumentCount
+	}
+	var args []Value
+	if copyCount > 0 {
+		args = owner.values[childBase : childBase+copyCount]
+	}
+	physicalDepth := frame.depth
+	recordBaseDepth := frame.recordBaseDepth
+	callerBorrowed := frame.window.borrowed
+	registers := owner.values[childBase:childEnd]
+	frame.resetFrameIntoRegisters(proto, args, closure.upvalues, closure.upvalueValues, closure.upvalueValueOK, owner, childBase, registers)
+	// Arguments beyond the callee's physical register window are ignored by
+	// the call. Clear that suffix now as well as during record resume so an
+	// error/yield cleanup cannot retain the forwarded tail in the shared owner.
+	ignoredStart := childEnd
+	if ignoredStart < openBase {
+		ignoredStart = openBase
+	}
+	ignoredEnd := openBase + openCount
+	if ignoredStart < ignoredEnd {
+		clear(owner.values[ignoredStart:ignoredEnd])
+	}
+	frame.currentClosure = closure
+	thread.indexFrameOpenUpvalues(frame)
+	frame.depth = physicalDepth
+	if recordBaseDepth < 0 {
+		recordBaseDepth = len(thread.frameRecords)
+	}
+	frame.recordBaseDepth = recordBaseDepth
+	frame.window = vmRegisterWindow{
+		owner:               owner,
+		base:                childBase,
+		length:              len(registers),
+		previousStackLength: previousLength,
+		borrowed:            true,
+	}
+	flags := vmFrameRecordFlagRecordOnly | vmFrameRecordFlagOpenArguments
+	if openDestination {
+		flags |= vmFrameRecordFlagOpenResults
+	}
+	if callerBorrowed {
+		flags |= vmFrameRecordFlagCallerBorrowed
+	}
+	return vmFrameRecord{
+		closure:           callerClosure,
+		returnPC:          returnPCValue,
+		base:              callerBase,
+		top:               callerTop,
+		resultDestination: resultDestination,
+		resultCount:       resultCountValue,
+		argumentBase:      argumentBase,
 		varargBase:        previousStackLength,
 		frameDepth:        frameDepth,
 		argumentCount:     argumentCountValue,
@@ -2684,6 +2907,34 @@ func (thread *vmThread) resetFrame(frame *vmFrame, proto *Proto, args []Value, u
 		length:              len(registers),
 		previousStackLength: previousLength,
 	}
+}
+
+// growStackOwner extends an owner-backed frame range without requiring a
+// vmThread. Standalone test frames use owners that are not attached to a
+// thread; active frames still keep the thread's stack view synchronized.
+func growStackOwner(owner *vmStackOwner, size int) bool {
+	if owner == nil || size < 0 {
+		return false
+	}
+	if owner.thread != nil && owner.thread.stackOwner == owner {
+		owner.thread.growStack(size)
+		return owner.thread.stackOwner == owner && size <= len(owner.values)
+	}
+	if size > cap(owner.values) {
+		nextCap := cap(owner.values) * 2
+		if nextCap < 64 {
+			nextCap = 64
+		}
+		for nextCap < size {
+			nextCap *= 2
+		}
+		next := make([]Value, size, nextCap)
+		copy(next, owner.values)
+		owner.values = next
+	} else {
+		owner.values = owner.values[:size]
+	}
+	return true
 }
 
 func (thread *vmThread) ensureStackOwner() *vmStackOwner {
@@ -2881,6 +3132,9 @@ func (thread *vmThread) releaseFrameWindow(frame *vmFrame) {
 		}
 		thread.closeOpenUpvalues(owner, start, end)
 		frame.closeCells()
+		if frame.varargOwner == owner {
+			frame.clearVarargStorage()
+		}
 		// Borrowed windows can overlap the caller's dead suffix. Clear only the
 		// window itself, after its result has been applied, then restore the
 		// caller's prior logical length. Materialized windows retain the old
@@ -2930,6 +3184,7 @@ func (thread *vmThread) dropFrames(depth int) {
 			frameDepth = frame.depth
 		}
 		thread.clearPendingCall(frame)
+		thread.clearDroppedFrameRecordArguments(frame)
 		if frame != nil && frame.recordBaseDepth >= 0 {
 			thread.truncateFrameRecords(frame.recordBaseDepth)
 		}
@@ -3010,15 +3265,54 @@ func (thread *vmThread) newClosureCallFramePrependedFromFrame(closure *closure, 
 }
 
 func (frame *vmFrame) resetFrameIntoRegisters(proto *Proto, args []Value, upvalues []*cell, upvalueValues []Value, upvalueValueOK []bool, owner *vmStackOwner, base int, registers []Value) {
+	frame.resetFrameIntoRegistersWithVarargSource(proto, args, upvalues, upvalueValues, upvalueValueOK, owner, base, registers, -1, -1)
+}
+
+// resetFrameIntoRegistersWithVarargSource is the owner-aware reset used by
+// borrowed variadic calls. A normal frame derives its vararg source from the
+// args slice. A borrowed frame instead passes an absolute owner offset so a
+// stack growth/reallocation cannot leave a stale source slice behind.
+func (frame *vmFrame) resetFrameIntoRegistersWithVarargSource(
+	proto *Proto,
+	args []Value,
+	upvalues []*cell,
+	upvalueValues []Value,
+	upvalueValueOK []bool,
+	owner *vmStackOwner,
+	base int,
+	registers []Value,
+	varargSourceBase int,
+	varargSourceCount int,
+) {
 	frame.clearOpenResultRange()
 	frame.currentClosure = nil
-	for _, register := range proto.entryNilRegisters {
-		registers[register] = NilValue()
+	varargCount := varargSourceCount
+	if varargCount < 0 {
+		varargCount = 0
+		if proto.variadic && len(args) > proto.params {
+			varargCount = len(args) - proto.params
+		}
+	}
+	varargBase := base + len(registers)
+	if varargCount > 0 {
+		if varargBase < base || varargCount > int(^uint(0)>>1)-varargBase || !growStackOwner(owner, varargBase+varargCount) {
+			panic("ember: unable to allocate variadic frame storage")
+		}
+		registers = owner.values[base : base+len(registers)]
+		if varargSourceBase >= 0 {
+			if varargSourceBase > len(owner.values) || varargCount > len(owner.values)-varargSourceBase {
+				panic("ember: invalid owner-backed variadic source")
+			}
+			copy(owner.values[varargBase:varargBase+varargCount], owner.values[varargSourceBase:varargSourceBase+varargCount])
+		} else {
+			copy(owner.values[varargBase:varargBase+varargCount], args[proto.params:])
+		}
 	}
 
-	varargs := []Value(nil)
-	if proto.variadic && len(args) > proto.params {
-		varargs = args[proto.params:]
+	// Nil entry initialization must happen after owner-backed vararg copying:
+	// entryNilRegisters can overlap extra argument slots in a borrowed window.
+	for _, register := range proto.entryNilRegisters {
+		registers[register] = NilValue()
 	}
 
 	for i := 0; i < proto.params && i < len(registers); i++ {
@@ -3057,7 +3351,9 @@ func (frame *vmFrame) resetFrameIntoRegisters(proto *Proto, args []Value, upvalu
 	frame.upvalues = upvalues
 	frame.upvalueValues = upvalueValues
 	frame.upvalueValueOK = upvalueValueOK
-	frame.varargs = varargs
+	frame.varargOwner = owner
+	frame.varargBase = varargBase
+	frame.varargCount = varargCount
 	frame.pc = 0
 	frame.debugLine = -1
 	frame.openResultStart = -1
@@ -3083,7 +3379,9 @@ func (frame *vmFrame) resetForReuse() {
 	frame.upvalues = nil
 	frame.upvalueValues = nil
 	frame.upvalueValueOK = nil
-	frame.varargs = frame.varargs[:0]
+	frame.varargOwner = nil
+	frame.varargBase = 0
+	frame.varargCount = 0
 	frame.pc = 0
 	frame.debugLine = -1
 	frame.openResultStart = -1
@@ -3099,12 +3397,12 @@ func (frame *vmFrame) resetForReuse() {
 func (frame *vmFrame) resetForPool() {
 	clear(frame.registers)
 	clear(frame.cells)
+	frame.clearVarargStorage()
 	if cap(frame.openResults.values) > 0 {
 		clear(frame.openResults.values[:cap(frame.openResults.values)])
 	}
 	frame.resetForReuse()
 	frame.registers = nil
-	frame.varargs = nil
 }
 
 func capturedLocalRegisters(proto *Proto) []bool {
@@ -3133,6 +3431,48 @@ func (frame *vmFrame) register(index int) Value {
 
 func (frame *vmFrame) setRegister(index int, value Value) {
 	frame.registers[index] = value
+}
+
+func (frame *vmFrame) varargLen() int {
+	if frame == nil || frame.varargCount <= 0 || frame.varargOwner == nil {
+		return 0
+	}
+	start := frame.varargBase
+	end := start + frame.varargCount
+	if start < 0 || end < start || end > len(frame.varargOwner.values) {
+		return 0
+	}
+	return frame.varargCount
+}
+
+func (frame *vmFrame) clearVarargStorage() {
+	if frame == nil || frame.varargOwner == nil || frame.varargCount <= 0 {
+		return
+	}
+	start := frame.varargBase
+	end := start + frame.varargCount
+	if start < 0 || end < start || start >= len(frame.varargOwner.values) {
+		return
+	}
+	if end > len(frame.varargOwner.values) {
+		end = len(frame.varargOwner.values)
+	}
+	clear(frame.varargOwner.values[start:end])
+}
+
+func (frame *vmFrame) varargAt(index int) Value {
+	if frame == nil || index < 0 || index >= frame.varargLen() {
+		return NilValue()
+	}
+	return frame.varargOwner.values[frame.varargBase+index]
+}
+
+func (frame *vmFrame) varargValues() []Value {
+	count := frame.varargLen()
+	if count == 0 {
+		return nil
+	}
+	return frame.varargOwner.values[frame.varargBase : frame.varargBase+count]
 }
 
 // clearOpenResultRange releases an owner-backed open result range and restores
@@ -3221,6 +3561,53 @@ func (frame *vmFrame) publishOpenResultRange(thread *vmThread, values []Value) b
 		owner.values[logicalTop] = NilValue()
 	}
 	frame.openRangeOwner = owner
+	frame.openRangeBase = logicalTop
+	frame.openRangeCount = count
+	frame.openRangeLogicalTop = logicalTop
+	return true
+}
+
+// publishOpenVarargRange publishes the frame-owned vararg slots without
+// materializing a temporary []Value. The source owner remains valid across
+// stack growth because growth replaces its values slice in place.
+func (frame *vmFrame) publishOpenVarargRange(thread *vmThread) bool {
+	if frame == nil || thread == nil {
+		return false
+	}
+	sourceOwner := frame.varargOwner
+	sourceBase := frame.varargBase
+	count := frame.varargLen()
+	if sourceOwner == nil || sourceBase < 0 {
+		return false
+	}
+	frame.clearOpenResultRange()
+	destinationOwner := frame.window.owner
+	if destinationOwner == nil {
+		destinationOwner = frame.owner
+	}
+	if destinationOwner == nil || destinationOwner != thread.ensureStackOwner() {
+		return false
+	}
+	if count == 0 {
+		count = 1
+	}
+	logicalTop := len(destinationOwner.values)
+	if logicalTop < 0 || count > int(^uint(0)>>1)-logicalTop {
+		return false
+	}
+	thread.growStack(logicalTop + count)
+	destinationOwner = thread.stackOwner
+	if destinationOwner == nil || logicalTop+count > len(destinationOwner.values) {
+		return false
+	}
+	if frame.varargLen() == 0 {
+		destinationOwner.values[logicalTop] = NilValue()
+	} else {
+		for index := 0; index < count; index++ {
+			destinationOwner.values[logicalTop+index] = sourceOwner.values[sourceBase+index]
+		}
+	}
+	frame.openRangeOwner = destinationOwner
 	frame.openRangeBase = logicalTop
 	frame.openRangeCount = count
 	frame.openRangeLogicalTop = logicalTop
@@ -3802,9 +4189,9 @@ func (thread *vmThread) runDirectFastCall(frame *vmFrame, nativeID nativeFuncID,
 		counts.addSideExit(directFrameSideExitReasonIntrinsic)
 		args := registers[start : start+argCount]
 		if nativeID == nativeFuncSelect {
-			args = make([]Value, 1+len(frame.varargs))
+			args = make([]Value, 1+frame.varargLen())
 			args[0] = StringValue("#")
-			copy(args[1:], frame.varargs)
+			copy(args[1:], frame.varargValues())
 		}
 		results, ok, err := directFrameNonYieldingCallIsland(callee, thread.globals, args)
 		if err != nil {
@@ -3854,7 +4241,7 @@ func (thread *vmThread) runDirectFastCall(frame *vmFrame, nativeID nativeFuncID,
 		}
 		directFrameApplyCallIslandResults(frame, registers, start, resultCount, []Value{value})
 	case nativeFuncSelect:
-		count := NumberValue(float64(len(frame.varargs)))
+		count := NumberValue(float64(frame.varargLen()))
 		frame.clearOpenResultState()
 		if resultCount < 0 {
 			frame.openResultStart = start
@@ -3883,12 +4270,12 @@ func (thread *vmThread) runColdFastCall(frame *vmFrame, nativeID nativeFuncID, s
 			return vmFrameResult{}, true, err
 		}
 		if nativeUnchanged {
-			frame.applyInlineResultDestination(destination, [2]Value{NumberValue(float64(len(frame.varargs)))}, 1)
+			frame.applyInlineResultDestination(destination, [2]Value{NumberValue(float64(frame.varargLen()))}, 1)
 			return vmFrameResult{}, false, nil
 		}
-		args := make([]Value, 1+len(frame.varargs))
+		args := make([]Value, 1+frame.varargLen())
 		args[0] = StringValue("#")
-		copy(args[1:], frame.varargs)
+		copy(args[1:], frame.varargValues())
 		return frame.callValueToDestination(callee, thread.globals, args, destination)
 	}
 	args := frame.scriptCallArgs(start, argCount)
@@ -4641,6 +5028,101 @@ func (thread *vmThread) resumeDirectFrameChild(rootDepth int, frame **vmFrame, r
 	return true
 }
 
+// vmFrameRecordArgumentCleanupEnd extends the child-window cleanup boundary
+// for open-argument records. A callee may accept fewer parameters than the
+// forwarded dynamic tail; those ignored owner slots sit beyond the physical
+// child registers and must still be cleared before the shared stack is
+// truncated.
+func vmFrameRecordArgumentCleanupEnd(record vmFrameRecord, childEnd int) (int, bool) {
+	if record.flags&vmFrameRecordFlagOpenArguments == 0 {
+		return childEnd, true
+	}
+	base, baseOK := vmFrameRecordUint32ToInt(record.argumentBase)
+	count, countOK := vmFrameRecordUint32ToInt(uint32(record.argumentCount))
+	if !baseOK || !countOK || base < 0 || count < 0 || base > int(^uint(0)>>1)-count {
+		return 0, false
+	}
+	end := base + count
+	if end > childEnd {
+		childEnd = end
+	}
+	return childEnd, true
+}
+
+// vmFrameCleanupEnd extends record cleanup through a variadic callee's
+// owner-backed tail. Record metadata deliberately stays 48 bytes, so the
+// active frame carries this transient range while it is executing.
+func vmFrameCleanupEnd(record vmFrameRecord, frame *vmFrame, owner *vmStackOwner, childEnd int) (int, bool) {
+	cleanupEnd, ok := vmFrameRecordArgumentCleanupEnd(record, childEnd)
+	if !ok || frame == nil || frame.varargOwner != owner || frame.varargCount <= 0 {
+		return cleanupEnd, ok
+	}
+	base := frame.varargBase
+	count := frame.varargCount
+	if base < 0 || count < 0 || base > int(^uint(0)>>1)-count {
+		return 0, false
+	}
+	if end := base + count; end > cleanupEnd {
+		cleanupEnd = end
+	}
+	return cleanupEnd, true
+}
+
+func clearOwnerRangeExcept(owner *vmStackOwner, start, end, preserveStart, preserveEnd int) {
+	if owner == nil {
+		return
+	}
+	if start < 0 {
+		start = 0
+	}
+	if end > len(owner.values) {
+		end = len(owner.values)
+	}
+	if start >= end {
+		return
+	}
+	if preserveEnd <= start || preserveStart >= end {
+		clear(owner.values[start:end])
+		return
+	}
+	if preserveStart > start {
+		clear(owner.values[start:preserveStart])
+	}
+	if preserveEnd < end {
+		clear(owner.values[preserveEnd:end])
+	}
+}
+
+// clearDroppedFrameRecordArguments releases every borrowed argument range
+// owned by a physical frame before its compact records are truncated. Normal
+// returns clear the range in the result-resume helpers; this path covers
+// errors, protected recovery, and other abnormal unwinds where no result
+// application runs. The record's destination is outside its argument range
+// by construction, so clearing the complete range cannot erase a live result.
+func (thread *vmThread) clearDroppedFrameRecordArguments(frame *vmFrame) {
+	if thread == nil || frame == nil || frame.recordBaseDepth < 0 || frame.recordBaseDepth >= len(thread.frameRecords) {
+		return
+	}
+	owner := thread.stackOwner
+	if owner == nil {
+		return
+	}
+	for _, record := range thread.frameRecords[frame.recordBaseDepth:] {
+		if record.flags&vmFrameRecordFlagRecordOnly == 0 {
+			continue
+		}
+		base, baseOK := vmFrameRecordUint32ToInt(record.argumentBase)
+		count, countOK := vmFrameRecordUint32ToInt(uint32(record.argumentCount))
+		if !baseOK || !countOK || base < 0 || count <= 0 || base > len(owner.values) || count > len(owner.values)-base {
+			continue
+		}
+		clear(owner.values[base : base+count])
+	}
+	if frame.varargOwner == owner && frame.varargCount > 0 {
+		frame.clearVarargStorage()
+	}
+}
+
 func (thread *vmThread) resumeRecordOnlyFixedCallOne(rootRecordDepth int, frame **vmFrame, value Value) bool {
 	if thread == nil || frame == nil || *frame == nil || len(thread.frameRecords) <= rootRecordDepth {
 		return false
@@ -4675,9 +5157,13 @@ func (thread *vmThread) resumeRecordOnlyFixedCallOne(rootRecordDepth int, frame 
 	if childEnd > len(owner.values) {
 		childEnd = len(owner.values)
 	}
-	if childStart < childEnd {
+	cleanupEnd, cleanupOK := vmFrameCleanupEnd(record, current, owner, childEnd)
+	if !cleanupOK {
+		return false
+	}
+	if childStart < cleanupEnd {
 		thread.closeOpenUpvalues(owner, childStart, childEnd)
-		clear(owner.values[childStart:childEnd])
+		clearOwnerRangeExcept(owner, childStart, cleanupEnd, destination, destination+1)
 	}
 	owner.values = owner.values[:top]
 	thread.stack = owner.values
@@ -4693,7 +5179,9 @@ func (thread *vmThread) resumeRecordOnlyFixedCallOne(rootRecordDepth int, frame 
 	current.upvalues = record.closure.upvalues
 	current.upvalueValues = record.closure.upvalueValues
 	current.upvalueValueOK = record.closure.upvalueValueOK
-	current.varargs = nil
+	current.varargOwner = nil
+	current.varargBase = 0
+	current.varargCount = 0
 	current.pc = returnPC
 	current.debugLine = -1
 	current.openResultStart = -1
@@ -4750,6 +5238,10 @@ func (thread *vmThread) resumeRecordOnlyOpenCall(rootRecordDepth int, frame **vm
 	childStart := current.window.base
 	childEnd := childStart + current.window.length
 	if childStart < 0 || childEnd < childStart || childEnd > len(owner.values) || sourceRegister > current.window.length || sourceCount > current.window.length-sourceRegister {
+		return false
+	}
+	cleanupEnd, cleanupOK := vmFrameCleanupEnd(record, current, owner, childEnd)
+	if !cleanupOK {
 		return false
 	}
 	sourceStart := childStart + sourceRegister
@@ -4835,30 +5327,9 @@ func (thread *vmThread) resumeRecordOnlyOpenCall(rootRecordDepth int, frame **vm
 			owner.values[targetBase] = NilValue()
 		}
 	}
-	clearExcept := func(start, end, preserveStart, preserveEnd int) {
-		if start < 0 {
-			start = 0
-		}
-		if end > len(owner.values) {
-			end = len(owner.values)
-		}
-		if start >= end {
-			return
-		}
-		if preserveEnd <= start || preserveStart >= end {
-			clear(owner.values[start:end])
-			return
-		}
-		if preserveStart > start {
-			clear(owner.values[start:preserveStart])
-		}
-		if preserveEnd < end {
-			clear(owner.values[preserveEnd:end])
-		}
-	}
-	clearExcept(childStart, childEnd, targetBase, targetEnd)
+	clearOwnerRangeExcept(owner, childStart, cleanupEnd, targetBase, targetEnd)
 	if openBase >= 0 {
-		clearExcept(openBase, openBase+openCount, targetBase, targetEnd)
+		clearOwnerRangeExcept(owner, openBase, openBase+openCount, targetBase, targetEnd)
 	}
 	if tempBase >= 0 {
 		clear(owner.values[tempBase : tempBase+total])
@@ -4877,7 +5348,9 @@ func (thread *vmThread) resumeRecordOnlyOpenCall(rootRecordDepth int, frame **vm
 	current.upvalues = record.closure.upvalues
 	current.upvalueValues = record.closure.upvalueValues
 	current.upvalueValueOK = record.closure.upvalueValueOK
-	current.varargs = nil
+	current.varargOwner = nil
+	current.varargBase = 0
+	current.varargCount = 0
 	current.pc = returnPC
 	current.debugLine = -1
 	current.openResultStart = destination - base
@@ -4938,6 +5411,10 @@ func (thread *vmThread) resumeRecordOnlyFixedCall(rootRecordDepth int, frame **v
 	if childStart < 0 || childEnd < childStart || childEnd > len(owner.values) {
 		return false
 	}
+	cleanupEnd, cleanupOK := vmFrameCleanupEnd(record, current, owner, childEnd)
+	if !cleanupOK {
+		return false
+	}
 	thread.closeOpenUpvalues(owner, childStart, childEnd)
 	available := sourceCount
 	if openResults != nil {
@@ -4962,22 +5439,9 @@ func (thread *vmThread) resumeRecordOnlyFixedCall(rootRecordDepth int, frame **v
 		owner.values[destination+index] = NilValue()
 	}
 	// Release the child window while preserving any caller destination slots
-	// that overlap it.  Destination slots outside the child are untouched.
-	preserveStart, preserveEnd := destination, destination+requested
-	if childStart < preserveStart {
-		end := preserveStart
-		if end > childEnd {
-			end = childEnd
-		}
-		clear(owner.values[childStart:end])
-	}
-	if preserveEnd < childEnd {
-		start := preserveEnd
-		if start < childStart {
-			start = childStart
-		}
-		clear(owner.values[start:childEnd])
-	}
+	// that overlap it. Open-argument records extend cleanup through the full
+	// forwarded tail, including arguments beyond the callee's register count.
+	clearOwnerRangeExcept(owner, childStart, cleanupEnd, destination, destination+requested)
 	owner.values = owner.values[:top]
 	thread.stack = owner.values
 	_, _ = thread.popFrameRecord()
@@ -4992,7 +5456,9 @@ func (thread *vmThread) resumeRecordOnlyFixedCall(rootRecordDepth int, frame **v
 	current.upvalues = record.closure.upvalues
 	current.upvalueValues = record.closure.upvalueValues
 	current.upvalueValueOK = record.closure.upvalueValueOK
-	current.varargs = nil
+	current.varargOwner = nil
+	current.varargBase = 0
+	current.varargCount = 0
 	current.pc = returnPC
 	current.debugLine = -1
 	current.openResultStart = -1
@@ -5260,30 +5726,22 @@ reload:
 				resultCount = 1
 			}
 			if resultCount < 0 {
-				if frame.openRangeOwner != nil {
-					frame.clearOpenResultRange()
-				}
-				frame.openResultStart = -1
-				frame.openResults = vmResultWindow{}
+				frame.clearOpenResultState()
 				frame.openResultStart = a
-				if !frame.publishOpenResultRange(thread, frame.varargs) {
-					frame.openResults = vmAdjustedBorrowedResultWindow(frame.varargs)
+				if !frame.publishOpenVarargRange(thread) {
+					frame.openResults = vmAdjustedBorrowedResultWindow(frame.varargValues())
 				}
 				registers = frame.registers
 				registers[a] = frame.openResultAt(0)
 				pc = nextWord
 				continue
 			}
-			if frame.openRangeOwner != nil {
-				frame.clearOpenResultRange()
-			}
-			frame.openResultStart = -1
-			frame.openResults = vmResultWindow{}
+			frame.clearOpenResultState()
 			for i := 0; i < resultCount; i++ {
-				if i >= len(frame.varargs) {
+				if i >= frame.varargLen() {
 					registers[a+i] = NilValue()
 				} else {
-					registers[a+i] = frame.varargs[i]
+					registers[a+i] = frame.varargAt(i)
 				}
 			}
 
@@ -6442,8 +6900,13 @@ reload:
 		case opCall:
 			resultCount, fixedMultiBorrow := decodeFixedMultiResultCount(d, frame.proto.registers)
 			openResultBorrow := decodeOpenResultCallMarker(d)
+			openArgumentPrefix, openArgumentMarker := decodeOpenArgumentCallMarker(c)
 			if openResultBorrow {
 				resultCount = -1
+			}
+			if openArgumentMarker {
+				prefixCount, _ := decodeOpenArgumentCallMarker(c)
+				c = -prefixCount - 1
 			}
 			if !fixedMultiBorrow && resultCount == 0 {
 				resultCount = 1
@@ -6472,7 +6935,7 @@ reload:
 					break
 				}
 			}
-			if resultCount == 1 && valueNativeID(callee) == nativeFuncRawLen {
+			if !openArgumentMarker && resultCount == 1 && valueNativeID(callee) == nativeFuncRawLen {
 				value, err := baseRawLenValue(registers[b+1 : b+1+c])
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
@@ -6485,7 +6948,7 @@ reload:
 				registers[a] = value
 				break
 			}
-			if resultCount == 1 && valueNativeID(callee) == nativeFuncToString {
+			if !openArgumentMarker && resultCount == 1 && valueNativeID(callee) == nativeFuncToString {
 				value := NilValue()
 				if c > 0 {
 					value = registers[b+1]
@@ -6501,6 +6964,20 @@ reload:
 				frame.openResults = vmResultWindow{}
 				registers[a] = result
 				break
+			}
+			if openArgumentMarker {
+				if closure, ok := callee.scriptFunction(); ok {
+					destinationCount := d
+					if fixedMultiBorrow || openResultBorrow || destinationCount == 0 {
+						destinationCount = resultCount
+					}
+					if record, entered := thread.maybeEnterRecordOnlyOpenArgumentCall(closure, frame, nextWord, b+1, openArgumentPrefix, vmResultDestination{register: a, count: destinationCount}); entered {
+						thread.pushFrameRecord(record)
+						thread.directFramePICCounts.addFixedCallTrampolineEntry()
+						directChildActive = true
+						goto reload
+					}
+				}
 			}
 			if closure, ok := callee.scriptFunction(); ok && c >= 0 {
 				destinationCount := d
@@ -7041,14 +7518,10 @@ reload:
 				resultCount = 1
 			}
 			if resultCount < 0 {
-				if frame.openRangeOwner != nil {
-					frame.clearOpenResultRange()
-				}
-				frame.openResultStart = -1
-				frame.openResults = vmResultWindow{}
+				frame.clearOpenResultState()
 				frame.openResultStart = a
-				if !frame.publishOpenResultRange(thread, frame.varargs) {
-					frame.openResults = vmAdjustedBorrowedResultWindow(frame.varargs)
+				if !frame.publishOpenVarargRange(thread) {
+					frame.openResults = vmAdjustedBorrowedResultWindow(frame.varargValues())
 				}
 				registers = frame.registers
 				registers[a] = frame.openResultAt(0)
@@ -7058,10 +7531,10 @@ reload:
 			}
 			frame.clearOpenResultState()
 			for i := 0; i < resultCount; i++ {
-				if i >= len(frame.varargs) {
+				if i >= frame.varargLen() {
 					registers[a+i] = NilValue()
 				} else {
-					registers[a+i] = frame.varargs[i]
+					registers[a+i] = frame.varargAt(i)
 				}
 			}
 
@@ -8164,8 +8637,13 @@ reload:
 		case opCall:
 			resultCount, fixedMultiBorrow := decodeFixedMultiResultCount(d, frame.proto.registers)
 			openResultBorrow := decodeOpenResultCallMarker(d)
+			openArgumentPrefix, openArgumentMarker := decodeOpenArgumentCallMarker(c)
 			if openResultBorrow {
 				resultCount = -1
+			}
+			if openArgumentMarker {
+				prefixCount, _ := decodeOpenArgumentCallMarker(c)
+				c = -prefixCount - 1
 			}
 			if !fixedMultiBorrow && resultCount == 0 {
 				resultCount = 1
@@ -8194,7 +8672,7 @@ reload:
 					break
 				}
 			}
-			if resultCount == 1 && valueNativeID(callee) == nativeFuncRawLen {
+			if !openArgumentMarker && resultCount == 1 && valueNativeID(callee) == nativeFuncRawLen {
 				value, err := baseRawLenValue(registers[b+1 : b+1+c])
 				if err != nil {
 					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
@@ -8207,7 +8685,7 @@ reload:
 				registers[a] = value
 				break
 			}
-			if resultCount == 1 && valueNativeID(callee) == nativeFuncToString {
+			if !openArgumentMarker && resultCount == 1 && valueNativeID(callee) == nativeFuncToString {
 				value := NilValue()
 				if c > 0 {
 					value = registers[b+1]
@@ -8223,6 +8701,20 @@ reload:
 				frame.openResults = vmResultWindow{}
 				registers[a] = result
 				break
+			}
+			if openArgumentMarker {
+				if closure, ok := callee.scriptFunction(); ok {
+					destinationCount := d
+					if fixedMultiBorrow || openResultBorrow || destinationCount == 0 {
+						destinationCount = resultCount
+					}
+					if record, entered := thread.maybeEnterRecordOnlyOpenArgumentCall(closure, frame, nextWord, b+1, openArgumentPrefix, vmResultDestination{register: a, count: destinationCount}); entered {
+						thread.pushFrameRecord(record)
+						thread.directFramePICCounts.addFixedCallTrampolineEntry()
+						directChildActive = true
+						goto reload
+					}
+				}
 			}
 			if closure, ok := callee.scriptFunction(); ok && c >= 0 {
 				destinationCount := d

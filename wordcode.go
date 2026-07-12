@@ -1236,15 +1236,25 @@ func verifyWordcodeInstruction(ins instruction, registerCount, constantCount, pr
 	}
 	if ins.op == opCall {
 		if decodeOpenResultCallMarker(ins.d) {
-			if ins.c < 0 {
+			prefixCount, openArguments := decodeOpenArgumentCallMarker(ins.c)
+			if ins.c < 0 && !openArguments {
 				return fmt.Errorf("open-result call marker requires fixed arguments")
 			}
-			if registerCount >= 0 && ins.b+ins.c >= registerCount {
+			if openArguments {
+				if registerCount >= 0 && ins.b+1+prefixCount >= registerCount {
+					return fmt.Errorf("call argument register range out of range")
+				}
+			} else if registerCount >= 0 && ins.b+ins.c >= registerCount {
 				return fmt.Errorf("call argument register range out of range")
 			}
 			return nil
 		}
-		if ins.c < 0 {
+		if prefixCount, marked := decodeOpenArgumentCallMarker(ins.c); marked {
+			openArgStart := ins.b + 1 + prefixCount
+			if openArgStart < 0 || openArgStart >= registerCount {
+				return fmt.Errorf("open call argument register %d out of range", openArgStart)
+			}
+		} else if ins.c < 0 {
 			prefixCount := -ins.c - 1
 			openArgStart := ins.b + 1 + prefixCount
 			if prefixCount < 0 || openArgStart < 0 || openArgStart >= registerCount {
@@ -1327,11 +1337,18 @@ func verifyWordcode(words []wordcodeWord, limits ...int) error {
 		if err := verifyWordcodeInstruction(ins, registerCount, constantCount, prototypeCount, upvalueCount, len(code)); err != nil {
 			return fmt.Errorf("instruction %d %s: %w", pc, opcodeName(ins.op), err)
 		}
-		if ins.op == opCall && decodeOpenResultCallMarker(ins.d) && !openResultCallFeedsOpenReturn(code, pc, ins.a) {
+		if ins.op == opCall && decodeOpenResultCallMarker(ins.d) && !openResultCallHasImmediateConsumer(code, pc, ins.a) {
 			return fmt.Errorf("instruction %d CALL open-result marker is not consumed by a matching open RETURN", pc)
 		}
-		if ins.op == opCall && ins.c < 0 && !wordcodeOpenResultProducer(code, pc, ins.b+1+(-ins.c-1), registerCount) {
-			return fmt.Errorf("instruction %d CALL open call has no preceding open-result producer", pc)
+		if ins.op == opCall {
+			prefixCount, open := decodeOpenArgumentCallMarker(ins.c)
+			if !open && ins.c < 0 {
+				prefixCount = -ins.c - 1
+				open = true
+			}
+			if open && !wordcodeOpenResultProducer(code, pc, ins.b+1+prefixCount, registerCount) {
+				return fmt.Errorf("instruction %d CALL open call has no preceding open-result producer", pc)
+			}
 		}
 		if ins.op == opReturn && ins.b < 0 && !wordcodeOpenResultProducer(code, pc, ins.a+(-ins.b-1), registerCount) {
 			return fmt.Errorf("instruction %d RETURN open result has no preceding open-result producer", pc)

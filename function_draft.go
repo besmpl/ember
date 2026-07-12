@@ -92,6 +92,7 @@ func sealFunctionDraft(draft *functionDraft) (*Proto, error) {
 func sealFunctionProto(proto *Proto, assembly *assembledBytecodeIR) error {
 	assignProtoGlobalSlots(proto, assembly.code)
 	assembly.code = normalizeOpenResultCallMarkers(assembly.code)
+	assembly.code = normalizeOpenArgumentCallMarkers(assembly.code)
 	assembly.code = normalizeFixedMultiResultCounts(assembly.code, proto.registers)
 	artifact := buildExecutionArtifact(proto, assembly.code)
 	artifact.apply(proto)

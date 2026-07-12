@@ -159,16 +159,23 @@ func registerEffectSpanBounds(ins instruction, span opcodeRegisterSpan, bound in
 	start = registerEffectSlotValue(ins, span.start) + int(span.offset)
 	count := registerEffectSlotValue(ins, span.count)
 	open := false
+	// Generic CALL uses a negative c to mean fixed prefix arguments followed
+	// by an open producer tail. Its register effect is the complete open span,
+	// not the fixed-call borrow-count interpretation used by CALL_ONE.
+	openCallArguments := ins.op == opCall && span.start == registerEffectSlotB && span.offset == 1 && span.count == registerEffectSlotC && ins.c < 0
 	switch span.mode {
 	case registerEffectSpanPositiveCount:
-		if count <= 0 {
+		if count <= 0 && !open {
 			return 0, 0, false
 		}
 	case registerEffectSpanSignedCount:
-		if count < 0 {
+		if openCallArguments {
+			open = true
+			count = 0
+		} else if count < 0 {
 			count, _ = decodeFixedCallCount(count)
 		}
-		if count <= 0 {
+		if count <= 0 && !open {
 			return 0, 0, false
 		}
 	case registerEffectSpanOpenOrOne:
@@ -186,6 +193,14 @@ func registerEffectSpanBounds(ins instruction, span opcodeRegisterSpan, bound in
 	}
 	if open {
 		if !clamp {
+			// Keep the statically named prefix visible to optimizer/liveness
+			// consumers. A bounded iterator expands the same effect to the full
+			// producer-backed tail.
+			if openCallArguments {
+				prefixCount := -ins.c - 1
+				end = registerEffectAddCount(start, prefixCount)
+				return start, end, end > start
+			}
 			return start, 0, true
 		}
 		end = bound
@@ -224,6 +239,7 @@ func instructionHasRegisterEffect(ins instruction, register int, access instruct
 	if register < 0 || access == 0 {
 		return false
 	}
+	ins = semanticRegisterEffectInstruction(ins)
 	effects := opcodeRegisterEffectsPtr(ins.op)
 	if effects == nil {
 		return false
@@ -269,6 +285,7 @@ type instructionRegisterIterator struct {
 // Callers that own a frame or state bound should use instructionRegistersBounded
 // so open call and vararg spans cover the complete bounded register window.
 func instructionRegisters(ins instruction, access instructionRegisterAccess) instructionRegisterIterator {
+	ins = semanticRegisterEffectInstruction(ins)
 	return instructionRegisterIterator{
 		ins:     ins,
 		access:  access,
@@ -278,12 +295,22 @@ func instructionRegisters(ins instruction, access instructionRegisterAccess) ins
 }
 
 func instructionRegistersBounded(ins instruction, access instructionRegisterAccess, bound int) instructionRegisterIterator {
+	ins = semanticRegisterEffectInstruction(ins)
 	return instructionRegisterIterator{
 		ins:     ins,
 		access:  access,
 		effects: opcodeRegisterEffectsPtr(ins.op),
 		bound:   bound,
 	}
+}
+
+func semanticRegisterEffectInstruction(ins instruction) instruction {
+	if ins.op == opCall {
+		if prefixCount, marked := decodeOpenArgumentCallMarker(ins.c); marked {
+			ins.c = -prefixCount - 1
+		}
+	}
+	return ins
 }
 
 func (iterator *instructionRegisterIterator) next() (int, bool) {
@@ -378,6 +405,7 @@ func (iterator *instructionRegisterIterator) spanEffectBefore(register int, curr
 }
 
 func instructionRegisterStaticBound(ins instruction) int {
+	ins = semanticRegisterEffectInstruction(ins)
 	if ins.op >= opcodeLimit {
 		return 0
 	}

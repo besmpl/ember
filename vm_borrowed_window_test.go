@@ -10,8 +10,8 @@ func TestOpenResultRangeUsesSharedOwnerAndClearsLogicalTop(t *testing.T) {
 	owner := thread.stackOwner
 	logicalTop := len(owner.values)
 	frame.openResultStart = 0
-	if !frame.publishOpenResultRange(&thread, frame.varargs) {
-		t.Fatal("publishOpenResultRange returned false")
+	if !frame.publishOpenVarargRange(&thread) {
+		t.Fatal("publishOpenVarargRange returned false")
 	}
 	if got, want := frame.openRangeBase, logicalTop; got != want {
 		t.Fatalf("open range base = %d, want logical top %d", got, want)
@@ -46,8 +46,8 @@ func TestOpenResultRangeRebindsAfterStackGrowth(t *testing.T) {
 		t.Fatal("stack growth did not force a rebind")
 	}
 	frame.openResultStart = 0
-	if !frame.publishOpenResultRange(&thread, frame.varargs) {
-		t.Fatal("publishOpenResultRange returned false after growth")
+	if !frame.publishOpenVarargRange(&thread) {
+		t.Fatal("publishOpenVarargRange returned false after growth")
 	}
 	values := frame.openResultRangeValues()
 	if len(values) != 3 {

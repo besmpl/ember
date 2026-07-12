@@ -81,7 +81,7 @@ func TestInstructionRegisterEffectsCoverOpenAndFixedSpans(t *testing.T) {
 		{name: "open call results", ins: instruction{op: opCall, a: 3, b: 1, c: -3, d: -1}, access: instructionRegisterWrite, bound: 8, want: []int{3, 4, 5, 6, 7}},
 		{name: "open vararg results", ins: instruction{op: opVararg, a: 3, b: -1}, access: instructionRegisterWrite, bound: 8, want: []int{3, 4, 5, 6, 7}},
 		{name: "fixed vararg results", ins: instruction{op: opVararg, a: 3, b: 3}, access: instructionRegisterWrite, bound: 8, want: []int{3, 4, 5}},
-		{name: "open call arguments", ins: instruction{op: opCall, a: 9, b: 3, c: -4, d: 1}, access: instructionRegisterRead, bound: 8, want: []int{3, 4, 5, 6}},
+		{name: "open call arguments", ins: instruction{op: opCall, a: 9, b: 3, c: -4, d: 1}, access: instructionRegisterRead, bound: 8, want: []int{3, 4, 5, 6, 7}},
 		{name: "concat span", ins: instruction{op: opConcatChain, a: 9, b: 3, c: 4}, access: instructionRegisterRead, bound: 8, want: []int{3, 4, 5, 6}},
 		{name: "open return prefix", ins: instruction{op: opReturn, a: 3, b: -4}, access: instructionRegisterRead, bound: 8, want: []int{3, 4, 5}},
 	}

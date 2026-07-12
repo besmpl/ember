@@ -254,7 +254,20 @@ func (thread *vmThread) runColdInstruction(frame *vmFrame) (action coldInstructi
 		if count, marked := decodeFixedMultiResultCount(d, frame.proto.registers); marked {
 			destinationCount = count
 		}
+		if destinationCount == 0 {
+			destinationCount = 1
+		}
 		destination := vmResultDestination{register: a, count: destinationCount}
+		prefixCount, openArgumentMarker := decodeOpenArgumentCallMarker(c)
+		if openArgumentMarker {
+			c = -prefixCount - 1
+			if closure, ok := callee.scriptFunction(); ok && globals != nil && globals.thread == thread {
+				if record, entered := thread.maybeEnterRecordOnlyOpenArgumentCall(closure, frame, frame.pc, b+1, prefixCount, destination); entered {
+					thread.pushFrameRecord(record)
+					return coldInstructionContinue(frame, frame.pc)
+				}
+			}
+		}
 		if c >= 0 {
 			done, err := frame.callFixedTableScriptCallMetamethod(callee, globals, b+1, c, destination)
 			if err != nil {
@@ -264,9 +277,17 @@ func (thread *vmThread) runColdInstruction(frame *vmFrame) (action coldInstructi
 				return coldInstructionResume(frame)
 			}
 		}
+		// Open-argument markers were decoded above. Keep the normalized semantic
+		// value local so generic fallbacks see the same shape as pre-marker
+		// bytecode.
 		var args []Value
 		if c < 0 {
-			prefixCount := -c - 1
+			if !openArgumentMarker {
+				prefixCount = -c - 1
+			}
+			if prefixCount < 0 || b < 0 || b+1 < 0 || prefixCount > frame.registerCount-(b+1) {
+				return coldInstructionError(fmt.Errorf("run: open call argument range out of bounds"))
+			}
 			if frame.openResultStart == b+1+prefixCount {
 				if _, ok := callee.scriptFunction(); ok && prefixCount == 0 && globals != nil && globals.thread != nil {
 					if values := frame.openResultRangeValues(); values != nil {

@@ -120,10 +120,23 @@ type fixedCallBorrowFact struct {
 	result        int
 	resultCount   int
 	openResults   bool
+	openArguments bool
+	prefixCount   int
 	suffixStart   int
 	suffixEnd     int
 	eligible      bool
 	reason        string
+}
+
+func openArgumentCallPrefix(ins instruction) (prefixCount int, ok bool) {
+	if ins.op != opCall || ins.c >= 0 {
+		return 0, false
+	}
+	if prefixCount, marked := decodeOpenArgumentCallMarker(ins.c); marked {
+		return prefixCount, true
+	}
+	prefixCount = -ins.c - 1
+	return prefixCount, prefixCount >= 0
 }
 
 func fixedCallBorrowShape(ins instruction) (argumentStart, argumentCount, result, rawCount int, ok bool) {
@@ -228,6 +241,76 @@ func fixedCallBorrowFactForInstruction(ins instruction, pc int, registers int, c
 	return fact
 }
 
+func openArgumentCallBorrowFactForInstruction(code []instruction, ins instruction, pc int, registers int, capturedLocals []bool, liveAfter registerSet) fixedCallBorrowFact {
+	prefixCount, ok := openArgumentCallPrefix(ins)
+	fact := fixedCallBorrowFact{pc: pc, op: ins.op, suffixEnd: registers, resultCount: 1, openArguments: ok, prefixCount: prefixCount}
+	if !ok {
+		return fact
+	}
+	fact.argumentStart = ins.b + 1
+	fact.argumentCount = prefixCount
+	openArgStart := fact.argumentStart + prefixCount
+	scratchStart := registers - prefixCount
+	fact.suffixStart = scratchStart
+	fact.result = ins.a
+	_, fixedMultiResults := decodeFixedMultiResultCount(ins.d, registers)
+	fact.openResults = ins.d < 0 && !fixedMultiResults
+	if fact.openResults {
+		fact.resultCount = -1
+	} else if fixedMultiResults {
+		fact.resultCount, _ = decodeFixedMultiResultCount(ins.d, registers)
+	} else if ins.d == 0 {
+		fact.resultCount = 1
+	} else {
+		fact.resultCount = ins.d
+	}
+	if !openArgumentCallHasProducer(code, pc, openArgStart, registers) {
+		fact.reason = "open argument call has no matching preceding producer"
+		return fact
+	}
+	if registers < 0 || fact.argumentStart < 0 || openArgStart < fact.argumentStart || openArgStart >= registers {
+		fact.reason = "open argument window is outside caller registers"
+		return fact
+	}
+	if fact.result < 0 || fact.result >= registers {
+		fact.reason = "result destination is outside caller registers"
+		return fact
+	}
+	if fact.openResults {
+		if fact.result >= scratchStart {
+			fact.reason = "open result destination overlaps the scratch suffix"
+			return fact
+		}
+	} else {
+		if fact.resultCount < 0 || fact.result+fact.resultCount > registers || (fact.resultCount > 0 && fact.result >= scratchStart) {
+			fact.reason = "result destination overlaps the scratch suffix"
+			return fact
+		}
+	}
+	resultEnd := fact.result + fact.resultCount
+	if fact.openResults {
+		resultEnd = registers
+	}
+	for destination := fact.result; destination < resultEnd; destination++ {
+		if len(capturedLocals) > destination && capturedLocals[destination] {
+			fact.reason = "result destination is captured"
+			return fact
+		}
+	}
+	for register := scratchStart; register < registers; register++ {
+		if register < len(capturedLocals) && capturedLocals[register] {
+			fact.reason = "borrowed suffix contains a captured local"
+			return fact
+		}
+		if !fact.openResults && (register < fact.result || register >= resultEnd) && liveAfter.contains(register) {
+			fact.reason = "borrowed suffix remains live after the call"
+			return fact
+		}
+	}
+	fact.eligible = true
+	return fact
+}
+
 func analyzeFixedCallBorrowFacts(code []instruction, registers int, capturedLocals []bool) []fixedCallBorrowFact {
 	if len(code) == 0 {
 		return nil
@@ -236,6 +319,19 @@ func analyzeFixedCallBorrowFacts(code []instruction, registers int, capturedLoca
 	analysis := analyzeBytecodeIR(ir, 0)
 	facts := make([]fixedCallBorrowFact, 0)
 	for pc, ins := range code {
+		if _, ok := openArgumentCallPrefix(ins); ok {
+			var liveAfter registerSet
+			if pc < len(analysis.liveAfter) {
+				liveAfter = analysis.liveAfter[pc]
+			}
+			fact := openArgumentCallBorrowFactForInstruction(code, ins, pc, registers, capturedLocals, liveAfter)
+			if fact.openResults && !openResultCallHasImmediateConsumer(code, pc, ins.a) {
+				fact.eligible = false
+				fact.reason = "open result call is not consumed by a matching open return"
+			}
+			facts = append(facts, fact)
+			continue
+		}
 		if _, _, _, _, ok := fixedCallBorrowShape(ins); !ok {
 			continue
 		}
@@ -248,7 +344,7 @@ func analyzeFixedCallBorrowFacts(code []instruction, registers int, capturedLoca
 			// An open destination is only safe for the compact record bridge when
 			// the call immediately feeds an open RETURN.  This proves that no
 			// unrelated suffix locals survive the dynamic result span.
-			if !openResultCallFeedsOpenReturn(code, pc, ins.a) {
+			if !openResultCallHasImmediateConsumer(code, pc, ins.a) {
 				fact.eligible = false
 				fact.reason = "open result call is not consumed by an open return"
 			}
@@ -264,6 +360,10 @@ func analyzeFixedCallBorrowFacts(code []instruction, registers int, capturedLoca
 func markBorrowableFixedCallWindows(code []instruction, registers int, capturedLocals []bool) []instruction {
 	hasFixedCall := false
 	for _, ins := range code {
+		if _, open := openArgumentCallPrefix(ins); open {
+			hasFixedCall = true
+			break
+		}
 		if _, _, _, _, ok := fixedCallBorrowShape(ins); ok {
 			hasFixedCall = true
 			break
@@ -279,12 +379,23 @@ func markBorrowableFixedCallWindows(code []instruction, registers int, capturedL
 		}
 		switch marked[fact.pc].op {
 		case opCall:
-			marker := encodeFixedMultiResultCount(fact.resultCount, registers)
-			if fact.openResults {
-				marker = encodeOpenResultCallMarker()
-			}
-			if marker >= -32768 && marker <= 32767 {
-				marked[fact.pc].d = marker
+			if fact.openArguments {
+				marker, representable := encodeOpenArgumentCallMarker(fact.prefixCount)
+				if !representable {
+					continue
+				}
+				marked[fact.pc].c = marker
+				if fact.openResults {
+					marked[fact.pc].d = encodeOpenResultCallMarker()
+				}
+			} else {
+				marker := encodeFixedMultiResultCount(fact.resultCount, registers)
+				if fact.openResults {
+					marker = encodeOpenResultCallMarker()
+				}
+				if marker >= -32768 && marker <= 32767 {
+					marked[fact.pc].d = marker
+				}
 			}
 		case opCallOne:
 			marked[fact.pc].c = encodeFixedCallCount(fact.argumentCount, true)

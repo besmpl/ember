@@ -665,16 +665,51 @@ func decodeFixedMultiResultCount(raw, registers int) (count int, borrowHint bool
 	return count, true
 }
 
-// openResultCallMarker is reserved for fixed-argument CALLs whose result
-// destination is semantically open. Valid open-result counts are bounded by
-// the caller register span, while fixed-multi markers occupy the range just
-// below that span; the signed int16 minimum leaves a distinct, verifier-visible
-// marker for the record-only bridge.
-const openResultCallMarker = -1 << 15
+// Open-argument CALL markers occupy a reserved int16 band. The marker carries
+// the number of fixed prefix arguments before the immediately preceding open
+// producer's dynamic tail. Keep this band distinct from the open-result marker
+// used in the d operand.
+const (
+	openArgumentCallMarkerMin = -32767
+	openArgumentCallMarkerMax = -32512
+	openResultCallMarker      = -1 << 15
+)
+
+func encodeOpenArgumentCallMarker(prefixCount int) (int, bool) {
+	if prefixCount < 0 || prefixCount > openArgumentCallMarkerMax-openArgumentCallMarkerMin {
+		return 0, false
+	}
+	return openArgumentCallMarkerMin + prefixCount, true
+}
+
+func decodeOpenArgumentCallMarker(raw int) (prefixCount int, marked bool) {
+	if raw < openArgumentCallMarkerMin || raw > openArgumentCallMarkerMax {
+		return 0, false
+	}
+	return raw - openArgumentCallMarkerMin, true
+}
 
 func encodeOpenResultCallMarker() int { return openResultCallMarker }
 
 func decodeOpenResultCallMarker(raw int) bool { return raw == openResultCallMarker }
+
+func normalizeOpenArgumentCallMarkers(code []instruction) []instruction {
+	var normalized []instruction
+	for index, ins := range code {
+		prefixCount, marked := decodeOpenArgumentCallMarker(ins.c)
+		if ins.op != opCall || !marked {
+			continue
+		}
+		if normalized == nil {
+			normalized = append([]instruction(nil), code...)
+		}
+		normalized[index].c = -prefixCount - 1
+	}
+	if normalized != nil {
+		return normalized
+	}
+	return code
+}
 
 func openResultCallFeedsOpenReturn(code []instruction, pc, result int) bool {
 	if pc < 0 || pc+1 >= len(code) {
@@ -686,6 +721,50 @@ func openResultCallFeedsOpenReturn(code []instruction, pc, result int) bool {
 	}
 	prefixCount := -next.b - 1
 	return prefixCount >= 0 && next.a+prefixCount == result
+}
+
+func openResultCallHasImmediateConsumer(code []instruction, pc, result int) bool {
+	if pc < 0 || pc+1 >= len(code) {
+		return false
+	}
+	next := code[pc+1]
+	if next.op == opReturn && next.b < 0 {
+		prefixCount := -next.b - 1
+		return prefixCount >= 0 && next.a+prefixCount == result
+	}
+	if next.op == opCall && next.c < 0 {
+		prefixCount, marked := decodeOpenArgumentCallMarker(next.c)
+		if !marked {
+			prefixCount = -next.c - 1
+		}
+		return prefixCount >= 0 && next.b+1+prefixCount == result
+	}
+	return false
+}
+
+func openArgumentCallHasProducer(code []instruction, pc, start, registers int) bool {
+	if pc <= 0 || start < 0 || (registers >= 0 && start >= registers) {
+		return false
+	}
+	prev := code[pc-1]
+	switch prev.op {
+	case opVararg:
+		return prev.b < 0 && prev.a == start
+	case opCall:
+		if prev.d < 0 && prev.a == start {
+			if registers >= 0 {
+				if _, marked := decodeFixedMultiResultCount(prev.d, registers); marked {
+					return false
+				}
+			}
+			return true
+		}
+		return false
+	case opFastCall:
+		return prev.d < 0 && prev.a == start
+	default:
+		return false
+	}
 }
 
 func normalizeOpenResultCallMarkers(code []instruction) []instruction {
@@ -1755,6 +1834,7 @@ func finalizeProtoExecutionArtifact(proto *Proto, sourceCode ...[]instruction) e
 		code = decoded
 	}
 	code = normalizeOpenResultCallMarkers(code)
+	code = normalizeOpenArgumentCallMarkers(code)
 	code = normalizeFixedMultiResultCounts(code, proto.registers)
 	assignProtoGlobalSlots(proto, code)
 	artifact := buildExecutionArtifact(proto, code)
@@ -2621,8 +2701,16 @@ func verifyProtoSeenWithCode(proto *Proto, seen map[*Proto]bool, code []instruct
 		if err := verifyInstruction(proto, pc, ins, len(code)); err != nil {
 			return fmt.Errorf("instruction %d %s(%d,%d,%d,%d): %w", pc, opcodeName(ins.op), ins.a, ins.b, ins.c, ins.d, err)
 		}
-		if ins.op == opCall && decodeOpenResultCallMarker(ins.d) && !openResultCallFeedsOpenReturn(code, pc, ins.a) {
+		if ins.op == opCall && decodeOpenResultCallMarker(ins.d) && !openResultCallHasImmediateConsumer(code, pc, ins.a) {
 			return fmt.Errorf("instruction %d CALL open-result marker is not consumed by a matching open RETURN", pc)
+		}
+		if ins.op == opCall {
+			if prefixCount, marked := decodeOpenArgumentCallMarker(ins.c); marked {
+				openArgStart := ins.b + 1 + prefixCount
+				if !openArgumentCallHasProducer(code, pc, openArgStart, proto.registers) {
+					return fmt.Errorf("instruction %d CALL open-argument marker has no matching open producer", pc)
+				}
+			}
 		}
 	}
 	if proto.lines != nil && len(proto.lines) != len(code) {
@@ -2988,15 +3076,25 @@ func verifyInstruction(proto *Proto, pc int, ins instruction, codeLen ...int) er
 			return err
 		}
 		if decodeOpenResultCallMarker(ins.d) {
-			if ins.c < 0 {
+			prefixCount, openArguments := decodeOpenArgumentCallMarker(ins.c)
+			if ins.c < 0 && !openArguments {
 				return fmt.Errorf("open-result call marker requires fixed arguments")
 			}
-			if ins.b+ins.c >= proto.registers {
+			if openArguments {
+				if ins.b+1+prefixCount >= proto.registers {
+					return fmt.Errorf("call argument register range out of range")
+				}
+			} else if ins.b+ins.c >= proto.registers {
 				return fmt.Errorf("call argument register range out of range")
 			}
 			return verifyRegister(proto, ins.a)
 		}
-		if ins.c < 0 {
+		if prefixCount, marked := decodeOpenArgumentCallMarker(ins.c); marked {
+			openArgStart := ins.b + 1 + prefixCount
+			if openArgStart < 0 || openArgStart >= proto.registers {
+				return fmt.Errorf("open call argument register %d out of range", openArgStart)
+			}
+		} else if ins.c < 0 {
 			prefixCount := -ins.c - 1
 			openArgStart := ins.b + 1 + prefixCount
 			if openArgStart < 0 || openArgStart >= proto.registers {

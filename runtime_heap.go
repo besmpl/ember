@@ -1332,7 +1332,9 @@ func (collector *runtimeHeapCollector) clearInactiveFrameSlots(thread *vmThread,
 		frame.upvalues = nil
 		frame.upvalueValues = nil
 		frame.upvalueValueOK = nil
-		frame.varargs = nil
+		frame.varargOwner = nil
+		frame.varargBase = 0
+		frame.varargCount = 0
 		frame.openResults = vmResultWindow{}
 		frame.openRangeOwner = nil
 		frame.openRangeBase = -1
@@ -1409,6 +1411,7 @@ func (collector *runtimeHeapCollector) scanFrame(value *vmFrame) {
 	collector.scanClosure(value.currentClosure)
 	collector.scanStackOwner(value.owner)
 	collector.scanStackOwner(value.window.owner)
+	collector.scanStackOwner(value.varargOwner)
 	collector.scanStackOwner(value.openRangeOwner)
 	collector.scanValues(value.registers)
 	for _, cell := range value.cells {
@@ -1422,7 +1425,6 @@ func (collector *runtimeHeapCollector) scanFrame(value *vmFrame) {
 			collector.scanValue(item)
 		}
 	}
-	collector.scanValues(value.varargs)
 	collector.scanResultWindow(value.openResults)
 	if value.hasPendingCall && value.pendingCall.protected != nil && value.pendingCall.protected.hasHandler {
 		collector.scanValue(value.pendingCall.protected.handler)
