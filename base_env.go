@@ -7,6 +7,7 @@ type globalEnv struct {
 	thread  *vmThread
 	owner   *runtimeOwner
 	version uint64
+	pooled  bool
 }
 
 type globalSlot struct {

@@ -1,6 +1,9 @@
 package ember
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 type vmCoroutineStatus string
 
@@ -13,6 +16,7 @@ const (
 
 type vmCoroutine struct {
 	status        vmCoroutineStatus
+	owner         *runtimeOwner
 	thread        vmThread
 	root          *closure
 	userdata      *UserData
@@ -50,15 +54,27 @@ func baseCoroutineCreate(globals *globalEnv, args []Value) ([]Value, error) {
 }
 
 func newVMCoroutine(globals *globalEnv, root *closure) *vmCoroutine {
+	owner := runtimeOwnerFromGlobals(globals)
+	coroutineGlobals := globals
+	if globals != nil && globals.pooled {
+		detached := *globals
+		detached.thread = nil
+		detached.pooled = false
+		coroutineGlobals = &detached
+	}
 	coroutine := &vmCoroutine{
 		status: vmCoroutineSuspended,
-		thread: newVMThread(globals),
+		owner:  owner,
+		thread: newVMThread(coroutineGlobals),
 		root:   root,
 	}
 	if globals != nil {
 		coroutine.thread.inheritRuntimeState(globals.thread)
 	}
 	coroutine.userdata = NewUserData(coroutine)
+	if owner != nil {
+		_ = owner.retainCoroutine(coroutine)
+	}
 	return coroutine
 }
 
@@ -75,6 +91,16 @@ func baseCoroutineResume(globals *globalEnv, args []Value) ([]Value, error) {
 	}
 	if coroutine.status == vmCoroutineNormal {
 		return []Value{BoolValue(false), StringValue("cannot resume non-suspended coroutine")}, nil
+	}
+	callerOwner := runtimeOwnerFromGlobals(globals)
+	if coroutine.owner != callerOwner {
+		return []Value{BoolValue(false), StringValue("coroutine.resume: runtime owner mismatch")}, nil
+	}
+	if coroutine.owner != nil {
+		if err := coroutine.owner.registerCoroutine(coroutine); err != nil {
+			return []Value{BoolValue(false), StringValue("coroutine.resume: " + err.Error())}, nil
+		}
+		defer coroutine.owner.unregisterCoroutine(coroutine)
 	}
 
 	coroutine.status = vmCoroutineRunning
@@ -103,14 +129,69 @@ func baseCoroutineResume(globals *globalEnv, args []Value) ([]Value, error) {
 	if err != nil {
 		coroutine.status = vmCoroutineDead
 		coroutine.err = err
-		coroutine.suspended = vmSuspendedFrames{}
-		coroutine.thread.dropFrames(0)
+		coroutine.disposeFrames()
+		coroutine.releaseOwner()
 		return []Value{BoolValue(false), StringValue(err.Error())}, nil
 	}
 	coroutine.status = vmCoroutineDead
-	coroutine.suspended = vmSuspendedFrames{}
+	returned := coroutine.resumeResult(true, results)
+	coroutine.disposeFrames()
+	coroutine.releaseOwner()
+	return returned, nil
+}
+
+func runtimeOwnerFromGlobals(globals *globalEnv) *runtimeOwner {
+	if globals == nil {
+		return nil
+	}
+	if globals.owner != nil {
+		return globals.owner
+	}
+	if globals.thread != nil {
+		return globals.thread.owner
+	}
+	return nil
+}
+
+func (coroutine *vmCoroutine) releaseOwner() {
+	if coroutine != nil && coroutine.owner != nil {
+		coroutine.owner.releaseCoroutine(coroutine)
+	}
+}
+
+func (coroutine *vmCoroutine) disposeFrames() {
+	if coroutine == nil {
+		return
+	}
+	if len(coroutine.suspended.frames) != 0 || coroutine.suspended.owner != nil {
+		coroutine.thread.resumeFrames(coroutine.suspended)
+		coroutine.suspended = vmSuspendedFrames{}
+	}
 	coroutine.thread.dropFrames(0)
-	return coroutine.resumeResult(true, results), nil
+	for _, frame := range coroutine.thread.frameSlots {
+		if frame != nil {
+			frame.resetForPool()
+		}
+	}
+	coroutine.thread.frames = nil
+	coroutine.thread.frameSlots = nil
+	coroutine.thread.stack = nil
+	coroutine.thread.stackOwner = nil
+	coroutine.thread.globals = nil
+	coroutine.thread.baseGlobals = globalEnv{}
+	coroutine.thread.ctx = context.Background()
+	coroutine.thread.coroutine = nil
+	coroutine.thread.stringIntern = nil
+	coroutine.thread.stringConcatIntern = nil
+	coroutine.thread.functionInstances = nil
+	coroutine.thread.functionInstanceSites = 0
+	coroutine.thread.intrinsicGuards = nil
+	coroutine.thread.debugHook = nil
+	coroutine.root = nil
+	coroutine.yieldedValues = nil
+	clear(coroutine.yieldedInline[:])
+	coroutine.resumeArgs = nil
+	coroutine.resumeResults = nil
 }
 
 func (coroutine *vmCoroutine) resumeResult(ok bool, values []Value) []Value {
@@ -140,7 +221,9 @@ func activeParentCoroutine(globals *globalEnv, child *vmCoroutine) (*vmCoroutine
 }
 
 func resumeCoroutine(coroutine *vmCoroutine, globals *globalEnv, args []Value) ([]Value, error) {
-	coroutine.thread.globals = globals
+	if coroutine.thread.globals == nil {
+		coroutine.thread.globals = globals
+	}
 	previousCoroutine := coroutine.thread.coroutine
 	coroutine.thread.coroutine = coroutine
 	defer func() {
@@ -208,13 +291,13 @@ func baseCoroutineClose(args []Value) ([]Value, error) {
 		err := coroutine.err
 		coroutine.err = nil
 		coroutine.status = vmCoroutineDead
-		coroutine.suspended = vmSuspendedFrames{}
-		coroutine.thread.dropFrames(0)
+		coroutine.disposeFrames()
+		coroutine.releaseOwner()
 		return []Value{BoolValue(false), StringValue(err.Error())}, nil
 	}
 	coroutine.status = vmCoroutineDead
-	coroutine.suspended = vmSuspendedFrames{}
-	coroutine.thread.dropFrames(0)
+	coroutine.disposeFrames()
+	coroutine.releaseOwner()
 	return []Value{BoolValue(true)}, nil
 }
 
@@ -247,8 +330,9 @@ func baseCoroutineWrap(globals *globalEnv, args []Value) ([]Value, error) {
 		return nil, fmt.Errorf("coroutine.wrap: argument is %s, want function", args[0].Kind())
 	}
 	coroutine := newVMCoroutine(globals, closure)
+	resumeGlobals := coroutine.thread.globals
 	wrapped := func(args []Value) ([]Value, error) {
-		results, err := baseCoroutineResume(globals, append([]Value{UserDataValue(coroutine.userdata)}, args...))
+		results, err := baseCoroutineResume(resumeGlobals, append([]Value{UserDataValue(coroutine.userdata)}, args...))
 		if err != nil {
 			return nil, err
 		}

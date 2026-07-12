@@ -1095,7 +1095,7 @@ func (thread *vmThread) resetForRun(ctx context.Context, globals *globalEnv) {
 		ctx = context.Background()
 	}
 	if globals == nil {
-		thread.baseGlobals = globalEnv{}
+		thread.baseGlobals = globalEnv{pooled: true}
 		globals = &thread.baseGlobals
 	}
 	thread.ctx = ctx

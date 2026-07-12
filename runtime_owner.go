@@ -31,6 +31,9 @@ type runtimeOwner struct {
 	activeRuns int
 	threads    map[*vmThread]struct{}
 	coroutines map[*vmCoroutine]struct{}
+	// coroutineRefs retains suspended owned coroutines so Close can dispose
+	// transferred stacks without treating suspension as active execution.
+	coroutineRefs map[*vmCoroutine]struct{}
 
 	roots map[uint64]*runtimeRoot
 	pins  map[uint64]*runtimePin
@@ -48,12 +51,13 @@ type runtimeOwnerPinState struct {
 
 func newRuntimeOwner() *runtimeOwner {
 	return &runtimeOwner{
-		heap:       &runtimeHeap{},
-		threads:    make(map[*vmThread]struct{}),
-		coroutines: make(map[*vmCoroutine]struct{}),
-		roots:      make(map[uint64]*runtimeRoot),
-		pins:       make(map[uint64]*runtimePin),
-		pinStates:  make(map[slot]runtimeOwnerPinState),
+		heap:          &runtimeHeap{},
+		threads:       make(map[*vmThread]struct{}),
+		coroutines:    make(map[*vmCoroutine]struct{}),
+		coroutineRefs: make(map[*vmCoroutine]struct{}),
+		roots:         make(map[uint64]*runtimeRoot),
+		pins:          make(map[uint64]*runtimePin),
+		pinStates:     make(map[slot]runtimeOwnerPinState),
 	}
 }
 
@@ -100,19 +104,29 @@ func (owner *runtimeOwner) close() error {
 		return nil
 	}
 	owner.mu.Lock()
-	defer owner.mu.Unlock()
 	if owner.state == runtimeOwnerClosed {
+		owner.mu.Unlock()
 		return nil
 	}
 	if owner.activeRuns != 0 || len(owner.threads) != 0 || len(owner.coroutines) != 0 {
+		owner.mu.Unlock()
 		return errRuntimeOwnerActive
 	}
 	owner.state = runtimeOwnerClosed
 	owner.idleVMCaches = nil
+	coroutines := make([]*vmCoroutine, 0, len(owner.coroutineRefs))
+	for coroutine := range owner.coroutineRefs {
+		coroutines = append(coroutines, coroutine)
+	}
+	clear(owner.coroutineRefs)
 	for _, root := range owner.roots {
 		root.released = true
 	}
 	clear(owner.roots)
+	owner.mu.Unlock()
+	for _, coroutine := range coroutines {
+		coroutine.disposeFrames()
+	}
 	return nil
 }
 
@@ -533,6 +547,31 @@ func (owner *runtimeOwner) unregisterCoroutine(coroutine *vmCoroutine) {
 	}
 	owner.mu.Lock()
 	delete(owner.coroutines, coroutine)
+	owner.mu.Unlock()
+}
+
+func (owner *runtimeOwner) retainCoroutine(coroutine *vmCoroutine) error {
+	if owner == nil || coroutine == nil {
+		return errRuntimeOwnerInvalid
+	}
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if owner.state == runtimeOwnerClosed {
+		return errRuntimeOwnerClosed
+	}
+	if owner.coroutineRefs == nil {
+		owner.coroutineRefs = make(map[*vmCoroutine]struct{})
+	}
+	owner.coroutineRefs[coroutine] = struct{}{}
+	return nil
+}
+
+func (owner *runtimeOwner) releaseCoroutine(coroutine *vmCoroutine) {
+	if owner == nil || coroutine == nil {
+		return
+	}
+	owner.mu.Lock()
+	delete(owner.coroutineRefs, coroutine)
 	owner.mu.Unlock()
 }
 
