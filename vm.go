@@ -74,6 +74,20 @@ func executeProto(ctx context.Context, proto *Proto, globals *globalEnv, options
 }
 
 func executeProtoWithOwner(ctx context.Context, proto *Proto, globals *globalEnv, options executeOptions) ([]Value, error) {
+	// A pure prototype does not need the VM thread or global environment. Route
+	// it through the compact slot runner when there is no budget/upvalue state
+	// and the context cannot be cancelled. The owner activity counter keeps
+	// close from racing this VM-thread-free path; the slot runner itself keeps
+	// using its pooled ephemeral heap until collector/root integration lands.
+	if proto != nil && proto.slotExecutionEligible && globals.thread == nil && options.maxInstructions < 0 &&
+		len(options.upvalues) == 0 && len(options.upvalueValues) == 0 &&
+		len(options.upvalueValueOK) == 0 &&
+		(ctx == nil || (ctx.Done() == nil && ctx.Err() == nil)) {
+		values, handled, err := runOwnerSlotExecution(globals.owner, proto, options.args)
+		if handled || err != nil {
+			return values, err
+		}
+	}
 	thread := acquireVMThread(ctx, globals)
 	if err := thread.bindOwner(globals.owner); err != nil {
 		thread.owner = nil
@@ -84,6 +98,14 @@ func executeProtoWithOwner(ctx context.Context, proto *Proto, globals *globalEnv
 	defer releaseVMThread(thread)
 	thread.instructionBudget = options.maxInstructions
 	return thread.runWithUpvalues(proto, options.args, options.upvalues, options.upvalueValues, options.upvalueValueOK)
+}
+
+func runOwnerSlotExecution(owner *runtimeOwner, proto *Proto, args []Value) (values []Value, handled bool, err error) {
+	if err := owner.beginSlotRun(); err != nil {
+		return nil, false, err
+	}
+	defer owner.endSlotRun()
+	return runSlotExecution(proto, args)
 }
 
 var vmThreadPool = sync.Pool{

@@ -29,8 +29,11 @@ type runtimeOwner struct {
 	state runtimeOwnerState
 
 	activeRuns int
-	threads    map[*vmThread]struct{}
-	coroutines map[*vmCoroutine]struct{}
+	// activeSlotRuns keeps close from racing an owner-bound compact execution
+	// that does not acquire a VM thread registration.
+	activeSlotRuns int
+	threads        map[*vmThread]struct{}
+	coroutines     map[*vmCoroutine]struct{}
 	// coroutineRefs retains suspended owned coroutines so Close can dispose
 	// transferred stacks without treating suspension as active execution.
 	coroutineRefs map[*vmCoroutine]struct{}
@@ -93,6 +96,34 @@ func (lease *runtimeRunLease) release() {
 	lease.end()
 }
 
+// beginSlotRun accounts for a compact owner-bound execution that does not
+// acquire a VM thread. The activity counter is deliberately kept on the owner
+// rather than in a lease object so the hot path remains allocation-free. The
+// caller must pair it with endSlotRun exactly once.
+func (owner *runtimeOwner) beginSlotRun() error {
+	if owner == nil {
+		return errRuntimeOwnerReleased
+	}
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if owner.state == runtimeOwnerClosed {
+		return errRuntimeOwnerClosed
+	}
+	owner.activeSlotRuns++
+	return nil
+}
+
+func (owner *runtimeOwner) endSlotRun() {
+	if owner == nil {
+		return
+	}
+	owner.mu.Lock()
+	if owner.activeSlotRuns > 0 {
+		owner.activeSlotRuns--
+	}
+	owner.mu.Unlock()
+}
+
 func (owner *runtimeOwner) close() error {
 	if owner == nil {
 		return nil
@@ -102,7 +133,7 @@ func (owner *runtimeOwner) close() error {
 		owner.mu.Unlock()
 		return nil
 	}
-	if owner.activeRuns != 0 || len(owner.threads) != 0 || len(owner.coroutines) != 0 {
+	if owner.activeRuns != 0 || owner.activeSlotRuns != 0 || len(owner.threads) != 0 || len(owner.coroutines) != 0 {
 		owner.mu.Unlock()
 		return errRuntimeOwnerActive
 	}
