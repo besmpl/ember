@@ -3895,6 +3895,40 @@ func directFrameStringField(value Value, key string) (Value, bool, error) {
 	return directFrameStringFieldBox(value, key, nil)
 }
 
+func directFrameArrayIndexInBounds(number float64, arrayLen int) (int, bool) {
+	if !(number >= 1 && number <= float64(arrayLen)) {
+		return 0, false
+	}
+	index := int(number)
+	if float64(index) != number {
+		return 0, false
+	}
+	return index, true
+}
+
+// directFrameRawStringField keeps the VM's common text-key lookup local. It
+// avoids constructing a general probe for inline fields while retaining the
+// hash sidecar fallback for overflow storage.
+func directFrameRawStringField(table *Table, key string) (Value, bool) {
+	if table == nil {
+		return NilValue(), false
+	}
+	for i := range table.stringFields {
+		field := &table.stringFields[i]
+		if !field.value.IsNil() && field.key == key {
+			return field.value, true
+		}
+	}
+	if !table.hasStringOverflow() {
+		return NilValue(), false
+	}
+	fields := table.hashFields()
+	if fields == nil {
+		return NilValue(), false
+	}
+	return fields.get(tableKey{kind: StringKind, str: key, strHash: hashString(key)})
+}
+
 func directFrameStringFieldBox(value Value, key string, box *stringBox) (Value, bool, error) {
 	table := value.tableRef()
 	if table == nil {
@@ -3905,7 +3939,7 @@ func directFrameStringFieldBox(value Value, key string, box *stringBox) (Value, 
 	if box != nil {
 		field, ok = table.rawStringFieldBox(box)
 	} else {
-		field, ok = table.rawStringField(key)
+		field, ok = directFrameRawStringField(table, key)
 	}
 	if ok {
 		return field, true, nil
@@ -3956,7 +3990,7 @@ func directFrameRowStringFieldFast(value Value, key string, slotIndex int) (Valu
 		table.stringFields[slotIndex].key == key {
 		return table.stringFields[slotIndex].value, true, true
 	}
-	if field, ok := table.rawStringField(key); ok {
+	if field, ok := directFrameRawStringField(table, key); ok {
 		return field, true, true
 	}
 	if table.metatable != nil {
@@ -3982,7 +4016,7 @@ func directFrameRowStringFieldsStringEqualFast(leftValue Value, leftKey string, 
 		leftTable.stringFields[leftSlot].key == leftKey {
 		left = leftTable.stringFields[leftSlot].value
 		leftOK = true
-	} else if field, ok := leftTable.rawStringField(leftKey); ok {
+	} else if field, ok := directFrameRawStringField(leftTable, leftKey); ok {
 		left = field
 		leftOK = true
 	}
@@ -3997,7 +4031,7 @@ func directFrameRowStringFieldsStringEqualFast(leftValue Value, leftKey string, 
 		rightTable.stringFields[rightSlot].key == rightKey {
 		right = rightTable.stringFields[rightSlot].value
 		rightOK = true
-	} else if field, ok := rightTable.rawStringField(rightKey); ok {
+	} else if field, ok := directFrameRawStringField(rightTable, rightKey); ok {
 		right = field
 		rightOK = true
 	}
@@ -5886,7 +5920,7 @@ reload:
 			firstBox := constants[b].stringBox()
 			first, ok := table.rawStringFieldBox(firstBox)
 			if firstBox == nil {
-				first, ok = table.rawStringField(firstKey)
+				first, ok = directFrameRawStringField(table, firstKey)
 			}
 			if !ok {
 				if table.metatable != nil {
@@ -5957,7 +5991,7 @@ reload:
 						break
 					}
 				}
-			} else if value, ok := table.rawStringField(keyText); ok {
+			} else if value, ok := directFrameRawStringField(table, keyText); ok {
 				// Keep the existing raw-string adapter as a defensive fallback for
 				// malformed hand-built prototypes.
 				registers[a] = value
@@ -5992,7 +6026,7 @@ reload:
 			firstBox := constants[c].stringBox()
 			first, ok := table.rawStringFieldBox(firstBox)
 			if firstBox == nil {
-				first, ok = table.rawStringField(firstKey)
+				first, ok = directFrameRawStringField(table, firstKey)
 			}
 			if !ok {
 				if table.metatable != nil {
@@ -6124,10 +6158,13 @@ reload:
 				} else {
 					picCounts.addMissingKeyFallback()
 				}
-			} else if index, ok := tableArrayIndexFromValue(key); ok && index <= len(table.array) {
-				picCounts.addNumericArrayIndexHit()
-				registers[a] = table.array[index-1]
-				break
+			} else if valueKind(key) == NumberKind {
+				if index, ok := directFrameArrayIndexInBounds(valueNumber(key), len(table.array)); ok {
+					picCounts.addNumericArrayIndexHit()
+					registers[a] = table.array[index-1]
+					break
+				}
+				picCounts.addInvalidKeyFallback()
 			} else {
 				picCounts.addInvalidKeyFallback()
 			}
@@ -7232,7 +7269,7 @@ reload:
 			key := constantKeys[c].str
 			callee, ok := table.rawStringFieldBox(constants[c].stringBox())
 			if constants[c].stringBox() == nil {
-				callee, ok = table.rawStringField(key)
+				callee, ok = directFrameRawStringField(table, key)
 			}
 			if !ok {
 				if table.metatable != nil {
@@ -7677,7 +7714,7 @@ reload:
 			firstBox := constants[b].stringBox()
 			first, ok := table.rawStringFieldBox(firstBox)
 			if firstBox == nil {
-				first, ok = table.rawStringField(firstKey)
+				first, ok = directFrameRawStringField(table, firstKey)
 			}
 			if !ok {
 				if table.metatable != nil {
@@ -7744,7 +7781,7 @@ reload:
 						break
 					}
 				}
-			} else if value, ok := table.rawStringField(keyText); ok {
+			} else if value, ok := directFrameRawStringField(table, keyText); ok {
 				// Keep the existing raw-string adapter as a defensive fallback for
 				// malformed hand-built prototypes.
 				registers[a] = value
@@ -7778,7 +7815,7 @@ reload:
 			firstBox := constants[c].stringBox()
 			first, ok := table.rawStringFieldBox(firstBox)
 			if firstBox == nil {
-				first, ok = table.rawStringField(firstKey)
+				first, ok = directFrameRawStringField(table, firstKey)
 			}
 			if !ok {
 				if table.metatable != nil {
@@ -7896,9 +7933,11 @@ reload:
 						break
 					}
 				}
-			} else if index, ok := tableArrayIndexFromValue(key); ok && index <= len(table.array) {
-				registers[a] = table.array[index-1]
-				break
+			} else if valueKind(key) == NumberKind {
+				if index, ok := directFrameArrayIndexInBounds(valueNumber(key), len(table.array)); ok {
+					registers[a] = table.array[index-1]
+					break
+				}
 			}
 			value, err := table.rawGet(key)
 			if err != nil {
@@ -8962,7 +9001,7 @@ reload:
 			key := constantKeys[c].str
 			callee, ok := table.rawStringFieldBox(constants[c].stringBox())
 			if constants[c].stringBox() == nil {
-				callee, ok = table.rawStringField(key)
+				callee, ok = directFrameRawStringField(table, key)
 			}
 			if !ok {
 				if table.metatable != nil {
@@ -9897,7 +9936,7 @@ func baseFieldIntrinsicUnchangedWithValues(globals *globalEnv, globalName string
 	if table == nil || table.metatable != nil {
 		return false
 	}
-	callee, ok := table.rawStringField(field)
+	callee, ok := directFrameRawStringField(table, field)
 	return ok && valueNativeID(callee) == nativeID
 }
 
@@ -9922,7 +9961,7 @@ func baseFieldIntrinsicCallee(globals *globalEnv, globalName string, field strin
 		thread.clearBaseFieldIntrinsicGuard(key)
 		return NilValue(), false, fmt.Errorf("run: get field target is %s, want table", tableValue.Kind())
 	}
-	if callee, ok := table.rawStringField(field); ok {
+	if callee, ok := directFrameRawStringField(table, field); ok {
 		fast := valueNativeID(callee) == intrinsic.nativeID
 		if fast {
 			thread.storeBaseFieldIntrinsicGuard(key, globals, table, callee)

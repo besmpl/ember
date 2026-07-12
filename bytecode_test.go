@@ -9794,3 +9794,28 @@ return rows[i].value
 		t.Fatalf("numeric array index hits = %d, want one direct array read", counts.numericArrayIndexHits)
 	}
 }
+
+func TestRunDirectFrameNumericIndexBoundsPreserveNilFallback(t *testing.T) {
+	proto, err := Compile(`
+local values = {4}
+return values[1], values[1.5], values[0], values[2]
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(results) != 4 {
+		t.Fatalf("Run returned %d results, want 4", len(results))
+	}
+	if got, ok := results[0].Number(); !ok || got != 4 {
+		t.Fatalf("in-bounds result is %v (%t), want 4", results[0], ok)
+	}
+	for index := 1; index < len(results); index++ {
+		if !results[index].IsNil() {
+			t.Fatalf("out-of-bounds result %d is %v, want nil", index, results[index])
+		}
+	}
+}

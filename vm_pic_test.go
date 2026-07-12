@@ -30,6 +30,32 @@ return total
 	}
 }
 
+func TestDirectFrameRawStringFieldPreservesInlineAndOverflowStorage(t *testing.T) {
+	table := NewTable()
+	inlineBox := newStringBox("inline")
+	table.setRawStringFieldBox(inlineBox.text, inlineBox, NumberValue(3))
+	if value, ok := directFrameRawStringField(table, "inline"); !ok {
+		t.Fatal("directFrameRawStringField(inline) missed")
+	} else if got, numberOK := value.Number(); !numberOK || got != 3 {
+		t.Fatalf("inline value = %v (%t), want 3", got, numberOK)
+	}
+
+	for index := 0; index < maxInlineStringFields; index++ {
+		table.setRawStringField("field"+string(rune('0'+index)), NumberValue(float64(index)))
+	}
+	table.setRawStringField("overflow", NumberValue(9))
+	if value, ok := directFrameRawStringField(table, "overflow"); !ok {
+		t.Fatal("directFrameRawStringField(overflow) missed")
+	} else if got, numberOK := value.Number(); !numberOK || got != 9 {
+		t.Fatalf("overflow value = %v (%t), want 9", got, numberOK)
+	}
+
+	table.setRawStringFieldBox(inlineBox.text, inlineBox, NilValue())
+	if _, ok := directFrameRawStringField(table, "inline"); ok {
+		t.Fatal("directFrameRawStringField returned a deleted inline field")
+	}
+}
+
 func TestDynamicStringIndexCacheInlinePointerHitPreservesLayoutAndInvalidation(t *testing.T) {
 	table := NewTable()
 	box := newStringBox("hp")
