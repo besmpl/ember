@@ -1722,10 +1722,11 @@ type Proto struct {
 	entryNilRegisters       []int
 	reuseZeroCaptureClosure bool
 	// slotExecutionEligible is sealed with the immutable wordcode artifact.
-	// The conservative slot runner admits pure LOAD/MOVE/arithmetic/loop/RETURN
-	// programs, including fixed parameters; richer prototypes use the
-	// established VM until a matching slot ABI slice is proven.
+	// Side-effect-free scalar programs use the compact tagged-slot runner;
+	// slotExecutionNumeric marks the stricter compiler-proven subset that can
+	// execute over an untagged float64 register file.
 	slotExecutionEligible bool
+	slotExecutionNumeric  bool
 	verifyErr             error
 }
 
@@ -1940,6 +1941,7 @@ func encodeProtoWords(proto *Proto, code []instruction) error {
 		proto.wordLines = wordcodeLinesFromWords(proto.lines, words)
 	}
 	proto.slotExecutionEligible = slotExecutionEligible(proto, code)
+	proto.slotExecutionNumeric = proto.slotExecutionEligible && slotExecutionNumericEligible(proto, code)
 	return nil
 }
 

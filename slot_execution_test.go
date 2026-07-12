@@ -39,6 +39,116 @@ func TestSlotExecutionImmediateScalarParity(t *testing.T) {
 	}
 }
 
+func TestSlotExecutionWhileLoopUsesNumericTier(t *testing.T) {
+	proto, err := Compile(`
+local i = 0
+local total = 0
+while i < 20 do
+	i = i + 1
+	total = total + i
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if !proto.slotExecutionEligible || !proto.slotExecutionNumeric {
+		t.Fatalf("while prototype tiers = (scalar %t, numeric %t), want both", proto.slotExecutionEligible, proto.slotExecutionNumeric)
+	}
+	got, handled, err := runSlotExecution(proto, nil)
+	if err != nil || !handled {
+		t.Fatalf("numeric slot execution = (%#v, %t, %v), want handled result", got, handled, err)
+	}
+	want, err := runWithSlotExecutionDisabled(proto)
+	if err != nil {
+		t.Fatalf("established VM returned error: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) || len(got) != 1 || got[0] != NumberValue(210) {
+		t.Fatalf("while results = (%#v, %#v), want exact [210] parity", got, want)
+	}
+}
+
+func TestSlotExecutionScalarStringControlFlowParity(t *testing.T) {
+	proto := newProto(
+		[]Value{StringValue("alpha"), StringValue("beta"), NumberValue(7), NumberValue(9)},
+		[]instruction{
+			{op: opLoadConst, a: 0, b: 0},
+			{op: opLoadConst, a: 1, b: 1},
+			{op: opLess, a: 2, b: 0, c: 1},
+			{op: opJumpIfFalse, a: 2, b: 6},
+			{op: opLoadConst, a: 3, b: 2},
+			{op: opReturnOne, a: 3},
+			{op: opLoadConst, a: 3, b: 3},
+			{op: opReturnOne, a: 3},
+		},
+		nil, nil, 4, 0, false,
+	)
+	if !proto.slotExecutionEligible || proto.slotExecutionNumeric {
+		t.Fatalf("string control-flow tiers = (scalar %t, numeric %t), want scalar only", proto.slotExecutionEligible, proto.slotExecutionNumeric)
+	}
+	got, handled, err := runSlotExecution(proto, nil)
+	if err != nil || !handled {
+		t.Fatalf("scalar slot execution = (%#v, %t, %v), want handled result", got, handled, err)
+	}
+	want, err := runWithSlotExecutionDisabled(proto)
+	if err != nil {
+		t.Fatalf("established VM returned error: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) || len(got) != 1 || got[0] != NumberValue(7) {
+		t.Fatalf("string branch results = (%#v, %#v), want exact [7] parity", got, want)
+	}
+}
+
+func TestSlotExecutionNumericNaNBranchFallsBack(t *testing.T) {
+	proto := newProto(
+		[]Value{NumberValue(math.NaN()), NumberValue(1)},
+		[]instruction{
+			{op: opLoadConst, a: 0, b: 0},
+			{op: opJumpIfNotLessK, a: 0, b: 1, d: 3},
+			{op: opReturnOne, a: 0},
+		},
+		nil, nil, 1, 0, false,
+	)
+	if !proto.slotExecutionNumeric {
+		t.Fatal("numeric NaN branch prototype did not reach numeric tier")
+	}
+	if values, handled, err := runSlotExecution(proto, nil); values != nil || handled || err != nil {
+		t.Fatalf("NaN branch slot execution = (%#v, %t, %v), want safe fallback", values, handled, err)
+	}
+	got, gotErr := Run(proto)
+	want, wantErr := runWithSlotExecutionDisabled(proto)
+	if got != nil || want != nil {
+		t.Fatalf("NaN branch results = (%#v, %#v), want nil", got, want)
+	}
+	if gotErr == nil || wantErr == nil || gotErr.Error() != wantErr.Error() {
+		t.Fatalf("NaN branch errors = (%v, %v), want exact parity", gotErr, wantErr)
+	}
+}
+
+func TestSlotExecutionWhileLoopAllocationBudget(t *testing.T) {
+	proto, err := Compile(`
+local i = 0
+local total = 0
+while i < 20 do
+	i = i + 1
+	total = total + i
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	allocs := testing.AllocsPerRun(100, func() {
+		values, err := Run(proto)
+		if err != nil || len(values) != 1 || values[0] != NumberValue(210) {
+			t.Fatalf("warm numeric while Run = %#v, %v; want [210]", values, err)
+		}
+	})
+	if allocs > 1 {
+		t.Fatalf("warm numeric while allocations = %.2f, want <= 1", allocs)
+	}
+}
+
 func TestSlotExecutionNumericForAccumulatorParity(t *testing.T) {
 	proto, err := Compile(`
 local total = 0
@@ -555,8 +665,8 @@ func TestSlotExecutionPoolResetOwnsNoRuntimeReferences(t *testing.T) {
 		if field.Type.Kind() == reflect.Array && field.Type.Elem() == reflect.TypeOf(slot(0)) {
 			continue
 		}
-		if field.Type != reflect.TypeOf([]slot(nil)) {
-			t.Fatalf("slot state field %q has type %s, want []slot or [N]slot", field.Name, field.Type)
+		if field.Type != reflect.TypeOf([]slot(nil)) && field.Type != reflect.TypeOf([]float64(nil)) {
+			t.Fatalf("slot state field %q has type %s, want compact scalar storage", field.Name, field.Type)
 		}
 	}
 	state := acquireSlotExecutionState(2, 2)
@@ -565,9 +675,11 @@ func TestSlotExecutionPoolResetOwnsNoRuntimeReferences(t *testing.T) {
 	state.registers[0] = slotNil
 	state.constants[0] = slotBool(true)
 	state.results = append(state.results, slot(1))
+	state.prepareNumericRegisters(2)[0] = 42
 	registerBacking := state.registers[:cap(state.registers)]
 	constantBacking := state.constants[:cap(state.constants)]
 	resultBacking := state.results[:cap(state.results)]
+	numericBacking := state.numericRegisters[:cap(state.numericRegisters)]
 	state.resetForPool()
 	if state.heap == nil {
 		t.Fatal("reset state discarded reusable runtime heap")
@@ -575,12 +687,17 @@ func TestSlotExecutionPoolResetOwnsNoRuntimeReferences(t *testing.T) {
 	if state.heapActive {
 		t.Fatal("reset state left heap active")
 	}
-	if len(state.registers) != 0 || len(state.constants) != 0 || len(state.results) != 0 {
-		t.Fatalf("reset state lengths = (%d, %d, %d), want all zero", len(state.registers), len(state.constants), len(state.results))
+	if len(state.registers) != 0 || len(state.constants) != 0 || len(state.results) != 0 || len(state.numericRegisters) != 0 {
+		t.Fatalf("reset state lengths = (%d, %d, %d, %d), want all zero", len(state.registers), len(state.constants), len(state.results), len(state.numericRegisters))
 	}
 	for _, values := range [][]slot{state.registers, state.constants, state.results} {
 		if len(values) != 0 {
 			t.Fatal("reset state retained slot values")
+		}
+	}
+	for index, value := range numericBacking {
+		if value != 0 {
+			t.Fatalf("reset numeric backing slot %d = %v, want zero", index, value)
 		}
 	}
 	for name, values := range map[string][]slot{
@@ -598,17 +715,18 @@ func TestSlotExecutionPoolResetOwnsNoRuntimeReferences(t *testing.T) {
 	slotExecutionPool.Put(state)
 
 	oversized := &slotExecutionState{
-		registers: make([]slot, maxPooledSlotExecutionCapacity+1),
-		constants: make([]slot, maxPooledSlotExecutionCapacity+1),
-		results:   make([]slot, maxPooledSlotExecutionCapacity+1),
+		registers:        make([]slot, maxPooledSlotExecutionCapacity+1),
+		constants:        make([]slot, maxPooledSlotExecutionCapacity+1),
+		results:          make([]slot, maxPooledSlotExecutionCapacity+1),
+		numericRegisters: make([]float64, maxPooledSlotExecutionCapacity+1),
 		heap: &runtimeHeap{strings: slotSlab[*stringBox]{
 			entries: make([]slotSlabEntry[*stringBox], maxPooledSlotExecutionCapacity+1),
 		}},
 		heapActive: true,
 	}
 	oversized.resetForPool()
-	if oversized.registers != nil || oversized.constants != nil || oversized.results != nil {
-		t.Fatal("pool reset retained oversized slot buffers")
+	if oversized.registers != nil || oversized.constants != nil || oversized.results != nil || oversized.numericRegisters != nil {
+		t.Fatal("pool reset retained oversized scalar buffers")
 	}
 	if oversized.heap != nil {
 		t.Fatal("pool reset retained oversized runtime heap")

@@ -10,13 +10,16 @@ import (
 // needs an out-of-line handle (for example a string or a tag-colliding NaN).
 // The heap is retained empty by the pool for reference-run reuse.
 type slotExecutionState struct {
-	registers       []slot
-	constants       []slot
-	results         []slot
-	heap            *runtimeHeap
-	heapActive      bool
-	transientInline [8]slot
-	transient       []slot
+	registers []slot
+	constants []slot
+	results   []slot
+	// numericRegisters is the untagged register file for prototypes whose
+	// compiler proof guarantees numeric reads, writes, branches, and returns.
+	numericRegisters []float64
+	heap             *runtimeHeap
+	heapActive       bool
+	transientInline  [8]slot
+	transient        []slot
 }
 
 func (state *slotExecutionState) addTransient(value slot) {
@@ -56,6 +59,131 @@ var slotExecutionPool = sync.Pool{
 	New: func() any { return &slotExecutionState{} },
 }
 
+// slotNumericAnalysisState is pooled compiler scratch. Numeric-tier proof is
+// deliberately allocation-free after warm-up so the runtime speedup does not
+// tax every compilation with a per-instruction graph of Go objects.
+type slotNumericAnalysisState struct {
+	facts     []uint64
+	scratch   []uint64
+	reachable []uint8
+	queued    []uint8
+	work      []int
+	words     int
+	codeLen   int
+}
+
+const maxPooledSlotNumericAnalysisWords = 64 * 1024
+
+var slotNumericAnalysisPool = sync.Pool{
+	New: func() any { return &slotNumericAnalysisState{} },
+}
+
+func acquireSlotNumericAnalysisState(codeLen int, registers int) *slotNumericAnalysisState {
+	state := slotNumericAnalysisPool.Get().(*slotNumericAnalysisState)
+	words := (registers + 63) / 64
+	factCount := codeLen * words
+	if cap(state.facts) < factCount {
+		state.facts = make([]uint64, factCount)
+	} else {
+		state.facts = state.facts[:factCount]
+		clear(state.facts)
+	}
+	if cap(state.scratch) < words {
+		state.scratch = make([]uint64, words)
+	} else {
+		state.scratch = state.scratch[:words]
+		clear(state.scratch)
+	}
+	if cap(state.reachable) < codeLen {
+		state.reachable = make([]uint8, codeLen)
+	} else {
+		state.reachable = state.reachable[:codeLen]
+		clear(state.reachable)
+	}
+	if cap(state.queued) < codeLen {
+		state.queued = make([]uint8, codeLen)
+	} else {
+		state.queued = state.queued[:codeLen]
+		clear(state.queued)
+	}
+	state.work = state.work[:0]
+	if cap(state.work) < codeLen {
+		state.work = make([]int, 0, codeLen)
+	}
+	state.words = words
+	state.codeLen = codeLen
+	return state
+}
+
+func releaseSlotNumericAnalysisState(state *slotNumericAnalysisState) {
+	if state == nil {
+		return
+	}
+	if cap(state.facts) > maxPooledSlotNumericAnalysisWords {
+		state.facts = nil
+	} else {
+		clear(state.facts)
+		state.facts = state.facts[:0]
+	}
+	if cap(state.scratch) > maxPooledSlotNumericAnalysisWords {
+		state.scratch = nil
+	} else {
+		clear(state.scratch)
+		state.scratch = state.scratch[:0]
+	}
+	clear(state.reachable)
+	clear(state.queued)
+	clear(state.work)
+	state.reachable = state.reachable[:0]
+	state.queued = state.queued[:0]
+	state.work = state.work[:0]
+	state.words = 0
+	state.codeLen = 0
+	slotNumericAnalysisPool.Put(state)
+}
+
+func (state *slotNumericAnalysisState) row(pc int) []uint64 {
+	start := pc * state.words
+	return state.facts[start : start+state.words]
+}
+
+func slotNumericFact(facts []uint64, register int) bool {
+	return register >= 0 && register/64 < len(facts) && facts[register/64]&(uint64(1)<<uint(register&63)) != 0
+}
+
+func slotNumericSetFact(facts []uint64, register int) {
+	facts[register/64] |= uint64(1) << uint(register&63)
+}
+
+func (state *slotNumericAnalysisState) merge(pc int, facts []uint64) bool {
+	if pc == state.codeLen {
+		return true
+	}
+	if pc < 0 || pc >= state.codeLen {
+		return false
+	}
+	row := state.row(pc)
+	changed := false
+	if state.reachable[pc] == 0 {
+		copy(row, facts)
+		state.reachable[pc] = 1
+		changed = true
+	} else {
+		for index, incoming := range facts {
+			merged := row[index] & incoming
+			if merged != row[index] {
+				row[index] = merged
+				changed = true
+			}
+		}
+	}
+	if changed && state.queued[pc] == 0 {
+		state.queued[pc] = 1
+		state.work = append(state.work, pc)
+	}
+	return true
+}
+
 func acquireSlotExecutionState(registers, constants int) *slotExecutionState {
 	state := slotExecutionPool.Get().(*slotExecutionState)
 	if cap(state.registers) < registers {
@@ -86,10 +214,12 @@ func (state *slotExecutionState) resetForPool() {
 	clear(state.registers)
 	clear(state.constants)
 	clear(state.results)
+	clear(state.numericRegisters)
 	clear(state.transient)
 	state.registers = resetSlotExecutionBuffer(state.registers)
 	state.constants = resetSlotExecutionBuffer(state.constants)
 	state.results = resetSlotExecutionBuffer(state.results)
+	state.numericRegisters = resetNumericExecutionBuffer(state.numericRegisters)
 	state.transient = state.transientInline[:0]
 	if state.heapActive && state.heap != nil {
 		if runtimeHeapExceedsPooledCapacity(state.heap) {
@@ -122,12 +252,27 @@ func resetSlotExecutionBuffer(values []slot) []slot {
 	return values[:0]
 }
 
+func resetNumericExecutionBuffer(values []float64) []float64 {
+	if cap(values) > maxPooledSlotExecutionCapacity {
+		return nil
+	}
+	return values[:0]
+}
+
+func (state *slotExecutionState) prepareNumericRegisters(count int) []float64 {
+	if cap(state.numericRegisters) < count {
+		state.numericRegisters = make([]float64, count)
+	} else {
+		state.numericRegisters = state.numericRegisters[:count]
+		clear(state.numericRegisters)
+	}
+	return state.numericRegisters
+}
+
 // slotExecutionEligible is sealed onto Proto by finalizeProtoExecutionArtifact.
-// The scalar runner is deliberately restricted to pure operations whose
-// scratch-only restart cannot duplicate an externally visible effect.  In
-// particular, no global, table, reference, call, closure, upvalue, vararg,
-// yield, or mutation opcode is admitted here. Fixed parameters are allowed;
-// they are imported into the same per-run scratch heap as constants.
+// The compact runner accepts only operations that cannot observe or mutate
+// external state. If a runtime type check fails, execution can therefore be
+// restarted safely in the established VM without duplicating an effect.
 func slotExecutionEligible(proto *Proto, code []instruction) bool {
 	if proto == nil || proto.registers < 0 || proto.params < 0 ||
 		proto.params > proto.registers || proto.variadic ||
@@ -139,28 +284,176 @@ func slotExecutionEligible(proto *Proto, code []instruction) bool {
 			return false
 		}
 	}
+	registerOK := func(index int) bool { return index >= 0 && index < proto.registers }
+	constantOK := func(index int) bool { return index >= 0 && index < len(proto.constants) }
+	jumpOK := func(ins instruction) bool {
+		target, ok := instructionJumpTarget(ins)
+		return ok && target >= 0 && target <= len(code)
+	}
 	for _, ins := range code {
 		switch ins.op {
 		case opLoadConst:
-			if ins.b < 0 || ins.b >= len(proto.constants) {
+			if !registerOK(ins.a) || !constantOK(ins.b) {
 				return false
 			}
-		case opMove:
-		case opAdd:
-		case opAddK:
-			if ins.c < 0 || ins.c >= len(proto.constants) {
+		case opMove, opNeg:
+			if !registerOK(ins.a) || !registerOK(ins.b) {
 				return false
 			}
-		case opNumericForCheck, opNumericForLoop:
+		case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow,
+			opEqual, opNotEqual, opLess, opLessEqual, opGreater, opGreaterEqual:
+			if !registerOK(ins.a) || !registerOK(ins.b) || !registerOK(ins.c) {
+				return false
+			}
+		case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
+			if !registerOK(ins.a) || !registerOK(ins.b) || !constantOK(ins.c) {
+				return false
+			}
+		case opNumericForCheck:
+			if !registerOK(ins.a) || !registerOK(ins.b) || !registerOK(ins.c) || !jumpOK(ins) {
+				return false
+			}
+		case opNumericForLoop:
+			if !registerOK(ins.a) || !registerOK(ins.b) || !jumpOK(ins) {
+				return false
+			}
+		case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
+			if !registerOK(ins.a) || !constantOK(ins.b) || !jumpOK(ins) {
+				return false
+			}
+		case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
+			if !registerOK(ins.a) || !registerOK(ins.b) || !jumpOK(ins) {
+				return false
+			}
+		case opJumpIfFalse:
+			if !registerOK(ins.a) || !jumpOK(ins) {
+				return false
+			}
+		case opJump:
+			if !jumpOK(ins) {
+				return false
+			}
 		case opReturnOne:
+			if !registerOK(ins.a) {
+				return false
+			}
 		case opReturn:
-			// Negative counts are open returns (calls/varargs) and cannot be
-			// represented by the immediate-only result window.
-			if ins.b < 0 {
+			if ins.b < 0 || ins.a < 0 || ins.a+ins.b > proto.registers {
 				return false
 			}
 		default:
 			return false
+		}
+	}
+	return true
+}
+
+// slotExecutionNumericEligible proves the strict numeric subset with a compact
+// forward data-flow pass. Every reachable register read must be numeric on
+// every predecessor. Fixed arguments are validated once when execution enters
+// the tier; opcode bodies then operate on raw float64 registers.
+func slotExecutionNumericEligible(proto *Proto, code []instruction) bool {
+	if proto == nil || !proto.slotExecutionEligible {
+		return false
+	}
+	if len(code) == 0 {
+		return true
+	}
+	analysis := acquireSlotNumericAnalysisState(len(code), proto.registers)
+	defer releaseSlotNumericAnalysisState(analysis)
+	entry := analysis.row(0)
+	for register := 0; register < proto.params; register++ {
+		slotNumericSetFact(entry, register)
+	}
+	analysis.reachable[0] = 1
+	analysis.queued[0] = 1
+	analysis.work = append(analysis.work, 0)
+
+	for head := 0; head < len(analysis.work); head++ {
+		pc := analysis.work[head]
+		analysis.queued[pc] = 0
+		facts := analysis.scratch
+		copy(facts, analysis.row(pc))
+		ins := code[pc]
+		constantNumber := func(index int) bool {
+			return index >= 0 && index < len(proto.constants) && valueKind(proto.constants[index]) == NumberKind
+		}
+
+		switch ins.op {
+		case opLoadConst:
+			if !constantNumber(ins.b) {
+				return false
+			}
+			slotNumericSetFact(facts, ins.a)
+		case opMove:
+			if !slotNumericFact(facts, ins.b) {
+				return false
+			}
+			slotNumericSetFact(facts, ins.a)
+		case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow:
+			if !slotNumericFact(facts, ins.b) || !slotNumericFact(facts, ins.c) {
+				return false
+			}
+			slotNumericSetFact(facts, ins.a)
+		case opNeg:
+			if !slotNumericFact(facts, ins.b) {
+				return false
+			}
+			slotNumericSetFact(facts, ins.a)
+		case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
+			if !slotNumericFact(facts, ins.b) || !constantNumber(ins.c) {
+				return false
+			}
+			slotNumericSetFact(facts, ins.a)
+		case opNumericForCheck:
+			if !slotNumericFact(facts, ins.a) || !slotNumericFact(facts, ins.b) || !slotNumericFact(facts, ins.c) {
+				return false
+			}
+		case opNumericForLoop:
+			if !slotNumericFact(facts, ins.a) || !slotNumericFact(facts, ins.b) {
+				return false
+			}
+			slotNumericSetFact(facts, ins.a)
+		case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
+			if !slotNumericFact(facts, ins.a) || !constantNumber(ins.b) {
+				return false
+			}
+		case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
+			if !slotNumericFact(facts, ins.a) || !slotNumericFact(facts, ins.b) {
+				return false
+			}
+		case opJump:
+		case opReturnOne:
+			if !slotNumericFact(facts, ins.a) {
+				return false
+			}
+		case opReturn:
+			for register := ins.a; register < ins.a+ins.b; register++ {
+				if !slotNumericFact(facts, register) {
+					return false
+				}
+			}
+		default:
+			return false
+		}
+
+		switch opcodeControlFlow(ins.op) {
+		case opcodeControlReturn:
+			continue
+		case opcodeControlJump:
+			target, _ := instructionJumpTarget(ins)
+			if !analysis.merge(target, facts) {
+				return false
+			}
+		case opcodeControlBranch:
+			target, _ := instructionJumpTarget(ins)
+			if !analysis.merge(target, facts) || !analysis.merge(pc+1, facts) {
+				return false
+			}
+		default:
+			if !analysis.merge(pc+1, facts) {
+				return false
+			}
 		}
 	}
 	return true
@@ -206,6 +499,14 @@ func runSlotExecution(proto *Proto, args []Value) (values []Value, handled bool,
 	if proto == nil || !proto.slotExecutionEligible {
 		return nil, false, nil
 	}
+	if proto.slotExecutionNumeric {
+		state := acquireSlotExecutionState(0, 0)
+		values, handled, err := runNumericSlotExecution(proto, args, state)
+		releaseSlotExecutionState(state)
+		if handled || err != nil {
+			return values, handled, err
+		}
+	}
 	state := acquireSlotExecutionState(proto.registers, len(proto.constants))
 	defer releaseSlotExecutionState(state)
 	return runSlotExecutionState(proto, args, state, false)
@@ -218,6 +519,14 @@ func runSlotExecution(proto *Proto, args []Value) (values []Value, handled bool,
 func runSlotExecutionWithHeap(proto *Proto, args []Value, heap *runtimeHeap) (values []Value, handled bool, err error) {
 	if proto == nil || !proto.slotExecutionEligible || heap == nil {
 		return nil, false, nil
+	}
+	if proto.slotExecutionNumeric {
+		state := acquireSlotExecutionState(0, 0)
+		values, handled, err := runNumericSlotExecution(proto, args, state)
+		releaseSlotExecutionState(state)
+		if handled || err != nil {
+			return values, handled, err
+		}
 	}
 	state := acquireSlotExecutionState(proto.registers, len(proto.constants))
 	for index := range state.registers {
@@ -253,6 +562,219 @@ func runSlotExecutionWithHeap(proto *Proto, args []Value, heap *runtimeHeap) (va
 	releaseSlotExecutionState(state)
 	heap.collectMu.Unlock()
 	return values, handled, err
+}
+
+// runNumericSlotExecution executes a compiler-proven numeric prototype over a
+// raw float64 register file. Constants remain in immutable prototype storage;
+// only fixed arguments cross the Value boundary before dispatch.
+func runNumericSlotExecution(proto *Proto, args []Value, state *slotExecutionState) ([]Value, bool, error) {
+	if proto == nil || state == nil || !proto.slotExecutionNumeric || len(args) < proto.params {
+		return nil, false, nil
+	}
+	registers := state.prepareNumericRegisters(proto.registers)
+	for index := 0; index < proto.params; index++ {
+		if valueKind(args[index]) != NumberKind {
+			return nil, false, nil
+		}
+		registers[index] = valueNumber(args[index])
+	}
+	start, count, ok := runNumericSlotExecutionWords(proto, registers)
+	if !ok {
+		return nil, false, nil
+	}
+	if count == 0 {
+		return nil, true, nil
+	}
+	values := make([]Value, count)
+	for index := range values {
+		number := registers[start+index]
+		// Preserve the tagged runner's safe-fallback contract for the rare
+		// quiet-NaN payloads that overlap the slot tag prefix.
+		if slotExecutionNumberNeedsBox(number) {
+			return nil, false, nil
+		}
+		values[index] = NumberValue(number)
+	}
+	return values, true, nil
+}
+
+// runNumericSlotExecutionWords is the hot numeric tier. Eligibility and
+// wordcode verification happen once at compilation, so dispatch performs one
+// opcode switch with no Value-kind or tagged-slot checks.
+func runNumericSlotExecutionWords(proto *Proto, registers []float64) (int, int, bool) {
+	words := proto.words
+	constants := proto.constantNumbers
+	pc := 0
+	for uint(pc) < uint(len(words)) {
+		raw := words[pc]
+		op := opcode(uint8(raw) & uint8(wordcodeOpcodeMask))
+		a := int(uint8(raw >> 8))
+		b := int(uint8(raw >> 16))
+		c := int(uint8(raw >> 24))
+		next := pc + 1
+
+		switch op {
+		case opLoadConst:
+			b = int(uint16(raw >> 16))
+			if raw&wordcodeAuxBit != 0 {
+				if next >= len(words) {
+					return 0, 0, false
+				}
+				b = int(int32(words[next]))
+				next++
+			}
+			registers[a] = constants[b]
+
+		case opMove:
+			registers[a] = registers[b]
+
+		case opAdd:
+			registers[a] = registers[b] + registers[c]
+		case opSub:
+			registers[a] = registers[b] - registers[c]
+		case opMul:
+			registers[a] = registers[b] * registers[c]
+		case opDiv:
+			registers[a] = registers[b] / registers[c]
+		case opMod:
+			left, right := registers[b], registers[c]
+			registers[a] = left - math.Floor(left/right)*right
+		case opIDiv:
+			registers[a] = math.Floor(registers[b] / registers[c])
+		case opPow:
+			registers[a] = math.Pow(registers[b], registers[c])
+		case opNeg:
+			registers[a] = -registers[b]
+
+		case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
+			if raw&wordcodeAuxBit != 0 {
+				if next >= len(words) {
+					return 0, 0, false
+				}
+				c = int(int32(words[next]))
+				next++
+			}
+			left, right := registers[b], constants[c]
+			switch op {
+			case opAddK:
+				registers[a] = left + right
+			case opSubK:
+				registers[a] = left - right
+			case opMulK:
+				registers[a] = left * right
+			case opDivK:
+				registers[a] = left / right
+			case opModK:
+				registers[a] = left - math.Floor(left/right)*right
+			case opIDivK:
+				registers[a] = math.Floor(left / right)
+			}
+
+		case opNumericForCheck:
+			if next >= len(words) {
+				return 0, 0, false
+			}
+			target := int(int32(words[next]))
+			next++
+			target += next
+			loopValue, limitValue, stepValue := registers[a], registers[b], registers[c]
+			if math.IsNaN(loopValue) || math.IsNaN(limitValue) || math.IsNaN(stepValue) {
+				return 0, 0, false
+			}
+			if (stepValue > 0 && loopValue > limitValue) || (stepValue <= 0 && loopValue < limitValue) {
+				pc = target
+				continue
+			}
+
+		case opNumericForLoop:
+			if next >= len(words) {
+				return 0, 0, false
+			}
+			target := int(int32(words[next]))
+			next++
+			target += next
+			registers[a] += registers[b]
+			pc = target
+			continue
+
+		case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
+			if next >= len(words) {
+				return 0, 0, false
+			}
+			b = int(uint16(raw >> 16))
+			target := int(int32(words[next]))
+			next++
+			target += next
+			left, right := registers[a], constants[b]
+			jump := false
+			switch op {
+			case opJumpIfNotEqualK:
+				jump = left != right
+			default:
+				if math.IsNaN(left) || math.IsNaN(right) {
+					return 0, 0, false
+				}
+				switch op {
+				case opJumpIfNotLessK:
+					jump = !(left < right)
+				case opJumpIfNotGreaterK:
+					jump = !(left > right)
+				case opJumpIfLessK:
+					jump = left < right
+				case opJumpIfGreaterK:
+					jump = left > right
+				}
+			}
+			if jump {
+				pc = target
+				continue
+			}
+
+		case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
+			if next >= len(words) {
+				return 0, 0, false
+			}
+			target := int(int32(words[next]))
+			next++
+			target += next
+			left, right := registers[a], registers[b]
+			if math.IsNaN(left) || math.IsNaN(right) {
+				return 0, 0, false
+			}
+			jump := false
+			switch op {
+			case opJumpIfNotLess:
+				jump = !(left < right)
+			case opJumpIfNotGreater:
+				jump = !(left > right)
+			case opJumpIfLess:
+				jump = left < right
+			case opJumpIfGreater:
+				jump = left > right
+			}
+			if jump {
+				pc = target
+				continue
+			}
+
+		case opJump:
+			pc = int(int32(raw)>>8) + next
+			continue
+
+		case opReturnOne:
+			return a, 1, true
+		case opReturn:
+			b = int(int16(uint16(raw >> 16)))
+			if b < 0 || a < 0 || a+b > len(registers) {
+				return 0, 0, false
+			}
+			return a, b, true
+		default:
+			return 0, 0, false
+		}
+		pc = next
+	}
+	return 0, 0, true
 }
 
 func runSlotExecutionState(proto *Proto, args []Value, state *slotExecutionState, trackTransients bool) (values []Value, handled bool, err error) {
@@ -440,126 +962,252 @@ func slotExecutionExport(state *slotExecutionState, value slot) (Value, bool) {
 
 func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) {
 	words := proto.words
+	registers := state.registers
+	constants := state.constants
 	pc := 0
-	for pc < len(words) {
+	for uint(pc) < uint(len(words)) {
 		raw := words[pc]
-		op := opcode(raw & wordcodeOpcodeMask)
-		hasAux := raw&wordcodeAuxBit != 0
+		op := opcode(uint8(raw) & uint8(wordcodeOpcodeMask))
 		a := int(uint8(raw >> 8))
 		b := int(uint8(raw >> 16))
 		c := int(uint8(raw >> 24))
-		d := 0
 		next := pc + 1
+
 		switch op {
 		case opLoadConst:
 			b = int(uint16(raw >> 16))
-			if hasAux {
+			if raw&wordcodeAuxBit != 0 {
 				if next >= len(words) {
 					return 0, false
 				}
 				b = int(int32(words[next]))
 				next++
 			}
-		case opMove, opAdd, opReturnOne:
-			if hasAux {
+			registers[a] = constants[b]
+
+		case opMove:
+			registers[a] = registers[b]
+
+		case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow:
+			left, leftOK := slotExecutionNumber(registers[b])
+			right, rightOK := slotExecutionNumber(registers[c])
+			if !leftOK || !rightOK {
 				return 0, false
 			}
-		case opAddK:
-			if hasAux {
+			var result float64
+			switch op {
+			case opAdd:
+				result = left + right
+			case opSub:
+				result = left - right
+			case opMul:
+				result = left * right
+			case opDiv:
+				result = left / right
+			case opMod:
+				result = left - math.Floor(left/right)*right
+			case opIDiv:
+				result = math.Floor(left / right)
+			case opPow:
+				result = math.Pow(left, right)
+			}
+			if !slotExecutionStoreNumber(registers, a, result) {
+				return 0, false
+			}
+
+		case opNeg:
+			operand, ok := slotExecutionNumber(registers[b])
+			if !ok || !slotExecutionStoreNumber(registers, a, -operand) {
+				return 0, false
+			}
+
+		case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
+			if raw&wordcodeAuxBit != 0 {
 				if next >= len(words) {
 					return 0, false
 				}
 				c = int(int32(words[next]))
 				next++
 			}
-		case opNumericForCheck, opNumericForLoop:
-			if !hasAux || next >= len(words) {
+			left, leftOK := slotExecutionNumber(registers[b])
+			right, rightOK := slotExecutionNumber(constants[c])
+			if !leftOK || !rightOK {
 				return 0, false
 			}
-			d = int(int32(words[next])) + next + 1
-			next++
-		case opReturn:
-			if hasAux {
+			var result float64
+			switch op {
+			case opAddK:
+				result = left + right
+			case opSubK:
+				result = left - right
+			case opMulK:
+				result = left * right
+			case opDivK:
+				result = left / right
+			case opModK:
+				result = left - math.Floor(left/right)*right
+			case opIDivK:
+				result = math.Floor(left / right)
+			}
+			if !slotExecutionStoreNumber(registers, a, result) {
 				return 0, false
 			}
-			b = int(int16(uint16(raw >> 16)))
-		default:
-			return 0, false
-		}
-		switch op {
-		case opLoadConst:
-			if a < 0 || a >= len(state.registers) || b < 0 || b >= len(state.constants) {
+
+		case opEqual, opNotEqual:
+			equal, ok := slotExecutionEqual(state, registers[b], registers[c])
+			if !ok {
 				return 0, false
 			}
-			state.registers[a] = state.constants[b]
-		case opMove:
-			if a < 0 || a >= len(state.registers) || b < 0 || b >= len(state.registers) {
+			if op == opNotEqual {
+				equal = !equal
+			}
+			registers[a] = slotBool(equal)
+
+		case opLess, opLessEqual, opGreater, opGreaterEqual:
+			left, right := registers[b], registers[c]
+			if op == opGreater || op == opGreaterEqual {
+				left, right = right, left
+			}
+			result, ok := slotExecutionLess(state, left, right, op == opLessEqual || op == opGreaterEqual)
+			if !ok {
 				return 0, false
 			}
-			state.registers[a] = state.registers[b]
-		case opAdd:
-			if a < 0 || a >= len(state.registers) || b < 0 || b >= len(state.registers) || c < 0 || c >= len(state.registers) {
-				return 0, false
-			}
-			left, leftOK := slotExecutionNumber(state.registers[b])
-			right, rightOK := slotExecutionNumber(state.registers[c])
-			if !leftOK || !rightOK || !slotExecutionStoreNumber(state.registers, a, left+right) {
-				return 0, false
-			}
-		case opAddK:
-			if a < 0 || a >= len(state.registers) || b < 0 || b >= len(state.registers) || c < 0 || c >= len(state.constants) {
-				return 0, false
-			}
-			left, leftOK := slotExecutionNumber(state.registers[b])
-			right, rightOK := slotExecutionNumber(state.constants[c])
-			if !leftOK || !rightOK || !slotExecutionStoreNumber(state.registers, a, left+right) {
-				return 0, false
-			}
+			registers[a] = slotBool(result)
+
 		case opNumericForCheck:
-			if a < 0 || a >= len(state.registers) || b < 0 || b >= len(state.registers) || c < 0 || c >= len(state.registers) {
+			if next >= len(words) {
 				return 0, false
 			}
-			loopValue, loopOK := slotExecutionNumber(state.registers[a])
-			limitValue, limitOK := slotExecutionNumber(state.registers[b])
-			stepValue, stepOK := slotExecutionNumber(state.registers[c])
+			target := int(int32(words[next]))
+			next++
+			target += next
+			loopValue, loopOK := slotExecutionNumber(registers[a])
+			limitValue, limitOK := slotExecutionNumber(registers[b])
+			stepValue, stepOK := slotExecutionNumber(registers[c])
 			if !loopOK || !limitOK || !stepOK || math.IsNaN(loopValue) || math.IsNaN(limitValue) || math.IsNaN(stepValue) {
 				return 0, false
 			}
 			if (stepValue > 0 && loopValue > limitValue) || (stepValue <= 0 && loopValue < limitValue) {
-				if d < 0 || d > len(words) {
-					return 0, false
-				}
-				pc = d
+				pc = target
 				continue
 			}
+
 		case opNumericForLoop:
-			if a < 0 || a >= len(state.registers) || b < 0 || b >= len(state.registers) {
+			if next >= len(words) {
 				return 0, false
 			}
-			loopValue, loopOK := slotExecutionNumber(state.registers[a])
-			stepValue, stepOK := slotExecutionNumber(state.registers[b])
-			if !loopOK || !stepOK || !slotExecutionStoreNumber(state.registers, a, loopValue+stepValue) {
+			target := int(int32(words[next]))
+			next++
+			target += next
+			loopValue, loopOK := slotExecutionNumber(registers[a])
+			stepValue, stepOK := slotExecutionNumber(registers[b])
+			if !loopOK || !stepOK || !slotExecutionStoreNumber(registers, a, loopValue+stepValue) {
 				return 0, false
 			}
-			if d < 0 || d > len(words) {
-				return 0, false
-			}
-			pc = d
+			pc = target
 			continue
-		case opReturnOne:
-			if a < 0 || a >= len(state.registers) {
+
+		case opJumpIfNotEqualK:
+			if next >= len(words) {
 				return 0, false
 			}
-			state.results = append(state.results[:0], state.registers[a])
+			b = int(uint16(raw >> 16))
+			target := int(int32(words[next]))
+			next++
+			target += next
+			equal, ok := slotExecutionEqual(state, registers[a], constants[b])
+			if !ok {
+				return 0, false
+			}
+			if !equal {
+				pc = target
+				continue
+			}
+
+		case opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
+			if next >= len(words) {
+				return 0, false
+			}
+			b = int(uint16(raw >> 16))
+			target := int(int32(words[next]))
+			next++
+			target += next
+			left, right := registers[a], constants[b]
+			if op == opJumpIfNotGreaterK || op == opJumpIfGreaterK {
+				left, right = right, left
+			}
+			less, ok := slotExecutionLess(state, left, right, false)
+			if !ok {
+				return 0, false
+			}
+			jump := less
+			if op == opJumpIfNotLessK || op == opJumpIfNotGreaterK {
+				jump = !jump
+			}
+			if jump {
+				pc = target
+				continue
+			}
+
+		case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
+			if next >= len(words) {
+				return 0, false
+			}
+			target := int(int32(words[next]))
+			next++
+			target += next
+			left, right := registers[a], registers[b]
+			if op == opJumpIfNotGreater || op == opJumpIfGreater {
+				left, right = right, left
+			}
+			less, ok := slotExecutionLess(state, left, right, false)
+			if !ok {
+				return 0, false
+			}
+			jump := less
+			if op == opJumpIfNotLess || op == opJumpIfNotGreater {
+				jump = !jump
+			}
+			if jump {
+				pc = target
+				continue
+			}
+
+		case opJumpIfFalse:
+			b = int(int16(uint16(raw >> 16)))
+			if raw&wordcodeAuxBit != 0 {
+				if next >= len(words) {
+					return 0, false
+				}
+				b = int(int32(words[next]))
+				next++
+			}
+			target := b + next
+			truthy, ok := slotExecutionTruthy(registers[a])
+			if !ok {
+				return 0, false
+			}
+			if !truthy {
+				pc = target
+				continue
+			}
+
+		case opJump:
+			pc = int(int32(raw)>>8) + next
+			continue
+
+		case opReturnOne:
+			state.results = append(state.results[:0], registers[a])
 			return 1, true
 		case opReturn:
-			if b < 0 || b > len(state.registers) || a < 0 || a+b > len(state.registers) {
+			b = int(int16(uint16(raw >> 16)))
+			if b < 0 || a < 0 || a+b > len(registers) {
 				return 0, false
 			}
 			if b == 0 {
 				return 0, true
 			}
-			state.results = append(state.results[:0], state.registers[a:a+b]...)
+			state.results = append(state.results[:0], registers[a:a+b]...)
 			return b, true
 		default:
 			return 0, false
@@ -567,6 +1215,83 @@ func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) 
 		pc = next
 	}
 	return 0, true
+}
+
+func slotExecutionTruthy(value slot) (bool, bool) {
+	if !slotIsTagged(value) {
+		return true, true
+	}
+	switch slotTagOf(value) {
+	case slotTagNil:
+		return false, slotImmediatePayloadZero(value)
+	case slotTagFalse:
+		return false, slotImmediatePayloadZero(value)
+	case slotTagTrue:
+		return true, slotImmediatePayloadZero(value)
+	case slotTagString, slotTagTable, slotTagClosure, slotTagUserdata, slotTagHostCallable, slotTagNativeID, slotTagBoxedNumber:
+		return true, true
+	default:
+		return false, false
+	}
+}
+
+func slotExecutionEqual(state *slotExecutionState, left slot, right slot) (bool, bool) {
+	leftKind := slotValueKind(left)
+	rightKind := slotValueKind(right)
+	if leftKind == slotInvalidValueKind || rightKind == slotInvalidValueKind {
+		return false, false
+	}
+	if leftKind != rightKind {
+		return false, true
+	}
+	if leftKind == TableKind {
+		// Table equality may invoke __eq. Restart in the established VM before
+		// observing a result or running user code.
+		return false, false
+	}
+	if !slotIsTagged(left) && !slotIsTagged(right) {
+		leftNumber := math.Float64frombits(uint64(left))
+		rightNumber := math.Float64frombits(uint64(right))
+		if math.IsNaN(leftNumber) || math.IsNaN(rightNumber) {
+			return false, true
+		}
+		return leftNumber == rightNumber, true
+	}
+	leftValue, leftOK := slotExecutionExport(state, left)
+	rightValue, rightOK := slotExecutionExport(state, right)
+	if !leftOK || !rightOK {
+		return false, false
+	}
+	return valuesEqual(leftValue, rightValue), true
+}
+
+func slotExecutionLess(state *slotExecutionState, left slot, right slot, orEqual bool) (bool, bool) {
+	if !slotIsTagged(left) && !slotIsTagged(right) {
+		leftNumber := math.Float64frombits(uint64(left))
+		rightNumber := math.Float64frombits(uint64(right))
+		if math.IsNaN(leftNumber) || math.IsNaN(rightNumber) {
+			return false, false
+		}
+		if orEqual {
+			return leftNumber <= rightNumber, true
+		}
+		return leftNumber < rightNumber, true
+	}
+	leftValue, leftOK := slotExecutionExport(state, left)
+	rightValue, rightOK := slotExecutionExport(state, right)
+	if !leftOK || !rightOK {
+		return false, false
+	}
+	var (
+		result bool
+		err    error
+	)
+	if orEqual {
+		result, err = valuesLessEqual(leftValue, rightValue)
+	} else {
+		result, err = valuesLess(leftValue, rightValue)
+	}
+	return result, err == nil
 }
 
 // slotExecutionNumber accepts only untagged IEEE-754 numbers.  A tagged
