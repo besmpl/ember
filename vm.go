@@ -53,13 +53,14 @@ type executeOptions struct {
 }
 
 func executeProto(ctx context.Context, proto *Proto, globals *globalEnv, options executeOptions) ([]Value, error) {
-	// The canonical scalar runner has no owner, globals, arguments, or
-	// suspension state. Everything else stays on the established VM until the
+	// The canonical scalar runner has no owner, globals, upvalues, or
+	// suspension state. Fixed arguments are imported into its per-run slot
+	// state; everything else stays on the established VM until the
 	// corresponding slot ABI slice is proven.
-	if globals == nil && len(options.args) == 0 && len(options.upvalues) == 0 &&
+	if globals == nil && len(options.upvalues) == 0 &&
 		len(options.upvalueValues) == 0 && len(options.upvalueValueOK) == 0 &&
 		options.maxInstructions < 0 {
-		if values, handled, err := runSlotExecution(proto); handled || err != nil {
+		if values, handled, err := runSlotExecution(proto, options.args); handled || err != nil {
 			return values, err
 		}
 	}

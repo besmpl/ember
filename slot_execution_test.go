@@ -6,6 +6,7 @@ import (
 	"math"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -18,7 +19,7 @@ func TestSlotExecutionImmediateScalarParity(t *testing.T) {
 	if !proto.slotExecutionEligible {
 		t.Fatal("constant-folded scalar prototype is not slot eligible")
 	}
-	values, handled, err := runSlotExecution(proto)
+	values, handled, err := runSlotExecution(proto, nil)
 	if err != nil || !handled {
 		t.Fatalf("slot execution = (%#v, %t, %v), want handled result", values, handled, err)
 	}
@@ -52,7 +53,7 @@ return total
 	if !proto.slotExecutionEligible {
 		t.Fatal("numeric accumulator prototype is not slot eligible")
 	}
-	values, handled, err := runSlotExecution(proto)
+	values, handled, err := runSlotExecution(proto, nil)
 	if err != nil || !handled {
 		t.Fatalf("slot execution = (%#v, %t, %v), want handled result", values, handled, err)
 	}
@@ -83,7 +84,7 @@ return total
 	if !proto.slotExecutionEligible {
 		t.Fatal("zero-iteration numeric loop is not slot eligible")
 	}
-	values, handled, err := runSlotExecution(proto)
+	values, handled, err := runSlotExecution(proto, nil)
 	if err != nil || !handled {
 		t.Fatalf("slot execution = (%#v, %t, %v), want handled result", values, handled, err)
 	}
@@ -134,7 +135,7 @@ func TestSlotExecutionNumericForWrongTypeMatchesVM(t *testing.T) {
 	if !proto.slotExecutionEligible {
 		t.Fatal("wrong-type numeric loop is not slot eligible")
 	}
-	if _, handled, err := runSlotExecution(proto); handled || err != nil {
+	if _, handled, err := runSlotExecution(proto, nil); handled || err != nil {
 		t.Fatalf("slot wrong-type execution = (handled %t, err %v), want safe fallback", handled, err)
 	}
 
@@ -166,7 +167,7 @@ func TestSlotExecutionTagCollidingNaNFallsBackBeforeResult(t *testing.T) {
 	if !proto.slotExecutionEligible {
 		t.Fatal("safe signaling-NaN inputs are not slot eligible")
 	}
-	if values, handled, err := runSlotExecution(proto); handled || err != nil || values != nil {
+	if values, handled, err := runSlotExecution(proto, nil); handled || err != nil || values != nil {
 		t.Fatalf("tag-colliding NaN slot execution = (%#v, %t, %v), want safe fallback", values, handled, err)
 	}
 
@@ -384,7 +385,7 @@ func TestSlotExecutionHeapStringRoundTripIdentityAndLifetime(t *testing.T) {
 	if !proto.slotExecutionEligible {
 		t.Fatal("string constant is not slot eligible")
 	}
-	values, handled, err := runSlotExecution(proto)
+	values, handled, err := runSlotExecution(proto, nil)
 	if err != nil || !handled || len(values) != 1 {
 		t.Fatalf("slot string execution = (%#v, %t, %v), want one handled result", values, handled, err)
 	}
@@ -445,7 +446,7 @@ func TestSlotExecutionHeapReferenceKindsPreserveIdentity(t *testing.T) {
 		if !proto.slotExecutionEligible {
 			t.Fatalf("%s constant is not slot eligible", test.name)
 		}
-		values, handled, err := runSlotExecution(proto)
+		values, handled, err := runSlotExecution(proto, nil)
 		if err != nil || !handled || len(values) != 1 {
 			t.Fatalf("%s slot execution = (%#v, %t, %v), want one handled result", test.name, values, handled, err)
 		}
@@ -466,7 +467,7 @@ func TestSlotExecutionHeapBoxedNaNPreservesBits(t *testing.T) {
 		[]instruction{{op: opLoadConst, a: 0, b: 0}, {op: opReturnOne, a: 0}},
 		nil, nil, 1, 0, false,
 	)
-	values, handled, err := runSlotExecution(proto)
+	values, handled, err := runSlotExecution(proto, nil)
 	if err != nil || !handled || len(values) != 1 {
 		t.Fatalf("slot boxed NaN execution = (%#v, %t, %v), want one handled result", values, handled, err)
 	}
@@ -629,6 +630,240 @@ func TestSlotExecutionPoolDropsGenerationExhaustedHeap(t *testing.T) {
 	}
 }
 
+func runWithSlotExecutionDisabledArgs(proto *Proto, args []Value) ([]Value, error) {
+	thread := acquireVMThread(context.Background(), nil)
+	defer releaseVMThread(thread)
+	thread.instructionBudget = -1
+	return thread.runWithUpvalues(proto, args, nil, nil, nil)
+}
+
+func TestSlotExecutionFixedParameterTransportParity(t *testing.T) {
+	proto := newProto(
+		nil,
+		[]instruction{{op: opReturn, a: 0, b: 2}},
+		nil, nil, 2, 2, false,
+	)
+	if !proto.slotExecutionEligible {
+		t.Fatal("fixed-parameter return prototype is not slot eligible")
+	}
+	cases := []struct {
+		name string
+		args []Value
+		want []Value
+	}{
+		{name: "too few", args: []Value{NumberValue(4)}, want: []Value{NumberValue(4), NilValue()}},
+		{name: "exact", args: []Value{NumberValue(4), NumberValue(5)}, want: []Value{NumberValue(4), NumberValue(5)}},
+		// The malformed value is deliberately outside the fixed parameter
+		// prefix. Extra arguments must be ignored before slot import.
+		{name: "extra", args: []Value{NumberValue(4), NumberValue(5), Value{bits: 0xff}}, want: []Value{NumberValue(4), NumberValue(5)}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			got, handled, err := runSlotExecution(proto, test.args)
+			if err != nil || !handled {
+				t.Fatalf("slot execution = (%#v, %t, %v), want handled result", got, handled, err)
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("slot result = %#v, want %#v", got, test.want)
+			}
+
+			vmValues, vmErr := runWithSlotExecutionDisabledArgs(proto, test.args)
+			if vmErr != nil {
+				t.Fatalf("established VM returned error: %v", vmErr)
+			}
+			if !reflect.DeepEqual(got, vmValues) {
+				t.Fatalf("slot/VM results = (%#v, %#v), want parity", got, vmValues)
+			}
+
+			publicValues, publicErr := callValue(closureFunctionValue(&closure{proto: proto}), nil, test.args)
+			if publicErr != nil {
+				t.Fatalf("public function call returned error: %v", publicErr)
+			}
+			if !reflect.DeepEqual(publicValues, test.want) {
+				t.Fatalf("public function result = %#v, want %#v", publicValues, test.want)
+			}
+		})
+	}
+}
+
+func TestSlotExecutionFixedParameterArgumentKinds(t *testing.T) {
+	proto := newProto(
+		nil,
+		[]instruction{{op: opReturnOne, a: 0}},
+		nil, nil, 1, 1, false,
+	)
+	if !proto.slotExecutionEligible {
+		t.Fatal("fixed-parameter return prototype is not slot eligible")
+	}
+	stringBox := newStringBox("slot-argument-reference")
+	const boxedNaNBits = uint64(0x7ff8_0000_0000_0042)
+	cases := []struct {
+		name  string
+		arg   Value
+		check func(t *testing.T, got Value)
+	}{
+		{name: "number", arg: NumberValue(7), check: func(t *testing.T, got Value) {
+			if value, ok := got.Number(); !ok || value != 7 {
+				t.Fatalf("number result = (%v, %t), want 7", value, ok)
+			}
+		}},
+		{name: "boolean", arg: BoolValue(true), check: func(t *testing.T, got Value) {
+			if value, ok := got.Bool(); !ok || !value {
+				t.Fatalf("boolean result = (%v, %t), want true", value, ok)
+			}
+		}},
+		{name: "nil", arg: NilValue(), check: func(t *testing.T, got Value) {
+			if !got.IsNil() {
+				t.Fatalf("nil result = %#v, want nil", got)
+			}
+		}},
+		{name: "reference", arg: stringValueFromBox(stringBox), check: func(t *testing.T, got Value) {
+			if got.stringBox() != stringBox {
+				t.Fatalf("string box = %p, want %p", got.stringBox(), stringBox)
+			}
+		}},
+		{name: "typed nil reference", arg: stringValueFromBox(nil), check: func(t *testing.T, got Value) {
+			if got.Kind() != StringKind || got.stringBox() != nil {
+				t.Fatalf("typed nil string = %#v, want nil string reference", got)
+			}
+		}},
+		{name: "boxed NaN", arg: NumberValue(math.Float64frombits(boxedNaNBits)), check: func(t *testing.T, got Value) {
+			if bits := valueFloat64Bits(valueNumber(got)); bits != boxedNaNBits {
+				t.Fatalf("boxed NaN bits = %#x, want %#x", bits, boxedNaNBits)
+			}
+		}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			got, handled, err := runSlotExecution(proto, []Value{test.arg})
+			if err != nil || !handled || len(got) != 1 {
+				t.Fatalf("slot execution = (%#v, %t, %v), want one handled result", got, handled, err)
+			}
+			test.check(t, got[0])
+
+			public, publicErr := callValue(closureFunctionValue(&closure{proto: proto}), nil, []Value{test.arg})
+			if publicErr != nil || len(public) != 1 {
+				t.Fatalf("public function result = (%#v, %v), want one result", public, publicErr)
+			}
+			test.check(t, public[0])
+		})
+	}
+}
+
+func TestExecuteProtoImportsFixedParametersIntoSlotExecution(t *testing.T) {
+	proto := newProto(
+		nil,
+		[]instruction{{op: opAdd, a: 0, b: 0, c: 1}, {op: opReturnOne, a: 0}},
+		nil, nil, 2, 2, false,
+	)
+	values, err := executeProto(context.Background(), proto, nil, executeOptions{
+		args:            []Value{NumberValue(4), NumberValue(5)},
+		maxInstructions: -1,
+	})
+	if err != nil || !reflect.DeepEqual(values, []Value{NumberValue(9)}) {
+		t.Fatalf("executeProto fixed parameters = (%#v, %v), want [9]", values, err)
+	}
+}
+
+func TestExecuteProtoFixedParametersRespectInstructionBudget(t *testing.T) {
+	proto := newProto(
+		nil,
+		[]instruction{{op: opReturnOne, a: 0}},
+		nil, nil, 1, 1, false,
+	)
+	values, err := executeProto(context.Background(), proto, nil, executeOptions{
+		args:            []Value{NumberValue(7)},
+		maxInstructions: 0,
+	})
+	if values != nil || err == nil || !strings.Contains(err.Error(), "instruction budget exhausted") {
+		t.Fatalf("budgeted executeProto = (%#v, %v), want instruction budget error", values, err)
+	}
+}
+
+func TestSlotExecutionFixedParameterWrongTypeFallsBack(t *testing.T) {
+	proto := newProto(
+		nil,
+		[]instruction{{op: opAdd, a: 0, b: 0, c: 1}, {op: opReturnOne, a: 0}},
+		nil, nil, 2, 2, false,
+	)
+	if !proto.slotExecutionEligible {
+		t.Fatal("fixed-parameter arithmetic prototype is not slot eligible")
+	}
+	args := []Value{StringValue("not a number"), NumberValue(2)}
+	if values, handled, err := runSlotExecution(proto, args); handled || err != nil || values != nil {
+		t.Fatalf("wrong-type slot execution = (%#v, %t, %v), want safe fallback", values, handled, err)
+	}
+	got, gotErr := callValue(closureFunctionValue(&closure{proto: proto}), nil, args)
+	want, wantErr := runWithSlotExecutionDisabledArgs(proto, args)
+	if got != nil || want != nil {
+		t.Fatalf("wrong-type results = (%#v, %#v), want nil", got, want)
+	}
+	if gotErr == nil || wantErr == nil || gotErr.Error() != wantErr.Error() {
+		t.Fatalf("wrong-type errors = (%v, %v), want exact parity", gotErr, wantErr)
+	}
+}
+
+func TestSlotExecutionFixedParameterReferenceConcurrentRuns(t *testing.T) {
+	box := newStringBox("concurrent-slot-argument")
+	proto := newProto(
+		nil,
+		[]instruction{{op: opReturnOne, a: 0}},
+		nil, nil, 1, 1, false,
+	)
+	const workers = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			values, err := callValue(closureFunctionValue(&closure{proto: proto}), nil, []Value{stringValueFromBox(box)})
+			if err != nil {
+				errs <- err
+				return
+			}
+			if len(values) != 1 || values[0].stringBox() != box {
+				errs <- fmt.Errorf("result = %#v, want original string box", values)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+}
+
+func TestSlotExecutionFixedParameterAllocationBudget(t *testing.T) {
+	proto := newProto(
+		nil,
+		[]instruction{{op: opReturnOne, a: 0}},
+		nil, nil, 1, 1, false,
+	)
+	args := []Value{NumberValue(7)}
+	allocs := testing.AllocsPerRun(100, func() {
+		values, handled, err := runSlotExecution(proto, args)
+		if err != nil || !handled || len(values) != 1 || values[0] != args[0] {
+			t.Fatalf("warm fixed-parameter run = (%#v, %t, %v), want [7]", values, handled, err)
+		}
+	})
+	if allocs > 1 {
+		t.Fatalf("warm fixed-parameter Run allocations = %.2f, want <= 1", allocs)
+	}
+
+	box := newStringBox("warm-slot-argument-reference")
+	args = []Value{stringValueFromBox(box)}
+	allocs = testing.AllocsPerRun(100, func() {
+		values, handled, err := runSlotExecution(proto, args)
+		if err != nil || !handled || len(values) != 1 || values[0].stringBox() != box {
+			t.Fatalf("warm reference fixed-parameter run = (%#v, %t, %v), want original box", values, handled, err)
+		}
+	})
+	if allocs > 1 {
+		t.Fatalf("warm reference fixed-parameter Run allocations = %.2f, want <= 1", allocs)
+	}
+}
+
 func BenchmarkRunSlotScalar(b *testing.B) {
 	proto, err := Compile(`return (1+2)*3-2`)
 	if err != nil {
@@ -639,6 +874,40 @@ func BenchmarkRunSlotScalar(b *testing.B) {
 	for index := 0; index < b.N; index++ {
 		if _, err := Run(proto); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkRunSlotFixedParameter(b *testing.B) {
+	proto := newProto(
+		nil,
+		[]instruction{{op: opAdd, a: 0, b: 0, c: 1}, {op: opReturnOne, a: 0}},
+		nil, nil, 2, 2, false,
+	)
+	args := []Value{NumberValue(4), NumberValue(5)}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		values, handled, err := runSlotExecution(proto, args)
+		if err != nil || !handled || len(values) != 1 || values[0] != NumberValue(9) {
+			b.Fatalf("slot fixed-parameter run = (%#v, %t, %v), want [9]", values, handled, err)
+		}
+	}
+}
+
+func BenchmarkRunEstablishedFixedParameter(b *testing.B) {
+	proto := newProto(
+		nil,
+		[]instruction{{op: opAdd, a: 0, b: 0, c: 1}, {op: opReturnOne, a: 0}},
+		nil, nil, 2, 2, false,
+	)
+	args := []Value{NumberValue(4), NumberValue(5)}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		values, err := runWithSlotExecutionDisabledArgs(proto, args)
+		if err != nil || len(values) != 1 || values[0] != NumberValue(9) {
+			b.Fatalf("established fixed-parameter run = (%#v, %v), want [9]", values, err)
 		}
 	}
 }

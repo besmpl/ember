@@ -1557,8 +1557,9 @@ type Proto struct {
 	entryNilRegisters       []int
 	reuseZeroCaptureClosure bool
 	// slotExecutionEligible is sealed with the immutable wordcode artifact.
-	// The conservative first slot runner only admits immediate LOAD/MOVE/RETURN
-	// programs; richer prototypes use the established VM until Slice 4.3.
+	// The conservative slot runner admits pure LOAD/MOVE/arithmetic/loop/RETURN
+	// programs, including fixed parameters; richer prototypes use the
+	// established VM until a matching slot ABI slice is proven.
 	slotExecutionEligible bool
 	verifyErr             error
 }

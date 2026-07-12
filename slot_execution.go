@@ -90,9 +90,11 @@ func resetSlotExecutionBuffer(values []slot) []slot {
 // The scalar runner is deliberately restricted to pure operations whose
 // scratch-only restart cannot duplicate an externally visible effect.  In
 // particular, no global, table, reference, call, closure, upvalue, vararg,
-// yield, or mutation opcode is admitted here.
+// yield, or mutation opcode is admitted here. Fixed parameters are allowed;
+// they are imported into the same per-run scratch heap as constants.
 func slotExecutionEligible(proto *Proto, code []instruction) bool {
-	if proto == nil || proto.registers < 0 || proto.params != 0 || proto.variadic ||
+	if proto == nil || proto.registers < 0 || proto.params < 0 ||
+		proto.params > proto.registers || proto.variadic ||
 		len(proto.upvalues) != 0 || len(proto.prototypes) != 0 {
 		return false
 	}
@@ -158,22 +160,24 @@ func slotExecutionNumberNeedsBox(value float64) bool {
 	return math.Float64bits(value)&slotTaggedMask == slotTaggedPrefix
 }
 
-// runSlotExecution attempts the canonical slot runner. Constants are imported
-// once at the public/host seam; opcode bodies operate only on slots. handled
-// is false for a safe fallback to the established VM; it is not a user-visible
-// execution error.
-func runSlotExecution(proto *Proto) (values []Value, handled bool, err error) {
+// runSlotExecution attempts the canonical slot runner. Constants and the
+// fixed-parameter prefix of args are imported once at the public/host seam;
+// opcode bodies operate only on slots. handled is false for a safe fallback
+// to the established VM; it is not a user-visible execution error. args is
+// the caller-provided parameter slice; extra values are ignored by the
+// fixed-parameter ABI, matching the established VM.
+func runSlotExecution(proto *Proto, args []Value) (values []Value, handled bool, err error) {
 	if proto == nil || !proto.slotExecutionEligible {
 		return nil, false, nil
 	}
 	state := acquireSlotExecutionState(proto.registers, len(proto.constants))
 	defer releaseSlotExecutionState(state)
 
-	if !slotExecutionImportConstants(state, proto.constants) {
-		return nil, false, nil
-	}
 	for index := range state.registers {
 		state.registers[index] = slotNil
+	}
+	if !slotExecutionImportConstantsAndArgs(state, proto.constants, args, proto.params) {
+		return nil, false, nil
 	}
 
 	count, ok := runSlotExecutionWords(proto, state)
@@ -198,8 +202,26 @@ func runSlotExecution(proto *Proto) (values []Value, handled bool, err error) {
 // heap allocation. A reference run lazily activates the pooled heap and
 // imports all constants through the public/host seam before opcode execution.
 func slotExecutionImportConstants(state *slotExecutionState, constants []Value) bool {
+	return slotExecutionImportConstantsAndArgs(state, constants, nil, 0)
+}
+
+// slotExecutionImportConstantsAndArgs imports constants and the relevant
+// fixed-parameter prefix into one run state. Immediate values remain
+// allocation-free; when any value needs an out-of-line representation, all
+// values are imported through the same pooled runtime heap so handles can be
+// resolved and exported together.
+func slotExecutionImportConstantsAndArgs(state *slotExecutionState, constants, args []Value, params int) bool {
 	if state == nil {
 		return false
+	}
+	if params < 0 {
+		return false
+	}
+	if params > len(state.registers) {
+		params = len(state.registers)
+	}
+	if params > len(args) {
+		params = len(args)
 	}
 	state.heapActive = false
 	needsHeap := false
@@ -210,6 +232,16 @@ func slotExecutionImportConstants(state *slotExecutionState, constants []Value) 
 			break
 		}
 		state.constants[index] = encoded
+	}
+	if !needsHeap {
+		for index := 0; index < params; index++ {
+			encoded, ok := slotExecutionImportImmediate(args[index])
+			if !ok {
+				needsHeap = true
+				break
+			}
+			state.registers[index] = encoded
+		}
 	}
 	if !needsHeap {
 		return true
@@ -224,6 +256,13 @@ func slotExecutionImportConstants(state *slotExecutionState, constants []Value) 
 			return false
 		}
 		state.constants[index] = encoded
+	}
+	for index := 0; index < params; index++ {
+		encoded, err := state.heap.importValue(args[index])
+		if err != nil {
+			return false
+		}
+		state.registers[index] = encoded
 	}
 	return true
 }
