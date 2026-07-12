@@ -3733,7 +3733,14 @@ type wordcodeDispatch struct {
 	nextWord int
 }
 
-func decodeWordcodeDispatch(words []wordcodeWord, pc int) (wordcodeDispatch, error) {
+func decodeWordcodeDispatch(words []wordcodeWord, pc int, indexes ...*wordcodeCacheIndex) (wordcodeDispatch, error) {
+	if len(indexes) > 1 {
+		return wordcodeDispatch{}, fmt.Errorf("wordcode dispatch received %d cache indexes", len(indexes))
+	}
+	var cacheIndex *wordcodeCacheIndex
+	if len(indexes) != 0 {
+		cacheIndex = indexes[0]
+	}
 	if pc < 0 || pc >= len(words) {
 		return wordcodeDispatch{}, fmt.Errorf("wordcode pc %d out of range", pc)
 	}
@@ -3757,18 +3764,8 @@ func decodeWordcodeDispatch(words []wordcodeWord, pc int) (wordcodeDispatch, err
 		dispatch.a = wordcodeDecodeByte(op, wordcodeSlotA, raw>>8)
 		dispatch.b = wordcodeDecodeByte(op, wordcodeSlotB, raw>>16)
 		dispatch.c = wordcodeDecodeByte(op, wordcodeSlotC, raw>>24)
-		if meta.wordcode.aux == wordcodeAuxConstCache16 {
+		if wordcodeCacheableOpcode(op) {
 			switch op {
-			case opSetStringField:
-				if dispatch.c != 0 {
-					return wordcodeDispatch{}, fmt.Errorf("wordcode pc %d %s reserves primary C for zero", pc, opcodeName(op))
-				}
-				dispatch.c, dispatch.b = dispatch.b, 0
-			case opGetStringField:
-				if dispatch.c != 0 {
-					return wordcodeDispatch{}, fmt.Errorf("wordcode pc %d %s reserves primary C for zero", pc, opcodeName(op))
-				}
-				dispatch.c = 0
 			case opSetStringFieldIndex:
 				dispatch.d, dispatch.c, dispatch.b = dispatch.c, dispatch.b, 0
 			case opGetStringFieldIndex:
@@ -3805,17 +3802,6 @@ func decodeWordcodeDispatch(words []wordcodeWord, pc int) (wordcodeDispatch, err
 		case wordcodeAuxCD16:
 			dispatch.c = wordcodeDecodeAD(op, wordcodeSlotC, aux)
 			dispatch.d = wordcodeDecodeAD(op, wordcodeSlotD, aux>>16)
-		case wordcodeAuxConstCache16:
-			constant := int(uint16(aux))
-			dispatch.cacheID = uint32(aux >> 16)
-			switch op {
-			case opSetStringField, opSetStringFieldIndex:
-				dispatch.b = constant
-			case opGetStringField, opGetStringFieldIndex:
-				dispatch.c = constant
-			}
-		case wordcodeAuxCache32:
-			dispatch.cacheID = uint32(aux)
 		default:
 			return wordcodeDispatch{}, fmt.Errorf("wordcode pc %d %s has unsupported AUX mode %d", pc, opcodeName(op), meta.wordcode.aux)
 		}
@@ -3827,6 +3813,21 @@ func decodeWordcodeDispatch(words []wordcodeWord, pc int) (wordcodeDispatch, err
 			dispatch.b += nextWord
 		case opcodeJumpTargetD:
 			dispatch.d += nextWord
+		}
+	}
+	if wordcodeCacheableOpcode(op) && cacheIndex != nil {
+		cacheID, descriptor, ok := cacheIndex.cacheSiteAt(pc)
+		if !ok {
+			return wordcodeDispatch{}, fmt.Errorf("wordcode pc %d %s is not a complete cache primary", pc, opcodeName(op))
+		}
+		dispatch.cacheID = cacheID
+		if descriptor != wordcodeCacheDynamicConstant {
+			switch op {
+			case opSetStringField, opSetStringFieldIndex:
+				dispatch.b = descriptor
+			case opGetStringField, opGetStringFieldIndex:
+				dispatch.c = descriptor
+			}
 		}
 	}
 	dispatch.nextWord = nextWord
@@ -3975,18 +3976,6 @@ reload:
 			a = wordcodeDecodeByte(op, wordcodeSlotA, raw>>8)
 			b = wordcodeDecodeByte(op, wordcodeSlotB, raw>>16)
 			c = wordcodeDecodeByte(op, wordcodeSlotC, raw>>24)
-			if encoding.aux == wordcodeAuxConstCache16 {
-				switch op {
-				case opSetStringField:
-					c, b = b, 0
-				case opGetStringField:
-					c = 0
-				case opSetStringFieldIndex:
-					d, c, b = c, b, 0
-				case opGetStringFieldIndex:
-					d, c = c, 0
-				}
-			}
 		case wordcodeFormatAD:
 			a = wordcodeDecodeByte(op, wordcodeSlotA, raw>>8)
 			value := wordcodeDecodeAD(op, encoding.adOperand, raw>>16)
@@ -4012,7 +4001,6 @@ reload:
 			return directFrameFail(fmt.Errorf("wordcode pc %d %s has unsupported format %d", pc, opcodeName(op), encoding.format))
 		}
 		nextWord := pc + 1
-		cacheID := uint32(0)
 		if hasAux {
 			if nextWord >= len(words) {
 				return directFrameFail(fmt.Errorf("wordcode pc %d %s AUX is truncated", pc, opcodeName(op)))
@@ -4039,17 +4027,6 @@ reload:
 			case wordcodeAuxCD16:
 				c = wordcodeDecodeAD(op, wordcodeSlotC, aux)
 				d = wordcodeDecodeAD(op, wordcodeSlotD, aux>>16)
-			case wordcodeAuxConstCache16:
-				setCacheConstant := int(uint16(aux))
-				cacheID = uint32(aux >> 16)
-				switch op {
-				case opSetStringField, opSetStringFieldIndex:
-					b = setCacheConstant
-				case opGetStringField, opGetStringFieldIndex:
-					c = setCacheConstant
-				}
-			case wordcodeAuxCache32:
-				cacheID = uint32(aux)
 			default:
 				return directFrameFail(fmt.Errorf("wordcode pc %d %s has unsupported AUX mode %d", pc, opcodeName(op), encoding.aux))
 			}
@@ -4168,6 +4145,11 @@ reload:
 			}
 
 		case opSetStringField:
+			cacheID, descriptor, cacheOK := proto.cacheIndex.cacheSiteAt(pc)
+			if !cacheOK {
+				return directFrameFail(fmt.Errorf("wordcode pc %d %s is not a complete cache primary", pc, opcodeName(op)))
+			}
+			b = descriptor
 			base := registers[a]
 			table := base.tableRef()
 			if table == nil {
@@ -4217,6 +4199,11 @@ reload:
 			table.setRawStringFieldBox(key, keyValue.stringBox(), value)
 
 		case opSetStringFieldIndex:
+			cacheID, descriptor, cacheOK := proto.cacheIndex.cacheSiteAt(pc)
+			if !cacheOK {
+				return directFrameFail(fmt.Errorf("wordcode pc %d %s is not a complete cache primary", pc, opcodeName(op)))
+			}
+			d, c, b = c, b, descriptor
 			base := registers[a]
 			table := base.tableRef()
 			if table == nil {
@@ -4265,6 +4252,11 @@ reload:
 			}
 
 		case opGetStringField:
+			cacheID, descriptor, cacheOK := proto.cacheIndex.cacheSiteAt(pc)
+			if !cacheOK {
+				return directFrameFail(fmt.Errorf("wordcode pc %d %s is not a complete cache primary", pc, opcodeName(op)))
+			}
+			c = descriptor
 			base := registers[b]
 			table := base.tableRef()
 			if table == nil {
@@ -4313,6 +4305,11 @@ reload:
 			registers[a] = NilValue()
 
 		case opGetStringFieldIndex:
+			cacheID, descriptor, cacheOK := proto.cacheIndex.cacheSiteAt(pc)
+			if !cacheOK {
+				return directFrameFail(fmt.Errorf("wordcode pc %d %s is not a complete cache primary", pc, opcodeName(op)))
+			}
+			d, c = c, descriptor
 			base := registers[b]
 			table := base.tableRef()
 			if table == nil {
@@ -4369,6 +4366,10 @@ reload:
 			registers[a] = value
 
 		case opSetIndex:
+			cacheID, _, cacheOK := proto.cacheIndex.cacheSiteAt(pc)
+			if !cacheOK {
+				return directFrameFail(fmt.Errorf("wordcode pc %d %s is not a complete cache primary", pc, opcodeName(op)))
+			}
 			base := registers[a]
 			table := base.tableRef()
 			if table == nil {
@@ -4408,6 +4409,10 @@ reload:
 			}
 
 		case opGetIndex:
+			cacheID, _, cacheOK := proto.cacheIndex.cacheSiteAt(pc)
+			if !cacheOK {
+				return directFrameFail(fmt.Errorf("wordcode pc %d %s is not a complete cache primary", pc, opcodeName(op)))
+			}
 			base := registers[b]
 			table := base.tableRef()
 			if table == nil {
@@ -5638,18 +5643,6 @@ reload:
 			a = wordcodeHotDecodeByte(raw>>8, wordcodeHotSlotSigned(encoding, wordcodeSlotA))
 			b = wordcodeHotDecodeByte(raw>>16, wordcodeHotSlotSigned(encoding, wordcodeSlotB))
 			c = wordcodeHotDecodeByte(raw>>24, wordcodeHotSlotSigned(encoding, wordcodeSlotC))
-			if encoding.aux == wordcodeAuxConstCache16 {
-				switch op {
-				case opSetStringField:
-					c, b = b, 0
-				case opGetStringField:
-					c = 0
-				case opSetStringFieldIndex:
-					d, c, b = c, b, 0
-				case opGetStringFieldIndex:
-					d, c = c, 0
-				}
-			}
 		case wordcodeFormatAD:
 			a = wordcodeHotDecodeByte(raw>>8, wordcodeHotSlotSigned(encoding, wordcodeSlotA))
 			value := wordcodeHotDecodeAD(raw>>16, wordcodeHotSlotSigned(encoding, encoding.adOperand))
@@ -5673,7 +5666,6 @@ reload:
 			}
 		}
 		nextWord := pc + 1
-		cacheID := uint32(0)
 		if hasAux {
 			aux := words[nextWord]
 			switch encoding.aux {
@@ -5697,17 +5689,6 @@ reload:
 			case wordcodeAuxCD16:
 				c = wordcodeHotDecodeAD(aux, wordcodeHotSlotSigned(encoding, wordcodeSlotC))
 				d = wordcodeHotDecodeAD(aux>>16, wordcodeHotSlotSigned(encoding, wordcodeSlotD))
-			case wordcodeAuxConstCache16:
-				constant := int(uint16(aux))
-				cacheID = uint32(aux >> 16)
-				switch op {
-				case opSetStringField, opSetStringFieldIndex:
-					b = constant
-				case opGetStringField, opGetStringFieldIndex:
-					c = constant
-				}
-			case wordcodeAuxCache32:
-				cacheID = uint32(aux)
 			}
 			nextWord++
 		}
@@ -5808,6 +5789,11 @@ reload:
 			}
 
 		case opSetStringField:
+			cacheID, descriptor, cacheOK := proto.cacheIndex.cacheSiteAt(pc)
+			if !cacheOK {
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("wordcode pc %d %s is not a complete cache primary", pc, opcodeName(op))))
+			}
+			b = descriptor
 			base := registers[a]
 			table := base.tableRef()
 			if table == nil {
@@ -5856,6 +5842,11 @@ reload:
 			table.setRawStringFieldBox(key, keyValue.stringBox(), value)
 
 		case opSetStringFieldIndex:
+			cacheID, descriptor, cacheOK := proto.cacheIndex.cacheSiteAt(pc)
+			if !cacheOK {
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("wordcode pc %d %s is not a complete cache primary", pc, opcodeName(op))))
+			}
+			d, c, b = c, b, descriptor
 			base := registers[a]
 			table := base.tableRef()
 			if table == nil {
@@ -5900,6 +5891,11 @@ reload:
 			}
 
 		case opGetStringField:
+			cacheID, descriptor, cacheOK := proto.cacheIndex.cacheSiteAt(pc)
+			if !cacheOK {
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("wordcode pc %d %s is not a complete cache primary", pc, opcodeName(op))))
+			}
+			c = descriptor
 			base := registers[b]
 			table := base.tableRef()
 			if table == nil {
@@ -5947,6 +5943,11 @@ reload:
 			registers[a] = NilValue()
 
 		case opGetStringFieldIndex:
+			cacheID, descriptor, cacheOK := proto.cacheIndex.cacheSiteAt(pc)
+			if !cacheOK {
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("wordcode pc %d %s is not a complete cache primary", pc, opcodeName(op))))
+			}
+			d, c = c, descriptor
 			base := registers[b]
 			table := base.tableRef()
 			if table == nil {
@@ -5997,6 +5998,10 @@ reload:
 			registers[a] = value
 
 		case opSetIndex:
+			cacheID, _, cacheOK := proto.cacheIndex.cacheSiteAt(pc)
+			if !cacheOK {
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("wordcode pc %d %s is not a complete cache primary", pc, opcodeName(op))))
+			}
 			base := registers[a]
 			table := base.tableRef()
 			if table == nil {
@@ -6032,6 +6037,10 @@ reload:
 			}
 
 		case opGetIndex:
+			cacheID, _, cacheOK := proto.cacheIndex.cacheSiteAt(pc)
+			if !cacheOK {
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("wordcode pc %d %s is not a complete cache primary", pc, opcodeName(op))))
+			}
 			base := registers[b]
 			table := base.tableRef()
 			if table == nil {

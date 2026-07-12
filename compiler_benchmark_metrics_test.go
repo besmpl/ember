@@ -54,6 +54,62 @@ func TestCompilerBenchmarkMetricsDeduplicatesStringBackingAliases(t *testing.T) 
 	}
 }
 
+func TestPrototypeFallbackWordcodeFootprintUsesRankedCacheSites(t *testing.T) {
+	proto, err := Compile(`
+local prototype = {hp = 20, mana = 5, armor = 2}
+local misses = 0
+local mt = {
+    __index = function(_, key)
+        misses = misses + 1
+        if key == "power" then
+            return prototype.hp + prototype.mana
+        end
+        return prototype[key] or 0
+    end,
+}
+local actors = {
+    setmetatable({hp = 80}, mt),
+    setmetatable({mana = 15, armor = 4}, mt),
+    setmetatable({hp = 45, power = 9}, mt),
+}
+local total = 0
+for tick = 1, 80 do
+    for _, actor in actors do
+        local value = actor.hp + actor.mana + actor.power
+        if actor.armor > 3 then
+            actor.hp = actor.hp + tick % 3 - actor.armor
+        else
+            actor.mana = actor.mana + tick % 4
+        end
+        total = total + value + actor.hp + actor.mana
+    end
+end
+return total + misses
+`)
+	if err != nil {
+		t.Fatalf("Compile prototype fallback fixture: %v", err)
+	}
+	cacheSites := 0
+	var countCacheSites func(*Proto)
+	countCacheSites = func(current *Proto) {
+		if current == nil {
+			return
+		}
+		cacheSites += current.cacheSiteCount
+		for _, child := range current.prototypes {
+			countCacheSites(child)
+		}
+	}
+	countCacheSites(proto)
+	if got, want := cacheSites, 23; got != want {
+		t.Fatalf("prototype fallback cache sites = %d, want %d", got, want)
+	}
+	metrics := compilerBenchmarkMetrics([]*Proto{proto})
+	if got, want := metrics.WordcodeBytes, int64(456); got != want {
+		t.Fatalf("prototype fallback wordcode bytes = %d, want %d", got, want)
+	}
+}
+
 func CompilerBenchmarkMetricsForTest(proto *Proto) CompilerBenchmarkMetrics {
 	if proto == nil {
 		return CompilerBenchmarkMetrics{}
@@ -188,6 +244,16 @@ func protoOwnedBenchmarkBytesWithStrings(proto *Proto, strings *compilerBenchmar
 		bytes := compilerBenchmarkStringBytes(box.text, strings)
 		owned += bytes
 		retainedStrings += bytes
+	}
+	if proto.cacheIndex != nil {
+		indexValue := reflect.ValueOf(proto.cacheIndex).Elem()
+		owned += int64(indexValue.Type().Size())
+		for fieldIndex := 0; fieldIndex < indexValue.NumField(); fieldIndex++ {
+			field := indexValue.Field(fieldIndex)
+			if field.Kind() == reflect.Slice {
+				owned += int64(field.Cap()) * int64(field.Type().Elem().Size())
+			}
+		}
 	}
 	return owned, retainedStrings
 }

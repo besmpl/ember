@@ -74,7 +74,7 @@ func (thread *vmThread) runColdInstruction(frame *vmFrame) (action coldInstructi
 
 	proto := frame.proto
 	globals := thread.globals
-	dispatch, err := decodeWordcodeDispatch(proto.words, frame.pc)
+	dispatch, err := decodeWordcodeDispatch(proto.words, frame.pc, proto.cacheIndex)
 	if err != nil {
 		return coldInstructionError(err)
 	}

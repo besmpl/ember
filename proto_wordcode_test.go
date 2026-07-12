@@ -46,3 +46,29 @@ func TestProtoPublishesWordcodeAndPhysicalLineMap(t *testing.T) {
 		t.Fatalf("AUX line mapping = %#v, want primary line 11 followed by zero", proto.wordLines)
 	}
 }
+
+func TestExecutionArtifactRefinalizationPreservesWideCacheConstants(t *testing.T) {
+	constants := make([]Value, 301)
+	for index := range constants {
+		constants[index] = NumberValue(float64(index))
+	}
+	constants[300] = StringValue("wide")
+	code := []instruction{
+		{op: opGetStringField, a: 0, b: 1, c: 300},
+		{op: opReturnOne, a: 0},
+	}
+	proto := newProtoWithDescriptors(constants, code, nil, nil, 2, 0, false)
+	if err := finalizeProtoExecutionArtifact(proto, code); err != nil {
+		t.Fatalf("initial finalization: %v", err)
+	}
+	if err := finalizeProtoExecutionArtifact(proto); err != nil {
+		t.Fatalf("wordcode-only refinalization: %v", err)
+	}
+	decoded, err := protoDecodedInstructions(proto)
+	if err != nil {
+		t.Fatalf("decode refinalized proto: %v", err)
+	}
+	if got := decoded[0].c; got != 300 {
+		t.Fatalf("refinalized cache constant = %d, want 300", got)
+	}
+}

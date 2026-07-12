@@ -2,6 +2,7 @@ package ember
 
 import (
 	"fmt"
+	"math/bits"
 	"strings"
 )
 
@@ -42,11 +43,6 @@ const (
 	wordcodeAuxAC16
 	wordcodeAuxBD16
 	wordcodeAuxCD16
-	// Cache-site encodings reserve the low/high halves for a semantic
-	// constant index and a zero-based cache site id. The cache32 form is used
-	// by register-only index operations whose ABC operands are already full.
-	wordcodeAuxConstCache16
-	wordcodeAuxCache32
 )
 
 type wordcodeOperandSlot uint8
@@ -163,10 +159,12 @@ func wordcodeMetadataFor(op opcode) wordcodeEncodingMetadata {
 		meta = wordcodeEncodingMetadata{format: wordcodeFormatABC, aux: wordcodeAuxBC16}
 	case opSetField:
 		meta = wordcodeEncodingMetadata{format: wordcodeFormatABC, aux: wordcodeAuxB}
-	case opSetStringField, opGetStringField, opSetStringFieldIndex, opGetStringFieldIndex:
-		meta = wordcodeEncodingMetadata{format: wordcodeFormatABC, aux: wordcodeAuxConstCache16, auxRequired: true}
-	case opSetIndex, opGetIndex:
-		meta = wordcodeEncodingMetadata{format: wordcodeFormatABC, aux: wordcodeAuxCache32, auxRequired: true}
+	case opSetStringField, opGetStringField, opSetStringFieldIndex, opGetStringFieldIndex,
+		opSetIndex, opGetIndex:
+		// Cacheable table/index operations stay on their original single-word
+		// primary layouts. Semantic string constants and cache site ids live in
+		// the immutable Proto cache index, rather than in an AUX payload.
+		meta = wordcodeEncodingMetadata{format: wordcodeFormatABC}
 	case opClosure, opGetUpvalue:
 		meta = wordcodeEncodingMetadata{format: wordcodeFormatAD, adOperand: wordcodeSlotB, aux: wordcodeAuxB}
 	case opSetUpvalue:
@@ -401,10 +399,6 @@ func wordcodeAuxContains(meta wordcodeEncodingMetadata, slot wordcodeOperandSlot
 		return slot == wordcodeSlotB || slot == wordcodeSlotD
 	case wordcodeAuxCD16:
 		return slot == wordcodeSlotC || slot == wordcodeSlotD
-	case wordcodeAuxConstCache16, wordcodeAuxCache32:
-		// Cache-site operands live in the AUX payload and are not part of the
-		// canonical A/B/C/D instruction slots.
-		return false
 	default:
 		return false
 	}
@@ -441,6 +435,226 @@ func wordcodeCacheSiteCount(code []instruction) int {
 	return count
 }
 
+const (
+	wordcodeCacheRankBlockWords  = 64
+	wordcodeCacheDynamicConstant = -1
+)
+
+// wordcodeCacheIndex is the immutable physical-PC index for cacheable
+// instructions in one Proto. primaryBits marks cache-primary words, while
+// rankPrefix stores the number of marked words before each 64-word block.
+// constants is ordered by cache id and stores semantic constant descriptors;
+// wordcodeCacheDynamicConstant is the sentinel used by register-only index
+// operations (SET_INDEX and GET_INDEX).
+//
+// The index is published with Proto and never mutated after finalization. VM
+// function instances own the mutable cache pointer array separately.
+type wordcodeCacheIndex struct {
+	primaryBits []uint64
+	rankPrefix  []uint32
+	constants   []int
+	wordCount   int
+}
+
+func wordcodeCacheDescriptor(ins instruction) int {
+	switch ins.op {
+	case opSetStringField, opSetStringFieldIndex:
+		return ins.b
+	case opGetStringField, opGetStringFieldIndex:
+		return ins.c
+	case opSetIndex, opGetIndex:
+		return wordcodeCacheDynamicConstant
+	default:
+		return wordcodeCacheDynamicConstant
+	}
+}
+
+func buildWordcodeCacheIndex(code []instruction, boundaries []int, wordCount int) (*wordcodeCacheIndex, error) {
+	if len(boundaries) != len(code)+1 {
+		return nil, fmt.Errorf("cache boundary count %d does not match code length %d", len(boundaries), len(code))
+	}
+	if wordcodeCacheSiteCount(code) == 0 {
+		return nil, nil
+	}
+	if wordCount < 0 {
+		return nil, fmt.Errorf("negative cache word count %d", wordCount)
+	}
+	blockCount := (wordCount + wordcodeCacheRankBlockWords - 1) / wordcodeCacheRankBlockWords
+	index := &wordcodeCacheIndex{
+		primaryBits: make([]uint64, blockCount),
+		rankPrefix:  make([]uint32, blockCount+1),
+		wordCount:   wordCount,
+	}
+	index.constants = make([]int, 0, wordcodeCacheSiteCount(code))
+	for logical, ins := range code {
+		if !wordcodeCacheableOpcode(ins.op) {
+			continue
+		}
+		if logical < 0 || logical >= len(boundaries)-1 {
+			return nil, fmt.Errorf("cache logical pc %d out of range", logical)
+		}
+		wordPC := boundaries[logical]
+		if wordPC < 0 || wordPC >= wordCount {
+			return nil, fmt.Errorf("cache logical pc %d maps to physical pc %d outside wordcode length %d", logical, wordPC, wordCount)
+		}
+		block := wordPC / wordcodeCacheRankBlockWords
+		bit := uint(wordPC % wordcodeCacheRankBlockWords)
+		index.primaryBits[block] |= uint64(1) << bit
+		index.constants = append(index.constants, wordcodeCacheDescriptor(ins))
+	}
+	var count uint32
+	for block, primary := range index.primaryBits {
+		index.rankPrefix[block] = count
+		count += uint32(bits.OnesCount64(primary))
+	}
+	index.rankPrefix[len(index.primaryBits)] = count
+	if int(count) != len(index.constants) {
+		return nil, fmt.Errorf("cache index has %d primary bits and %d descriptors", count, len(index.constants))
+	}
+	return index, nil
+}
+
+func (index *wordcodeCacheIndex) validate(wordCount, expectedSites int) error {
+	if index == nil {
+		if expectedSites == 0 {
+			return nil
+		}
+		return fmt.Errorf("cache index is missing for %d cache sites", expectedSites)
+	}
+	if index.wordCount != wordCount {
+		return fmt.Errorf("cache index word count %d, want %d", index.wordCount, wordCount)
+	}
+	blockCount := (wordCount + wordcodeCacheRankBlockWords - 1) / wordcodeCacheRankBlockWords
+	if len(index.primaryBits) != blockCount {
+		return fmt.Errorf("cache index primary bitset has %d blocks, want %d", len(index.primaryBits), blockCount)
+	}
+	if len(index.rankPrefix) != blockCount+1 {
+		return fmt.Errorf("cache index rank prefix has %d entries, want %d", len(index.rankPrefix), blockCount+1)
+	}
+	if len(index.rankPrefix) == 0 || index.rankPrefix[0] != 0 {
+		return fmt.Errorf("cache index rank prefix must start at zero")
+	}
+	if wordCount > 0 && len(index.primaryBits) > 0 {
+		used := uint(wordCount % wordcodeCacheRankBlockWords)
+		if used != 0 {
+			invalid := index.primaryBits[len(index.primaryBits)-1] & ^(uint64(1)<<used - 1)
+			if invalid != 0 {
+				return fmt.Errorf("cache index marks physical words beyond wordcode length")
+			}
+		}
+	}
+	for block, primary := range index.primaryBits {
+		if index.rankPrefix[block] > index.rankPrefix[block+1] {
+			return fmt.Errorf("cache index rank prefix decreases at block %d", block)
+		}
+		if want := index.rankPrefix[block] + uint32(bits.OnesCount64(primary)); want != index.rankPrefix[block+1] {
+			return fmt.Errorf("cache index rank prefix at block %d is %d, want %d", block, index.rankPrefix[block+1], want)
+		}
+	}
+	count := index.rankPrefix[len(index.rankPrefix)-1]
+	if int(count) != len(index.constants) {
+		return fmt.Errorf("cache index has %d descriptors, want %d", len(index.constants), count)
+	}
+	if expectedSites >= 0 && int(count) != expectedSites {
+		return fmt.Errorf("cache index contains %d cache sites, want %d", count, expectedSites)
+	}
+	for id, descriptor := range index.constants {
+		if descriptor < wordcodeCacheDynamicConstant {
+			return fmt.Errorf("cache descriptor %d is %d, want non-negative constant or %d sentinel", id, descriptor, wordcodeCacheDynamicConstant)
+		}
+	}
+	return nil
+}
+
+func (index *wordcodeCacheIndex) marksWord(wordPC int) bool {
+	if index == nil || wordPC < 0 || wordPC >= index.wordCount {
+		return false
+	}
+	block := wordPC / wordcodeCacheRankBlockWords
+	bit := uint(wordPC % wordcodeCacheRankBlockWords)
+	return block < len(index.primaryBits) && index.primaryBits[block]&(uint64(1)<<bit) != 0
+}
+
+func (index *wordcodeCacheIndex) validateWords(words []wordcodeWord, expectedSites, constantCount int) error {
+	if err := index.validate(len(words), expectedSites); err != nil {
+		return err
+	}
+	for wordPC := 0; wordPC < len(words); {
+		raw := words[wordPC]
+		op := opcode(uint8(raw) & uint8(wordcodeOpcodeMask))
+		meta, ok := opcodeMetadata(op)
+		if !ok {
+			return fmt.Errorf("wordcode pc %d has unknown opcode %d", wordPC, op)
+		}
+		cacheable := wordcodeCacheableOpcode(op)
+		if marked := index.marksWord(wordPC); marked != cacheable {
+			return fmt.Errorf("wordcode pc %d %s cache mark is %t, want %t", wordPC, opcodeName(op), marked, cacheable)
+		}
+		if cacheable {
+			_, descriptor, complete := index.cacheSiteAt(wordPC)
+			if !complete {
+				return fmt.Errorf("wordcode pc %d %s has incomplete cache metadata", wordPC, opcodeName(op))
+			}
+			switch op {
+			case opSetIndex, opGetIndex:
+				if descriptor != wordcodeCacheDynamicConstant {
+					return fmt.Errorf("wordcode pc %d %s cache descriptor is %d, want dynamic sentinel", wordPC, opcodeName(op), descriptor)
+				}
+			default:
+				if descriptor < 0 || constantCount >= 0 && descriptor >= constantCount {
+					return fmt.Errorf("wordcode pc %d %s cache constant %d out of range", wordPC, opcodeName(op), descriptor)
+				}
+			}
+		}
+		nextWord := wordPC + 1
+		if raw&wordcodeAuxBit != 0 {
+			if meta.wordcode.aux == wordcodeAuxNone || nextWord >= len(words) {
+				return fmt.Errorf("wordcode pc %d %s has invalid AUX", wordPC, opcodeName(op))
+			}
+			if index.marksWord(nextWord) {
+				return fmt.Errorf("wordcode AUX pc %d is marked as a cache primary", nextWord)
+			}
+			nextWord++
+		}
+		wordPC = nextWord
+	}
+	return nil
+}
+
+func (index *wordcodeCacheIndex) cacheIDAt(wordPC int) (uint32, bool) {
+	if index == nil || wordPC < 0 || wordPC >= index.wordCount {
+		return 0, false
+	}
+	block := wordPC / wordcodeCacheRankBlockWords
+	bit := uint(wordPC % wordcodeCacheRankBlockWords)
+	if block < 0 || block >= len(index.primaryBits) || block >= len(index.rankPrefix) || index.primaryBits[block]&(uint64(1)<<bit) == 0 {
+		return 0, false
+	}
+	prior := index.primaryBits[block]
+	if bit != 0 {
+		prior &= (uint64(1) << bit) - 1
+	} else {
+		prior = 0
+	}
+	return index.rankPrefix[block] + uint32(bits.OnesCount64(prior)), true
+}
+
+func (index *wordcodeCacheIndex) descriptorAt(wordPC int) (int, bool) {
+	id, ok := index.cacheIDAt(wordPC)
+	if !ok || int(id) >= len(index.constants) {
+		return wordcodeCacheDynamicConstant, false
+	}
+	return index.constants[id], true
+}
+
+func (index *wordcodeCacheIndex) cacheSiteAt(wordPC int) (uint32, int, bool) {
+	id, ok := index.cacheIDAt(wordPC)
+	if !ok || int(id) >= len(index.constants) {
+		return 0, wordcodeCacheDynamicConstant, false
+	}
+	return id, index.constants[id], true
+}
+
 func wordcodeJumpSlot(op opcode) (wordcodeOperandSlot, bool) {
 	switch target := opcodeJumpTarget(op); target {
 	case opcodeJumpTargetB:
@@ -472,26 +686,7 @@ func wordcodeSigned16ForAux(op opcode, slot wordcodeOperandSlot, value int) (uin
 	return uint16(value), nil
 }
 
-func wordcodeBuildAux(op opcode, meta wordcodeEncodingMetadata, ins instruction, displacement int, cacheSiteID int) (wordcodeWord, error) {
-	if meta.aux == wordcodeAuxConstCache16 {
-		constant := wordcodeSlotValue(ins, wordcodeCacheConstantSlot(op))
-		if constant < 0 || constant > 0xffff {
-			return 0, fmt.Errorf("%s cache constant index %d out of uint16 range", opcodeName(op), constant)
-		}
-		if cacheSiteID < 0 || cacheSiteID > 0xffff {
-			return 0, fmt.Errorf("%s cache site id %d out of uint16 range", opcodeName(op), cacheSiteID)
-		}
-		return wordcodeWord(uint16(constant)) | wordcodeWord(uint16(cacheSiteID))<<16, nil
-	}
-	if meta.aux == wordcodeAuxCache32 {
-		if cacheSiteID < 0 {
-			return 0, fmt.Errorf("%s cache site id is required by the encoder", opcodeName(op))
-		}
-		if uint64(cacheSiteID) > uint64(^uint32(0)) {
-			return 0, fmt.Errorf("%s cache site id %d exceeds uint32 range", opcodeName(op), cacheSiteID)
-		}
-		return wordcodeWord(uint32(cacheSiteID)), nil
-	}
+func wordcodeBuildAux(op opcode, meta wordcodeEncodingMetadata, ins instruction, displacement int) (wordcodeWord, error) {
 	value := func(slot wordcodeOperandSlot) int { return wordcodeValueForAux(op, ins, slot, displacement) }
 	switch meta.aux {
 	case wordcodeAuxA, wordcodeAuxB, wordcodeAuxC, wordcodeAuxD:
@@ -521,8 +716,6 @@ func wordcodeBuildAux(op opcode, meta wordcodeEncodingMetadata, ins instruction,
 			return 0, err
 		}
 		return wordcodeWord(low) | wordcodeWord(high)<<16, nil
-	case wordcodeAuxConstCache16, wordcodeAuxCache32:
-		return 0, fmt.Errorf("%s cache AUX requires cache-aware encoding", opcodeName(op))
 	default:
 		return 0, fmt.Errorf("%s declares unsupported AUX mode %d", opcodeName(op), meta.aux)
 	}
@@ -552,16 +745,6 @@ func wordcodeSetAux(ins *instruction, meta wordcodeEncodingMetadata, aux wordcod
 		}
 		setWordcodeSlot(ins, lowSlot, wordcodeDecodeAD(ins.op, lowSlot, aux))
 		setWordcodeSlot(ins, highSlot, wordcodeDecodeAD(ins.op, highSlot, aux>>16))
-		return nil
-	case wordcodeAuxConstCache16:
-		// The cache id is carried alongside the constant and is consumed by
-		// wordcodeDecodeWords/dispatchers; this helper only reconstructs the
-		// canonical semantic constant operand.
-		setWordcodeSlot(ins, wordcodeCacheConstantSlot(ins.op), int(uint16(aux)))
-		return nil
-	case wordcodeAuxCache32:
-		// Register-only index operations have no semantic AUX operand. The
-		// payload is the cache id, which callers that need it extract directly.
 		return nil
 	default:
 		return fmt.Errorf("%s declares unsupported AUX mode %d", opcodeName(ins.op), meta.aux)
@@ -614,7 +797,7 @@ func wordcodePrimaryAD(value int, signed bool, aux bool) (wordcodeWord, error) {
 	return wordcodeWord(uint16(value)), nil
 }
 
-func wordcodeEncodeInstruction(ins instruction, pc int, nextWordPC int, boundaries []int, cacheSite ...int) ([]wordcodeWord, error) {
+func wordcodeEncodeInstruction(ins instruction, pc int, nextWordPC int, boundaries []int) ([]wordcodeWord, error) {
 	meta, ok := opcodeMetadata(ins.op)
 	if !ok {
 		return nil, fmt.Errorf("unknown opcode %d", ins.op)
@@ -637,16 +820,6 @@ func wordcodeEncodeInstruction(ins instruction, pc int, nextWordPC int, boundari
 	if encoding.auxRequired {
 		hasAux = true
 	}
-	if len(cacheSite) > 1 {
-		return nil, fmt.Errorf("%s received %d cache site ids", opcodeName(ins.op), len(cacheSite))
-	}
-	cacheSiteID := -1
-	if len(cacheSite) != 0 {
-		cacheSiteID = cacheSite[0]
-	}
-	if wordcodeCacheableOpcode(ins.op) && cacheSiteID < 0 {
-		return nil, fmt.Errorf("%s cache site id is required by the encoder", opcodeName(ins.op))
-	}
 	if encoding.aux == wordcodeAuxNone && hasAux {
 		return nil, fmt.Errorf("%s does not permit an AUX word", opcodeName(ins.op))
 	}
@@ -655,6 +828,13 @@ func wordcodeEncodeInstruction(ins instruction, pc int, nextWordPC int, boundari
 		word |= wordcodeAuxBit
 	}
 	encodePrimary := func(slot wordcodeOperandSlot, value int) (wordcodeWord, error) {
+		if wordcodeCacheableOpcode(ins.op) &&
+			ins.op != opSetIndex && ins.op != opGetIndex &&
+			slot == wordcodeCacheConstantSlot(ins.op) {
+			// The low byte remains a useful compact hint for disassembly, but
+			// the immutable cache descriptor is authoritative for wide indexes.
+			return wordcodePrimaryByte(value, true)
+		}
 		if wordcodeAuxContains(encoding, slot) {
 			return wordcodePrimaryByte(value, true)
 		}
@@ -664,14 +844,11 @@ func wordcodeEncodeInstruction(ins instruction, pc int, nextWordPC int, boundari
 	case wordcodeFormatABC:
 		primary := [3]int{ins.a, ins.b, ins.c}
 		if wordcodeCacheableOpcode(ins.op) {
-			// Cacheable table/index operations use the primary ABC fields for
-			// their semantic register operands. Constants and the cache site id
-			// live in AUX, keeping every cacheable operation on the one-AUX path.
+			// Chained string-field operations have four semantic operands but
+			// retain a single primary ABC word. Their full constant descriptor is
+			// carried by the immutable Proto cache index; the remaining register
+			// operands occupy the primary B/C bytes.
 			switch ins.op {
-			case opSetStringField:
-				primary = [3]int{ins.a, ins.c, 0}
-			case opGetStringField:
-				primary = [3]int{ins.a, ins.b, 0}
 			case opSetStringFieldIndex:
 				primary = [3]int{ins.a, ins.c, ins.d}
 			case opGetStringFieldIndex:
@@ -713,7 +890,7 @@ func wordcodeEncodeInstruction(ins instruction, pc int, nextWordPC int, boundari
 	if !hasAux {
 		return []wordcodeWord{word}, nil
 	}
-	aux, err := wordcodeBuildAux(ins.op, encoding, ins, displacement, cacheSiteID)
+	aux, err := wordcodeBuildAux(ins.op, encoding, ins, displacement)
 	if err != nil {
 		return nil, err
 	}
@@ -841,14 +1018,8 @@ func encodeWordcode(code []instruction, limits ...int) ([]wordcodeWord, error) {
 	}
 	boundaries := boundaryMap.logicalToWord
 	words := make([]wordcodeWord, 0, boundaries[len(code)])
-	cacheSiteID := 0
 	for pc, ins := range code {
-		siteID := -1
-		if wordcodeCacheableOpcode(ins.op) {
-			siteID = cacheSiteID
-			cacheSiteID++
-		}
-		encoded, err := wordcodeEncodeInstruction(ins, pc, boundaries[pc+1], boundaries, siteID)
+		encoded, err := wordcodeEncodeInstruction(ins, pc, boundaries[pc+1], boundaries)
 		if err != nil {
 			return nil, fmt.Errorf("instruction %d %s: %w", pc, opcodeName(ins.op), err)
 		}
@@ -872,10 +1043,19 @@ type wordcodeDecoded struct {
 	ins      instruction
 	wordPC   int
 	nextWord int
-	cacheID  uint32
 }
 
-func wordcodeDecodeWords(words []wordcodeWord) ([]wordcodeDecoded, []int, error) {
+func wordcodeDecodeWords(words []wordcodeWord, indexes ...*wordcodeCacheIndex) ([]wordcodeDecoded, []int, error) {
+	if len(indexes) > 1 {
+		return nil, nil, fmt.Errorf("wordcode decoder received %d cache indexes", len(indexes))
+	}
+	var cacheIndex *wordcodeCacheIndex
+	if len(indexes) != 0 && indexes[0] != nil {
+		cacheIndex = indexes[0]
+		if err := cacheIndex.validate(len(words), -1); err != nil {
+			return nil, nil, err
+		}
+	}
 	decoded := make([]wordcodeDecoded, 0)
 	boundaries := []int{0}
 	for wordPC := 0; wordPC < len(words); {
@@ -900,17 +1080,6 @@ func wordcodeDecodeWords(words []wordcodeWord) ([]wordcodeDecoded, []int, error)
 			ins.b = wordcodeDecodeByte(op, wordcodeSlotB, raw>>16)
 			ins.c = wordcodeDecodeByte(op, wordcodeSlotC, raw>>24)
 			switch op {
-			case opSetStringField:
-				if ins.c != 0 {
-					return nil, nil, fmt.Errorf("word %d %s reserves primary C for zero", wordPC, opcodeName(op))
-				}
-				ins.c = ins.b
-				ins.b = 0
-			case opGetStringField:
-				if ins.c != 0 {
-					return nil, nil, fmt.Errorf("word %d %s reserves primary C for zero", wordPC, opcodeName(op))
-				}
-				ins.c = 0
 			case opSetStringFieldIndex:
 				ins.d = ins.c
 				ins.c = ins.b
@@ -927,37 +1096,36 @@ func wordcodeDecodeWords(words []wordcodeWord) ([]wordcodeDecoded, []int, error)
 		default:
 			return nil, nil, fmt.Errorf("word %d %s has unsupported format %d", wordPC, opcodeName(op), meta.wordcode.format)
 		}
+		if wordcodeCacheableOpcode(op) && cacheIndex != nil {
+			_, descriptor, ok := cacheIndex.cacheSiteAt(wordPC)
+			if !ok {
+				return nil, nil, fmt.Errorf("word %d %s is not a complete cache primary", wordPC, opcodeName(op))
+			}
+			if wordcodeCacheConstantSlot(op) != wordcodeSlotA && descriptor != wordcodeCacheDynamicConstant {
+				setWordcodeSlot(&ins, wordcodeCacheConstantSlot(op), descriptor)
+			}
+		}
 		nextWord := wordPC + 1
-		cacheID := uint32(0)
 		if hasAux {
 			if nextWord >= len(words) {
 				return nil, nil, fmt.Errorf("word %d %s AUX word is truncated", wordPC, opcodeName(op))
 			}
 			aux := words[nextWord]
-			if meta.wordcode.aux == wordcodeAuxConstCache16 {
-				constant := int(uint16(aux))
-				cacheID = uint32(aux >> 16)
-				setWordcodeSlot(&ins, wordcodeCacheConstantSlot(op), constant)
-			} else if meta.wordcode.aux == wordcodeAuxCache32 {
-				cacheID = uint32(aux)
-			} else if err := wordcodeSetAux(&ins, meta.wordcode, aux); err != nil {
+			if err := wordcodeSetAux(&ins, meta.wordcode, aux); err != nil {
 				return nil, nil, err
 			}
 			nextWord++
 		}
-		decoded = append(decoded, wordcodeDecoded{ins: ins, wordPC: wordPC, nextWord: nextWord, cacheID: cacheID})
+		decoded = append(decoded, wordcodeDecoded{ins: ins, wordPC: wordPC, nextWord: nextWord})
 		boundaries = append(boundaries, nextWord)
 		wordPC = nextWord
 	}
 	return decoded, boundaries, nil
 }
 
-func decodeWordcode(words []wordcodeWord) ([]instruction, error) {
-	decoded, boundaries, err := wordcodeDecodeWords(words)
+func decodeWordcode(words []wordcodeWord, indexes ...*wordcodeCacheIndex) ([]instruction, error) {
+	decoded, boundaries, err := wordcodeDecodeWords(words, indexes...)
 	if err != nil {
-		return nil, err
-	}
-	if err := verifyWordcodeCacheSiteIDs(decoded, -1); err != nil {
 		return nil, err
 	}
 	wordToLogical := make(map[int]int, len(boundaries))
@@ -1120,11 +1288,8 @@ func verifyWordcodeInstruction(ins instruction, registerCount, constantCount, pr
 // verifyWordcode validates a decoded stream. Optional limits are registers,
 // constants, prototypes, and upvalues respectively.
 func verifyWordcode(words []wordcodeWord, limits ...int) error {
-	decoded, _, err := wordcodeDecodeWords(words)
+	_, _, err := wordcodeDecodeWords(words)
 	if err != nil {
-		return err
-	}
-	if err := verifyWordcodeCacheSiteIDs(decoded, -1); err != nil {
 		return err
 	}
 	code, err := decodeWordcode(words)
@@ -1159,26 +1324,6 @@ func verifyWordcode(words []wordcodeWord, limits ...int) error {
 	return nil
 }
 
-// verifyWordcodeCacheSiteIDs enforces the compact, encounter-order cache-site
-// numbering contract. The production loops can then use the AUX id as a
-// direct index without a physical-PC side table or a second lookup.
-func verifyWordcodeCacheSiteIDs(decoded []wordcodeDecoded, expected int) error {
-	next := 0
-	for pc, entry := range decoded {
-		if !wordcodeCacheableOpcode(entry.ins.op) {
-			continue
-		}
-		if entry.cacheID != uint32(next) {
-			return fmt.Errorf("instruction %d %s cache site id %d, want %d", pc, opcodeName(entry.ins.op), entry.cacheID, next)
-		}
-		next++
-	}
-	if expected >= 0 && next != expected {
-		return fmt.Errorf("wordcode contains %d cache sites, want %d", next, expected)
-	}
-	return nil
-}
-
 func wordcodeOpenResultProducer(code []instruction, pc, start int) bool {
 	if pc <= 0 || start < 0 {
 		return false
@@ -1206,14 +1351,10 @@ func verifyWordcodeForProto(proto *Proto, words []wordcodeWord) error {
 	if err := verifyWordcode(words, proto.registers, len(proto.constants), len(proto.prototypes), len(proto.upvalues)); err != nil {
 		return err
 	}
-	decoded, _, err := wordcodeDecodeWords(words)
-	if err != nil {
+	if err := proto.cacheIndex.validateWords(words, proto.cacheSiteCount, len(proto.constants)); err != nil {
 		return err
 	}
-	if err := verifyWordcodeCacheSiteIDs(decoded, proto.cacheSiteCount); err != nil {
-		return err
-	}
-	code, err := decodeWordcode(words)
+	code, err := decodeWordcode(words, proto.cacheIndex)
 	if err != nil {
 		return err
 	}
@@ -1226,8 +1367,8 @@ func verifyWordcodeForProto(proto *Proto, words []wordcodeWord) error {
 	return nil
 }
 
-func disassembleWordcodeChecked(words []wordcodeWord) ([]string, error) {
-	code, err := decodeWordcode(words)
+func disassembleWordcodeChecked(words []wordcodeWord, indexes ...*wordcodeCacheIndex) ([]string, error) {
+	code, err := decodeWordcode(words, indexes...)
 	if err != nil {
 		return nil, err
 	}
@@ -1242,8 +1383,8 @@ func disassembleWordcodeChecked(words []wordcodeWord) ([]string, error) {
 	return lines, nil
 }
 
-func disassembleWordcode(words []wordcodeWord) []string {
-	lines, err := disassembleWordcodeChecked(words)
+func disassembleWordcode(words []wordcodeWord, indexes ...*wordcodeCacheIndex) []string {
+	lines, err := disassembleWordcodeChecked(words, indexes...)
 	if err != nil {
 		return []string{fmt.Sprintf("<invalid wordcode: %v>", err)}
 	}

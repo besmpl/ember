@@ -1553,6 +1553,7 @@ type Proto struct {
 	variadic                bool
 	capturedLocals          []bool
 	cacheSiteCount          int
+	cacheIndex              *wordcodeCacheIndex
 	entryNilRegisters       []int
 	reuseZeroCaptureClosure bool
 	verifyErr               error
@@ -1656,7 +1657,7 @@ func finalizeProtoExecutionArtifact(proto *Proto, sourceCode ...[]instruction) e
 	if len(sourceCode) != 0 {
 		code = sourceCode[0]
 	} else if len(proto.words) != 0 {
-		decoded, err := decodeWordcode(proto.words)
+		decoded, err := decodeWordcode(proto.words, proto.cacheIndex)
 		if err != nil {
 			proto.verifyErr = err
 			return err
@@ -1735,8 +1736,20 @@ func encodeProtoWords(proto *Proto, code []instruction) error {
 	if err != nil {
 		return err
 	}
+	var cacheIndex *wordcodeCacheIndex
+	if wordcodeCacheSiteCount(code) != 0 {
+		boundaries, boundaryErr := wordcodeBoundaries(code)
+		if boundaryErr != nil {
+			return boundaryErr
+		}
+		cacheIndex, err = buildWordcodeCacheIndex(code, boundaries, len(words))
+		if err != nil {
+			return err
+		}
+	}
 	proto.words = words
 	proto.cacheSiteCount = wordcodeCacheSiteCount(code)
+	proto.cacheIndex = cacheIndex
 	if len(proto.lines) == 0 {
 		proto.wordLines = nil
 	} else {
@@ -2477,7 +2490,7 @@ func protoDecodedInstructions(proto *Proto) ([]instruction, error) {
 	if proto == nil || len(proto.words) == 0 {
 		return nil, nil
 	}
-	return decodeWordcode(proto.words)
+	return decodeWordcode(proto.words, proto.cacheIndex)
 }
 
 func verifyProtoSeenWithCode(proto *Proto, seen map[*Proto]bool, code []instruction) error {
@@ -2496,6 +2509,12 @@ func verifyProtoSeenWithCode(proto *Proto, seen map[*Proto]bool, code []instruct
 	}
 	if proto.params > proto.registers {
 		return fmt.Errorf("parameter count %d exceeds register count %d", proto.params, proto.registers)
+	}
+	if proto.cacheSiteCount < 0 {
+		return fmt.Errorf("negative cache site count %d", proto.cacheSiteCount)
+	}
+	if err := proto.cacheIndex.validateWords(proto.words, proto.cacheSiteCount, len(proto.constants)); err != nil {
+		return err
 	}
 	if want := protoEntryNilRegisters(code, proto.params, proto.registers); !equalIntSlices(proto.entryNilRegisters, want) {
 		return fmt.Errorf("entry nil registers %v do not match finalized plan %v", proto.entryNilRegisters, want)

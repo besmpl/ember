@@ -25,6 +25,7 @@ func TestProtoFieldClassificationBudget(t *testing.T) {
 		"variadic":                {},
 		"capturedLocals":          {},
 		"cacheSiteCount":          {},
+		"cacheIndex":              {},
 		"reuseZeroCaptureClosure": {},
 		"verifyErr":               {},
 	}

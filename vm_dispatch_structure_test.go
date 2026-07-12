@@ -73,7 +73,7 @@ func TestVMExecutionDoesNotMaterializePackedInstructions(t *testing.T) {
 	if strings.Contains(coldText, "packedCode") || strings.Contains(coldText, "packedInstruction") {
 		t.Fatal("vm_cold.go still executes through the legacy packed instruction stream")
 	}
-	if !strings.Contains(coldText, "decodeWordcodeDispatch(proto.words, frame.pc)") {
+	if !strings.Contains(coldText, "decodeWordcodeDispatch(proto.words, frame.pc, proto.cacheIndex)") {
 		t.Fatal("cold side-exit helper must fetch and decode wordcode directly")
 	}
 	if strings.Contains(coldText, "for frame.pc") {
@@ -208,6 +208,17 @@ func TestDirectFrameDefersRuntimeFunctionInstanceLookupUntilCacheUse(t *testing.
 		}
 		if got, want := strings.Count(loop, "cache := functionInstance.cacheAt(cacheID)"), 6; got != want {
 			t.Fatalf("%s has %d runtime cache reads, want %d cache paths", bounds[0], got, want)
+		}
+		dispatchLoop := loop[reload+dispatch:]
+		opSwitch := strings.Index(dispatchLoop, "switch op {")
+		if opSwitch < 0 {
+			t.Fatalf("%s is missing opcode switch", bounds[0])
+		}
+		if strings.Contains(dispatchLoop[:opSwitch], "cacheSiteAt(pc)") {
+			t.Fatalf("%s resolves cache metadata before opcode dispatch", bounds[0])
+		}
+		if got, want := strings.Count(loop, "cacheSiteAt(pc)"), 6; got != want {
+			t.Fatalf("%s has %d cache metadata lookups, want %d cache opcode handlers", bounds[0], got, want)
 		}
 	}
 }

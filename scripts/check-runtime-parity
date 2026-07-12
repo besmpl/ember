@@ -112,11 +112,23 @@ self_test_gate_rejects() {
 	fi
 }
 
+self_test_gate_invalid() {
+	fixture="$1"
+	label="$2"
+	output="$root/gate-$label.out"
+	if scripts/scenario-ratio-gate --median-max 0.95 --p90-max 1.00 --cases arithmetic_for "$fixture" >"$output" 2>&1; then
+		self_test_fail "$label parity fixture unexpectedly passed the gate"
+	else
+		status=$?
+		[ "$status" -eq 2 ] || self_test_fail "$label fixture returned status $status, want invalid status 2"
+	fi
+}
+
 self_test_write_gate_fixture() {
 	fixture="$1"
 	awk -v path="$fixture" '
 	BEGIN {
-		print "# ember-runtime-parity raw/v1" > path
+		print "# ember-runtime-parity raw/v2" > path
 		print "# luau_path=/opt/homebrew/bin/luau" >> path
 		print "# luau_sha256=c921fa51dbc0d81f9acbddcfa9208aa58f039388301f9fba77d2c5a324cb42bd" >> path
 		print "# luau_version=0.728" >> path
@@ -126,16 +138,21 @@ self_test_write_gate_fixture() {
 		print "# gomaxprocs=1" >> path
 		print "# iterations=1,10,100,1000" >> path
 		print "# pairs=9" >> path
-		print "case\tpair\torder\tengine\tn\telapsed_ns\tresult\texpected" >> path
+		print "# repeats=3" >> path
+		print "case\tpair\trepeat\torder\tengine\tn\telapsed_ns\tresult\texpected\tload_before\tcpu_before\tload_after\tcpu_after" >> path
 		for (pair = 1; pair <= 9; pair++) {
-			for (order = 1; order <= 8; order++) {
-				slot = order
-				if (slot > 4) slot -= 4
-				n = (slot == 1 ? 1 : slot == 2 ? 10 : slot == 3 ? 100 : 1000)
-				if (pair % 2 == 1) engine = (order <= 4 ? "ember" : "luau")
-				else engine = (order <= 4 ? "luau" : "ember")
-				inner = (engine == "ember" ? 5 : 10)
-				printf "arithmetic_for\t%d\t%d\t%s\t%d\t%d\t1595\t1595\n", pair, order, engine, n, 100 + inner * n >> path
+			for (repeat = 1; repeat <= 3; repeat++) {
+				for (iteration = 1; iteration <= 4; iteration++) {
+					n = (iteration == 1 ? 1 : iteration == 2 ? 10 : iteration == 3 ? 100 : 1000)
+					for (engine_index = 0; engine_index <= 1; engine_index++) {
+						ember_first = ((pair + repeat + iteration - 1) % 2 == 0)
+						if (ember_first) engine = (engine_index == 0 ? "ember" : "luau")
+						else engine = (engine_index == 0 ? "luau" : "ember")
+						order = (iteration - 1) * 2 + engine_index + 1
+						inner = (engine == "ember" ? 5 : 10)
+						printf "arithmetic_for\t%d\t%d\t%d\t%s\t%d\t%d\t1595\t1595\t1.0\t50.0\t1.0\t50.0\n", pair, repeat, order, engine, n, 100 + inner * n >> path
+					}
+				}
 			}
 		}
 		close(path)
@@ -215,25 +232,64 @@ run_self_test() {
 		self_test_fail "valid parity fixture failed the gate"
 	fi
 
-	awk -F '\t' 'BEGIN {OFS = "\t"} {print; if ($1 == "arithmetic_for" && $2 == "1" && $3 == "1") print}' \
+	awk -F '\t' 'BEGIN {OFS = "\t"} {print; if ($1 == "arithmetic_for" && $2 == "1" && $3 == "1" && $4 == "1") print}' \
 		"$valid_gate" >"$root/gate-duplicate-order.tsv"
 	self_test_gate_rejects "$root/gate-duplicate-order.tsv" duplicate-order
 
-	awk -F '\t' 'BEGIN {OFS = "\t"} $1 == "arithmetic_for" && $2 == "1" && $3 == "1" {next} {print}' \
+	awk -F '\t' 'BEGIN {OFS = "\t"} {print; if ($1 == "arithmetic_for" && $2 == "1" && $3 == "2" && $4 == "1") print}' \
+		"$valid_gate" >"$root/gate-duplicate-repeat.tsv"
+	self_test_gate_rejects "$root/gate-duplicate-repeat.tsv" duplicate-repeat
+
+	awk -F '\t' 'BEGIN {OFS = "\t"} $1 == "arithmetic_for" && $2 == "1" && $3 == "1" && $4 == "1" {next} {print}' \
 		"$valid_gate" >"$root/gate-missing-order.tsv"
 	self_test_gate_rejects "$root/gate-missing-order.tsv" missing-order
 
-	awk -F '\t' 'BEGIN {OFS = "\t"} {if ($1 == "arithmetic_for" && $2 == "1" && $3 == "1") $4 = "luau"; print}' \
+	awk -F '\t' 'BEGIN {OFS = "\t"} !($1 == "arithmetic_for" && $2 == "1" && $3 == "3") {print}' \
+		"$valid_gate" >"$root/gate-missing-repeat.tsv"
+	self_test_gate_rejects "$root/gate-missing-repeat.tsv" missing-repeat
+
+	awk -F '\t' 'BEGIN {OFS = "\t"} {if ($1 == "arithmetic_for" && $2 == "1" && $3 == "1" && $4 == "1") $5 = "luau"; print}' \
 		"$valid_gate" >"$root/gate-wrong-engine.tsv"
 	self_test_gate_rejects "$root/gate-wrong-engine.tsv" wrong-engine
 
-	awk -F '\t' 'BEGIN {OFS = "\t"} {if ($1 == "arithmetic_for" && $2 == "1" && $3 == "1") $5 = 10; print}' \
+	awk -F '\t' 'BEGIN {OFS = "\t"} {if ($1 == "arithmetic_for" && $2 == "1" && $3 == "1" && $4 == "1") $6 = 10; print}' \
 		"$valid_gate" >"$root/gate-wrong-sample.tsv"
 	self_test_gate_rejects "$root/gate-wrong-sample.tsv" wrong-sample
 
-	awk -F '\t' 'BEGIN {OFS = "\t"} {if ($1 == "arithmetic_for" && $2 == "1" && $3 == "1") $7 = 1596; print}' \
+	awk -F '\t' 'BEGIN {OFS = "\t"} {if ($1 == "arithmetic_for" && $2 == "1" && $3 == "1" && $4 == "1") $8 = 1596; print}' \
 		"$valid_gate" >"$root/gate-wrong-result.tsv"
-	self_test_gate_rejects "$root/gate-wrong-result.tsv" wrong-result
+	self_test_gate_invalid "$root/gate-wrong-result.tsv" wrong-result
+
+	awk -F '\t' 'BEGIN {OFS = "\t"} {if ($1 == "arithmetic_for" && $2 == "9" && $5 == "ember") $7 = 100 + 20 * $6; print}' \
+		"$valid_gate" >"$root/gate-p90.tsv"
+	self_test_gate_rejects "$root/gate-p90.tsv" p90
+	grep -q '2.0000x | fail' "$root/gate-p90.out" || self_test_fail "p90 fixture did not gate on sorted item 9"
+
+	awk -F '\t' 'BEGIN {OFS = "\t"} {if ($1 == "arithmetic_for" && $3 == "3" && $5 == "ember") $7 = 100 + 9 * $6; print}' \
+		"$valid_gate" >"$root/gate-high-spread.tsv"
+	self_test_gate_rejects "$root/gate-high-spread.tsv" high-spread
+	if ! scripts/scenario-ratio-gate --median-max 0.95 --p90-max 1.00 --repeat-spread-max 1.00 --cases arithmetic_for "$root/gate-high-spread.tsv" >"$root/gate-high-spread-configured.out" 2>&1; then
+		self_test_fail "configured repeat spread threshold rejected the fixture"
+	fi
+
+	awk -F '\t' 'BEGIN {OFS = "\t"} {if ($1 == "arithmetic_for" && $2 == "1" && $3 == "1") $10 = 3.0; print}' \
+		"$valid_gate" >"$root/gate-high-load.tsv"
+	contamination_attempt="$root/contamination/phase/fingerprint"
+	mkdir -p "$contamination_attempt"
+	if scripts/scenario-ratio-gate --median-max 0.95 --p90-max 1.00 --cases arithmetic_for "$root/gate-high-load.tsv" >"$root/gate-high-load.out" 2>&1; then
+		self_test_fail "high-load parity fixture unexpectedly passed the gate"
+	else
+		high_load_status=$?
+		[ "$high_load_status" -eq 2 ] || self_test_fail "high-load fixture returned status $high_load_status, want contamination status 2"
+	fi
+	if [ "$high_load_status" -ne 2 ]; then
+		mark_acquisition_complete "$contamination_attempt" fingerprint
+	fi
+	[ ! -e "$contamination_attempt/acquisition.complete" ] || self_test_fail "contaminated acquisition was marked complete"
+
+	awk -F '\t' 'BEGIN {OFS = "\t"} {if ($1 == "arithmetic_for" && $2 == "1" && $3 == "1" && $6 == "100") $13 = 101.0; print}' \
+		"$valid_gate" >"$root/gate-high-cpu-after.tsv"
+	self_test_gate_invalid "$root/gate-high-cpu-after.tsv" high-cpu-after
 
 	sed 's/^# luau_sha256=.*/# luau_sha256=wrong/' "$valid_gate" >"$root/gate-wrong-fingerprint.tsv"
 	self_test_gate_rejects "$root/gate-wrong-fingerprint.tsv" wrong-fingerprint
@@ -368,7 +424,6 @@ if [ "$claim_state" = "new" ]; then
 		printf 'check-runtime-parity: inputs changed during capture; incomplete attempt retained: %s\n' "$attempt" >&2
 		exit 2
 	fi
-	mark_acquisition_complete "$attempt" "$fingerprint"
 else
 	[ -r "$raw_path" ] || { printf 'check-runtime-parity: completed attempt is missing raw data: %s\n' "$raw_path" >&2; exit 2; }
 	printf 'runtime parity phase: %s (re-gate retained acquisition)\n' "$phase"
@@ -388,6 +443,13 @@ mv "$report_tmp" "$report_path"
 while IFS= read -r report_line || [ -n "$report_line" ]; do
 	printf '%s\n' "$report_line"
 done <"$report_path"
+if [ "$claim_state" = "new" ] && [ "$gate_status" -eq 2 ]; then
+	printf 'check-runtime-parity: contaminated or invalid acquisition; acquisition.complete not written: %s\n' "$attempt" >&2
+	exit 2
+fi
+if [ "$claim_state" = "new" ]; then
+	mark_acquisition_complete "$attempt" "$fingerprint"
+fi
 if [ "$gate_status" -ne 0 ]; then
 	printf 'runtime parity gate failed; retained raw samples: %s; report: %s\n' "$raw_path" "$report_path" >&2
 	exit "$gate_status"

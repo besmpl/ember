@@ -2,7 +2,6 @@ package ember
 
 import (
 	"reflect"
-	"strings"
 	"sync"
 	"testing"
 )
@@ -120,13 +119,17 @@ func TestColdWordcodeDispatchPreservesCacheOperandsAcrossBoundaries(t *testing.T
 	if len(boundaries) != len(code)+1 {
 		t.Fatalf("wordcode boundaries = %d entries, want %d", len(boundaries), len(code)+1)
 	}
+	cacheIndex, err := buildWordcodeCacheIndex(code, boundaries, len(words))
+	if err != nil {
+		t.Fatalf("build cache index: %v", err)
+	}
 
 	physicalPC := 0
 	for logicalPC, want := range code {
 		if physicalPC != boundaries[logicalPC] {
 			t.Fatalf("logical pc %d starts at physical pc %d, want %d", logicalPC, physicalPC, boundaries[logicalPC])
 		}
-		dispatch, err := decodeWordcodeDispatch(words, physicalPC)
+		dispatch, err := decodeWordcodeDispatch(words, physicalPC, cacheIndex)
 		if err != nil {
 			t.Fatalf("decode dispatch at logical pc %d (word pc %d): %v", logicalPC, physicalPC, err)
 		}
@@ -135,8 +138,16 @@ func TestColdWordcodeDispatchPreservesCacheOperandsAcrossBoundaries(t *testing.T
 				logicalPC, opcodeName(dispatch.op), dispatch.a, dispatch.b, dispatch.c, dispatch.d,
 				opcodeName(want.op), want.a, want.b, want.c, want.d)
 		}
-		if dispatch.cacheID != uint32(logicalPC) {
-			t.Fatalf("dispatch at logical pc %d has cache site id %d, want %d", logicalPC, dispatch.cacheID, logicalPC)
+		wantCacheID := uint32(0)
+		if wordcodeCacheableOpcode(want.op) {
+			var ok bool
+			wantCacheID, ok = cacheIndex.cacheIDAt(physicalPC)
+			if !ok {
+				t.Fatalf("dispatch at logical pc %d has no cache rank", logicalPC)
+			}
+		}
+		if dispatch.cacheID != wantCacheID {
+			t.Fatalf("dispatch at logical pc %d has cache site id %d, want %d", logicalPC, dispatch.cacheID, wantCacheID)
 		}
 		if dispatch.nextWord != boundaries[logicalPC+1] {
 			t.Fatalf("dispatch at logical pc %d ends at physical pc %d, want %d", logicalPC, dispatch.nextWord, boundaries[logicalPC+1])
@@ -148,14 +159,17 @@ func TestColdWordcodeDispatchPreservesCacheOperandsAcrossBoundaries(t *testing.T
 	}
 }
 
-func TestWordcodeRejectsUint16CacheSiteOverflow(t *testing.T) {
+func TestWordcodeCacheSitesDoNotHaveUint16Overflow(t *testing.T) {
 	code := make([]instruction, 1<<16+1)
 	for index := range code {
 		code[index] = instruction{op: opGetStringField, a: 0, b: 1, c: 0}
 	}
-	_, err := encodeWordcode(code, 2, 1)
-	if err == nil || !strings.Contains(err.Error(), "cache site id 65536 out of uint16 range") {
-		t.Fatalf("encode with uint16 cache-site overflow returned %v, want uint16 range error", err)
+	words, err := encodeWordcode(code, 2, 1)
+	if err != nil {
+		t.Fatalf("encode cache sites beyond uint16: %v", err)
+	}
+	if got, want := len(words), len(code); got != want {
+		t.Fatalf("word count with >uint16 cache sites = %d, want %d", got, want)
 	}
 }
 
@@ -228,6 +242,52 @@ func TestProtoHasNoMutableRuntimeState(t *testing.T) {
 		if containsRuntimeCacheType(field.Type, cacheType, closureType) {
 			t.Errorf("Proto field %q retains mutable runtime cache type %s", field.Name, field.Type)
 		}
+	}
+}
+
+func TestVerifyProtoRejectsNegativeCacheSiteCount(t *testing.T) {
+	proto, err := Compile(`
+local row = { hp = 1 }
+return row.hp
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proto.cacheSiteCount = -1
+	if err := verifyProto(proto); err == nil {
+		t.Fatal("verifyProto accepted a negative cache site count")
+	}
+}
+
+func TestCacheIndexInterpreterCorrectnessInBothLoops(t *testing.T) {
+	proto, err := Compile(`
+local row = { hp = 1 }
+local key = "hp"
+local total = 0
+for i = 1, 16 do
+    total = total + row[key]
+end
+return total
+`)
+	if err != nil {
+		t.Fatalf("Compile cache loop: %v", err)
+	}
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("production Run returned error: %v", err)
+	}
+	if got, ok := results[0].Number(); !ok || got != 16 {
+		t.Fatalf("production result = %v (%t), want 16", results[0], ok)
+	}
+
+	thread := newVMThread(runtimeGlobals(nil))
+	thread.directFrameInstrumented = true
+	results, err = thread.run(proto, nil, nil)
+	if err != nil {
+		t.Fatalf("instrumented run returned error: %v", err)
+	}
+	if got, ok := results[0].Number(); !ok || got != 16 {
+		t.Fatalf("instrumented result = %v (%t), want 16", results[0], ok)
 	}
 }
 

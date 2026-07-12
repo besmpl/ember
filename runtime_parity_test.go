@@ -25,8 +25,12 @@ const (
 	parityLuauVersion = "0.728"
 	parityPlatform    = "Darwin 24.6.0 arm64"
 	parityCPU         = "Apple M1"
-	parityRawHeader   = "# ember-runtime-parity raw/v1"
+	parityRawHeader   = "# ember-runtime-parity raw/v2"
 	parityRawDefault  = "tmp/runtime-parity/raw.tsv"
+	parityRepeatCount = 3
+
+	parityLoadMax = 2.0
+	parityCPUMax  = 100.0
 )
 
 var parityIterations = [...]int{1, 10, 100, 1000}
@@ -36,6 +40,11 @@ const parityPairCount = 9
 type parityFit struct {
 	Entry float64
 	Inner float64
+}
+
+type paritySystemSample struct {
+	Load float64
+	CPU  float64
 }
 
 type parityEnvironment struct {
@@ -112,6 +121,28 @@ func parityRatio(emberSamples, luauSamples map[int]float64) (float64, parityFit,
 	return ratio, emberFit, luauFit, nil
 }
 
+func summarizeParityRepeatRatios(ratios []float64) (median, relativeSpread float64, err error) {
+	if len(ratios) != parityRepeatCount {
+		return 0, 0, fmt.Errorf("parity repeat ratios: want %d samples, got %d", parityRepeatCount, len(ratios))
+	}
+	sorted := append([]float64(nil), ratios...)
+	for i, ratio := range sorted {
+		if !finiteParityFloat(ratio) || ratio <= 0 {
+			return 0, 0, fmt.Errorf("parity repeat ratios: invalid sample %d: %v", i+1, ratio)
+		}
+	}
+	sort.Float64s(sorted)
+	median = sorted[len(sorted)/2]
+	if median <= 0 || !finiteParityFloat(median) {
+		return 0, 0, fmt.Errorf("parity repeat ratios: invalid median %v", median)
+	}
+	relativeSpread = (sorted[len(sorted)-1] - sorted[0]) / median
+	if relativeSpread < 0 || !finiteParityFloat(relativeSpread) {
+		return 0, 0, fmt.Errorf("parity repeat ratios: invalid relative spread %v", relativeSpread)
+	}
+	return median, relativeSpread, nil
+}
+
 func summarizeParityRatios(ratios []float64) (median, p90 float64, err error) {
 	if len(ratios) != parityPairCount {
 		return 0, 0, fmt.Errorf("parity ratios: want %d samples, got %d", parityPairCount, len(ratios))
@@ -131,6 +162,18 @@ func parityEngineOrder(pair int) [2]string {
 		return [2]string{"ember", "luau"}
 	}
 	return [2]string{"luau", "ember"}
+}
+
+func parityEngineOrderFor(pair, repeat, iterationIndex int) [2]string {
+	if (pair+repeat+iterationIndex)%2 == 0 {
+		return [2]string{"ember", "luau"}
+	}
+	return [2]string{"luau", "ember"}
+}
+
+func parityOrderForRepeat(repeat, engineIndex, iterationIndex int) int {
+	_ = repeat
+	return iterationIndex*2 + engineIndex + 1
 }
 
 func parityOrderFor(pair, engineIndex, iterationIndex int) int {
@@ -317,6 +360,49 @@ func inspectParityEnvironment() (parityEnvironment, error) {
 	}, nil
 }
 
+func sampleParitySystem() (paritySystemSample, error) {
+	if runtime.GOOS != "darwin" {
+		return paritySystemSample{}, fmt.Errorf("parity system sample: want darwin, got %s", runtime.GOOS)
+	}
+	loadOutput, err := parityCommandOutput("sysctl", "-n", "vm.loadavg")
+	if err != nil {
+		return paritySystemSample{}, fmt.Errorf("parity system load: %w", err)
+	}
+	loadFields := strings.Fields(strings.Trim(loadOutput, "{}"))
+	if len(loadFields) < 1 {
+		return paritySystemSample{}, fmt.Errorf("parity system load: invalid output %q", loadOutput)
+	}
+	load, err := strconv.ParseFloat(loadFields[0], 64)
+	if err != nil || !finiteParityFloat(load) || load < 0 {
+		return paritySystemSample{}, fmt.Errorf("parity system load: invalid value %q", loadFields[0])
+	}
+
+	cpuCommand := exec.Command("ps", "-A", "-o", "%cpu=")
+	cpuCommand.Env = append(os.Environ(), "LC_ALL=C")
+	cpuOutput, err := cpuCommand.Output()
+	if err != nil {
+		return paritySystemSample{}, fmt.Errorf("parity system CPU: %w", err)
+	}
+	var cpu float64
+	for _, field := range strings.Fields(string(cpuOutput)) {
+		value, err := strconv.ParseFloat(field, 64)
+		if err != nil || !finiteParityFloat(value) || value < 0 {
+			return paritySystemSample{}, fmt.Errorf("parity system CPU: invalid value %q", field)
+		}
+		cpu += value
+	}
+	if !finiteParityFloat(cpu) {
+		return paritySystemSample{}, fmt.Errorf("parity system CPU: invalid total %v", cpu)
+	}
+	return paritySystemSample{Load: load, CPU: cpu}, nil
+}
+
+func paritySystemSampleClean(sample paritySystemSample) bool {
+	return finiteParityFloat(sample.Load) && finiteParityFloat(sample.CPU) &&
+		sample.Load >= 0 && sample.CPU >= 0 &&
+		sample.Load <= parityLoadMax && sample.CPU <= parityCPUMax
+}
+
 func measureParityEmber(proto *ember.Proto) (float64, string, error) {
 	start := time.Now()
 	values, err := ember.Run(proto)
@@ -452,6 +538,32 @@ func TestRuntimeParityHarness(t *testing.T) {
 	if _, _, _, err := parityRatio(samples, map[int]float64{1: 1, 10: 1, 100: 1, 1000: 1}); err == nil {
 		t.Fatal("accepted non-positive Luau slope")
 	}
+	repeatMedian, repeatSpread, err := summarizeParityRepeatRatios([]float64{0.90, 1.00, 1.10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeatMedian != 1.00 || math.Abs(repeatSpread-0.20) > 1e-9 {
+		t.Fatalf("repeat median/spread = %v/%v, want 1/0.2", repeatMedian, repeatSpread)
+	}
+	if _, _, err := summarizeParityRepeatRatios([]float64{0.9, 1.0}); err == nil {
+		t.Fatal("accepted incomplete repeat ratio set")
+	}
+	if _, _, err := summarizeParityRepeatRatios([]float64{0.9, math.NaN(), 1.0}); err == nil {
+		t.Fatal("accepted non-finite repeat ratio")
+	}
+	if !paritySystemSampleClean(paritySystemSample{Load: 1.0, CPU: 50.0}) {
+		t.Fatal("rejected clean system sample")
+	}
+	for _, contaminated := range []paritySystemSample{
+		{Load: parityLoadMax + 0.01, CPU: 50},
+		{Load: 1, CPU: parityCPUMax + 0.01},
+		{Load: math.NaN(), CPU: 50},
+		{Load: 1, CPU: math.Inf(1)},
+	} {
+		if paritySystemSampleClean(contaminated) {
+			t.Fatalf("accepted contaminated system sample: %+v", contaminated)
+		}
+	}
 
 	for pair := 1; pair <= parityPairCount; pair++ {
 		order := parityEngineOrder(pair)
@@ -467,6 +579,21 @@ func TestRuntimeParityHarness(t *testing.T) {
 				want := engineIndex*4 + iterationIndex + 1
 				if got != want {
 					t.Fatalf("pair %d engine %s N=%d order=%d, want %d", pair, order[engineIndex], parityIterations[iterationIndex], got, want)
+				}
+			}
+		}
+		for repeat := 1; repeat <= parityRepeatCount; repeat++ {
+			for iterationIndex, n := range parityIterations {
+				gotOrder := parityEngineOrderFor(pair, repeat, iterationIndex)
+				wantEmberFirst := (pair+repeat+iterationIndex)%2 == 0
+				if (gotOrder[0] == "ember") != wantEmberFirst || gotOrder[1] == gotOrder[0] {
+					t.Fatalf("pair %d repeat %d N=%d order=%v, want alternating start", pair, repeat, n, gotOrder)
+				}
+				for engineIndex := range gotOrder {
+					want := iterationIndex*2 + engineIndex + 1
+					if got := parityOrderForRepeat(repeat, engineIndex, iterationIndex); got != want {
+						t.Fatalf("pair %d repeat %d engine %s N=%d order=%d, want %d", pair, repeat, gotOrder[engineIndex], n, got, want)
+					}
 				}
 			}
 		}
@@ -513,15 +640,18 @@ func testParityGateAcceptsArithmeticFor(t *testing.T) {
 	fmt.Fprintln(&raw, "# gomaxprocs=1")
 	fmt.Fprintln(&raw, "# iterations=1,10,100,1000")
 	fmt.Fprintln(&raw, "# pairs=9")
-	fmt.Fprintln(&raw, "case\tpair\torder\tengine\tn\telapsed_ns\tresult\texpected")
+	fmt.Fprintln(&raw, "# repeats=3")
+	fmt.Fprintln(&raw, "case\tpair\trepeat\torder\tengine\tn\telapsed_ns\tresult\texpected\tload_before\tcpu_before\tload_after\tcpu_after")
 	for pair := 1; pair <= parityPairCount; pair++ {
-		for engineIndex, engine := range parityEngineOrder(pair) {
-			entry, inner := -1.0, 5.0
-			if engine == "luau" {
-				entry, inner = -2, 10
-			}
+		for repeat := 1; repeat <= parityRepeatCount; repeat++ {
 			for iterationIndex, n := range parityIterations {
-				fmt.Fprintf(&raw, "arithmetic_for\t%d\t%d\t%s\t%d\t%.0f\t1595\t1595\n", pair, parityOrderFor(pair, engineIndex, iterationIndex), engine, n, entry+inner*float64(n))
+				for engineIndex, engine := range parityEngineOrderFor(pair, repeat, iterationIndex) {
+					entry, inner := -1.0, 5.0
+					if engine == "luau" {
+						entry, inner = -2, 10
+					}
+					fmt.Fprintf(&raw, "arithmetic_for\t%d\t%d\t%d\t%s\t%d\t%.0f\t1595\t1595\t1.0\t50.0\t1.0\t50.0\n", pair, repeat, parityOrderForRepeat(repeat, engineIndex, iterationIndex), engine, n, entry+inner*float64(n))
+				}
 			}
 		}
 	}
@@ -591,7 +721,8 @@ func TestRuntimeParityLive(t *testing.T) {
 	writeRaw("# gomaxprocs=%d\n", environment.GOMAXPROCS)
 	writeRaw("# iterations=%s\n", parityIterationString())
 	writeRaw("# pairs=%d\n", parityPairCount)
-	writeRaw("case\tpair\torder\tengine\tn\telapsed_ns\tresult\texpected\n")
+	writeRaw("# repeats=%d\n", parityRepeatCount)
+	writeRaw("case\tpair\trepeat\torder\tengine\tn\telapsed_ns\tresult\texpected\tload_before\tcpu_before\tload_after\tcpu_after\n")
 
 	for _, tc := range selected {
 		protos := make(map[int]*ember.Proto, len(parityIterations))
@@ -613,29 +744,55 @@ func TestRuntimeParityLive(t *testing.T) {
 		}
 
 		for pair := 1; pair <= parityPairCount; pair++ {
-			order := parityEngineOrder(pair)
-			for engineIndex, engine := range order {
+			for repeat := 1; repeat <= parityRepeatCount; repeat++ {
+				rows := make([]string, 0, len(parityIterations)*2)
 				for iterationIndex, n := range parityIterations {
-					var elapsed float64
-					var result string
-					switch engine {
-					case "ember":
-						elapsed, result, err = measureParityEmber(protos[n])
-					case "luau":
-						elapsed, result, err = measureParityLuau(environment.LuauPath, scripts[n])
-					default:
-						t.Fatalf("unknown parity engine %q", engine)
-					}
+					before, err := sampleParitySystem()
 					if err != nil {
-						t.Fatalf("%s pair=%d engine=%s N=%d: %v", tc.name, pair, engine, n, err)
+						t.Fatalf("%s pair=%d repeat=%d N=%d before sample: %v", tc.name, pair, repeat, n, err)
 					}
-					if elapsed <= 0 || !finiteParityFloat(elapsed) {
-						t.Fatalf("%s pair=%d engine=%s N=%d: invalid timing %v", tc.name, pair, engine, n, elapsed)
+					if !paritySystemSampleClean(before) {
+						t.Fatalf("%s pair=%d repeat=%d N=%d before sample contaminated: load=%.6f cpu=%.6f", tc.name, pair, repeat, n, before.Load, before.CPU)
 					}
-					if result != tc.want {
-						t.Fatalf("%s pair=%d engine=%s N=%d: result %q, want %q", tc.name, pair, engine, n, result, tc.want)
+					order := parityEngineOrderFor(pair, repeat, iterationIndex)
+					pointRows := make([]string, 0, len(order))
+					for engineIndex, engine := range order {
+						var elapsed float64
+						var result string
+						switch engine {
+						case "ember":
+							elapsed, result, err = measureParityEmber(protos[n])
+						case "luau":
+							elapsed, result, err = measureParityLuau(environment.LuauPath, scripts[n])
+						default:
+							t.Fatalf("unknown parity engine %q", engine)
+						}
+						if err != nil {
+							t.Fatalf("%s pair=%d repeat=%d engine=%s N=%d: %v", tc.name, pair, repeat, engine, n, err)
+						}
+						if elapsed <= 0 || !finiteParityFloat(elapsed) {
+							t.Fatalf("%s pair=%d repeat=%d engine=%s N=%d: invalid timing %v", tc.name, pair, repeat, engine, n, elapsed)
+						}
+						if result != tc.want {
+							t.Fatalf("%s pair=%d repeat=%d engine=%s N=%d: result %q, want %q", tc.name, pair, repeat, engine, n, result, tc.want)
+						}
+						pointRows = append(pointRows, fmt.Sprintf("%s\t%d\t%d\t%d\t%s\t%d\t%.0f\t%s\t%s\t%.6f\t%.6f\t", tc.name, pair, repeat, parityOrderForRepeat(repeat, engineIndex, iterationIndex), engine, n, elapsed, result, tc.want, before.Load, before.CPU))
 					}
-					writeRaw("%s\t%d\t%d\t%s\t%d\t%.0f\t%s\t%s\n", tc.name, pair, parityOrderFor(pair, engineIndex, iterationIndex), engine, n, elapsed, result, tc.want)
+					after, err := sampleParitySystem()
+					if err != nil {
+						t.Fatalf("%s pair=%d repeat=%d N=%d after sample: %v", tc.name, pair, repeat, n, err)
+					}
+					if !paritySystemSampleClean(after) {
+						t.Fatalf("%s pair=%d repeat=%d N=%d after sample contaminated: load=%.6f cpu=%.6f", tc.name, pair, repeat, n, after.Load, after.CPU)
+					}
+					for _, row := range pointRows {
+						rows = append(rows, fmt.Sprintf("%s%.6f\t%.6f\n", row, after.Load, after.CPU))
+					}
+				}
+				// Emit only after every adjacent A/B point in the repeat has passed
+				// its own before/after contamination probes.
+				for _, row := range rows {
+					writeRaw("%s", row)
 				}
 			}
 		}
