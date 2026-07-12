@@ -61,8 +61,17 @@ func TestVMExecutionDoesNotMaterializePackedInstructions(t *testing.T) {
 			t.Fatalf("production direct loop still uses generic decoder %q", forbidden)
 		}
 	}
-	if !strings.Contains(production, "wordcodeEncodingTable[op]") {
-		t.Fatal("production direct loop must use compact wordcode encoding metadata")
+	for _, marker := range []string{
+		"a := int(uint8(raw >> 8))",
+		"b := int(uint8(raw >> 16))",
+		"c := int(uint8(raw >> 24))",
+	} {
+		if !strings.Contains(production, marker) {
+			t.Fatalf("production direct loop must decode primary operands in place; missing %q", marker)
+		}
+	}
+	if strings.Contains(production, "wordcodeEncodingTable") {
+		t.Fatal("production direct loop still consults wordcode encoding metadata per instruction")
 	}
 
 	coldSource, err := os.ReadFile(filepath.Join(root, "vm_cold.go"))
@@ -139,32 +148,6 @@ return i
 	instrumentedValue, ok := instrumentedResults[0].Number()
 	if !ok || instrumentedValue != 200 {
 		t.Fatalf("instrumented run result = %v (%t), want number 200", instrumentedValue, ok)
-	}
-}
-
-func TestWordcodeHotEncodingMatchesOpcodeMetadata(t *testing.T) {
-	for _, op := range allOpcodes {
-		canonical := wordcodeMetadataFor(op)
-		hot := wordcodeEncodingTable[op]
-		if hot.format != canonical.format || hot.adOperand != canonical.adOperand || hot.aux != canonical.aux {
-			t.Fatalf("hot encoding for %s = %#v, want format/ad/AUX (%d, %d, %d)", opcodeName(op), hot, canonical.format, canonical.adOperand, canonical.aux)
-		}
-		wantAux := uint8(0)
-		if canonical.auxRequired {
-			wantAux = wordcodeHotAuxRequired
-		}
-		if hot.flags != wantAux {
-			t.Fatalf("hot AUX flags for %s = %d, want %d", opcodeName(op), hot.flags, wantAux)
-		}
-		if hot.jumpSlot != opcodeJumpTarget(op) {
-			t.Fatalf("hot jump slot for %s = %d, want %d", opcodeName(op), hot.jumpSlot, opcodeJumpTarget(op))
-		}
-		for _, slot := range []wordcodeOperandSlot{wordcodeSlotA, wordcodeSlotB, wordcodeSlotC, wordcodeSlotD} {
-			got := hot.signedSlots&(1<<uint(slot)) != 0
-			if got != wordcodeSlotSigned(op, slot) {
-				t.Fatalf("hot signed slot %s.%s = %t, want %t", opcodeName(op), wordcodeSlotName(slot), got, wordcodeSlotSigned(op, slot))
-			}
-		}
 	}
 }
 

@@ -7489,75 +7489,29 @@ reload:
 
 	for uint(pc) < uint(len(words)) {
 		raw := words[pc]
-		hasAux := raw&wordcodeAuxBit != 0
 		op := opcode(uint8(raw) & uint8(wordcodeOpcodeMask))
-		encoding := wordcodeEncodingTable[op]
-		a, b, c, d := 0, 0, 0, 0
-		switch encoding.format {
-		case wordcodeFormatABC:
-			a = wordcodeHotDecodeByte(raw>>8, wordcodeHotSlotSigned(encoding, wordcodeSlotA))
-			b = wordcodeHotDecodeByte(raw>>16, wordcodeHotSlotSigned(encoding, wordcodeSlotB))
-			c = wordcodeHotDecodeByte(raw>>24, wordcodeHotSlotSigned(encoding, wordcodeSlotC))
-		case wordcodeFormatAD:
-			a = wordcodeHotDecodeByte(raw>>8, wordcodeHotSlotSigned(encoding, wordcodeSlotA))
-			value := wordcodeHotDecodeAD(raw>>16, wordcodeHotSlotSigned(encoding, encoding.adOperand))
-			switch encoding.adOperand {
-			case wordcodeSlotA:
-				a = value
-			case wordcodeSlotB:
-				b = value
-			case wordcodeSlotC:
-				c = value
-			case wordcodeSlotD:
-				d = value
-			}
-		case wordcodeFormatE:
-			value := wordcodeHotDecodeE(raw >> 8)
-			switch encoding.jumpSlot {
-			case opcodeJumpTargetB:
-				b = value
-			case opcodeJumpTargetD:
-				d = value
-			}
-		}
+		// Verified wordcode lets the production loop decode the common primary
+		// fields directly. Opcode-specific wide, signed, AUX, and jump operands
+		// are decoded in their cases below, avoiding metadata dispatch on every
+		// instruction.
+		a := int(uint8(raw >> 8))
+		b := int(uint8(raw >> 16))
+		c := int(uint8(raw >> 24))
 		nextWord := pc + 1
-		if hasAux {
-			aux := words[nextWord]
-			switch encoding.aux {
-			case wordcodeAuxA:
-				a = int(int32(aux))
-			case wordcodeAuxB:
-				b = int(int32(aux))
-			case wordcodeAuxC:
-				c = int(int32(aux))
-			case wordcodeAuxD:
-				d = int(int32(aux))
-			case wordcodeAuxBC16:
-				b = wordcodeHotDecodeAD(aux, wordcodeHotSlotSigned(encoding, wordcodeSlotB))
-				c = wordcodeHotDecodeAD(aux>>16, wordcodeHotSlotSigned(encoding, wordcodeSlotC))
-			case wordcodeAuxAC16:
-				a = wordcodeHotDecodeAD(aux, wordcodeHotSlotSigned(encoding, wordcodeSlotA))
-				c = wordcodeHotDecodeAD(aux>>16, wordcodeHotSlotSigned(encoding, wordcodeSlotC))
-			case wordcodeAuxBD16:
-				b = wordcodeHotDecodeAD(aux, wordcodeHotSlotSigned(encoding, wordcodeSlotB))
-				d = wordcodeHotDecodeAD(aux>>16, wordcodeHotSlotSigned(encoding, wordcodeSlotD))
-			case wordcodeAuxCD16:
-				c = wordcodeHotDecodeAD(aux, wordcodeHotSlotSigned(encoding, wordcodeSlotC))
-				d = wordcodeHotDecodeAD(aux>>16, wordcodeHotSlotSigned(encoding, wordcodeSlotD))
-			}
-			nextWord++
-		}
-		switch encoding.jumpSlot {
-		case opcodeJumpTargetB:
-			b += nextWord
-		case opcodeJumpTargetD:
-			d += nextWord
-		}
 		switch op {
 		case opLoadConst:
+			b = int(uint16(raw >> 16))
+			if raw&wordcodeAuxBit != 0 {
+				b = int(int32(words[nextWord]))
+				nextWord++
+			}
 			registers[a] = constants[b]
 
 		case opLoadGlobal:
+			aux := words[nextWord]
+			b = int(uint16(aux))
+			c = int(uint16(aux >> 16))
+			nextWord++
 			name, _ := constants[b].String()
 			value, ok, _ := thread.globals.getSlot(proto.globalSlot(c, name), name)
 			if !ok {
@@ -7566,16 +7520,31 @@ reload:
 			registers[a] = value
 
 		case opSetGlobal:
+			aux := words[nextWord]
+			a = int(uint16(aux))
+			c = int(uint16(aux >> 16))
+			nextWord++
 			name, _ := constants[a].String()
 			thread.globals.setSlot(proto.globalSlot(c, name), name, registers[b])
 
 		case opNewTable:
+			if raw&wordcodeAuxBit != 0 {
+				aux := words[nextWord]
+				b = int(uint16(aux))
+				c = int(uint16(aux >> 16))
+				nextWord++
+			}
 			registers[a] = TableValue(newTableWithCapacity(b, c))
 
 		case opMove:
 			registers[a] = registers[b]
 
 		case opGetUpvalue:
+			b = int(uint16(raw >> 16))
+			if raw&wordcodeAuxBit != 0 {
+				b = int(int32(words[nextWord]))
+				nextWord++
+			}
 			value, err := frame.upvalue(b)
 			if err != nil {
 				return directFrameExitAt(frame, pc, directFrameFail(err))
@@ -7583,11 +7552,14 @@ reload:
 			registers[a] = value
 
 		case opSetUpvalue:
+			a = int(int32(words[nextWord]))
+			nextWord++
 			if err := frame.setUpvalue(a, registers[b]); err != nil {
 				return directFrameExitAt(frame, pc, directFrameFail(err))
 			}
 
 		case opVararg:
+			b = int(int16(uint16(raw >> 16)))
 			resultCount := b
 			if resultCount == 0 {
 				resultCount = 1
@@ -7614,6 +7586,10 @@ reload:
 			}
 
 		case opSetField:
+			if raw&wordcodeAuxBit != 0 {
+				b = int(int32(words[nextWord]))
+				nextWord++
+			}
 			base := registers[a]
 			table := base.tableRef()
 			if table == nil {
@@ -7704,7 +7680,9 @@ reload:
 			if !cacheOK {
 				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("wordcode pc %d %s is not a complete cache primary", pc, opcodeName(op))))
 			}
-			d, c, b = c, b, descriptor
+			d := c
+			c = b
+			b = descriptor
 			base := registers[a]
 			table := base.tableRef()
 			if table == nil {
@@ -7805,7 +7783,8 @@ reload:
 			if !cacheOK {
 				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("wordcode pc %d %s is not a complete cache primary", pc, opcodeName(op))))
 			}
-			d, c = c, descriptor
+			d := c
+			c = descriptor
 			base := registers[b]
 			table := base.tableRef()
 			if table == nil {
@@ -7946,6 +7925,11 @@ reload:
 			registers[a] = value
 
 		case opClosure:
+			b = int(uint16(raw >> 16))
+			if raw&wordcodeAuxBit != 0 {
+				b = int(int32(words[nextWord]))
+				nextWord++
+			}
 			child := proto.prototypes[b]
 			captured := thread.captureUpvalues(child, frame)
 			registers[a] = thread.functionValueWithCapturedUpvalues(child, captured)
@@ -7976,6 +7960,8 @@ reload:
 			}
 
 		case opArrayNext:
+			d := int(int32(words[nextWord]))
+			nextWord++
 			callee := registers[b]
 			var first Value
 			var second Value
@@ -8036,6 +8022,9 @@ reload:
 			}
 
 		case opArrayNextJump2:
+			d := int(int32(words[nextWord]))
+			nextWord++
+			d += nextWord
 			if proto.directLoopKernels != nil {
 				if kernel := proto.directLoopKernels.kernelAt(pc); kernel != nil {
 					exit := runDirectLoopKernel(thread, frame, kernel)
@@ -8246,6 +8235,10 @@ reload:
 			registers[a] = NumberValue(math.Pow(valueNumber(left), valueNumber(right)))
 
 		case opAddK:
+			if raw&wordcodeAuxBit != 0 {
+				c = int(int32(words[nextWord]))
+				nextWord++
+			}
 			left := registers[b]
 			if valueKind(left) != NumberKind || !constantNumberOK[c] {
 				right := constants[c]
@@ -8266,6 +8259,10 @@ reload:
 			registers[a] = NumberValue(valueNumber(left) + constantNumbers[c])
 
 		case opSubK:
+			if raw&wordcodeAuxBit != 0 {
+				c = int(int32(words[nextWord]))
+				nextWord++
+			}
 			left := registers[b]
 			if valueKind(left) != NumberKind || !constantNumberOK[c] {
 				right := constants[c]
@@ -8286,6 +8283,10 @@ reload:
 			registers[a] = NumberValue(valueNumber(left) - constantNumbers[c])
 
 		case opMulK:
+			if raw&wordcodeAuxBit != 0 {
+				c = int(int32(words[nextWord]))
+				nextWord++
+			}
 			left := registers[b]
 			if valueKind(left) != NumberKind || !constantNumberOK[c] {
 				right := constants[c]
@@ -8306,6 +8307,10 @@ reload:
 			registers[a] = NumberValue(valueNumber(left) * constantNumbers[c])
 
 		case opDivK:
+			if raw&wordcodeAuxBit != 0 {
+				c = int(int32(words[nextWord]))
+				nextWord++
+			}
 			left := registers[b]
 			if valueKind(left) != NumberKind || !constantNumberOK[c] {
 				right := constants[c]
@@ -8326,6 +8331,10 @@ reload:
 			registers[a] = NumberValue(valueNumber(left) / constantNumbers[c])
 
 		case opModK:
+			if raw&wordcodeAuxBit != 0 {
+				c = int(int32(words[nextWord]))
+				nextWord++
+			}
 			left := registers[b]
 			if valueKind(left) != NumberKind || !constantNumberOK[c] {
 				right := constants[c]
@@ -8347,6 +8356,10 @@ reload:
 			registers[a] = NumberValue(valueNumber(left) - math.Floor(valueNumber(left)/right)*right)
 
 		case opIDivK:
+			if raw&wordcodeAuxBit != 0 {
+				c = int(int32(words[nextWord]))
+				nextWord++
+			}
 			left := registers[b]
 			if valueKind(left) != NumberKind || !constantNumberOK[c] {
 				right := constants[c]
@@ -8436,6 +8449,10 @@ reload:
 			registers[a] = thread.internStringValue(leftText + rightText)
 
 		case opConcatChain:
+			if raw&wordcodeAuxBit != 0 {
+				c = int(int32(words[nextWord]))
+				nextWord++
+			}
 			if value, ok := thread.internStringConcatValues(registers[b : b+c]); ok {
 				registers[a] = value
 				break
@@ -8549,6 +8566,9 @@ reload:
 			registers[a] = BoolValue(valueNumber(left) >= valueNumber(right))
 
 		case opNumericForCheck:
+			d := int(int32(words[nextWord]))
+			nextWord++
+			d += nextWord
 			loopValue := registers[a]
 			limitValue := registers[b]
 			stepValue := registers[c]
@@ -8577,6 +8597,9 @@ reload:
 			}
 
 		case opNumericForLoop:
+			d := int(int32(words[nextWord]))
+			nextWord++
+			d += nextWord
 			loopValue := registers[a]
 			stepValue := registers[b]
 			if valueKind(loopValue) != NumberKind || valueKind(stepValue) != NumberKind {
@@ -8587,6 +8610,10 @@ reload:
 			continue
 
 		case opJumpIfNotEqualK:
+			b = int(uint16(raw >> 16))
+			d := int(int32(words[nextWord]))
+			nextWord++
+			d += nextWord
 			left := registers[a]
 			if valueKind(left) == NumberKind && constantNumberOK[b] {
 				if valueNumber(left) != constantNumbers[b] {
@@ -8613,6 +8640,9 @@ reload:
 			}
 
 		case opJumpIfTableHasMetatable:
+			d := int(int32(words[nextWord]))
+			nextWord++
+			d += nextWord
 			base := registers[a]
 			if table := base.tableRef(); table != nil && table.metatable != nil {
 				pc = d
@@ -8620,6 +8650,10 @@ reload:
 			}
 
 		case opJumpIfNotLessK:
+			b = int(uint16(raw >> 16))
+			d := int(int32(words[nextWord]))
+			nextWord++
+			d += nextWord
 			left := registers[a]
 			less, err := directFrameLessForBranchUncounted(thread.globals, left, constants[b])
 			if err != nil {
@@ -8631,6 +8665,10 @@ reload:
 			}
 
 		case opJumpIfNotGreaterK:
+			b = int(uint16(raw >> 16))
+			d := int(int32(words[nextWord]))
+			nextWord++
+			d += nextWord
 			left := registers[a]
 			greater, err := directFrameLessForBranchUncounted(thread.globals, constants[b], left)
 			if err != nil {
@@ -8642,6 +8680,10 @@ reload:
 			}
 
 		case opJumpIfLessK:
+			b = int(uint16(raw >> 16))
+			d := int(int32(words[nextWord]))
+			nextWord++
+			d += nextWord
 			left := registers[a]
 			less, err := directFrameLessForBranchUncounted(thread.globals, left, constants[b])
 			if err != nil {
@@ -8653,6 +8695,10 @@ reload:
 			}
 
 		case opJumpIfGreaterK:
+			b = int(uint16(raw >> 16))
+			d := int(int32(words[nextWord]))
+			nextWord++
+			d += nextWord
 			left := registers[a]
 			greater, err := directFrameLessForBranchUncounted(thread.globals, constants[b], left)
 			if err != nil {
@@ -8664,6 +8710,9 @@ reload:
 			}
 
 		case opJumpIfNotLess:
+			d := int(int32(words[nextWord]))
+			nextWord++
+			d += nextWord
 			left := registers[a]
 			right := registers[b]
 			less, err := directFrameLessForBranchUncounted(thread.globals, left, right)
@@ -8676,6 +8725,9 @@ reload:
 			}
 
 		case opJumpIfNotGreater:
+			d := int(int32(words[nextWord]))
+			nextWord++
+			d += nextWord
 			left := registers[a]
 			right := registers[b]
 			greater, err := directFrameLessForBranchUncounted(thread.globals, right, left)
@@ -8688,6 +8740,9 @@ reload:
 			}
 
 		case opJumpIfLess:
+			d := int(int32(words[nextWord]))
+			nextWord++
+			d += nextWord
 			left := registers[a]
 			right := registers[b]
 			less, err := directFrameLessForBranchUncounted(thread.globals, left, right)
@@ -8700,6 +8755,9 @@ reload:
 			}
 
 		case opJumpIfGreater:
+			d := int(int32(words[nextWord]))
+			nextWord++
+			d += nextWord
 			left := registers[a]
 			right := registers[b]
 			greater, err := directFrameLessForBranchUncounted(thread.globals, right, left)
@@ -8712,16 +8770,27 @@ reload:
 			}
 
 		case opJumpIfFalse:
+			b = int(int16(uint16(raw >> 16)))
+			if raw&wordcodeAuxBit != 0 {
+				b = int(int32(words[nextWord]))
+				nextWord++
+			}
+			b += nextWord
 			if !registers[a].truthy() {
 				pc = b
 				continue
 			}
 
 		case opJump:
+			b = int(int32(raw)>>8) + nextWord
 			pc = b
 			continue
 
 		case opCall:
+			aux := words[nextWord]
+			c = int(int16(uint16(aux)))
+			d := int(int16(uint16(aux >> 16)))
+			nextWord++
 			resultCount, fixedMultiBorrow := decodeFixedMultiResultCount(d, frame.proto.registers)
 			openResultBorrow := decodeOpenResultCallMarker(d)
 			openArgumentPrefix, openArgumentMarker := decodeOpenArgumentCallMarker(c)
@@ -8840,6 +8909,9 @@ reload:
 			return directFrameExitAt(frame, pc, directFrameEnterGenericFrameFor(directFrameSideExitReasonCall))
 
 		case opCallOne:
+			aux := words[nextWord]
+			c = int(int16(uint16(aux)))
+			nextWord++
 			callee := registers[b]
 			argCount, borrowHint := decodeFixedCallCount(c)
 			if valueNativeID(callee) == nativeFuncRawLen {
@@ -8894,6 +8966,8 @@ reload:
 			return directFrameExitAt(frame, pc, directFrameEnterGenericFrameFor(directFrameSideExitReasonCall))
 
 		case opCallLocalOne:
+			d := int(int32(words[nextWord]))
+			nextWord++
 			callee := registers[b]
 			closure, ok := callee.scriptFunction()
 			if !ok {
@@ -8947,6 +9021,8 @@ reload:
 			continue
 
 		case opCallUpvalueOne:
+			d := int(int32(words[nextWord]))
+			nextWord++
 			callee, err := frame.upvalue(b)
 			if err != nil {
 				return directFrameExitAt(frame, pc, directFrameFail(err))
@@ -9003,6 +9079,10 @@ reload:
 			continue
 
 		case opCallMethodOne:
+			aux := words[nextWord]
+			c = int(uint16(aux))
+			d := int(int16(uint16(aux >> 16)))
+			nextWord++
 			receiver := registers[b]
 			table := receiver.tableRef()
 			if table == nil {
@@ -9073,6 +9153,10 @@ reload:
 			continue
 
 		case opFastCall:
+			aux := words[nextWord]
+			c = int(uint16(aux))
+			d := int(int16(uint16(aux >> 16)))
+			nextWord++
 			exit := thread.runDirectFastCall(frame, nativeFuncID(b), a, c, d, nil)
 			if exit.resumesDirectFrame() {
 				break
@@ -9095,6 +9179,7 @@ reload:
 			return directFrameExitAt(frame, pc, directFrameReturn(result))
 
 		case opReturn:
+			b = int(int16(uint16(raw >> 16)))
 			count := b
 			if count < 0 {
 				prefixCount := -count - 1
