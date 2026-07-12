@@ -330,9 +330,12 @@ func baseCoroutineWrap(globals *globalEnv, args []Value) ([]Value, error) {
 		return nil, fmt.Errorf("coroutine.wrap: argument is %s, want function", args[0].Kind())
 	}
 	coroutine := newVMCoroutine(globals, closure)
-	resumeGlobals := coroutine.thread.globals
-	wrapped := func(args []Value) ([]Value, error) {
-		results, err := baseCoroutineResume(resumeGlobals, append([]Value{UserDataValue(coroutine.userdata)}, args...))
+	definingGlobals := coroutine.thread.globals
+	wrapped := func(callerGlobals *globalEnv, args []Value) ([]Value, error) {
+		if callerGlobals == nil {
+			callerGlobals = definingGlobals
+		}
+		results, err := baseCoroutineResume(callerGlobals, append([]Value{UserDataValue(coroutine.userdata)}, args...))
 		if err != nil {
 			return nil, err
 		}
@@ -342,7 +345,7 @@ func baseCoroutineWrap(globals *globalEnv, args []Value) ([]Value, error) {
 		}
 		return results[1:], nil
 	}
-	return []Value{HostFuncValue(wrapped)}, nil
+	return []Value{nativeFuncValue(wrapped)}, nil
 }
 
 func activeThread(globals *globalEnv) *vmThread {
