@@ -10,11 +10,44 @@ import (
 // needs an out-of-line handle (for example a string or a tag-colliding NaN).
 // The heap is retained empty by the pool for reference-run reuse.
 type slotExecutionState struct {
-	registers  []slot
-	constants  []slot
-	results    []slot
-	heap       *runtimeHeap
-	heapActive bool
+	registers       []slot
+	constants       []slot
+	results         []slot
+	heap            *runtimeHeap
+	heapActive      bool
+	transientInline [8]slot
+	transient       []slot
+}
+
+func (state *slotExecutionState) addTransient(value slot) {
+	if state == nil || !slotIsLiveHandle(value) {
+		return
+	}
+	if state.transient == nil {
+		state.transient = state.transientInline[:0]
+	}
+	state.transient = append(state.transient, value)
+}
+
+func (state *slotExecutionState) releaseTransients(heap *runtimeHeap) {
+	if state == nil || heap == nil {
+		return
+	}
+	for _, handle := range state.transient {
+		switch slotTagOf(handle) {
+		case slotTagUserdata, slotTagHostCallable:
+			// importValue gives opaque userdata and host callables a default
+			// pin. These handles were created by this transient execution, so
+			// drop that temporary pin before releasing; preexisting owner
+			// handles are never present in this list.
+			if err := heap.unpinHandle(handle); err != nil {
+				continue
+			}
+		}
+		_ = heap.releaseHandle(handle)
+	}
+	clear(state.transient)
+	state.transient = state.transientInline[:0]
 }
 
 const maxPooledSlotExecutionCapacity = 4 * 1024
@@ -35,6 +68,7 @@ func acquireSlotExecutionState(registers, constants int) *slotExecutionState {
 	state.constants = state.constants[:constants]
 	state.results = state.results[:0]
 	state.heapActive = false
+	state.transient = state.transientInline[:0]
 	return state
 }
 
@@ -52,9 +86,11 @@ func (state *slotExecutionState) resetForPool() {
 	clear(state.registers)
 	clear(state.constants)
 	clear(state.results)
+	clear(state.transient)
 	state.registers = resetSlotExecutionBuffer(state.registers)
 	state.constants = resetSlotExecutionBuffer(state.constants)
 	state.results = resetSlotExecutionBuffer(state.results)
+	state.transient = state.transientInline[:0]
 	if state.heapActive && state.heap != nil {
 		if runtimeHeapExceedsPooledCapacity(state.heap) {
 			state.heap = nil
@@ -172,14 +208,64 @@ func runSlotExecution(proto *Proto, args []Value) (values []Value, handled bool,
 	}
 	state := acquireSlotExecutionState(proto.registers, len(proto.constants))
 	defer releaseSlotExecutionState(state)
+	return runSlotExecutionState(proto, args, state, false)
+}
 
+// runSlotExecutionWithHeap executes an eligible prototype against a heap
+// borrowed from its runtime owner. The borrowed heap is never reset here.
+// Values created by this run are released when it ends; preexisting owner
+// roots and pins are left untouched.
+func runSlotExecutionWithHeap(proto *Proto, args []Value, heap *runtimeHeap) (values []Value, handled bool, err error) {
+	if proto == nil || !proto.slotExecutionEligible || heap == nil {
+		return nil, false, nil
+	}
+	state := acquireSlotExecutionState(proto.registers, len(proto.constants))
 	for index := range state.registers {
 		state.registers[index] = slotNil
 	}
-	if !slotExecutionImportConstantsAndArgs(state, proto.constants, args, proto.params) {
+	params, needsHeap, ok := slotExecutionPrepareImmediates(state, proto.constants, args, proto.params)
+	if !ok {
+		releaseSlotExecutionState(state)
 		return nil, false, nil
 	}
+	if !needsHeap {
+		values, handled, err = runSlotExecutionPrepared(proto, state)
+		releaseSlotExecutionState(state)
+		return values, handled, err
+	}
 
+	// Immediate-only runs never contend on the owner heap. Reference-bearing
+	// runs hold its collector gate across import, execution, export, and
+	// transactional release so concurrent owner runs and root/pin operations
+	// cannot observe or mutate a partial heap transaction.
+	heap.collectMu.Lock()
+	previousHeap := state.heap
+	state.heap = heap
+	state.heapActive = true
+	if slotExecutionImportAll(state, proto.constants, args, params, true) {
+		values, handled, err = runSlotExecutionPrepared(proto, state)
+	}
+	state.releaseTransients(heap)
+	// Borrowed owner heaps must never be reset by the pooled state. Restore the
+	// state's own reusable heap before returning it to the pool.
+	state.heapActive = false
+	state.heap = previousHeap
+	releaseSlotExecutionState(state)
+	heap.collectMu.Unlock()
+	return values, handled, err
+}
+
+func runSlotExecutionState(proto *Proto, args []Value, state *slotExecutionState, trackTransients bool) (values []Value, handled bool, err error) {
+	for index := range state.registers {
+		state.registers[index] = slotNil
+	}
+	if !slotExecutionImportConstantsAndArgsTracked(state, proto.constants, args, proto.params, trackTransients) {
+		return nil, false, nil
+	}
+	return runSlotExecutionPrepared(proto, state)
+}
+
+func runSlotExecutionPrepared(proto *Proto, state *slotExecutionState) (values []Value, handled bool, err error) {
 	count, ok := runSlotExecutionWords(proto, state)
 	if !ok {
 		return nil, false, nil
@@ -211,11 +297,33 @@ func slotExecutionImportConstants(state *slotExecutionState, constants []Value) 
 // values are imported through the same pooled runtime heap so handles can be
 // resolved and exported together.
 func slotExecutionImportConstantsAndArgs(state *slotExecutionState, constants, args []Value, params int) bool {
+	return slotExecutionImportConstantsAndArgsTracked(state, constants, args, params, false)
+}
+
+// slotExecutionImportConstantsAndArgsTracked is the owner-heap variant of
+// slotExecutionImportConstantsAndArgs. imported receives only handles created
+// by this import pass; handles already present in an owner heap may represent a
+// root or pin and must not be released by the compact run.
+func slotExecutionImportConstantsAndArgsTracked(state *slotExecutionState, constants, args []Value, params int, trackTransients bool) bool {
+	params, needsHeap, ok := slotExecutionPrepareImmediates(state, constants, args, params)
+	if !ok || !needsHeap {
+		return ok
+	}
+	if state.heap == nil {
+		state.heap = &runtimeHeap{}
+	}
+	state.heapActive = true
+	return slotExecutionImportAll(state, constants, args, params, trackTransients)
+}
+
+// slotExecutionPrepareImmediates fills the scratch arrays without touching a
+// heap and reports whether a second, heap-backed import pass is required.
+func slotExecutionPrepareImmediates(state *slotExecutionState, constants, args []Value, params int) (int, bool, bool) {
 	if state == nil {
-		return false
+		return 0, false, false
 	}
 	if params < 0 {
-		return false
+		return 0, false, false
 	}
 	if params > len(state.registers) {
 		params = len(state.registers)
@@ -244,27 +352,38 @@ func slotExecutionImportConstantsAndArgs(state *slotExecutionState, constants, a
 		}
 	}
 	if !needsHeap {
-		return true
+		return params, false, true
 	}
-	if state.heap == nil {
-		state.heap = &runtimeHeap{}
-	}
-	state.heapActive = true
+	return params, true, true
+}
+
+func slotExecutionImportAll(state *slotExecutionState, constants, args []Value, params int, trackTransients bool) bool {
 	for index, constant := range constants {
-		encoded, err := state.heap.importValue(constant)
+		encoded, err := slotExecutionImportValue(state, constant, trackTransients)
 		if err != nil {
 			return false
 		}
 		state.constants[index] = encoded
 	}
 	for index := 0; index < params; index++ {
-		encoded, err := state.heap.importValue(args[index])
+		encoded, err := slotExecutionImportValue(state, args[index], trackTransients)
 		if err != nil {
 			return false
 		}
 		state.registers[index] = encoded
 	}
 	return true
+}
+
+func slotExecutionImportValue(state *slotExecutionState, value Value, trackTransient bool) (slot, error) {
+	encoded, created, err := state.heap.importTransientValue(value)
+	if err != nil {
+		return 0, err
+	}
+	if created && trackTransient {
+		state.addTransient(encoded)
+	}
+	return encoded, nil
 }
 
 func slotExecutionImportImmediate(value Value) (slot, bool) {

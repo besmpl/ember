@@ -105,7 +105,10 @@ func runOwnerSlotExecution(owner *runtimeOwner, proto *Proto, args []Value) (val
 		return nil, false, err
 	}
 	defer owner.endSlotRun()
-	return runSlotExecution(proto, args)
+	if owner.heap == nil {
+		return nil, false, errRuntimeOwnerReleased
+	}
+	return runSlotExecutionWithHeap(proto, args, owner.heap)
 }
 
 var vmThreadPool = sync.Pool{

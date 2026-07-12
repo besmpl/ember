@@ -194,6 +194,15 @@ func resetSlotSlab[T comparable](slab *slotSlab[T]) {
 }
 
 func (slab *slotSlab[T]) add(value T, pinned bool) (uint32, uint16, error) {
+	index, generation, _, err := slab.addTracked(value, pinned, true)
+	return index, generation, err
+}
+
+// addTracked reports whether it created a new live entry. pinExisting keeps
+// the ordinary import behavior available to explicit pin operations, while a
+// transient execution can reuse an existing handle without changing its
+// lifetime policy.
+func (slab *slotSlab[T]) addTracked(value T, pinned, pinExisting bool) (uint32, uint16, bool, error) {
 	if slab.byValue == nil {
 		slab.byValue = make(map[T]uint32)
 	}
@@ -201,10 +210,10 @@ func (slab *slotSlab[T]) add(value T, pinned bool) (uint32, uint16, error) {
 		if int(index) < len(slab.entries) {
 			entry := &slab.entries[index]
 			if entry.live && !entry.retired && entry.value == value {
-				if pinned {
+				if pinned && pinExisting {
 					entry.pinned = true
 				}
-				return index, entry.generation, nil
+				return index, entry.generation, false, nil
 			}
 		}
 		delete(slab.byValue, value)
@@ -226,10 +235,10 @@ func (slab *slotSlab[T]) add(value T, pinned bool) (uint32, uint16, error) {
 		entry.pinned = pinned
 		entry.mark = false
 		slab.byValue[value] = index
-		return index, entry.generation, nil
+		return index, entry.generation, true, nil
 	}
 	if len(slab.entries) > int(slotIndexMask) {
-		return 0, 0, fmt.Errorf("slot: typed slab exhausted")
+		return 0, 0, false, fmt.Errorf("slot: typed slab exhausted")
 	}
 	index := uint32(len(slab.entries))
 	slab.entries = append(slab.entries, slotSlabEntry[T]{
@@ -240,7 +249,7 @@ func (slab *slotSlab[T]) add(value T, pinned bool) (uint32, uint16, error) {
 		mark:       false,
 	})
 	slab.byValue[value] = index
-	return index, 1, nil
+	return index, 1, true, nil
 }
 
 func (slab *slotSlab[T]) resolve(index uint32, generation uint16) (T, error) {
@@ -324,6 +333,45 @@ func (heap *runtimeHeap) importValue(value Value) (slot, error) {
 	}
 }
 
+// importTransientValue imports a compact-run value and reports whether the
+// run created the returned handle. Existing handles keep their root/pin state
+// unchanged; callers may release only handles reported as created.
+func (heap *runtimeHeap) importTransientValue(value Value) (slot, bool, error) {
+	switch valueKind(value) {
+	case NilKind:
+		return slotNil, false, nil
+	case BoolKind:
+		return slotBool(valueBool(value)), false, nil
+	case NumberKind:
+		if !slotIsTagged(slot(value.bits)) {
+			return slot(value.bits), false, nil
+		}
+		handle, err := heap.boxNumberBits(value.bits)
+		return handle, err == nil, err
+	case StringKind:
+		return slotImportTransientRef(&heap.strings, slotTagString, value.stringBox(), false)
+	case TableKind:
+		return slotImportTransientRef(&heap.tables, slotTagTable, value.tableRef(), false)
+	case FunctionKind:
+		closure, _ := value.scriptFunction()
+		return slotImportTransientRef(&heap.closures, slotTagClosure, closure, false)
+	case UserDataKind:
+		return slotImportTransientRef(&heap.userdata, slotTagUserdata, value.userdataRef(), true)
+	case HostFuncKind:
+		if valueRef(value) == nil {
+			id := valueNativeID(value)
+			if id == nativeFuncUnknown {
+				handle, err := slotPackTypedNil(slotTagHostCallable)
+				return handle, false, err
+			}
+			return slotNativeID(id), false, nil
+		}
+		return slotImportTransientRef(&heap.hostCallables, slotTagHostCallable, value.hostCallableRef(), true)
+	default:
+		return 0, false, fmt.Errorf("slot: %s value adapter is unsupported", valueKind(value))
+	}
+}
+
 func (heap *runtimeHeap) exportValue(value slot) (Value, error) {
 	if !slotIsTagged(value) {
 		bits, err := slotNumberBits(value, heap)
@@ -400,6 +448,20 @@ func slotImportRef[T comparable](slab *slotSlab[T], kind slotTag, value T, pinne
 		return 0, err
 	}
 	return slotPackHandle(kind, index, generation)
+}
+
+func slotImportTransientRef[T comparable](slab *slotSlab[T], kind slotTag, value T, pinned bool) (slot, bool, error) {
+	var zero T
+	if value == zero {
+		handle, err := slotPackTypedNil(kind)
+		return handle, false, err
+	}
+	index, generation, created, err := slab.addTracked(value, pinned, false)
+	if err != nil {
+		return 0, false, err
+	}
+	handle, err := slotPackHandle(kind, index, generation)
+	return handle, created, err
 }
 
 func slotExportRef[T comparable](slab *slotSlab[T], value slot, wantKind slotTag) (T, error) {

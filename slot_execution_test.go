@@ -552,8 +552,11 @@ func TestSlotExecutionPoolResetOwnsNoRuntimeReferences(t *testing.T) {
 			}
 			continue
 		}
+		if field.Type.Kind() == reflect.Array && field.Type.Elem() == reflect.TypeOf(slot(0)) {
+			continue
+		}
 		if field.Type != reflect.TypeOf([]slot(nil)) {
-			t.Fatalf("slot state field %q has type %s, want []slot", field.Name, field.Type)
+			t.Fatalf("slot state field %q has type %s, want []slot or [N]slot", field.Name, field.Type)
 		}
 	}
 	state := acquireSlotExecutionState(2, 2)

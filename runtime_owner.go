@@ -309,6 +309,8 @@ func (owner *runtimeOwner) root(handle slot) (*runtimeRoot, error) {
 	if owner.state == runtimeOwnerClosed {
 		return nil, errRuntimeOwnerClosed
 	}
+	owner.heap.collectMu.Lock()
+	defer owner.heap.collectMu.Unlock()
 	// A slot is meaningful only in its runtime owner's heap. Handles omit heap
 	// identity deliberately, so callers must never move raw slots between
 	// owners; public Values are the cross-owner adapter.
@@ -336,6 +338,8 @@ func (owner *runtimeOwner) rootValues(values []Value) ([]*runtimeRoot, error) {
 	if owner.state == runtimeOwnerClosed {
 		return nil, errRuntimeOwnerClosed
 	}
+	owner.heap.collectMu.Lock()
+	defer owner.heap.collectMu.Unlock()
 	roots := make([]*runtimeRoot, 0, len(values))
 	created := make([]slot, 0, len(values))
 	for _, value := range values {
@@ -381,6 +385,8 @@ func (root *runtimeRoot) value() (slot, error) {
 	if _, ok := owner.roots[root.tokenID]; !ok {
 		return 0, errRuntimeOwnerReleased
 	}
+	owner.heap.collectMu.Lock()
+	defer owner.heap.collectMu.Unlock()
 	if err := owner.heap.validateSlot(root.handle); err != nil {
 		return 0, err
 	}
@@ -468,6 +474,8 @@ func (owner *runtimeOwner) pin(value Value) (*runtimePin, error) {
 	if owner.state == runtimeOwnerClosed {
 		return nil, errRuntimeOwnerClosed
 	}
+	owner.heap.collectMu.Lock()
+	defer owner.heap.collectMu.Unlock()
 	_, found, wasPinned := owner.heap.lookupExistingValue(value)
 	handle, err := owner.heap.importValue(value)
 	if err != nil {
@@ -515,6 +523,8 @@ func (pin *runtimePin) value() (Value, error) {
 	if _, ok := owner.pins[pin.tokenID]; !ok {
 		return NilValue(), errRuntimeOwnerReleased
 	}
+	owner.heap.collectMu.Lock()
+	defer owner.heap.collectMu.Unlock()
 	return owner.heap.exportValue(pin.handle)
 }
 
@@ -528,6 +538,8 @@ func (pin *runtimePin) release() {
 	if pin.released {
 		return
 	}
+	owner.heap.collectMu.Lock()
+	defer owner.heap.collectMu.Unlock()
 	delete(owner.pins, pin.tokenID)
 	if state, ok := owner.pinStates[pin.handle]; ok {
 		if state.count <= 1 {

@@ -189,13 +189,13 @@ func assertRuntimeOwnerHeapEmpty(t *testing.T, owner *runtimeOwner) {
 		t.Fatal("runtime owner heap is nil")
 	}
 	heap := owner.heap
-	if len(heap.boxedNumbers.entries) != 0 || len(heap.strings.entries) != 0 ||
-		len(heap.tables.entries) != 0 || len(heap.closures.entries) != 0 ||
-		len(heap.upvalues.entries) != 0 || len(heap.userdata.entries) != 0 ||
-		len(heap.hostCallables.entries) != 0 {
-		t.Fatalf("owner heap retained ephemeral values: boxed=%d strings=%d tables=%d closures=%d upvalues=%d userdata=%d host=%d",
-			len(heap.boxedNumbers.entries), len(heap.strings.entries), len(heap.tables.entries),
-			len(heap.closures.entries), len(heap.upvalues.entries), len(heap.userdata.entries), len(heap.hostCallables.entries))
+	if live := heap.liveEntryCount(); live != 0 {
+		t.Fatalf("owner heap retained %d live ephemeral values", live)
+	}
+	if len(heap.strings.byValue) != 0 || len(heap.tables.byValue) != 0 ||
+		len(heap.closures.byValue) != 0 || len(heap.upvalues.byValue) != 0 ||
+		len(heap.userdata.byValue) != 0 || len(heap.hostCallables.byValue) != 0 {
+		t.Fatal("owner heap retained ephemeral lookup entries")
 	}
 }
 
