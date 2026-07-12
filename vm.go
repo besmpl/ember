@@ -4469,7 +4469,13 @@ func (cache *dynamicStringIndexCache) getKeyCounted(table *Table, key dynamicStr
 		if match == dynamicStringIndexKeyHashBytes {
 			counts.addHashByteFallback()
 		}
-		value, ok, indexed := directFrameReadCachedStringSlot(table, entry.slot, key, entry.table == table && match == dynamicStringIndexKeyPointer)
+		pointer := entry.table == table && match == dynamicStringIndexKeyPointer
+		if field, ok := directFrameInlineCachedStringField(table, entry.slot, pointer); ok && !field.value.IsNil() {
+			counts.addPointerHit()
+			counts.addHit(i)
+			return field.value, true
+		}
+		value, ok, indexed := directFrameReadCachedStringSlot(table, entry.slot, key, pointer)
 		if !ok {
 			counts.addShapeMiss()
 			continue
@@ -4500,7 +4506,11 @@ func (cache *dynamicStringIndexCache) getKey(table *Table, key dynamicStringInde
 		if entry.table == nil || match == dynamicStringIndexKeyMiss {
 			continue
 		}
-		value, ok, _ := directFrameReadCachedStringSlot(table, entry.slot, key, entry.table == table && match == dynamicStringIndexKeyPointer)
+		pointer := entry.table == table && match == dynamicStringIndexKeyPointer
+		if field, ok := directFrameInlineCachedStringField(table, entry.slot, pointer); ok && !field.value.IsNil() {
+			return field.value, true
+		}
+		value, ok, _ := directFrameReadCachedStringSlot(table, entry.slot, key, pointer)
 		if ok {
 			return value, true
 		}
@@ -4659,7 +4669,15 @@ func (cache *dynamicStringIndexCache) writeKeyCounted(table *Table, key dynamicS
 		if match == dynamicStringIndexKeyHashBytes {
 			counts.addHashByteFallback()
 		}
-		ok, indexed := directFrameWriteCachedStringSlot(table, entry.slot, key, value, entry.table == table && match == dynamicStringIndexKeyPointer)
+		pointer := entry.table == table && match == dynamicStringIndexKeyPointer
+		if field, ok := directFrameInlineCachedStringField(table, entry.slot, pointer); ok && !field.value.IsNil() {
+			field.value = value
+			table.stringValueVersion++
+			counts.addPointerHit()
+			counts.addHit(i)
+			return true
+		}
+		ok, indexed := directFrameWriteCachedStringSlot(table, entry.slot, key, value, pointer)
 		if !ok {
 			counts.addShapeMiss()
 			continue
@@ -4690,7 +4708,13 @@ func (cache *dynamicStringIndexCache) writeKey(table *Table, key dynamicStringIn
 		if entry.table == nil || match == dynamicStringIndexKeyMiss {
 			continue
 		}
-		if ok, _ := directFrameWriteCachedStringSlot(table, entry.slot, key, value, entry.table == table && match == dynamicStringIndexKeyPointer); ok {
+		pointer := entry.table == table && match == dynamicStringIndexKeyPointer
+		if field, ok := directFrameInlineCachedStringField(table, entry.slot, pointer); ok && !field.value.IsNil() {
+			field.value = value
+			table.stringValueVersion++
+			return true
+		}
+		if ok, _ := directFrameWriteCachedStringSlot(table, entry.slot, key, value, pointer); ok {
 			return true
 		}
 	}
@@ -4708,6 +4732,20 @@ func (entry *dynamicStringIndexCacheEntry) matchKey(key dynamicStringIndexKey) d
 		return dynamicStringIndexKeyMiss
 	}
 	return dynamicStringIndexKeyHashBytes
+}
+
+// directFrameInlineCachedStringField is the common monomorphic row path. A
+// pointer-key hit on the same table needs only the cached layout proof and the
+// live inline slot; hash-backed and polymorphic cases keep the full validator.
+func directFrameInlineCachedStringField(table *Table, slot tableStringFieldSlot, pointer bool) (*tableStringField, bool) {
+	if table == nil || !pointer || slot.token.storage != 0 ||
+		slot.token.layout != table.stringVersion ||
+		slot.token.metatable != table.metatable ||
+		(table.cold != nil && table.cold.stringHashCount > 0) ||
+		slot.index < 0 || slot.index >= len(table.stringFields) {
+		return nil, false
+	}
+	return &table.stringFields[slot.index], true
 }
 
 func directFrameReadCachedStringSlot(table *Table, slot tableStringFieldSlot, key dynamicStringIndexKey, pointer bool) (Value, bool, bool) {

@@ -30,6 +30,43 @@ return total
 	}
 }
 
+func TestDynamicStringIndexCacheInlinePointerHitPreservesLayoutAndInvalidation(t *testing.T) {
+	table := NewTable()
+	box := newStringBox("hp")
+	key := stringValueFromBox(box)
+	table.setRawStringFieldBox(box.text, box, NumberValue(1))
+	slot, ok := table.rawStringFieldSlotBox(box)
+	if !ok || slot.token.storage != 0 {
+		t.Fatalf("hp slot = %#v, %t; want inline slot", slot, ok)
+	}
+
+	var cache dynamicStringIndexCache
+	cache.storeValue(table, key, slot)
+	layoutVersion := table.stringVersion
+	valueVersion := table.stringValueVersion
+	if !cache.writeValue(table, key, NumberValue(7)) {
+		t.Fatal("cache.writeValue(hp) missed, want inline pointer hit")
+	}
+	if table.stringVersion != layoutVersion {
+		t.Fatalf("inline value write changed layout version from %d to %d", layoutVersion, table.stringVersion)
+	}
+	if table.stringValueVersion != valueVersion+1 {
+		t.Fatalf("inline value version = %d, want %d", table.stringValueVersion, valueVersion+1)
+	}
+	value, ok := cache.getValue(table, key)
+	if got, numberOK := value.Number(); !ok || !numberOK || got != 7 {
+		t.Fatalf("cached hp = %v, %t/%t; want 7", got, ok, numberOK)
+	}
+
+	table.setRawStringFieldBox(box.text, box, NilValue())
+	if _, ok := cache.getValue(table, key); ok {
+		t.Fatal("cache survived inline field deletion with a stale slot")
+	}
+	if cache.writeValue(table, key, NumberValue(9)) {
+		t.Fatal("stale cache write resurrected a deleted inline field")
+	}
+}
+
 func TestDynamicStringIndexCacheOverflowHitUsesCurrentIndexedValue(t *testing.T) {
 	table := NewTable()
 	for index := 0; index < maxInlineStringFields; index++ {
