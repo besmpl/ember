@@ -126,3 +126,64 @@ return outer(0)
 		t.Fatalf("thread kept %d frame records after error, want empty stack", len(thread.frameRecords))
 	}
 }
+
+func TestRecursiveZeroCaptureCallsUseOnlyCompactFrameRecords(t *testing.T) {
+	proto, err := Compile(`
+function sum(n)
+	if n == 0 then
+		return 0
+	end
+	return n + sum(n - 1)
+end
+local result = sum(64)
+return result
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	thread := newVMThread(runtimeGlobals(nil))
+	results, err := thread.run(proto, nil, nil)
+	if err != nil {
+		t.Fatalf("thread.run returned error: %v", err)
+	}
+	if got, want := len(results), 1; got != want {
+		t.Fatalf("thread.run returned %d results, want %d", got, want)
+	}
+	if got, ok := results[0].Number(); !ok || got != 2080 {
+		t.Fatalf("thread.run result is %v (%t), want number 2080", results[0], ok)
+	}
+	if got, want := thread.maxFrames, 1; got != want {
+		t.Fatalf("thread max physical frame depth is %d, want %d", got, want)
+	}
+	if got, wantAtLeast := thread.maxFrameRecords, 65; got < wantAtLeast {
+		t.Fatalf("thread max compact frame-record depth is %d, want at least %d", got, wantAtLeast)
+	}
+	if len(thread.frames) != 0 || len(thread.frameRecords) != 0 {
+		t.Fatalf("thread retained %d physical frames and %d records after return", len(thread.frames), len(thread.frameRecords))
+	}
+	if !allocationInstrumentedTest() {
+		allocs := testing.AllocsPerRun(50, func() {
+			results, runErr := thread.run(proto, nil, nil)
+			if runErr != nil {
+				t.Fatalf("warm record-only run returned error: %v", runErr)
+			}
+			if got, ok := results[0].Number(); !ok || got != 2080 {
+				t.Fatalf("warm record-only result is %v (%t), want number 2080", results[0], ok)
+			}
+		})
+		if allocs > 2 {
+			t.Fatalf("warm record-only recursion allocated %.0f times per run, want boundary allocations only", allocs)
+		}
+	}
+
+	_, snapshot, err := runWithDirectFrameMechanismCounters(proto, nil)
+	if err != nil {
+		t.Fatalf("instrumented run returned error: %v", err)
+	}
+	if got, wantAtLeast := snapshot.picCounts.fixedCallTrampolineEntries, uint64(65); got < wantAtLeast {
+		t.Fatalf("fixed-call record entries = %d, want at least %d", got, wantAtLeast)
+	}
+	if got := snapshot.picCounts.fixedCallFrameReuses; got != 0 {
+		t.Fatalf("fixed-call pooled frame reuses = %d, want zero", got)
+	}
+}

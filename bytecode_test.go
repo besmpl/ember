@@ -1776,7 +1776,7 @@ func TestTableFastArrayFrontRemoveKeepsSequenceStorage(t *testing.T) {
 	}
 }
 
-func TestVMThreadUsesExplicitFrameStackForRecursiveScriptCalls(t *testing.T) {
+func TestVMThreadUsesCompactRecordsForRecursiveScriptCalls(t *testing.T) {
 	proto, err := Compile(`
 local function sum(n)
 	if n == 0 then
@@ -1805,11 +1805,14 @@ return sum(4)
 	if !ok || got != 10 {
 		t.Fatalf("thread.run result is %v (%t), want number 10", got, ok)
 	}
-	if thread.maxFrames < 6 {
-		t.Fatalf("thread max frame depth is %d, want recursive script calls on explicit stack", thread.maxFrames)
+	if got, want := thread.maxFrames, 2; got != want {
+		t.Fatalf("thread max physical frame depth is %d, want %d while the captured root remains bridged", got, want)
 	}
-	if len(thread.frames) != 0 {
-		t.Fatalf("thread kept %d frames after return, want empty stack", len(thread.frames))
+	if got, wantAtLeast := thread.maxFrameRecords, 4; got < wantAtLeast {
+		t.Fatalf("thread max compact frame-record depth is %d, want at least %d", got, wantAtLeast)
+	}
+	if len(thread.frames) != 0 || len(thread.frameRecords) != 0 {
+		t.Fatalf("thread retained %d physical frames and %d records after return", len(thread.frames), len(thread.frameRecords))
 	}
 }
 
@@ -6968,8 +6971,11 @@ return total
 	if callSnapshot.opcodeCount(opCallLocalOne) == 0 {
 		t.Fatalf("CALL_LOCAL_ONE dispatch count = 0; ranked opcodes: %#v", callSnapshot.rankedOpcodes())
 	}
-	if callSnapshot.picCounts.fixedCallFrameReuses == 0 {
-		t.Fatal("fixed-call frame reuses = 0, want grouped fixed-call attribution")
+	if got := callSnapshot.picCounts.fixedCallFrameReuses; got != 0 {
+		t.Fatalf("fixed-call pooled frame reuses = %d, want zero", got)
+	}
+	if got, wantAtLeast := callSnapshot.picCounts.fixedCallTrampolineEntries, uint64(8); got < wantAtLeast {
+		t.Fatalf("fixed-call record entries = %d, want at least %d", got, wantAtLeast)
 	}
 }
 

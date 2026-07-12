@@ -214,8 +214,8 @@ return value
 	if snapshot.picCounts.fixedCallFrameMaterializations != 0 {
 		t.Fatalf("marked method fixed-call materializations = %d, want zero", snapshot.picCounts.fixedCallFrameMaterializations)
 	}
-	if snapshot.picCounts.fixedCallFrameReuses == 0 {
-		t.Fatal("marked method frame reuses = 0, want borrowed frame reuse")
+	if got := snapshot.picCounts.fixedCallFrameReuses; got != 0 {
+		t.Fatalf("marked method pooled frame reuses = %d, want zero", got)
 	}
 	if snapshot.picCounts.fixedCallTrampolineEntries == 0 || snapshot.picCounts.fixedCallRecursiveEntries != 0 {
 		t.Fatalf("marked method trampoline/recursive entries = %d/%d, want iterative only", snapshot.picCounts.fixedCallTrampolineEntries, snapshot.picCounts.fixedCallRecursiveEntries)
@@ -262,7 +262,7 @@ return #object
 	}
 }
 
-func TestCompiledNestedFixedCallsReuseBorrowedWindows(t *testing.T) {
+func TestCompiledNestedFixedCallsUseCompactRecords(t *testing.T) {
 	proto, err := Compile(`
 local function outer(value)
 	local function step(input)
@@ -295,8 +295,11 @@ return outer(0)
 	if got, ok := results[0].Number(); !ok || got != 2 {
 		t.Fatalf("nested fixed-call result is %v (%t), want 2", results[0], ok)
 	}
-	if snapshot.picCounts.fixedCallFrameReuses < 2 {
-		t.Fatalf("nested fixed-call frame reuses = %d, want at least 2", snapshot.picCounts.fixedCallFrameReuses)
+	if got := snapshot.picCounts.fixedCallFrameReuses; got != 0 {
+		t.Fatalf("nested fixed-call pooled frame reuses = %d, want zero", got)
+	}
+	if got, wantAtLeast := snapshot.picCounts.fixedCallTrampolineEntries, uint64(2); got < wantAtLeast {
+		t.Fatalf("nested fixed-call record entries = %d, want at least %d", got, wantAtLeast)
 	}
 	if snapshot.picCounts.fixedCallArgCopies != 0 || snapshot.picCounts.fixedCallFrameMaterializations != 0 {
 		t.Fatalf("nested fixed-call copies/materializations = %d/%d, want zero", snapshot.picCounts.fixedCallArgCopies, snapshot.picCounts.fixedCallFrameMaterializations)
@@ -327,8 +330,11 @@ return total
 	if got, ok := results[0].Number(); !ok || got != 1000 {
 		t.Fatalf("fixed-call loop result is %v (%t), want 1000", results[0], ok)
 	}
-	if snapshot.picCounts.fixedCallFrameReuses < 1000 {
-		t.Fatalf("fixed-call loop frame reuses = %d, want at least 1000", snapshot.picCounts.fixedCallFrameReuses)
+	if got := snapshot.picCounts.fixedCallFrameReuses; got != 0 {
+		t.Fatalf("fixed-call loop pooled frame reuses = %d, want zero", got)
+	}
+	if got, wantAtLeast := snapshot.picCounts.fixedCallTrampolineEntries, uint64(1000); got < wantAtLeast {
+		t.Fatalf("fixed-call loop record entries = %d, want at least %d", got, wantAtLeast)
 	}
 	if snapshot.picCounts.fixedCallArgCopies != 0 || snapshot.picCounts.fixedCallFrameMaterializations != 0 {
 		t.Fatalf("fixed-call loop copies/materializations = %d/%d, want zero", snapshot.picCounts.fixedCallArgCopies, snapshot.picCounts.fixedCallFrameMaterializations)
