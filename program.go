@@ -2,6 +2,7 @@ package ember
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"sort"
@@ -58,6 +59,18 @@ type ProgramOptions struct {
 	Entrypoints []Entrypoint
 	Check       bool
 	Parallelism int
+	Limits      ProgramLimits
+}
+
+// ProgramLimits bounds module graph discovery and compilation. Zero means
+// unlimited for backward compatibility.
+type ProgramLimits struct {
+	// MaxModules bounds unique module identities accepted during discovery.
+	MaxModules uint64
+	// MaxTotalSourceBytes bounds aggregate loaded source text.
+	MaxTotalSourceBytes uint64
+	// Compile applies source parsing limits to every module.
+	Compile CompileLimits
 }
 
 // Program is an immutable compiled module graph.
@@ -185,7 +198,7 @@ func loadProgramWithArtifactStore(ctx context.Context, loader ModuleLoader, opti
 		return nil, report, err
 	}
 
-	combined, err := loadProgramGraph(ctx, loader, entrypoints, parallelism, artifacts)
+	combined, err := loadProgramGraph(ctx, loader, entrypoints, parallelism, artifacts, options.Limits)
 	if err != nil {
 		if cycle, ok := err.(moduleCycleError); ok {
 			report.Diagnostics = []Diagnostic{diagnosticFromModuleDiagnostic(cycle.Diagnostic())}
@@ -194,13 +207,13 @@ func loadProgramWithArtifactStore(ctx context.Context, loader ModuleLoader, opti
 		return nil, report, err
 	}
 
-	protos, err := compileProgramModules(ctx, combined, artifacts, parallelism)
+	protos, err := compileProgramModules(ctx, combined, artifacts, parallelism, options.Limits.Compile)
 	if err != nil {
 		return nil, report, err
 	}
 	var summaries map[moduleKey]moduleSummaryArtifact
 	if options.Check {
-		checkReport, err := checkProgramModules(ctx, combined, artifacts, parallelism)
+		checkReport, err := checkProgramModules(ctx, combined, artifacts, parallelism, options.Limits.Compile)
 		if err != nil {
 			return nil, report, err
 		}
@@ -452,21 +465,21 @@ func programParallelism(value int) (int, error) {
 	return value, nil
 }
 
-func loadProgramGraph(ctx context.Context, loader ModuleLoader, entrypoints []programEntrypoint, parallelism int, artifacts *sourceArtifactStore) (moduleGraph, error) {
+func loadProgramGraph(ctx context.Context, loader ModuleLoader, entrypoints []programEntrypoint, parallelism int, artifacts *sourceArtifactStore, limits ProgramLimits) (moduleGraph, error) {
 	if parallelism <= 1 || len(entrypoints) <= 1 {
-		return loadProgramGraphSequential(ctx, loader, entrypoints, artifacts)
+		return loadProgramGraphSequential(ctx, loader, entrypoints, artifacts, limits)
 	}
-	return loadProgramGraphParallel(ctx, loader, entrypoints, parallelism, artifacts)
+	return loadProgramGraphParallel(ctx, loader, entrypoints, parallelism, artifacts, limits)
 }
 
-func loadProgramGraphSequential(ctx context.Context, loader ModuleLoader, entrypoints []programEntrypoint, artifacts *sourceArtifactStore) (moduleGraph, error) {
-	resolver := newProgramModuleResolver(ctx, loader)
+func loadProgramGraphSequential(ctx context.Context, loader ModuleLoader, entrypoints []programEntrypoint, artifacts *sourceArtifactStore, limits ProgramLimits) (moduleGraph, error) {
+	resolver := newProgramModuleResolverWithLimits(ctx, loader, limits)
 	combined := moduleGraph{Nodes: make(map[moduleKey]moduleGraphNode)}
 	for i, entrypoint := range entrypoints {
 		if err := ctx.Err(); err != nil {
 			return moduleGraph{}, err
 		}
-		graph, err := buildModuleGraphWithStore(resolver, entrypoint.key, artifacts)
+		graph, err := buildModuleGraphWithStoreAndLimits(resolver, entrypoint.key, artifacts, limits.Compile)
 		if err != nil {
 			return moduleGraph{}, err
 		}
@@ -480,8 +493,10 @@ type programGraphResult struct {
 	err   error
 }
 
-func loadProgramGraphParallel(ctx context.Context, loader ModuleLoader, entrypoints []programEntrypoint, parallelism int, artifacts *sourceArtifactStore) (moduleGraph, error) {
-	resolver := newProgramModuleResolver(ctx, loader)
+func loadProgramGraphParallel(ctx context.Context, loader ModuleLoader, entrypoints []programEntrypoint, parallelism int, artifacts *sourceArtifactStore, limits ProgramLimits) (moduleGraph, error) {
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	resolver := newProgramModuleResolverWithLimits(workCtx, loader, limits)
 	jobs := make(chan int)
 	results := make([]programGraphResult, len(entrypoints))
 	workers := parallelism
@@ -495,30 +510,46 @@ func loadProgramGraphParallel(ctx context.Context, loader ModuleLoader, entrypoi
 		go func() {
 			defer wg.Done()
 			for index := range jobs {
-				graph, err := buildProgramEntrypointGraph(ctx, resolver, entrypoints[index], artifacts)
+				graph, err := buildProgramEntrypointGraph(workCtx, resolver, entrypoints[index], artifacts)
 				results[index] = programGraphResult{graph: graph, err: err}
+				if errors.Is(err, ErrLimitExceeded) {
+					cancel()
+				}
 			}
 		}()
 	}
 
+	sendAborted := false
 	for index := range entrypoints {
 		select {
 		case jobs <- index:
-		case <-ctx.Done():
-			close(jobs)
-			wg.Wait()
-			return moduleGraph{}, ctx.Err()
+		case <-workCtx.Done():
+			sendAborted = true
+		}
+		if sendAborted {
+			break
 		}
 	}
 	close(jobs)
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return moduleGraph{}, err
+	}
 
 	combined := moduleGraph{Nodes: make(map[moduleKey]moduleGraphNode)}
+	for _, result := range results {
+		if errors.Is(result.err, ErrLimitExceeded) {
+			return moduleGraph{}, result.err
+		}
+	}
 	for index, result := range results {
 		if result.err != nil {
 			return moduleGraph{}, result.err
 		}
 		mergeProgramGraph(&combined, result.graph, index == 0)
+	}
+	if sendAborted {
+		return moduleGraph{}, workCtx.Err()
 	}
 	return combined, nil
 }
@@ -527,7 +558,7 @@ func buildProgramEntrypointGraph(ctx context.Context, resolver *programModuleRes
 	if err := ctx.Err(); err != nil {
 		return moduleGraph{}, err
 	}
-	return buildModuleGraphWithStore(resolver, entrypoint.key, artifacts)
+	return buildModuleGraphWithStoreAndLimits(resolver, entrypoint.key, artifacts, resolver.limits.Compile)
 }
 
 func mergeProgramGraph(combined *moduleGraph, graph moduleGraph, setRoot bool) {
@@ -540,11 +571,14 @@ func mergeProgramGraph(combined *moduleGraph, graph moduleGraph, setRoot bool) {
 }
 
 type programModuleResolver struct {
-	ctx     context.Context
-	loader  ModuleLoader
-	mu      sync.Mutex
-	sources map[moduleKey]resolvedModuleSource
-	loading map[moduleKey]*programModuleLoad
+	ctx         context.Context
+	loader      ModuleLoader
+	limits      ProgramLimits
+	mu          sync.Mutex
+	sources     map[moduleKey]resolvedModuleSource
+	loading     map[moduleKey]*programModuleLoad
+	moduleCount uint64
+	sourceBytes uint64
 }
 
 type programModuleLoad struct {
@@ -554,9 +588,14 @@ type programModuleLoad struct {
 }
 
 func newProgramModuleResolver(ctx context.Context, loader ModuleLoader) *programModuleResolver {
+	return newProgramModuleResolverWithLimits(ctx, loader, ProgramLimits{})
+}
+
+func newProgramModuleResolverWithLimits(ctx context.Context, loader ModuleLoader, configured ProgramLimits) *programModuleResolver {
 	return &programModuleResolver{
 		ctx:     ctx,
 		loader:  loader,
+		limits:  configured,
 		sources: make(map[moduleKey]resolvedModuleSource),
 		loading: make(map[moduleKey]*programModuleLoad),
 	}
@@ -585,6 +624,12 @@ func (r *programModuleResolver) Source(key moduleKey) (resolvedModuleSource, err
 			return resolvedModuleSource{}, r.ctx.Err()
 		}
 	}
+	if r.limits.MaxModules != 0 && r.moduleCount >= r.limits.MaxModules {
+		used := r.moduleCount + 1
+		r.mu.Unlock()
+		return resolvedModuleSource{}, &LimitError{Kind: LimitModules, Limit: r.limits.MaxModules, Used: used}
+	}
+	r.moduleCount++
 	load := &programModuleLoad{done: make(chan struct{})}
 	r.loading[key] = load
 	r.mu.Unlock()
@@ -593,8 +638,22 @@ func (r *programModuleResolver) Source(key moduleKey) (resolvedModuleSource, err
 
 	r.mu.Lock()
 	delete(r.loading, key)
-	if err == nil {
-		r.sources[key] = source
+	if err != nil {
+		r.moduleCount--
+	} else {
+		used := r.sourceBytes
+		if sourceBytes := uint64(len(source.Source.Text)); sourceBytes > ^uint64(0)-used {
+			used = ^uint64(0)
+		} else {
+			used += sourceBytes
+		}
+		if r.limits.MaxTotalSourceBytes != 0 && used > r.limits.MaxTotalSourceBytes {
+			err = &LimitError{Kind: LimitTotalSourceBytes, Limit: r.limits.MaxTotalSourceBytes, Used: used}
+			r.moduleCount--
+		} else {
+			r.sourceBytes = used
+			r.sources[key] = source
+		}
 	}
 	load.source = source
 	load.err = err
@@ -675,9 +734,9 @@ func moduleIDFromKey(key moduleKey) ModuleID {
 	}
 }
 
-func compileProgramModules(ctx context.Context, graph moduleGraph, cache *sourceArtifactStore, parallelism int) (map[moduleKey]*Proto, error) {
+func compileProgramModules(ctx context.Context, graph moduleGraph, cache *sourceArtifactStore, parallelism int, compileLimits CompileLimits) (map[moduleKey]*Proto, error) {
 	if parallelism > 1 && len(graph.Nodes) > 1 {
-		return compileProgramModulesParallel(ctx, graph, cache, parallelism)
+		return compileProgramModulesParallel(ctx, graph, cache, parallelism, compileLimits)
 	}
 	protos := make(map[moduleKey]*Proto, len(graph.Nodes))
 	for _, key := range sortedModuleKeys(graph.Nodes) {
@@ -685,7 +744,7 @@ func compileProgramModules(ctx context.Context, graph moduleGraph, cache *source
 			return nil, err
 		}
 		node := graph.Nodes[key]
-		proto, err := cache.compile(node.Source, node.Identity)
+		proto, err := cache.compileWithLimits(node.Source, node.Identity, compileLimits)
 		if err != nil {
 			return nil, fmt.Errorf("load program: compile %s: %w", key.String(), err)
 		}
@@ -694,7 +753,7 @@ func compileProgramModules(ctx context.Context, graph moduleGraph, cache *source
 	return protos, nil
 }
 
-func compileProgramModulesParallel(ctx context.Context, graph moduleGraph, cache *sourceArtifactStore, parallelism int) (map[moduleKey]*Proto, error) {
+func compileProgramModulesParallel(ctx context.Context, graph moduleGraph, cache *sourceArtifactStore, parallelism int, compileLimits CompileLimits) (map[moduleKey]*Proto, error) {
 	jobs := uniqueProgramArtifactJobs(graph)
 	results := make([]programCompileArtifact, len(jobs))
 	workers := boundedProgramWorkers(parallelism, len(jobs))
@@ -711,7 +770,7 @@ func compileProgramModulesParallel(ctx context.Context, graph moduleGraph, cache
 					results[index].err = err
 					continue
 				}
-				proto, err := cache.compile(job.source, job.identity)
+				proto, err := cache.compileWithLimits(job.source, job.identity, compileLimits)
 				if err != nil {
 					results[index].err = err
 					continue
@@ -750,9 +809,9 @@ type programCheckReport struct {
 	summaries   map[moduleKey]moduleSummaryArtifact
 }
 
-func checkProgramModules(ctx context.Context, graph moduleGraph, cache *sourceArtifactStore, parallelism int) (programCheckReport, error) {
+func checkProgramModules(ctx context.Context, graph moduleGraph, cache *sourceArtifactStore, parallelism int, compileLimits CompileLimits) (programCheckReport, error) {
 	if parallelism > 1 && len(graph.Nodes) > 1 {
-		return checkProgramModulesParallel(ctx, graph, cache, parallelism)
+		return checkProgramModulesParallel(ctx, graph, cache, parallelism, compileLimits)
 	}
 	var diagnostics []programDiagnostic
 	results := make(map[moduleKey]CheckResult, len(graph.Nodes))
@@ -761,7 +820,7 @@ func checkProgramModules(ctx context.Context, graph moduleGraph, cache *sourceAr
 			return programCheckReport{}, err
 		}
 		node := graph.Nodes[key]
-		artifact, err := cache.check(node.Source, node.Identity)
+		artifact, err := cache.checkWithLimits(node.Source, node.Identity, compileLimits)
 		if err != nil {
 			return programCheckReport{}, fmt.Errorf("load program: check %s: %w", key.String(), err)
 		}
@@ -779,7 +838,7 @@ func checkProgramModules(ctx context.Context, graph moduleGraph, cache *sourceAr
 	}, nil
 }
 
-func checkProgramModulesParallel(ctx context.Context, graph moduleGraph, cache *sourceArtifactStore, parallelism int) (programCheckReport, error) {
+func checkProgramModulesParallel(ctx context.Context, graph moduleGraph, cache *sourceArtifactStore, parallelism int, compileLimits CompileLimits) (programCheckReport, error) {
 	jobs := uniqueProgramArtifactJobs(graph)
 	results := make([]programCheckArtifact, len(jobs))
 	workers := boundedProgramWorkers(parallelism, len(jobs))
@@ -796,7 +855,7 @@ func checkProgramModulesParallel(ctx context.Context, graph moduleGraph, cache *
 					results[index].err = err
 					continue
 				}
-				artifact, err := cache.check(job.source, job.identity)
+				artifact, err := cache.checkWithLimits(job.source, job.identity, compileLimits)
 				if err != nil {
 					results[index].err = err
 					continue

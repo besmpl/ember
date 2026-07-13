@@ -93,6 +93,168 @@ func TestLoadProgramRejectsInvalidOptions(t *testing.T) {
 	}
 }
 
+func TestLoadProgramLimitsModuleCountAcrossChainsAndFanout(t *testing.T) {
+	tests := []struct {
+		name    string
+		sources map[string]string
+		limit   uint64
+	}{
+		{
+			name: "chain",
+			sources: map[string]string{
+				"logical:game/a": `return require("./b")`,
+				"logical:game/b": `return require("./c")`,
+				"logical:game/c": `return 1`,
+			},
+			limit: 2,
+		},
+		{
+			name: "fanout",
+			sources: map[string]string{
+				"logical:game/a": `return require("./b"), require("./c"), require("./d")`,
+				"logical:game/b": `return 1`,
+				"logical:game/c": `return 2`,
+				"logical:game/d": `return 3`,
+			},
+			limit: 3,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			loader := &programTestLoader{sources: test.sources}
+			_, _, err := ember.LoadProgram(context.Background(), loader, ember.ProgramOptions{
+				Entrypoints: []ember.Entrypoint{{Name: "main", Module: ember.LogicalModule("game/a")}},
+				Limits:      ember.ProgramLimits{MaxModules: test.limit},
+			})
+			limitErr := assertProgramLimitKind(t, err, ember.LimitModules)
+			if limitErr.Limit != test.limit {
+				t.Fatalf("limit = %d, want %d", limitErr.Limit, test.limit)
+			}
+		})
+	}
+}
+
+func TestLoadProgramLimitsCountDuplicateModuleOnce(t *testing.T) {
+	loader := &programTestLoader{sources: map[string]string{
+		"logical:game/a":      `local left = require("./shared") local right = require("./shared") return left`,
+		"logical:game/shared": `return {value = 1}`,
+	}}
+	program, _, err := ember.LoadProgram(context.Background(), loader, ember.ProgramOptions{
+		Entrypoints: []ember.Entrypoint{{Name: "main", Module: ember.LogicalModule("game/a")}},
+		Limits:      ember.ProgramLimits{MaxModules: 2},
+	})
+	if err != nil || program == nil {
+		t.Fatalf("duplicate module load = (%v, %v), want success", program, err)
+	}
+	loader.mu.Lock()
+	sharedLoads := loader.loads["logical:game/shared"]
+	loader.mu.Unlock()
+	if sharedLoads != 1 {
+		t.Fatalf("shared module loads = %d, want 1", sharedLoads)
+	}
+	rootBytes := uint64(len(loader.sources["logical:game/a"]))
+	sharedBytes := uint64(len(loader.sources["logical:game/shared"]))
+	if _, _, err := ember.LoadProgram(context.Background(), loader, ember.ProgramOptions{
+		Entrypoints: []ember.Entrypoint{{Name: "main", Module: ember.LogicalModule("game/a")}},
+		Limits:      ember.ProgramLimits{MaxTotalSourceBytes: rootBytes + sharedBytes},
+	}); err != nil {
+		t.Fatalf("duplicate module total bytes = %v, want exact-boundary success", err)
+	}
+}
+
+func TestLoadProgramLimitsTotalSourceBytesAndCompileLimits(t *testing.T) {
+	tests := []struct {
+		name    string
+		sources map[string]string
+		limits  ember.ProgramLimits
+		kind    ember.LimitKind
+	}{
+		{
+			name: "total source bytes",
+			sources: map[string]string{
+				"logical:game/a": `return require("./b")`,
+				"logical:game/b": `return 123456789`,
+			},
+			limits: ember.ProgramLimits{MaxTotalSourceBytes: 30},
+			kind:   ember.LimitTotalSourceBytes,
+		},
+		{
+			name: "per source compile",
+			sources: map[string]string{
+				"logical:game/a": `return 123456789`,
+			},
+			limits: ember.ProgramLimits{Compile: ember.CompileLimits{MaxTokens: 1}},
+			kind:   ember.LimitTokens,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			loader := &programTestLoader{sources: test.sources}
+			_, _, err := ember.LoadProgram(context.Background(), loader, ember.ProgramOptions{
+				Entrypoints: []ember.Entrypoint{{Name: "main", Module: ember.LogicalModule("game/a")}},
+				Limits:      test.limits,
+			})
+			limitErr := assertProgramLimitKind(t, err, test.kind)
+			wantLimit := test.limits.MaxTotalSourceBytes
+			if test.kind == ember.LimitTokens {
+				wantLimit = test.limits.Compile.MaxTokens
+			}
+			if limitErr.Limit != wantLimit {
+				t.Fatalf("limit = %d, want %d", limitErr.Limit, wantLimit)
+			}
+		})
+	}
+}
+
+func TestLoadProgramParallelLimitsReturnTypedErrorWithoutLeakingWorkers(t *testing.T) {
+	loader := newParallelProgramTestLoader(map[string]string{
+		"logical:game/a": `return 1`,
+		"logical:game/b": `return 2`,
+		"logical:game/c": `return 3`,
+		"logical:game/d": `return 4`,
+	}, 4)
+	before := goruntime.NumGoroutine()
+	_, _, err := ember.LoadProgram(context.Background(), loader, ember.ProgramOptions{
+		Entrypoints: []ember.Entrypoint{
+			{Name: "a", Module: ember.LogicalModule("game/a")},
+			{Name: "b", Module: ember.LogicalModule("game/b")},
+			{Name: "c", Module: ember.LogicalModule("game/c")},
+			{Name: "d", Module: ember.LogicalModule("game/d")},
+		},
+		Parallelism: 4,
+		Limits:      ember.ProgramLimits{MaxModules: 1},
+	})
+	limitErr := assertProgramLimitKind(t, err, ember.LimitModules)
+	if limitErr.Limit != 1 {
+		t.Fatalf("limit = %d, want 1", limitErr.Limit)
+	}
+	for range 20 {
+		if got := goruntime.NumGoroutine(); got <= before+2 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("goroutines after parallel limit failure = %d, before %d", goruntime.NumGoroutine(), before)
+}
+
+func assertProgramLimitKind(t *testing.T, err error, want ember.LimitKind) *ember.LimitError {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("error = nil, want %s limit", want)
+	}
+	if !errors.Is(err, ember.ErrLimitExceeded) {
+		t.Fatalf("error = %v, want ErrLimitExceeded", err)
+	}
+	var limitErr *ember.LimitError
+	if !errors.As(err, &limitErr) {
+		t.Fatalf("error = %v, want *LimitError", err)
+	}
+	if limitErr.Kind != want {
+		t.Fatalf("limit kind = %q, want %q", limitErr.Kind, want)
+	}
+	return limitErr
+}
+
 func TestLoadProgramBuildsSharedGraphForEntrypoints(t *testing.T) {
 	loader := &programTestLoader{
 		sources: map[string]string{

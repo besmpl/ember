@@ -92,11 +92,15 @@ type moduleDiagnostic struct {
 }
 
 func buildModuleGraphWithStore(resolver moduleResolver, root moduleKey, store *sourceArtifactStore) (moduleGraph, error) {
+	return buildModuleGraphWithStoreAndLimits(resolver, root, store, CompileLimits{})
+}
+
+func buildModuleGraphWithStoreAndLimits(resolver moduleResolver, root moduleKey, store *sourceArtifactStore, limits CompileLimits) (moduleGraph, error) {
 	graph := moduleGraph{
 		Root:  root,
 		Nodes: make(map[moduleKey]moduleGraphNode),
 	}
-	if err := graph.visit(resolver, store, root, nil); err != nil {
+	if err := graph.visit(resolver, store, root, nil, limits); err != nil {
 		return moduleGraph{}, err
 	}
 	return graph, nil
@@ -139,7 +143,7 @@ func moduleDependencyKind(kind moduleKeyKind) ModuleDependencyKind {
 	}
 }
 
-func (g *moduleGraph) visit(resolver moduleResolver, store *sourceArtifactStore, key moduleKey, stack []moduleKey) error {
+func (g *moduleGraph) visit(resolver moduleResolver, store *sourceArtifactStore, key moduleKey, stack []moduleKey, limits CompileLimits) error {
 	if cyclePath, ok := moduleCyclePath(stack, key); ok {
 		return moduleCycleError{Path: cyclePath}
 	}
@@ -151,7 +155,7 @@ func (g *moduleGraph) visit(resolver moduleResolver, store *sourceArtifactStore,
 	if err != nil {
 		return err
 	}
-	artifact, err := store.parse(source.Source, source.Identity)
+	artifact, err := store.parseWithLimits(source.Source, source.Identity, limits)
 	if err != nil {
 		return fmt.Errorf("module resolver: parse %s: %w", key.String(), err)
 	}
@@ -181,7 +185,7 @@ func (g *moduleGraph) visit(resolver moduleResolver, store *sourceArtifactStore,
 
 	nextStack := append(append([]moduleKey(nil), stack...), key)
 	for _, required := range node.Requires {
-		if err := g.visit(resolver, store, required, nextStack); err != nil {
+		if err := g.visit(resolver, store, required, nextStack, limits); err != nil {
 			return err
 		}
 	}

@@ -19,6 +19,10 @@ const (
 	LimitNesting LimitKind = "nesting"
 	// LimitSyntaxNodes identifies the syntax node limit during compilation.
 	LimitSyntaxNodes LimitKind = "syntax-nodes"
+	// LimitModules identifies the program module-count limit.
+	LimitModules LimitKind = "modules"
+	// LimitTotalSourceBytes identifies the aggregate program source limit.
+	LimitTotalSourceBytes LimitKind = "total-source-bytes"
 )
 
 // ErrLimitExceeded reports that a configured execution or compilation
