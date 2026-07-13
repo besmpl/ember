@@ -426,7 +426,7 @@ func FuzzWordcodeRoundTrip(f *testing.F) {
 	})
 }
 
-func TestWordcodeCacheSitesUseSemanticOperandsAndPhysicalRank(t *testing.T) {
+func TestWordcodeCacheSitesUseSemanticOperandsAndPhysicalIDs(t *testing.T) {
 	code := []instruction{
 		{op: opSetStringField, a: 1, b: 1, c: 2},
 		{op: opGetStringField, a: 3, b: 4, c: 2},
@@ -466,7 +466,7 @@ func TestWordcodeCacheSitesUseSemanticOperandsAndPhysicalRank(t *testing.T) {
 	for index, entry := range decoded {
 		wantID, ok := cacheIndex.cacheIDAt(entry.wordPC)
 		if !ok || wantID != uint32(index) {
-			t.Fatalf("cache site %d rank id = %d/%t, want %d", index, wantID, ok, index)
+			t.Fatalf("cache site %d ID = %d/%t, want %d", index, wantID, ok, index)
 		}
 		raw := words[entry.wordPC]
 		gotPrimary := [3]uint32{(raw >> 8) & 0xff, (raw >> 16) & 0xff, (raw >> 24) & 0xff}
@@ -502,15 +502,14 @@ func TestWordcodeRejectsMalformedCacheIndex(t *testing.T) {
 	}
 	proto := &Proto{registers: 4, cacheSiteCount: 2, cacheIndex: cacheIndex}
 	for name, mutate := range map[string]func(*wordcodeCacheIndex){
-		"rank length":      func(index *wordcodeCacheIndex) { index.rankPrefix = index.rankPrefix[:1] },
-		"primary spoof":    func(index *wordcodeCacheIndex) { index.primaryBits[0] &^= 1 },
+		"sidecar length":   func(index *wordcodeCacheIndex) { index.sidecar = index.sidecar[:1] },
+		"missing primary":  func(index *wordcodeCacheIndex) { index.sidecar[0] = 0 },
 		"dynamic sentinel": func(index *wordcodeCacheIndex) { index.constants[0] = -2 },
 		"dynamic constant": func(index *wordcodeCacheIndex) { index.constants[0] = 0 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			bad := *cacheIndex
-			bad.primaryBits = append([]uint64(nil), cacheIndex.primaryBits...)
-			bad.rankPrefix = append([]uint32(nil), cacheIndex.rankPrefix...)
+			bad.sidecar = append([]uint32(nil), cacheIndex.sidecar...)
 			bad.constants = append([]int(nil), cacheIndex.constants...)
 			mutate(&bad)
 			candidate := *proto
@@ -539,7 +538,8 @@ func TestWordcodeRejectsCacheMarkOnNonCachePrimary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	index.primaryBits[0] = 1 // preserve one marked site, but move it from GET_INDEX to MOVE
+	index.sidecar[0] = 1 // move the cache mark from GET_INDEX to MOVE
+	index.sidecar[1] = 0
 	proto := &Proto{registers: 3, cacheSiteCount: 1, cacheIndex: index}
 	if err := verifyWordcodeForProto(proto, words); err == nil || !strings.Contains(err.Error(), "cache mark") {
 		t.Fatalf("accepted cache mark on non-cache primary: %v", err)
@@ -616,7 +616,7 @@ func TestWordcodeCacheOpsStaySinglePrimaryWord(t *testing.T) {
 	}
 }
 
-func TestWordcodeCacheIndexRanksAcross64WordBlocks(t *testing.T) {
+func TestWordcodeCacheIndexIDsAcross64WordBlocks(t *testing.T) {
 	code := make([]instruction, 0, 70)
 	code = append(code, instruction{op: opGetIndex, a: 0, b: 1, c: 2})
 	for len(code) < 65 {
@@ -625,24 +625,21 @@ func TestWordcodeCacheIndexRanksAcross64WordBlocks(t *testing.T) {
 	code = append(code, instruction{op: opSetIndex, a: 0, b: 1, c: 2})
 	words, err := encodeWordcode(code, 3, 0)
 	if err != nil {
-		t.Fatalf("encode rank fixture: %v", err)
+		t.Fatalf("encode cache fixture: %v", err)
 	}
 	boundaries, err := wordcodeBoundaries(code)
 	if err != nil {
-		t.Fatalf("rank boundaries: %v", err)
+		t.Fatalf("cache boundaries: %v", err)
 	}
 	index, err := buildWordcodeCacheIndex(code, boundaries, len(words))
 	if err != nil {
-		t.Fatalf("build rank index: %v", err)
+		t.Fatalf("build cache index: %v", err)
 	}
 	if got, ok := index.cacheIDAt(boundaries[0]); !ok || got != 0 {
-		t.Fatalf("first cache rank = %d/%t, want 0", got, ok)
+		t.Fatalf("first cache ID = %d/%t, want 0", got, ok)
 	}
 	if got, ok := index.cacheIDAt(boundaries[65]); !ok || got != 1 {
-		t.Fatalf("second-block cache rank = %d/%t, want 1", got, ok)
-	}
-	if got := len(index.rankPrefix); got != 3 {
-		t.Fatalf("rank prefix entries = %d, want three block boundaries", got)
+		t.Fatalf("second cache ID = %d/%t, want 1", got, ok)
 	}
 }
 
@@ -664,14 +661,14 @@ func TestWordcodeCacheIndexIgnoresVariableAuxLowByteSpoof(t *testing.T) {
 		t.Fatalf("build AUX spoof index: %v", err)
 	}
 	// The non-cache LOAD_CONST AUX word is deliberately given a low byte that
-	// looks like a cache opcode. Rank/select still marks only the real cache
-	// primary at its physical PC.
+	// looks like a cache opcode. The physical sidecar still marks only the real
+	// cache primary.
 	words[boundaries[0]+1] = wordcodeWord(opGetIndex)
 	if _, ok := index.cacheIDAt(boundaries[0] + 1); ok {
 		t.Fatal("variable AUX word was exposed as a cache primary")
 	}
 	if got, ok := index.cacheIDAt(boundaries[1]); !ok || got != 0 {
-		t.Fatalf("cache rank after spoof = %d/%t, want 0", got, ok)
+		t.Fatalf("cache ID after spoof = %d/%t, want 0", got, ok)
 	}
 	if _, err := decodeWordcode(words, index); err != nil {
 		t.Fatalf("variable AUX low-byte spoof rejected: %v", err)

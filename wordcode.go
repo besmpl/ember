@@ -2,7 +2,6 @@ package ember
 
 import (
 	"fmt"
-	"math/bits"
 	"strings"
 )
 
@@ -358,25 +357,21 @@ func wordcodeCacheSiteCount(code []instruction) int {
 	return count
 }
 
-const (
-	wordcodeCacheRankBlockWords  = 64
-	wordcodeCacheDynamicConstant = -1
-)
+const wordcodeCacheDynamicConstant = -1
 
 // wordcodeCacheIndex is the immutable physical-PC index for cacheable
-// instructions in one Proto. primaryBits marks cache-primary words, while
-// rankPrefix stores the number of marked words before each 64-word block.
-// constants is ordered by cache id and stores semantic constant descriptors;
+// instructions in one Proto. sidecar stores cacheID+1 at each cache-primary
+// word, leaving zero as the no-site marker. constants is ordered by cache id
+// and stores semantic constant descriptors;
 // wordcodeCacheDynamicConstant is the sentinel used by register-only index
 // operations (SET_INDEX and GET_INDEX).
 //
 // The index is published with Proto and never mutated after finalization. VM
 // function instances own the mutable cache pointer array separately.
 type wordcodeCacheIndex struct {
-	primaryBits []uint64
-	rankPrefix  []uint32
-	constants   []int
-	wordCount   int
+	sidecar   []uint32
+	constants []int
+	wordCount int
 }
 
 func wordcodeCacheDescriptor(ins instruction) int {
@@ -402,11 +397,9 @@ func buildWordcodeCacheIndex(code []instruction, boundaries []int, wordCount int
 	if wordCount < 0 {
 		return nil, fmt.Errorf("negative cache word count %d", wordCount)
 	}
-	blockCount := (wordCount + wordcodeCacheRankBlockWords - 1) / wordcodeCacheRankBlockWords
 	index := &wordcodeCacheIndex{
-		primaryBits: make([]uint64, blockCount),
-		rankPrefix:  make([]uint32, blockCount+1),
-		wordCount:   wordCount,
+		sidecar:   make([]uint32, wordCount),
+		wordCount: wordCount,
 	}
 	index.constants = make([]int, 0, wordcodeCacheSiteCount(code))
 	for logical, ins := range code {
@@ -420,19 +413,14 @@ func buildWordcodeCacheIndex(code []instruction, boundaries []int, wordCount int
 		if wordPC < 0 || wordPC >= wordCount {
 			return nil, fmt.Errorf("cache logical pc %d maps to physical pc %d outside wordcode length %d", logical, wordPC, wordCount)
 		}
-		block := wordPC / wordcodeCacheRankBlockWords
-		bit := uint(wordPC % wordcodeCacheRankBlockWords)
-		index.primaryBits[block] |= uint64(1) << bit
+		if uint64(len(index.constants)) >= uint64(^uint32(0)) {
+			return nil, fmt.Errorf("cache site count %d exceeds direct sidecar marker range", len(index.constants))
+		}
+		if index.sidecar[wordPC] != 0 {
+			return nil, fmt.Errorf("cache logical pc %d maps to duplicate physical pc %d", logical, wordPC)
+		}
+		index.sidecar[wordPC] = uint32(len(index.constants) + 1)
 		index.constants = append(index.constants, wordcodeCacheDescriptor(ins))
-	}
-	var count uint32
-	for block, primary := range index.primaryBits {
-		index.rankPrefix[block] = count
-		count += uint32(bits.OnesCount64(primary))
-	}
-	index.rankPrefix[len(index.primaryBits)] = count
-	if int(count) != len(index.constants) {
-		return nil, fmt.Errorf("cache index has %d primary bits and %d descriptors", count, len(index.constants))
 	}
 	return index, nil
 }
@@ -447,39 +435,27 @@ func (index *wordcodeCacheIndex) validate(wordCount, expectedSites int) error {
 	if index.wordCount != wordCount {
 		return fmt.Errorf("cache index word count %d, want %d", index.wordCount, wordCount)
 	}
-	blockCount := (wordCount + wordcodeCacheRankBlockWords - 1) / wordcodeCacheRankBlockWords
-	if len(index.primaryBits) != blockCount {
-		return fmt.Errorf("cache index primary bitset has %d blocks, want %d", len(index.primaryBits), blockCount)
+	if len(index.sidecar) != wordCount {
+		return fmt.Errorf("cache index direct sidecar has %d entries, want %d", len(index.sidecar), wordCount)
 	}
-	if len(index.rankPrefix) != blockCount+1 {
-		return fmt.Errorf("cache index rank prefix has %d entries, want %d", len(index.rankPrefix), blockCount+1)
-	}
-	if len(index.rankPrefix) == 0 || index.rankPrefix[0] != 0 {
-		return fmt.Errorf("cache index rank prefix must start at zero")
-	}
-	if wordCount > 0 && len(index.primaryBits) > 0 {
-		used := uint(wordCount % wordcodeCacheRankBlockWords)
-		if used != 0 {
-			invalid := index.primaryBits[len(index.primaryBits)-1] & ^(uint64(1)<<used - 1)
-			if invalid != 0 {
-				return fmt.Errorf("cache index marks physical words beyond wordcode length")
+	markerCount := 0
+	for wordPC, marker := range index.sidecar {
+		if marker > uint32(len(index.constants)) {
+			return fmt.Errorf("cache index direct marker at physical pc %d is %d, want at most %d", wordPC, marker, len(index.constants))
+		}
+		if marker != 0 {
+			want := uint32(markerCount + 1)
+			if marker != want {
+				return fmt.Errorf("cache index direct marker at physical pc %d is %d, want %d", wordPC, marker, want)
 			}
+			markerCount++
 		}
 	}
-	for block, primary := range index.primaryBits {
-		if index.rankPrefix[block] > index.rankPrefix[block+1] {
-			return fmt.Errorf("cache index rank prefix decreases at block %d", block)
-		}
-		if want := index.rankPrefix[block] + uint32(bits.OnesCount64(primary)); want != index.rankPrefix[block+1] {
-			return fmt.Errorf("cache index rank prefix at block %d is %d, want %d", block, index.rankPrefix[block+1], want)
-		}
+	if markerCount != len(index.constants) {
+		return fmt.Errorf("cache index direct sidecar contains %d markers, want %d descriptors", markerCount, len(index.constants))
 	}
-	count := index.rankPrefix[len(index.rankPrefix)-1]
-	if int(count) != len(index.constants) {
-		return fmt.Errorf("cache index has %d descriptors, want %d", len(index.constants), count)
-	}
-	if expectedSites >= 0 && int(count) != expectedSites {
-		return fmt.Errorf("cache index contains %d cache sites, want %d", count, expectedSites)
+	if expectedSites >= 0 && markerCount != expectedSites {
+		return fmt.Errorf("cache index direct sidecar contains %d cache sites, want %d", markerCount, expectedSites)
 	}
 	for id, descriptor := range index.constants {
 		if descriptor < wordcodeCacheDynamicConstant {
@@ -493,9 +469,7 @@ func (index *wordcodeCacheIndex) marksWord(wordPC int) bool {
 	if index == nil || wordPC < 0 || wordPC >= index.wordCount {
 		return false
 	}
-	block := wordPC / wordcodeCacheRankBlockWords
-	bit := uint(wordPC % wordcodeCacheRankBlockWords)
-	return block < len(index.primaryBits) && index.primaryBits[block]&(uint64(1)<<bit) != 0
+	return wordPC < len(index.sidecar) && index.sidecar[wordPC] != 0
 }
 
 func (index *wordcodeCacheIndex) validateWords(words []wordcodeWord, expectedSites, constantCount int) error {
@@ -548,18 +522,10 @@ func (index *wordcodeCacheIndex) cacheIDAt(wordPC int) (uint32, bool) {
 	if index == nil || wordPC < 0 || wordPC >= index.wordCount {
 		return 0, false
 	}
-	block := wordPC / wordcodeCacheRankBlockWords
-	bit := uint(wordPC % wordcodeCacheRankBlockWords)
-	if block < 0 || block >= len(index.primaryBits) || block >= len(index.rankPrefix) || index.primaryBits[block]&(uint64(1)<<bit) == 0 {
+	if wordPC >= len(index.sidecar) || index.sidecar[wordPC] == 0 {
 		return 0, false
 	}
-	prior := index.primaryBits[block]
-	if bit != 0 {
-		prior &= (uint64(1) << bit) - 1
-	} else {
-		prior = 0
-	}
-	return index.rankPrefix[block] + uint32(bits.OnesCount64(prior)), true
+	return index.sidecar[wordPC] - 1, true
 }
 
 func (index *wordcodeCacheIndex) descriptorAt(wordPC int) (int, bool) {
