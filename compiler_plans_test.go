@@ -6,12 +6,11 @@ import (
 )
 
 func TestValueListPlanComputesItemsWithoutMaterializingSlice(t *testing.T) {
-	prog, err := (&parser{source: "return 1, f()"}).parse()
+	tree, err := (&parser{source: "return 1, f()"}).parse()
 	if err != nil {
 		t.Fatalf("parse returned error: %v", err)
 	}
-	tree := newSyntaxTree(prog)
-	values := prog.statements[0].ret.values
+	values := tree.root.statements[0].ret.values
 	plan := fixedValueListPlan(tree, values, 4)
 	want := []valuePlan{
 		{kind: valuePlanSingle, source: 0, resultCount: 1},
@@ -52,7 +51,7 @@ func TestClosurePlanViewsMethodSelfWithoutCopyingParams(t *testing.T) {
 }
 
 func TestCollectRequireRequestsWalksSyntaxDirectly(t *testing.T) {
-	prog := parseSourceForBindTest(t, `
+	tree := parseSourceForBindTest(t, `
 local inventory = require("./inventory")
 require("../shared/register")
 local hooks = {
@@ -63,7 +62,7 @@ local hooks = {
 return require("./final")
 `)
 	want := []string{"./inventory", "../shared/register", "host:clock", "./final"}
-	if got := collectRequireRequests(prog); !reflect.DeepEqual(got, want) {
+	if got := collectRequireRequestsTree(tree); !reflect.DeepEqual(got, want) {
 		t.Fatalf("requests = %#v, want %#v", got, want)
 	}
 }

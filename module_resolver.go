@@ -255,29 +255,29 @@ func moduleReturnLocalReferenceTree(tree syntaxTree) (string, string) {
 		if !ok {
 			return "", ""
 		}
-		selectors := tree.termSelectors(&value)
-		name := tree.termName(&value)
+		selectors, _ := tree.termSelectors(value)
+		name := tree.termName(value)
 		if len(selectors) == 0 {
 			return name, ""
 		}
-		if len(selectors) == 1 && tree.selectorField(&selectors[0]) != "" {
-			return name, tree.selectorField(&selectors[0])
+		if len(selectors) == 1 && tree.termSelectorField(selectors[0]) != "" {
+			return name, tree.termSelectorField(selectors[0])
 		}
 		return "", ""
 	}
 	return "", ""
 }
 
-func localFieldReference(tree syntaxTree, expr expression) (string, string, bool) {
+func localFieldReference(tree syntaxTree, expr expressionID) (string, string, bool) {
 	value, ok := expressionSingleTerm(tree, expr)
-	if !ok || tree.termName(&value) == "" {
+	if !ok || tree.termName(value) == "" {
 		return "", "", false
 	}
-	selectors := tree.termSelectors(&value)
-	if len(selectors) != 1 || tree.selectorField(&selectors[0]) == "" {
+	selectors, _ := tree.termSelectors(value)
+	if len(selectors) != 1 || tree.termSelectorField(selectors[0]) == "" {
 		return "", "", false
 	}
-	return tree.termName(&value), tree.selectorField(&selectors[0]), true
+	return tree.termName(value), tree.termSelectorField(selectors[0]), true
 }
 
 func moduleCyclePath(stack []moduleKey, key moduleKey) ([]string, bool) {
@@ -295,7 +295,7 @@ func moduleCyclePath(stack []moduleKey, key moduleKey) ([]string, bool) {
 	return nil, false
 }
 
-func collectExpressionsRequireRequestsTree(tree syntaxTree, expressions []expression, requests *[]string) {
+func collectExpressionsRequireRequestsTree(tree syntaxTree, expressions []expressionID, requests *[]string) {
 	for _, expr := range expressions {
 		collectExpressionRequireRequests(tree, expr, requests)
 	}
@@ -320,22 +320,22 @@ func collectStatementsRequireRequests(tree syntaxTree, statements []statement, r
 		case syntaxStatementAssign:
 			collectExpressionsRequireRequestsTree(tree, tree.assignmentValues(tree.assignment(stmt)), requests)
 		case syntaxStatementCall:
-			collectTermRequireRequests(tree, *tree.call(stmt), requests)
+			collectTermRequireRequests(tree, tree.call(stmt), requests)
 		case syntaxStatementIf:
 			ifStmt := tree.ifStatement(stmt)
-			collectExpressionRequireRequests(tree, *tree.ifCondition(ifStmt), requests)
+			collectExpressionRequireRequests(tree, tree.ifCondition(ifStmt), requests)
 			collectStatementsRequireRequests(tree, tree.ifThenStatements(ifStmt), requests)
 			collectStatementsRequireRequests(tree, tree.ifElseStatements(ifStmt), requests)
 		case syntaxStatementWhile:
 			while := tree.whileStatement(stmt)
-			collectExpressionRequireRequests(tree, *tree.whileCondition(while), requests)
+			collectExpressionRequireRequests(tree, tree.whileCondition(while), requests)
 			collectStatementsRequireRequests(tree, tree.whileStatements(while), requests)
 		case syntaxStatementFor:
 			loop := tree.forStatement(stmt)
-			collectExpressionRequireRequests(tree, *tree.numericForStart(loop), requests)
-			collectExpressionRequireRequests(tree, *tree.numericForLimit(loop), requests)
-			if step := tree.numericForStep(loop); step != nil {
-				collectExpressionRequireRequests(tree, *step, requests)
+			collectExpressionRequireRequests(tree, tree.numericForStart(loop), requests)
+			collectExpressionRequireRequests(tree, tree.numericForLimit(loop), requests)
+			if step := tree.numericForStep(loop); step != 0 {
+				collectExpressionRequireRequests(tree, step, requests)
 			}
 			collectStatementsRequireRequests(tree, tree.numericForStatements(loop), requests)
 		case syntaxStatementGenericFor:
@@ -345,7 +345,7 @@ func collectStatementsRequireRequests(tree syntaxTree, statements []statement, r
 		case syntaxStatementRepeat:
 			loop := tree.repeatStatement(stmt)
 			collectStatementsRequireRequests(tree, tree.repeatStatements(loop), requests)
-			collectExpressionRequireRequests(tree, *tree.repeatCondition(loop), requests)
+			collectExpressionRequireRequests(tree, tree.repeatCondition(loop), requests)
 		case syntaxStatementBlock:
 			collectStatementsRequireRequests(tree, tree.blockStatements(tree.blockStatement(stmt)), requests)
 		case syntaxStatementReturn:
@@ -354,7 +354,7 @@ func collectStatementsRequireRequests(tree syntaxTree, statements []statement, r
 	}
 }
 
-func collectExpressionRequireRequests(tree syntaxTree, expr expression, requests *[]string) {
+func collectExpressionRequireRequests(tree syntaxTree, expr expressionID, requests *[]string) {
 	if call, ok := expressionSingleCall(tree, expr); ok {
 		collectCallRequireRequest(tree, call, requests)
 		return
@@ -364,74 +364,72 @@ func collectExpressionRequireRequests(tree syntaxTree, expr expression, requests
 	}
 }
 
-func collectTermRequireRequests(tree syntaxTree, value term, requests *[]string) {
-	if call := tree.termCall(&value); call != nil {
-		collectCallRequireRequest(tree, *call, requests)
+func collectTermRequireRequests(tree syntaxTree, value termID, requests *[]string) {
+	if call, ok := tree.termCall(value); ok {
+		collectCallRequireRequest(tree, call, requests)
 	}
-	if table := tree.termTable(&value); table != nil {
-		for i := range tree.tableFields(table) {
-			field := &tree.tableFields(table)[i]
-			if key := tree.tableFieldKey(field); key != nil {
-				collectExpressionRequireRequests(tree, *key, requests)
+	if table, ok := tree.termTable(value); ok {
+		fields, _ := tree.tableFields(table)
+		for _, field := range fields {
+			if key := tree.tableFieldKey(field); key != 0 {
+				collectExpressionRequireRequests(tree, key, requests)
 			}
-			collectExpressionRequireRequests(tree, *tree.tableFieldValue(field), requests)
+			collectExpressionRequireRequests(tree, tree.tableFieldValue(field), requests)
 		}
 	}
-	if function := tree.termFunction(&value); function != nil {
+	if function, ok := tree.termFunction(value); ok {
 		collectStatementsRequireRequests(tree, tree.functionExpressionStatements(function), requests)
 	}
-	if ifExpr := tree.termIf(&value); ifExpr != nil {
-		collectExpressionRequireRequests(tree, *tree.ifExpressionCondition(ifExpr), requests)
-		collectExpressionRequireRequests(tree, *tree.ifExpressionThen(ifExpr), requests)
-		collectExpressionRequireRequests(tree, *tree.ifExpressionElse(ifExpr), requests)
+	if ifExpr, ok := tree.termIf(value); ok {
+		collectExpressionRequireRequests(tree, tree.ifExpressionCondition(ifExpr), requests)
+		collectExpressionRequireRequests(tree, tree.ifExpressionThen(ifExpr), requests)
+		collectExpressionRequireRequests(tree, tree.ifExpressionElse(ifExpr), requests)
 	}
-	if group := tree.termGroup(&value); group != nil {
-		collectExpressionRequireRequests(tree, *group, requests)
+	if group, ok := tree.termGroup(value); ok {
+		collectExpressionRequireRequests(tree, group, requests)
 	}
-	if unary := tree.termUnaryNot(&value); unary != nil {
-		collectTermRequireRequests(tree, *unary, requests)
+	if kind := tree.termKind(value); kind == syntaxTermUnaryNot || kind == syntaxTermUnaryMinus || kind == syntaxTermUnaryLength {
+		if unary, ok := tree.termChild(value); ok {
+			collectTermRequireRequests(tree, unary, requests)
+		}
 	}
-	if unary := tree.termUnaryMinus(&value); unary != nil {
-		collectTermRequireRequests(tree, *unary, requests)
+	if power, ok := tree.termPower(value); ok {
+		collectTermRequireRequests(tree, tree.powerBase(power), requests)
+		collectTermRequireRequests(tree, tree.powerExponent(power), requests)
 	}
-	if unary := tree.termUnaryLength(&value); unary != nil {
-		collectTermRequireRequests(tree, *unary, requests)
-	}
-	if power := tree.termPower(&value); power != nil {
-		collectTermRequireRequests(tree, *tree.powerBase(power), requests)
-		collectTermRequireRequests(tree, *tree.powerExponent(power), requests)
-	}
-	for i := range tree.termSelectors(&value) {
-		selector := &tree.termSelectors(&value)[i]
-		if index := tree.selectorIndex(selector); index != nil {
-			collectExpressionRequireRequests(tree, *index, requests)
+	selectors, _ := tree.termSelectors(value)
+	for _, selector := range selectors {
+		if index := tree.termSelectorIndex(selector); index != 0 {
+			collectExpressionRequireRequests(tree, index, requests)
 		}
 	}
 }
 
-func collectCallRequireRequest(tree syntaxTree, call callExpression, requests *[]string) {
+func collectCallRequireRequest(tree syntaxTree, call arenaCallID, requests *[]string) {
 	if request, ok := requireCallRequest(tree, call); ok {
 		*requests = append(*requests, request)
 	}
-	collectTermRequireRequests(tree, *tree.callTarget(&call), requests)
-	if receiver := tree.callReceiver(&call); receiver != nil {
-		collectTermRequireRequests(tree, *receiver, requests)
+	collectTermRequireRequests(tree, tree.callTarget(call), requests)
+	if receiver := tree.callReceiver(call); receiver != 0 {
 	}
-	collectExpressionsRequireRequestsTree(tree, tree.callArgs(&call), requests)
+	args, _ := tree.callArgs(call)
+	collectExpressionsRequireRequestsTree(tree, args, requests)
 }
 
-func requireCallRequest(tree syntaxTree, call callExpression) (string, bool) {
-	target := tree.callTarget(&call)
-	if tree.termName(target) != "require" || len(tree.termSelectors(target)) != 0 || len(tree.callArgs(&call)) == 0 {
+func requireCallRequest(tree syntaxTree, call arenaCallID) (string, bool) {
+	target := tree.callTarget(call)
+	selectors, _ := tree.termSelectors(target)
+	args, _ := tree.callArgs(call)
+	if tree.termName(target) != "require" || len(selectors) != 0 || len(args) == 0 {
 		return "", false
 	}
-	return stringLiteralExpression(tree, tree.callArgs(&call)[0])
+	return stringLiteralExpression(tree, args[0])
 }
 
-func stringLiteralExpression(tree syntaxTree, expr expression) (string, bool) {
+func stringLiteralExpression(tree syntaxTree, expr expressionID) (string, bool) {
 	value, ok := expressionSingleTerm(tree, expr)
-	lit := tree.termLiteral(&value)
-	if !ok || lit == nil {
+	lit, litOK := tree.termLiteral(value)
+	if !ok || !litOK {
 		return "", false
 	}
 	return lit.String()

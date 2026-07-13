@@ -147,7 +147,7 @@ func (a *syntaxIDAssigner) statement(stmt *statement) {
 		forStmt.nameID = a.node()
 		a.expression(a.tree.numericForStart(forStmt))
 		a.expression(a.tree.numericForLimit(forStmt))
-		if step := a.tree.numericForStep(forStmt); step != nil {
+		if step := a.tree.numericForStep(forStmt); step != 0 {
 			a.expression(step)
 		}
 		a.statements(a.tree.numericForStatements(forStmt))
@@ -172,115 +172,158 @@ func (a *syntaxIDAssigner) statement(stmt *statement) {
 	}
 }
 
-func (a *syntaxIDAssigner) expressions(expressions []expression) {
-	for i := range expressions {
-		if a.err != nil {
-			return
-		}
-		a.expression(&expressions[i])
+func (a *syntaxIDAssigner) expressions(values []expressionID) {
+	for _, value := range values {
+		a.expression(value)
 	}
 }
-
-func (a *syntaxIDAssigner) expression(expr *expression) {
-	if expr == nil {
+func (a *syntaxIDAssigner) expression(id expressionID) {
+	if id == 0 || a.err != nil {
 		return
 	}
-	expr.id = a.node()
-	if a.err != nil {
+	node, ok := a.tree.arenaExpression(id)
+	if !ok {
 		return
 	}
-	for i := range a.tree.expressionTerms(expr) {
-		and := &a.tree.expressionTerms(expr)[i]
-		for j := range a.tree.andTerms(and) {
-			comparison := &a.tree.andTerms(and)[j]
-			a.concat(a.tree.comparisonLeftRef(comparison))
-			if right := a.tree.comparisonRight(comparison); right != nil {
-				a.concat(right)
+	node.id = a.node()
+	a.tree.arena.expressions[id-1] = node
+	terms, ok := a.tree.arenaExpressionTerms(node.terms)
+	if !ok {
+		return
+	}
+	for _, andID := range terms {
+		a.and(andID)
+	}
+}
+func (a *syntaxIDAssigner) and(id andExpressionID) {
+	node, ok := a.tree.arenaAnd(id)
+	if !ok {
+		return
+	}
+	values, ok := a.tree.arenaAndTerms(node.terms)
+	if !ok {
+		return
+	}
+	for _, value := range values {
+		a.comparison(value)
+	}
+}
+func (a *syntaxIDAssigner) comparison(id comparisonExpressionID) {
+	node, ok := a.tree.arenaComparison(id)
+	if !ok {
+		return
+	}
+	a.concat(node.left)
+	a.concat(node.right)
+}
+func (a *syntaxIDAssigner) concat(id concatExpressionID) {
+	node, ok := a.tree.arenaConcat(id)
+	if !ok {
+		return
+	}
+	a.additive(node.first)
+	values, ok := a.tree.arenaConcatRest(node.rest)
+	if !ok {
+		return
+	}
+	for _, value := range values {
+		a.additive(value)
+	}
+}
+func (a *syntaxIDAssigner) additive(id additiveExpressionID) {
+	node, ok := a.tree.arenaAdditive(id)
+	if !ok {
+		return
+	}
+	a.multiplicative(node.first)
+	values, ok := a.tree.arenaAdditiveRest(node.rest)
+	if !ok {
+		return
+	}
+	for _, value := range values {
+		a.multiplicative(value.value)
+	}
+}
+func (a *syntaxIDAssigner) multiplicative(id multiplicativeExpressionID) {
+	node, ok := a.tree.arenaMultiplicative(id)
+	if !ok {
+		return
+	}
+	a.term(node.first)
+	values, ok := a.tree.arenaMultiplicativeRest(node.rest)
+	if !ok {
+		return
+	}
+	for _, value := range values {
+		a.term(value.value)
+	}
+}
+func (a *syntaxIDAssigner) term(id termID) {
+	if id == 0 || a.err != nil {
+		return
+	}
+	node, ok := a.tree.arenaTerm(id)
+	if !ok {
+		return
+	}
+	node.id = a.node()
+	a.tree.arena.terms[id-1] = node
+	switch node.kind {
+	case termKindPower:
+		power, ok := a.tree.arena.power(arenaPowerID(node.payload))
+		if ok {
+			a.term(power.base)
+			a.term(power.exponent)
+		}
+	case termKindTable:
+		table, ok := a.tree.arena.table(arenaTableID(node.payload))
+		if ok {
+			fields, _ := a.tree.arena.tableFieldsIDs(table.fields)
+			for _, field := range fields {
+				a.expression(field.key)
+				a.expression(field.value)
 			}
 		}
+	case termKindFunction:
+		fn, ok := a.tree.arena.function(arenaFunctionID(node.payload))
+		if ok {
+			fn.id, fn.functionID = a.node(), a.function()
+			fn.typeParamID, fn.typePackID, fn.paramID = a.names(fn.typeParams), a.names(fn.typePacks), a.names(fn.params)
+			a.types(fn.paramAnnotations)
+			a.typeExpression(fn.variadicAnnotation)
+			a.typeExpression(fn.returnAnnotation)
+			a.statements(fn.statements)
+			a.tree.arena.functions[arenaFunctionID(node.payload)-1] = fn
+		}
+	case termKindIf:
+		value, ok := a.tree.arena.ifExpression(arenaIfExpressionID(node.payload))
+		if ok {
+			a.expression(value.condition)
+			a.expression(value.thenValue)
+			a.expression(value.elseValue)
+		}
+	case termKindCall:
+		call, ok := a.tree.arena.call(arenaCallID(node.payload))
+		if ok {
+			a.term(call.target)
+			a.term(call.receiver)
+			a.types(call.typeArgs)
+			args, _ := a.tree.arena.callArgIDs(call.args)
+			a.expressions(args)
+		}
+	case termKindUnaryNot, termKindUnaryMinus, termKindUnaryLength:
+		a.term(termID(node.payload))
+	case termKindGroup:
+		a.expression(expressionID(node.payload))
 	}
-}
-
-func (a *syntaxIDAssigner) concat(expr *concatExpression) {
-	if a.err != nil {
-		return
-	}
-	a.additive(a.tree.concatFirstRef(expr))
-	for i := range a.tree.concatRest(expr) {
-		a.additive(&a.tree.concatRest(expr)[i])
-	}
-}
-
-func (a *syntaxIDAssigner) additive(expr *additiveExpression) {
-	if a.err != nil {
-		return
-	}
-	a.multiplicative(a.tree.additiveFirstRef(expr))
-	for i := range a.tree.additiveRest(expr) {
-		a.multiplicative(a.tree.additivePartValue(&a.tree.additiveRest(expr)[i]))
-	}
-}
-
-func (a *syntaxIDAssigner) multiplicative(expr *multiplicativeExpression) {
-	if a.err != nil {
-		return
-	}
-	a.term(a.tree.multiplicativeFirstRef(expr))
-	for i := range a.tree.multiplicativeRest(expr) {
-		a.term(a.tree.multiplicativePartValue(&a.tree.multiplicativeRest(expr)[i]))
-	}
-}
-
-func (a *syntaxIDAssigner) term(value *term) {
-	if value == nil {
-		return
-	}
-	value.id = a.node()
-	if a.err != nil {
-		return
-	}
-	if power := a.tree.termPower(value); power != nil {
-		a.term(a.tree.powerBase(power))
-		a.term(a.tree.powerExponent(power))
-	}
-	if table := a.tree.termTable(value); table != nil {
-		for i := range a.tree.tableFields(table) {
-			field := &a.tree.tableFields(table)[i]
-			if key := a.tree.tableFieldKey(field); key != nil {
-				a.expression(key)
-			}
-			a.expression(a.tree.tableFieldValue(field))
+	if node.castType != 0 {
+		if cast, ok := a.tree.arena.cast(uint32(node.castType)); ok {
+			a.typeExpression(cast)
 		}
 	}
-	if fn := a.tree.termFunction(value); fn != nil {
-		fn.id, fn.functionID = a.node(), a.function()
-		fn.typeParamID, fn.typePackID = a.names(a.tree.functionExpressionTypeParams(fn)), a.names(a.tree.functionExpressionTypePacks(fn))
-		fn.paramID = a.names(a.tree.functionExpressionParams(fn))
-		a.types(a.tree.functionExpressionParamAnnotations(fn))
-		a.typeExpression(a.tree.functionExpressionVariadicAnnotation(fn))
-		a.typeExpression(a.tree.functionExpressionReturnAnnotation(fn))
-		a.statements(a.tree.functionExpressionStatements(fn))
-	}
-	if ifExpr := a.tree.termIf(value); ifExpr != nil {
-		a.expression(a.tree.ifExpressionCondition(ifExpr))
-		a.expression(a.tree.ifExpressionThen(ifExpr))
-		a.expression(a.tree.ifExpressionElse(ifExpr))
-	}
-	if call := a.tree.termCall(value); call != nil {
-		a.term(a.tree.callTarget(call))
-		a.term(a.tree.callReceiver(call))
-		a.types(a.tree.callTypeArgs(call))
-		a.expressions(a.tree.callArgs(call))
-	}
-	a.term(a.tree.termUnaryNot(value))
-	a.term(a.tree.termUnaryMinus(value))
-	a.term(a.tree.termUnaryLength(value))
-	a.expression(a.tree.termGroup(value))
-	a.typeExpression(a.tree.termCast(value))
-	for i := range a.tree.termSelectors(value) {
-		if index := a.tree.selectorIndex(&a.tree.termSelectors(value)[i]); index != nil {
-			a.expression(index)
-		}
+	selectors, _ := a.tree.arena.selectorIDs(node.selectors)
+	for _, selector := range selectors {
+		a.expression(selector.index)
 	}
 }
 
@@ -293,7 +336,7 @@ func (a *syntaxIDAssigner) assignTarget(target *assignTarget) {
 		return
 	}
 	for i := range a.tree.assignTargetSelectors(target) {
-		if index := a.tree.selectorIndex(&a.tree.assignTargetSelectors(target)[i]); index != nil {
+		if index := a.tree.selectorIndex(&a.tree.assignTargetSelectors(target)[i]); index != 0 {
 			a.expression(index)
 		}
 	}
@@ -329,7 +372,7 @@ func (a *syntaxIDAssigner) typeExpression(value *typeExpression) {
 		a.typeExpression(a.tree.typeParamValue(&a.tree.typeParams(value)[i]))
 	}
 	a.typeExpression(a.tree.typeReturn(value))
-	if expr := a.tree.typeExpression(value); expr != nil {
+	if expr := a.tree.typeExpression(value); expr != 0 {
 		a.expression(expr)
 	}
 }

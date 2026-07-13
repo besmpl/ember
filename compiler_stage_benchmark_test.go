@@ -50,7 +50,7 @@ type compilerStageMetrics struct {
 var (
 	compilerStageTokensSink        []sourceToken
 	compilerStageCommentsSink      []sourceComment
-	compilerStageProgramSink       program
+	compilerStageProgramSink       syntaxTree
 	compilerStageBindSink          bindResult
 	compilerStageEmissionSink      compilerStageEmission
 	compilerStageIRSink            []bytecodeIRInstruction
@@ -378,6 +378,7 @@ func emitCompilerStage(artifact sourceArtifact) (compilerStageEmission, error) {
 func emitCompilerStageWithCapacity(artifact sourceArtifact, capacity int) (compilerStageEmission, error) {
 	c := compiler{
 		bytecodeBuilder:    bytecodeBuilder{ir: make([]bytecodeIRInstruction, 0, capacity)},
+		tree:               artifact.tree,
 		bind:               artifact.bind,
 		sourceLines:        newSourceLineMap(artifact.source.Text),
 		symbolRegisters:    newDenseSymbolSlots(len(artifact.bind.symbols)),
@@ -527,7 +528,7 @@ func BenchmarkSourceArtifactStoreHits(b *testing.B) {
 					if err != nil {
 						b.Fatal(err)
 					}
-					compilerStageProgramSink = artifact.tree.root
+					compilerStageProgramSink = artifact.tree
 				case "compile":
 					proto, err := store.compile(source, identity)
 					if err != nil {

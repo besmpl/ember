@@ -9213,11 +9213,14 @@ return collect(3, 8, 13)
 
 func TestRegisterAllocationClaimsFixedVarargResultSpan(t *testing.T) {
 	compiler := compiler{
+		tree: syntaxTree{arena: &syntaxArena{
+			terms: []arenaTerm{{kind: termKindVararg}},
+		}},
 		variadic:  true,
 		freeTemps: []int{2, 3, 4},
 	}
 
-	if err := compiler.compileVarargToResults(term{vararg: true}, 2, 3); err != nil {
+	if err := compiler.compileVarargToResults(termID(1), 2, 3); err != nil {
 		t.Fatalf("compileVarargToResults returned error: %v", err)
 	}
 	if got, want := compiler.nextReg, 5; got != want {

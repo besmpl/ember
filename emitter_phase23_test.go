@@ -67,12 +67,16 @@ func TestSlice23CompileRejectsMissingBindingFact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
-	term := artifact.tree.statements()[0].ret.values[0].terms[0].terms[0].left.first.first.first
-	if term.id <= 0 {
-		t.Fatalf("return term has invalid syntax id %d", term.id)
+	term, ok := expressionSingleTerm(artifact.tree, artifact.tree.returnValues(artifact.tree.statements()[0].ret)[0])
+	if !ok {
+		t.Fatal("return expression is not a single term")
 	}
-	artifact.bind.nodeFacts[term.id].use = int32(boundUseUnvisited)
-	artifact.bind.nodeFacts[term.id].flags &^= boundNodeUseValid
+	node := artifact.tree.termSyntaxID(term)
+	if node <= 0 {
+		t.Fatalf("return term has invalid syntax id %d", node)
+	}
+	artifact.bind.nodeFacts[node].use = int32(boundUseUnvisited)
+	artifact.bind.nodeFacts[node].flags &^= boundNodeUseValid
 	_, err = compileProgram(artifact)
 	if err == nil {
 		t.Fatal("compileProgram succeeded with an unvisited binding fact")
@@ -87,9 +91,13 @@ func TestSlice23CompileRejectsStaleBindingIDWithoutValidFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
-	term := artifact.tree.statements()[0].ret.values[0].terms[0].terms[0].left.first.first.first
-	artifact.bind.nodeFacts[term.id].use = 0
-	artifact.bind.nodeFacts[term.id].flags &^= boundNodeUseValid
+	term, ok := expressionSingleTerm(artifact.tree, artifact.tree.returnValues(artifact.tree.statements()[0].ret)[0])
+	if !ok {
+		t.Fatal("return expression is not a single term")
+	}
+	node := artifact.tree.termSyntaxID(term)
+	artifact.bind.nodeFacts[node].use = 0
+	artifact.bind.nodeFacts[node].flags &^= boundNodeUseValid
 	_, err = compileProgram(artifact)
 	if err == nil {
 		t.Fatal("compileProgram succeeded with stale binding id")
@@ -154,8 +162,12 @@ func TestSlice23CompilerUsesBoundGlobalClassification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
-	term := artifact.tree.statements()[0].ret.values[0].terms[0].terms[0].left.first.first.first
-	if got := artifact.bind.useClassification(term.id); got != boundUseGlobal {
+	term, ok := expressionSingleTerm(artifact.tree, artifact.tree.returnValues(artifact.tree.statements()[0].ret)[0])
+	if !ok {
+		t.Fatal("return expression is not a single term")
+	}
+	node := artifact.tree.termSyntaxID(term)
+	if got := artifact.bind.useClassification(node); got != boundUseGlobal {
 		t.Fatalf("host term classification = %d, want global %d", got, boundUseGlobal)
 	}
 	proto, err := compileProgram(artifact)
@@ -180,14 +192,18 @@ func TestSlice23MissingBindingErrorIncludesNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
-	term := artifact.tree.statements()[0].ret.values[0].terms[0].terms[0].left.first.first.first
-	artifact.bind.nodeFacts[term.id].use = int32(boundUseUnvisited)
-	artifact.bind.nodeFacts[term.id].flags &^= boundNodeUseValid
+	term, ok := expressionSingleTerm(artifact.tree, artifact.tree.returnValues(artifact.tree.statements()[0].ret)[0])
+	if !ok {
+		t.Fatal("return expression is not a single term")
+	}
+	node := artifact.tree.termSyntaxID(term)
+	artifact.bind.nodeFacts[node].use = int32(boundUseUnvisited)
+	artifact.bind.nodeFacts[node].flags &^= boundNodeUseValid
 	_, err = compileProgram(artifact)
 	if err == nil {
 		t.Fatal("compileProgram succeeded with missing binding")
 	}
-	if !strings.Contains(err.Error(), fmt.Sprintf("node %d", term.id)) {
-		t.Fatalf("compileProgram error is %q, want node id %d", err, term.id)
+	if !strings.Contains(err.Error(), fmt.Sprintf("node %d", node)) {
+		t.Fatalf("compileProgram error is %q, want node id %d", err, node)
 	}
 }

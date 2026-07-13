@@ -308,18 +308,18 @@ func moduleReturnExportTree(tree syntaxTree, diagCodes []string, flow moduleValu
 	return ModuleExport{}, false
 }
 
-func (f moduleValueFlow) value(expr expression) TypeSummary {
+func (f moduleValueFlow) value(expr expressionID) TypeSummary {
 	tree := f.tree
 	value, ok := expressionSingleTerm(f.tree, expr)
 	if !ok {
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
-	name := tree.termName(&value)
-	selectors := tree.termSelectors(&value)
+	name := tree.termName(value)
+	selectors, _ := tree.termSelectors(value)
 	if name != "" {
 		if len(selectors) != 0 {
 			if summary, ok := f.values[name]; ok {
-				if field, ok := tableSummaryPath(f.tree, summary, selectors); ok {
+				if field, ok := tableSummaryTermPath(f.tree, summary, selectors); ok {
 					return field
 				}
 			}
@@ -332,19 +332,20 @@ func (f moduleValueFlow) value(expr expression) TypeSummary {
 	if len(selectors) != 0 {
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
-	if call := tree.termCall(&value); call != nil {
-		return f.callValue(*call)
+	if call, ok := tree.termCall(value); ok {
+		return f.callValue(call)
 	}
-	if table := tree.termTable(&value); table != nil {
-		return f.tableValue(*table)
+	if table, ok := tree.termTable(value); ok {
+		return f.tableValue(table)
 	}
 	return simpleTypeSummary(simpleTypeFromTerm(f.tree, value))
 }
 
-func (f moduleValueFlow) callValue(call callExpression) TypeSummary {
+func (f moduleValueFlow) callValue(call arenaCallID) TypeSummary {
 	tree := f.tree
-	target := tree.callTarget(&call)
-	if len(tree.termSelectors(target)) != 0 {
+	target := tree.callTarget(call)
+	selectors, _ := tree.termSelectors(target)
+	if len(selectors) != 0 {
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
 	switch tree.termName(target) {
@@ -357,8 +358,8 @@ func (f moduleValueFlow) callValue(call callExpression) TypeSummary {
 	}
 }
 
-func (f moduleValueFlow) setMetatableCallValue(call callExpression) TypeSummary {
-	args := f.tree.callArgs(&call)
+func (f moduleValueFlow) setMetatableCallValue(call arenaCallID) TypeSummary {
+	args, _ := f.tree.callArgs(call)
 	if len(args) < 2 {
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
@@ -374,8 +375,8 @@ func (f moduleValueFlow) setMetatableCallValue(call callExpression) TypeSummary 
 	return table
 }
 
-func (f moduleValueFlow) getMetatableCallValue(call callExpression) TypeSummary {
-	args := f.tree.callArgs(&call)
+func (f moduleValueFlow) getMetatableCallValue(call arenaCallID) TypeSummary {
+	args, _ := f.tree.callArgs(call)
 	if len(args) == 0 {
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
@@ -386,17 +387,17 @@ func (f moduleValueFlow) getMetatableCallValue(call callExpression) TypeSummary 
 	return *table.Metatable
 }
 
-func (f moduleValueFlow) tableValue(table tableExpression) TypeSummary {
+func (f moduleValueFlow) tableValue(table arenaTableID) TypeSummary {
 	tree := f.tree
 	summary := TypeSummary{Kind: TypeSummaryTable, Display: "table"}
-	for i := range tree.tableFields(&table) {
-		field := &tree.tableFields(&table)[i]
+	fields, _ := tree.tableFields(table)
+	for _, field := range fields {
 		if tree.tableFieldName(field) == "" {
 			continue
 		}
 		summary.Properties = append(summary.Properties, TablePropertySummary{
 			Name: tree.tableFieldName(field),
-			Type: f.value(*tree.tableFieldValue(field)),
+			Type: f.value(tree.tableFieldValue(field)),
 		})
 	}
 	return summary

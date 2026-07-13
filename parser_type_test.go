@@ -55,31 +55,50 @@ func firstReturnStatement(t *testing.T, result checkResult) *returnStatement {
 	return nil
 }
 
-func firstReturnedTerm(t *testing.T, result checkResult) *term {
+func firstReturnedTerm(t *testing.T, result checkResult) termID {
 	t.Helper()
 
 	ret := firstReturnStatement(t, result)
 	if len(ret.values) < 1 {
 		t.Fatal("return statement has no values")
 	}
-	return &ret.values[0].terms[0].terms[0].left.first.first.first
+	ands, ok := result.tree.expressionTerms(ret.values[0])
+	if !ok || len(ands) == 0 {
+		t.Fatal("first returned expression has no or terms")
+	}
+	comparisons, ok := result.tree.andTerms(ands[0])
+	if !ok || len(comparisons) == 0 {
+		t.Fatal("first returned expression has no and terms")
+	}
+	concat := result.tree.comparisonLeft(comparisons[0])
+	additive := result.tree.concatFirst(concat)
+	multiplicative := result.tree.additiveFirst(additive)
+	value := result.tree.multiplicativeFirst(multiplicative)
+	if value == 0 {
+		t.Fatal("first returned expression has no term")
+	}
+	return value
 }
 
-func firstReturnedGroupedTerm(t *testing.T, result checkResult) *term {
+func firstReturnedGroupedTerm(t *testing.T, result checkResult) termID {
 	t.Helper()
 
-	group := firstReturnedTerm(t, result).group
-	if group == nil {
+	group, ok := result.tree.termGroup(firstReturnedTerm(t, result))
+	if !ok {
 		t.Fatal("first returned term has no grouped expression")
 	}
-	return &group.terms[0].terms[0].left.first.first.first
+	value, ok := expressionSingleTerm(result.tree, group)
+	if !ok {
+		t.Fatal("grouped expression is not a single term")
+	}
+	return value
 }
 
-func firstReturnedCallTerm(t *testing.T, result checkResult) *term {
+func firstReturnedCall(t *testing.T, result checkResult) arenaCallID {
 	t.Helper()
 
-	call := firstReturnedTerm(t, result)
-	if call.call == nil {
+	call, ok := result.tree.termCall(firstReturnedTerm(t, result))
+	if !ok {
 		t.Fatal("first returned term call is nil")
 	}
 	return call
@@ -178,9 +197,9 @@ local value = 1
 return (value :: number) + 2
 `)
 
-	castTerm := firstReturnedGroupedTerm(t, result)
-	if castTerm.cast == nil || len(castTerm.cast.name) != 1 || castTerm.cast.name[0] != "number" {
-		t.Fatalf("cast type is %#v, want number", castTerm.cast)
+	cast, ok := result.tree.termCast(firstReturnedGroupedTerm(t, result))
+	if !ok || cast == nil || len(cast.name) != 1 || cast.name[0] != "number" {
+		t.Fatalf("cast type is %#v, want number", cast)
 	}
 }
 
@@ -221,14 +240,14 @@ end
 return make<<number, string>>()
 `)
 
-	call := firstReturnedCallTerm(t, result).call
-	if len(call.typeArgs) != 2 {
-		t.Fatalf("call has %d type args, want 2", len(call.typeArgs))
+	typeArgs := result.tree.callTypeArgs(firstReturnedCall(t, result))
+	if len(typeArgs) != 2 {
+		t.Fatalf("call has %d type args, want 2", len(typeArgs))
 	}
-	if got := call.typeArgs[0].name; len(got) != 1 || got[0] != "number" {
+	if got := typeArgs[0].name; len(got) != 1 || got[0] != "number" {
 		t.Fatalf("first type arg is %#v, want number", got)
 	}
-	if got := call.typeArgs[1].name; len(got) != 1 || got[0] != "string" {
+	if got := typeArgs[1].name; len(got) != 1 || got[0] != "string" {
 		t.Fatalf("second type arg is %#v, want string", got)
 	}
 }

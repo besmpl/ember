@@ -166,7 +166,7 @@ func (a *analysisState) analyzeStatements(statements []statement) {
 			a.checkFunctionParameterTypeNames(a.tree.functionDeclarationParamAnnotations(function), a.tree.functionDeclarationVariadicAnnotation(function))
 			a.analyzeFunctionBody(a.tree.functionDeclarationReturnAnnotation(function), a.tree.functionDeclarationStatements(function))
 		case syntaxStatementCall:
-			a.analyzeCallStatement(*a.tree.call(stmt))
+			a.analyzeCallStatement(a.tree.call(stmt))
 		case syntaxStatementReturn:
 			a.analyzeReturnStatement(*a.tree.returnStatement(stmt))
 		case syntaxStatementIf:
@@ -185,23 +185,22 @@ func (a *analysisState) analyzeStatements(statements []statement) {
 	}
 }
 
-func (a *analysisState) analyzeCallStatement(stmt term) {
-	callNode := a.tree.termCall(&stmt)
-	if callNode == nil {
+func (a *analysisState) analyzeCallStatement(stmt termID) {
+	call, ok := a.tree.termCall(stmt)
+	if !ok {
 		return
 	}
-	call := *callNode
 	if fact, ok := a.functionFactForCall(call); ok {
 		a.checkCallArguments(fact, call)
 	}
 	a.applyAssertRefinement(call)
 }
 
-func (a *analysisState) applyAssertRefinement(call callExpression) {
-	target := termWithoutCastsAndGroups(a.tree, *a.tree.callTarget(&call))
-	selectors := a.tree.termSelectors(&target)
-	args := a.tree.callArgs(&call)
-	if a.tree.termName(&target) != "assert" || len(selectors) != 0 || len(args) == 0 {
+func (a *analysisState) applyAssertRefinement(call arenaCallID) {
+	target := termWithoutCastsAndGroups(a.tree, a.tree.callTarget(call))
+	selectors, selOK := a.tree.termSelectors(target)
+	args, argsOK := a.tree.callArgs(call)
+	if !selOK || !argsOK || a.tree.termName(target) != "assert" || len(selectors) != 0 || len(args) == 0 {
 		return
 	}
 	a.analyzeConditionExpression(args[0])
@@ -211,8 +210,9 @@ func (a *analysisState) applyAssertRefinement(call callExpression) {
 		return
 	}
 	value, ok := expressionSingleTerm(a.tree, args[0])
-	valueName := a.tree.termName(&value)
-	if !ok || valueName == "" || len(a.tree.termSelectors(&value)) != 0 {
+	valueName := a.tree.termName(value)
+	valueSelectors, valueSelOK := a.tree.termSelectors(value)
+	if !ok || valueName == "" || !valueSelOK || len(valueSelectors) != 0 {
 		return
 	}
 	narrowed := truthyType(a.lookupLocal(valueName))
@@ -223,7 +223,7 @@ func (a *analysisState) applyAssertRefinement(call callExpression) {
 }
 
 func (a *analysisState) analyzeIfStatement(stmt ifStatement) {
-	condition := *a.tree.ifCondition(&stmt)
+	condition := a.tree.ifCondition(&stmt)
 	a.analyzeConditionExpression(condition)
 	trueRefinements := a.trueConditionRefinements(a.tree, condition)
 
@@ -242,7 +242,7 @@ func (a *analysisState) analyzeIfStatement(stmt ifStatement) {
 }
 
 func (a *analysisState) analyzeWhileStatement(stmt whileStatement) {
-	condition := *a.tree.whileCondition(&stmt)
+	condition := a.tree.whileCondition(&stmt)
 	a.analyzeConditionExpression(condition)
 	a.pushScope()
 	a.applyTrueRefinements(a.trueConditionRefinements(a.tree, condition))
@@ -251,10 +251,10 @@ func (a *analysisState) analyzeWhileStatement(stmt whileStatement) {
 }
 
 func (a *analysisState) analyzeNumericForStatement(stmt forStatement) {
-	a.checkNumericForBound(*a.tree.numericForStart(&stmt))
-	a.checkNumericForBound(*a.tree.numericForLimit(&stmt))
-	if step := a.tree.numericForStep(&stmt); step != nil {
-		a.checkNumericForBound(*step)
+	a.checkNumericForBound(a.tree.numericForStart(&stmt))
+	a.checkNumericForBound(a.tree.numericForLimit(&stmt))
+	if step := a.tree.numericForStep(&stmt); step != 0 {
+		a.checkNumericForBound(step)
 	}
 	a.pushScope()
 	name := a.tree.numericForName(&stmt)
@@ -266,7 +266,7 @@ func (a *analysisState) analyzeNumericForStatement(stmt forStatement) {
 	a.popScope()
 }
 
-func (a *analysisState) checkNumericForBound(expr expression) {
+func (a *analysisState) checkNumericForBound(expr expressionID) {
 	actual := a.inferExpression(expr)
 	constraint := typeConstraint{
 		kind:     constraintAssignable,
@@ -307,29 +307,35 @@ func (a *analysisState) genericForValueTypes(stmt genericForStatement) []simpleT
 	if len(values) != 1 {
 		return nil
 	}
-	if value, ok := expressionSingleTerm(a.tree, values[0]); ok && a.tree.termName(&value) != "" && len(a.tree.termSelectors(&value)) == 0 {
-		if fact, ok := a.lookupTableFact(a.tree.termName(&value)); ok {
-			return tableIterationTypes(fact)
+	if value, ok := expressionSingleTerm(a.tree, values[0]); ok {
+		selectors, _ := a.tree.termSelectors(value)
+		if a.tree.termName(value) != "" && len(selectors) == 0 {
+			if fact, ok := a.lookupTableFact(a.tree.termName(value)); ok {
+				return tableIterationTypes(fact)
+			}
 		}
 	}
 	call, ok := expressionSingleCall(a.tree, values[0])
 	if !ok {
 		return nil
 	}
-	target := termWithoutCastsAndGroups(a.tree, *a.tree.callTarget(&call))
-	if len(a.tree.termSelectors(&target)) != 0 || len(a.tree.callArgs(&call)) != 1 {
+	target := termWithoutCastsAndGroups(a.tree, a.tree.callTarget(call))
+	targetSelectors, _ := a.tree.termSelectors(target)
+	args, argsOK := a.tree.callArgs(call)
+	if !argsOK || len(targetSelectors) != 0 || len(args) != 1 {
 		return nil
 	}
-	arg, ok := expressionSingleTerm(a.tree, a.tree.callArgs(&call)[0])
-	if !ok || a.tree.termName(&arg) == "" || len(a.tree.termSelectors(&arg)) != 0 {
+	arg, ok := expressionSingleTerm(a.tree, args[0])
+	argSelectors, _ := a.tree.termSelectors(arg)
+	if !ok || a.tree.termName(arg) == "" || len(argSelectors) != 0 {
 		return nil
 	}
-	fact, ok := a.lookupTableFact(a.tree.termName(&arg))
+	fact, ok := a.lookupTableFact(a.tree.termName(arg))
 	if !ok {
 		return nil
 	}
 	keyType := simpleTypeUnknown
-	switch a.tree.termName(&target) {
+	switch a.tree.termName(target) {
 	case "ipairs":
 		keyType = simpleTypeNumber
 	case "pairs":
@@ -350,14 +356,16 @@ func (a *analysisState) nextTableForValueTypes(stmt genericForStatement) []simpl
 		return nil
 	}
 	iterator, ok := expressionSingleTerm(a.tree, values[0])
-	if !ok || a.tree.termName(&iterator) != "next" || len(a.tree.termSelectors(&iterator)) != 0 {
+	iteratorSelectors, _ := a.tree.termSelectors(iterator)
+	if !ok || a.tree.termName(iterator) != "next" || len(iteratorSelectors) != 0 {
 		return nil
 	}
 	value, ok := expressionSingleTerm(a.tree, values[1])
-	if !ok || a.tree.termName(&value) == "" || len(a.tree.termSelectors(&value)) != 0 {
+	valueSelectors, _ := a.tree.termSelectors(value)
+	if !ok || a.tree.termName(value) == "" || len(valueSelectors) != 0 {
 		return nil
 	}
-	fact, ok := a.lookupTableFact(a.tree.termName(&value))
+	fact, ok := a.lookupTableFact(a.tree.termName(value))
 	if !ok {
 		return nil
 	}
@@ -392,17 +400,24 @@ func tableFieldValueUnion(fact tableFact) simpleType {
 func (a *analysisState) analyzeRepeatStatement(stmt repeatStatement) {
 	a.pushScope()
 	a.analyzeStatements(a.tree.repeatStatements(&stmt))
-	condition := *a.tree.repeatCondition(&stmt)
+	condition := a.tree.repeatCondition(&stmt)
 	a.analyzeConditionExpression(condition)
 	refinements := a.trueConditionRefinements(a.tree, condition)
 	a.popScope()
 	a.applyTrueRefinementsToExisting(refinements)
 }
 
-func (a *analysisState) analyzeConditionExpression(expr expression) {
-	for i := range a.tree.expressionTerms(&expr) {
-		term := &a.tree.expressionTerms(&expr)[i]
-		for _, comparison := range a.tree.andTerms(term) {
+func (a *analysisState) analyzeConditionExpression(expr expressionID) {
+	terms, ok := a.tree.expressionTerms(expr)
+	if !ok {
+		return
+	}
+	for _, term := range terms {
+		comparisons, ok := a.tree.andTerms(term)
+		if !ok {
+			continue
+		}
+		for _, comparison := range comparisons {
 			a.inferComparisonExpression(comparison)
 		}
 	}
@@ -593,7 +608,7 @@ func (a *analysisState) analyzeLocalStatement(stmt localStatement) {
 	}
 }
 
-func (a *analysisState) moduleReturnFactFromExpression(expr expression) (simpleType, tableFact, bool) {
+func (a *analysisState) moduleReturnFactFromExpression(expr expressionID) (simpleType, tableFact, bool) {
 	summary, ok := a.moduleSummaryFromExpression(expr)
 	if !ok {
 		return simpleTypeUnknown, tableFact{}, false
@@ -605,7 +620,7 @@ func (a *analysisState) moduleReturnFactFromExpression(expr expression) (simpleT
 	return fact.typ, fact.table, true
 }
 
-func (a *analysisState) moduleSummaryFromExpression(expr expression) (ModuleSummary, bool) {
+func (a *analysisState) moduleSummaryFromExpression(expr expressionID) (ModuleSummary, bool) {
 	call, ok := expressionSingleCall(a.tree, expr)
 	if !ok {
 		return ModuleSummary{}, false
@@ -615,8 +630,11 @@ func (a *analysisState) moduleSummaryFromExpression(expr expression) (ModuleSumm
 		return ModuleSummary{}, false
 	}
 	summary, ok := a.moduleSummaries.summaryForRequire(a.source, request)
-	args := a.tree.callArgs(&call)
-	if !ok && a.moduleSummaries.active() {
+	args, argsOK := a.tree.callArgs(call)
+	if !argsOK {
+		return summary, ok
+	}
+	if !ok && a.moduleSummaries.active() && len(args) != 0 {
 		span := expressionRange(a.tree, args[0])
 		a.diagnostics = append(a.diagnostics, missingModuleSummaryDiagnostic(request, span.start, span.end))
 	}
@@ -637,29 +655,32 @@ func moduleReturnFact(summary ModuleSummary) (globalTypeFact, bool) {
 	return globalFactFromSummary(exported.Type), true
 }
 
-func (a *analysisState) tableFactFromLiteral(value expression) tableFact {
+func (a *analysisState) tableFactFromLiteral(value expressionID) tableFact {
 	tree := a.tree
 	tableTerm, ok := expressionSingleTerm(a.tree, value)
-	table := tree.termTable(&tableTerm)
-	if !ok || table == nil {
+	table, tableOK := tree.termTable(tableTerm)
+	if !ok || !tableOK {
 		return tableFact{}
 	}
-	fields := make(map[string]simpleType)
+	fieldFacts := make(map[string]simpleType)
 	var indexers []tableIndexerFact
-	for i := range tree.tableFields(table) {
-		field := &tree.tableFields(table)[i]
+	fields, fieldsOK := tree.tableFields(table)
+	if !fieldsOK {
+		return tableFact{}
+	}
+	for _, field := range fields {
 		name := tree.tableFieldName(field)
 		key := tree.tableFieldKey(field)
-		valueExpr := *tree.tableFieldValue(field)
-		if name == "" && key == nil && tree.tableFieldArrayIndex(field) > 0 {
+		valueExpr := tree.tableFieldValue(field)
+		if name == "" && key == 0 && tree.tableFieldArrayIndex(field) > 0 {
 			typ := a.inferExpression(valueExpr)
 			if typ != simpleTypeUnknown {
 				indexers = mergeTableIndexerFact(indexers, simpleTypeNumber, typ)
 			}
 			continue
 		}
-		if name == "" && key != nil {
-			keyType := a.inferExpression(*key)
+		if name == "" && key != 0 {
+			keyType := a.inferExpression(key)
 			typ := a.inferExpression(valueExpr)
 			if keyType != simpleTypeUnknown && typ != simpleTypeUnknown {
 				indexers = mergeTableIndexerFact(indexers, keyType, typ)
@@ -673,9 +694,9 @@ func (a *analysisState) tableFactFromLiteral(value expression) tableFact {
 		if typ == simpleTypeUnknown {
 			continue
 		}
-		fields[name] = typ
+		fieldFacts[name] = typ
 	}
-	return tableFact{known: true, fields: fields, indexers: indexers}
+	return tableFact{known: true, fields: fieldFacts, indexers: indexers}
 }
 
 func mergeTableIndexerFact(indexers []tableIndexerFact, key, value simpleType) []tableIndexerFact {
@@ -688,35 +709,37 @@ func mergeTableIndexerFact(indexers []tableIndexerFact, key, value simpleType) [
 	return append(indexers, tableIndexerFact{key: key, value: value})
 }
 
-func (a *analysisState) tableFactFromExpression(value expression) tableFact {
+func (a *analysisState) tableFactFromExpression(value expressionID) tableFact {
 	tree := a.tree
 	valueTerm, ok := expressionSingleTerm(a.tree, value)
 	if !ok {
 		return tableFact{}
 	}
-	if tree.termTable(&valueTerm) != nil {
+	if _, ok := tree.termTable(valueTerm); ok {
 		return a.tableFactFromLiteral(value)
 	}
-	if call := tree.termCall(&valueTerm); call != nil {
-		fact, ok := a.functionFactForCallQuiet(*call)
+	if call, ok := tree.termCall(valueTerm); ok {
+		fact, ok := a.functionFactForCallQuiet(call)
 		if !ok {
 			return tableFact{}
 		}
 		return fact.returnTable
 	}
-	if tree.termName(&valueTerm) == "" || len(tree.termSelectors(&valueTerm)) != 0 {
+	selectors, _ := tree.termSelectors(valueTerm)
+	if tree.termName(valueTerm) == "" || len(selectors) != 0 {
 		return tableFact{}
 	}
-	fact, ok := a.lookupTableFact(tree.termName(&valueTerm))
+	fact, ok := a.lookupTableFact(tree.termName(valueTerm))
 	if !ok {
 		return tableFact{}
 	}
 	return fact
 }
 
-func expressionIsTableLiteral(tree syntaxTree, value expression) bool {
+func expressionIsTableLiteral(tree syntaxTree, value expressionID) bool {
 	valueTerm, ok := expressionSingleTerm(tree, value)
-	return ok && tree.termTable(&valueTerm) != nil
+	_, tableOK := tree.termTable(valueTerm)
+	return ok && tableOK
 }
 
 func localNameRange(tree syntaxTree, stmt localStatement, index int) sourceRange {
@@ -727,58 +750,61 @@ func localNameRange(tree syntaxTree, stmt localStatement, index int) sourceRange
 	return sourceRange{}
 }
 
-func (a *analysisState) analyzeAnnotatedExpression(annotation *typeExpression, value expression) {
+func (a *analysisState) analyzeAnnotatedExpression(annotation *typeExpression, value expressionID) {
 	a.analyzeAnnotatedFunctionExpression(annotation, value)
 	expectedFact := a.tableFactFromAnnotation(annotation)
 	if expectedFact.empty() {
 		return
 	}
 	tableTerm, ok := expressionSingleTerm(a.tree, value)
-	table := a.tree.termTable(&tableTerm)
-	if !ok || table == nil {
+	table, tableOK := a.tree.termTable(tableTerm)
+	if !ok || !tableOK {
 		return
 	}
 	expectedFields := expectedFact.fields
 	actualFact := a.tableFactFromLiteral(value)
-	fields := a.tree.tableFields(table)
+	fields, fieldsOK := a.tree.tableFields(table)
+	if !fieldsOK {
+		return
+	}
 	presentFields := make(map[string]bool, len(fields))
 	for _, field := range fields {
-		fieldName := a.tree.tableFieldName(&field)
-		fieldKey := a.tree.tableFieldKey(&field)
-		fieldValue := a.tree.tableFieldValue(&field)
+		fieldName := a.tree.tableFieldName(field)
+		fieldKey := a.tree.tableFieldKey(field)
+		fieldValue := a.tree.tableFieldValue(field)
 		if fieldName != "" {
 			presentFields[fieldName] = true
 		}
-		if fieldName == "" && fieldKey == nil && a.tree.tableFieldArrayIndex(&field) > 0 {
+		if fieldName == "" && fieldKey == 0 && a.tree.tableFieldArrayIndex(field) > 0 {
 			indexer, ok := tableIndexerForKeyType(expectedFact, simpleTypeNumber)
 			if !ok || indexer.value == simpleTypeUnknown {
 				continue
 			}
-			actual := a.inferExpression(*fieldValue)
+			actual := a.inferExpression(fieldValue)
 			constraint := typeConstraint{
 				kind:     constraintAssignable,
 				expected: indexer.value,
 				actual:   actual,
 				evidence: constraintEvidence{
-					span: expressionRange(a.tree, *fieldValue),
+					span: expressionRange(a.tree, fieldValue),
 				},
 			}
 			a.checkConstraint(constraint)
 			continue
 		}
-		if fieldName == "" && fieldKey != nil {
-			key := a.inferExpression(*fieldKey)
-			indexer, ok := a.tableIndexerForKey(expectedFact, key, expressionRange(a.tree, *fieldKey))
+		if fieldName == "" && fieldKey != 0 {
+			key := a.inferExpression(fieldKey)
+			indexer, ok := a.tableIndexerForKey(expectedFact, key, expressionRange(a.tree, fieldKey))
 			if !ok || indexer.value == simpleTypeUnknown {
 				continue
 			}
-			actual := a.inferExpression(*fieldValue)
+			actual := a.inferExpression(fieldValue)
 			constraint := typeConstraint{
 				kind:     constraintAssignable,
 				expected: indexer.value,
 				actual:   actual,
 				evidence: constraintEvidence{
-					span: expressionRange(a.tree, *fieldValue),
+					span: expressionRange(a.tree, fieldValue),
 				},
 			}
 			a.checkConstraint(constraint)
@@ -793,13 +819,13 @@ func (a *analysisState) analyzeAnnotatedExpression(annotation *typeExpression, v
 		if fieldName == "" || expected == simpleTypeUnknown {
 			continue
 		}
-		actual := a.inferExpression(*fieldValue)
+		actual := a.inferExpression(fieldValue)
 		constraint := typeConstraint{
 			kind:     constraintAssignable,
 			expected: expected,
 			actual:   actual,
 			evidence: constraintEvidence{
-				span: expressionRange(a.tree, *fieldValue),
+				span: expressionRange(a.tree, fieldValue),
 			},
 		}
 		if a.checkConstraint(constraint) {
@@ -829,36 +855,35 @@ func (a *analysisState) analyzeAnnotatedExpression(annotation *typeExpression, v
 	}
 }
 
-func (a *analysisState) analyzeAnnotatedFunctionExpression(annotation *typeExpression, value expression) {
+func (a *analysisState) analyzeAnnotatedFunctionExpression(annotation *typeExpression, value expressionID) {
 	fact, ok := a.functionFactFromAnnotation(annotation)
 	if !ok {
 		return
 	}
 	functionTerm, ok := expressionSingleTerm(a.tree, value)
-	functionNode := a.tree.termFunction(&functionTerm)
-	if !ok || functionNode == nil {
+	function, functionOK := a.tree.termFunction(functionTerm)
+	if !ok || !functionOK {
 		return
 	}
-	function := *functionNode
-	restore := a.bindLocals(a.tree.functionExpressionParams(&function), a.tree.functionExpressionParamID(&function), functionExpressionParamTypes(a.tree, function, fact))
-	a.analyzeFunctionBodyWithReturn(fact.returnType, fact.returnTable, fact.returnSpan, fact.returnPack, a.tree.functionExpressionStatements(&function))
+	restore := a.bindLocals(a.tree.functionExpressionParams(function), a.tree.functionExpressionParamID(function), functionExpressionParamTypes(a.tree, function, fact))
+	a.analyzeFunctionBodyWithReturn(fact.returnType, fact.returnTable, fact.returnSpan, fact.returnPack, a.tree.functionExpressionStatements(function))
 	restore()
 }
 
-func (a *analysisState) analyzeFunctionExpressionAnnotations(value expression) {
+func (a *analysisState) analyzeFunctionExpressionAnnotations(value expressionID) {
 	function, ok := functionExpressionFromExpression(a.tree, value)
 	if !ok || !functionExpressionHasAnnotations(a.tree, function) {
 		return
 	}
-	a.checkFunctionParameterTypeNames(a.tree.functionExpressionParamAnnotations(&function), a.tree.functionExpressionVariadicAnnotation(&function))
-	a.checkUnknownTypeNames(a.tree.functionExpressionReturnAnnotation(&function))
+	a.checkFunctionParameterTypeNames(a.tree.functionExpressionParamAnnotations(function), a.tree.functionExpressionVariadicAnnotation(function))
+	a.checkUnknownTypeNames(a.tree.functionExpressionReturnAnnotation(function))
 	fact := a.functionFactFromFunctionExpression(function)
-	restore := a.bindLocals(a.tree.functionExpressionParams(&function), a.tree.functionExpressionParamID(&function), functionExpressionParamTypes(a.tree, function, fact))
-	a.analyzeFunctionBodyWithReturn(fact.returnType, fact.returnTable, fact.returnSpan, fact.returnPack, a.tree.functionExpressionStatements(&function))
+	restore := a.bindLocals(a.tree.functionExpressionParams(function), a.tree.functionExpressionParamID(function), functionExpressionParamTypes(a.tree, function, fact))
+	a.analyzeFunctionBodyWithReturn(fact.returnType, fact.returnTable, fact.returnSpan, fact.returnPack, a.tree.functionExpressionStatements(function))
 	restore()
 }
 
-func (a *analysisState) functionFactFromExpression(value expression) (functionFact, bool) {
+func (a *analysisState) functionFactFromExpression(value expressionID) (functionFact, bool) {
 	function, ok := functionExpressionFromExpression(a.tree, value)
 	if !ok {
 		return functionFact{}, false
@@ -866,20 +891,20 @@ func (a *analysisState) functionFactFromExpression(value expression) (functionFa
 	return a.functionFactFromFunctionExpression(function), true
 }
 
-func functionExpressionFromExpression(tree syntaxTree, value expression) (functionExpression, bool) {
+func functionExpressionFromExpression(tree syntaxTree, value expressionID) (arenaFunctionID, bool) {
 	functionTerm, ok := expressionSingleTerm(tree, value)
-	functionNode := tree.termFunction(&functionTerm)
-	if !ok || functionNode == nil {
-		return functionExpression{}, false
+	function, functionOK := tree.termFunction(functionTerm)
+	if !ok || !functionOK {
+		return 0, false
 	}
-	return *functionNode, true
+	return function, true
 }
 
-func functionExpressionHasAnnotations(tree syntaxTree, function functionExpression) bool {
-	if tree.functionExpressionReturnAnnotation(&function) != nil || tree.functionExpressionVariadicAnnotation(&function) != nil {
+func functionExpressionHasAnnotations(tree syntaxTree, function arenaFunctionID) bool {
+	if tree.functionExpressionReturnAnnotation(function) != nil || tree.functionExpressionVariadicAnnotation(function) != nil {
 		return true
 	}
-	for _, annotation := range tree.functionExpressionParamAnnotations(&function) {
+	for _, annotation := range tree.functionExpressionParamAnnotations(function) {
 		if annotation != nil {
 			return true
 		}
@@ -887,17 +912,17 @@ func functionExpressionHasAnnotations(tree syntaxTree, function functionExpressi
 	return false
 }
 
-func (a *analysisState) functionFactFromFunctionExpression(function functionExpression) functionFact {
-	returnAnnotation := a.tree.functionExpressionReturnAnnotation(&function)
-	paramAnnotations := a.tree.functionExpressionParamAnnotations(&function)
-	typeParams := a.tree.functionExpressionTypeParams(&function)
+func (a *analysisState) functionFactFromFunctionExpression(function arenaFunctionID) functionFact {
+	returnAnnotation := a.tree.functionExpressionReturnAnnotation(function)
+	paramAnnotations := a.tree.functionExpressionParamAnnotations(function)
+	typeParams := a.tree.functionExpressionTypeParams(function)
 	returnPack := a.returnPackFromAnnotation(returnAnnotation)
 	return functionFact{
 		typeParams:      append([]string(nil), typeParams...),
 		params:          a.simpleTypesFromAnnotations(paramAnnotations),
 		paramGenerics:   genericAnnotationNames(a.tree, paramAnnotations, typeParams),
-		variadic:        a.simpleTypeFromAnnotation(a.tree.functionExpressionVariadicAnnotation(&function)),
-		variadicGeneric: genericAnnotationName(a.tree, a.tree.functionExpressionVariadicAnnotation(&function), typeParams),
+		variadic:        a.simpleTypeFromAnnotation(a.tree.functionExpressionVariadicAnnotation(function)),
+		variadicGeneric: genericAnnotationName(a.tree, a.tree.functionExpressionVariadicAnnotation(function), typeParams),
 		returnType:      returnPack.firstType(a.simpleTypeFromAnnotation(returnAnnotation)),
 		returnTable:     returnPack.firstTable(a.tableFactFromAnnotation(returnAnnotation)),
 		returnSpan:      annotationRange(a.tree, returnAnnotation),
@@ -906,8 +931,8 @@ func (a *analysisState) functionFactFromFunctionExpression(function functionExpr
 	}
 }
 
-func functionExpressionParamTypes(tree syntaxTree, function functionExpression, fact functionFact) []simpleType {
-	params := tree.functionExpressionParams(&function)
+func functionExpressionParamTypes(tree syntaxTree, function arenaFunctionID, fact functionFact) []simpleType {
+	params := tree.functionExpressionParams(function)
 	types := make([]simpleType, len(params))
 	for i := range params {
 		if i < len(fact.params) {
@@ -1149,21 +1174,21 @@ func (a *analysisState) analyzeMissingAssignValue(target assignTarget) {
 	a.checkConstraint(constraint)
 }
 
-func (a *analysisState) analyzeFieldAssign(target assignTarget, value expression) {
+func (a *analysisState) analyzeFieldAssign(target assignTarget, value expressionID) {
 	name := a.tree.assignTargetName(&target)
 	selectors := a.tree.assignTargetSelectors(&target)
 	start, end := a.tree.assignTargetRange(&target)
 	if name == "" || len(selectors) != 1 {
 		return
 	}
-	selector := &selectors[0]
+	selector := selectors[0]
 	fact, ok := a.lookupTableFact(name)
 	if !ok {
 		return
 	}
-	if index := a.tree.selectorIndex(selector); index != nil {
-		key := a.inferExpression(*index)
-		indexer, ok := a.tableIndexerForKey(fact, key, expressionRange(a.tree, *index))
+	if index := a.tree.selectorIndex(&selector); index != 0 {
+		key := a.inferExpression(index)
+		indexer, ok := a.tableIndexerForKey(fact, key, expressionRange(a.tree, index))
 		if !ok || indexer.value == simpleTypeUnknown {
 			return
 		}
@@ -1187,7 +1212,7 @@ func (a *analysisState) analyzeFieldAssign(target assignTarget, value expression
 		a.checkConstraint(constraint)
 		return
 	}
-	field := a.tree.selectorField(selector)
+	field := a.tree.selectorField(&selector)
 	if field == "" {
 		return
 	}
@@ -1278,8 +1303,8 @@ func (a *analysisState) tableFactFromAssignTarget(target assignTarget) tableFact
 	return fact
 }
 
-func (a *analysisState) lookupNamedTerm(value term) simpleType {
-	return a.lookupBoundName(a.tree.termID(&value), a.tree.termName(&value))
+func (a *analysisState) lookupNamedTerm(value termID) simpleType {
+	return a.lookupBoundName(a.tree.termID(value), a.tree.termName(value))
 }
 
 func (a *analysisState) checkUnknownName(node syntaxID, name string, start int, end int) {
@@ -1328,9 +1353,9 @@ func selectedLocalType(annotation, value simpleType) simpleType {
 	return value
 }
 
-func (a *analysisState) inferExpression(expr expression) simpleType {
-	terms := a.tree.expressionTerms(&expr)
-	if len(terms) == 0 {
+func (a *analysisState) inferExpression(expr expressionID) simpleType {
+	terms, ok := a.tree.expressionTerms(expr)
+	if !ok || len(terms) == 0 {
 		return simpleTypeUnknown
 	}
 	result := a.inferAndExpression(terms[0])
@@ -1351,9 +1376,9 @@ func (a *analysisState) inferExpression(expr expression) simpleType {
 	return result
 }
 
-func (a *analysisState) inferAndExpression(expr andExpression) simpleType {
-	terms := a.tree.andTerms(&expr)
-	if len(terms) == 0 {
+func (a *analysisState) inferAndExpression(expr andExpressionID) simpleType {
+	terms, ok := a.tree.andTerms(expr)
+	if !ok || len(terms) == 0 {
 		return simpleTypeUnknown
 	}
 	result := a.inferComparisonExpression(terms[0])
@@ -1380,45 +1405,48 @@ func (a *analysisState) inferAndExpression(expr andExpression) simpleType {
 	return result
 }
 
-func (a *analysisState) inferComparisonExpression(expr comparisonExpression) simpleType {
-	leftExpr := a.tree.comparisonLeft(&expr)
-	operator := a.tree.comparisonOperator(&expr)
-	rightExpr := a.tree.comparisonRight(&expr)
+func (a *analysisState) inferComparisonExpression(expr comparisonExpressionID) simpleType {
+	leftExpr := a.tree.comparisonLeft(expr)
+	operator := a.tree.comparisonOperator(expr)
+	rightExpr := a.tree.comparisonRight(expr)
 	left := a.inferConcatExpression(leftExpr)
-	if operator == "" || rightExpr == nil {
+	if operator == "" || rightExpr == 0 {
 		return left
 	}
-	right := a.inferConcatExpression(*rightExpr)
+	right := a.inferConcatExpression(rightExpr)
 	if isOrderedComparison(operator) {
-		a.checkComparisonOperand(string(operator), left, right, concatExpressionRange(a.tree, *rightExpr))
+		a.checkComparisonOperand(string(operator), left, right, concatExpressionRange(a.tree, rightExpr))
 	}
 	return simpleTypeBoolean
 }
 
-func andExpressionKnownTruthiness(tree syntaxTree, expr andExpression) (bool, bool) {
-	terms := tree.andTerms(&expr)
-	if len(terms) != 1 {
+func andExpressionKnownTruthiness(tree syntaxTree, expr andExpressionID) (bool, bool) {
+	terms, ok := tree.andTerms(expr)
+	if !ok || len(terms) != 1 {
 		return false, false
 	}
 	return comparisonKnownTruthiness(tree, terms[0])
 }
 
-func comparisonKnownTruthiness(tree syntaxTree, expr comparisonExpression) (bool, bool) {
-	if tree.comparisonOperator(&expr) != "" || tree.comparisonRight(&expr) != nil {
+func comparisonKnownTruthiness(tree syntaxTree, expr comparisonExpressionID) (bool, bool) {
+	if tree.comparisonOperator(expr) != "" || tree.comparisonRight(expr) != 0 {
 		return false, false
 	}
-	return concatExpressionKnownTruthiness(tree, tree.comparisonLeft(&expr))
+	return concatExpressionKnownTruthiness(tree, tree.comparisonLeft(expr))
 }
 
-func concatExpressionKnownTruthiness(tree syntaxTree, expr concatExpression) (bool, bool) {
-	first := tree.concatFirst(&expr)
-	firstFirst := tree.additiveFirst(&first)
-	if len(tree.concatRest(&expr)) != 0 || len(tree.additiveRest(&first)) != 0 || len(tree.multiplicativeRest(&firstFirst)) != 0 {
+func concatExpressionKnownTruthiness(tree syntaxTree, expr concatExpressionID) (bool, bool) {
+	first := tree.concatFirst(expr)
+	firstFirst := tree.additiveFirst(first)
+	concatRest, _ := tree.concatRest(expr)
+	addRest, _ := tree.additiveRest(first)
+	mulRest, _ := tree.multiplicativeRest(firstFirst)
+	if len(concatRest) != 0 || len(addRest) != 0 || len(mulRest) != 0 {
 		return false, false
 	}
-	value := termWithoutCastsAndGroups(tree, tree.multiplicativeFirst(&firstFirst))
-	literal := tree.termLiteral(&value)
-	if literal == nil {
+	value := termWithoutCastsAndGroups(tree, tree.multiplicativeFirst(firstFirst))
+	literal, ok := tree.termLiteral(value)
+	if !ok {
 		if typ := simpleTypeFromTerm(tree, value); typ != simpleTypeUnknown {
 			return simpleTypeKnownTruthiness(typ)
 		}
@@ -1458,117 +1486,119 @@ func isOrderedComparison(op comparisonOperator) bool {
 	}
 }
 
-func (a *analysisState) inferConcatExpression(expr concatExpression) simpleType {
-	first := a.tree.concatFirst(&expr)
+func (a *analysisState) inferConcatExpression(expr concatExpressionID) simpleType {
+	first := a.tree.concatFirst(expr)
 	result := a.inferAdditiveExpression(first)
-	if len(a.tree.concatRest(&expr)) == 0 {
+	rest, _ := a.tree.concatRest(expr)
+	if len(rest) == 0 {
 		return result
 	}
 	a.checkConcatOperand(result, additiveExpressionRange(a.tree, first))
-	for _, part := range a.tree.concatRest(&expr) {
+	for _, part := range rest {
 		value := a.inferAdditiveExpression(part)
 		a.checkConcatOperand(value, additiveExpressionRange(a.tree, part))
 	}
 	return simpleTypeString
 }
 
-func (a *analysisState) inferAdditiveExpression(expr additiveExpression) simpleType {
-	first := a.tree.additiveFirst(&expr)
-	rest := a.tree.additiveRest(&expr)
+func (a *analysisState) inferAdditiveExpression(expr additiveExpressionID) simpleType {
+	first := a.tree.additiveFirst(expr)
+	rest, _ := a.tree.additiveRest(expr)
 	result := a.inferMultiplicativeExpression(first)
 	if len(rest) == 0 {
 		return result
 	}
-	a.checkBinaryOperand(string(a.tree.additivePartOperator(&rest[0])), result, multiplicativeExpressionRange(a.tree, first))
-	for i := range rest {
-		part := &rest[i]
-		valueExpr := *a.tree.additivePartValue(part)
+	a.checkBinaryOperand(string(a.tree.additivePartOperator(rest[0])), result, multiplicativeExpressionRange(a.tree, first))
+	for _, part := range rest {
+		valueExpr := a.tree.additivePartValue(part)
 		value := a.inferMultiplicativeExpression(valueExpr)
 		a.checkBinaryOperand(string(a.tree.additivePartOperator(part)), value, multiplicativeExpressionRange(a.tree, valueExpr))
 	}
 	return simpleTypeNumber
 }
 
-func (a *analysisState) inferMultiplicativeExpression(expr multiplicativeExpression) simpleType {
-	first := a.tree.multiplicativeFirst(&expr)
-	rest := a.tree.multiplicativeRest(&expr)
+func (a *analysisState) inferMultiplicativeExpression(expr multiplicativeExpressionID) simpleType {
+	first := a.tree.multiplicativeFirst(expr)
+	rest, _ := a.tree.multiplicativeRest(expr)
 	result := a.inferTerm(first)
 	if len(rest) == 0 {
 		return result
 	}
-	a.checkBinaryOperand(string(a.tree.multiplicativePartOperator(&rest[0])), result, termRange(a.tree, first))
-	for i := range rest {
-		part := &rest[i]
-		valueExpr := *a.tree.multiplicativePartValue(part)
+	a.checkBinaryOperand(string(a.tree.multiplicativePartOperator(rest[0])), result, termRange(a.tree, first))
+	for _, part := range rest {
+		valueExpr := a.tree.multiplicativePartValue(part)
 		value := a.inferTerm(valueExpr)
 		a.checkBinaryOperand(string(a.tree.multiplicativePartOperator(part)), value, termRange(a.tree, valueExpr))
 	}
 	return simpleTypeNumber
 }
 
-func (a *analysisState) inferTerm(value term) simpleType {
-	cast := a.tree.termCast(&value)
-	if cast != nil {
-		uncast := value
-		uncast.cast = nil
-		a.inferTerm(uncast)
+func (a *analysisState) inferTerm(value termID) simpleType {
+	cast, hasCast := a.tree.termCast(value)
+	if hasCast {
+		if name := a.tree.termName(value); name != "" {
+			_ = a.lookupNamedTerm(value)
+		}
 		return a.simpleTypeFromAnnotation(cast)
 	}
 	if fieldType := a.inferFieldRead(value); fieldType != simpleTypeUnknown {
 		return fieldType
 	}
-	if unary := a.tree.termUnaryNot(&value); unary != nil {
-		a.inferTerm(*unary)
+	if a.tree.termKind(value) == syntaxTermUnaryNot {
+		unary, _ := a.tree.termChild(value)
+		a.inferTerm(unary)
 		return simpleTypeBoolean
 	}
-	if unary := a.tree.termUnaryMinus(&value); unary != nil {
-		actual := a.inferTerm(*unary)
+	if a.tree.termKind(value) == syntaxTermUnaryMinus {
+		unary, _ := a.tree.termChild(value)
+		actual := a.inferTerm(unary)
 		constraint := typeConstraint{
 			kind:     constraintUnaryOp,
 			operator: "-",
 			expected: simpleTypeNumber,
 			actual:   actual,
 			evidence: constraintEvidence{
-				span: termRange(a.tree, *unary),
+				span: termRange(a.tree, unary),
 			},
 		}
 		a.checkConstraint(constraint)
 		return simpleTypeNumber
 	}
-	if unary := a.tree.termUnaryLength(&value); unary != nil {
-		actual := a.inferTerm(*unary)
+	if a.tree.termKind(value) == syntaxTermUnaryLength {
+		unary, _ := a.tree.termChild(value)
+		actual := a.inferTerm(unary)
 		constraint := typeConstraint{
 			kind:     constraintUnaryOp,
 			operator: "#",
 			expected: simpleType("string|table"),
 			actual:   actual,
 			evidence: constraintEvidence{
-				span: termRange(a.tree, *unary),
+				span: termRange(a.tree, unary),
 			},
 		}
 		a.checkConstraint(constraint)
 		return simpleTypeNumber
 	}
-	selectors := a.tree.termSelectors(&value)
-	name := a.tree.termName(&value)
-	start, _ := a.tree.termRange(&value)
+	selectors, _ := a.tree.termSelectors(value)
+	name := a.tree.termName(value)
+	start, _ := a.tree.termRange(value)
 	if len(selectors) != 0 {
-		a.checkUnknownName(a.tree.termID(&value), name, start, start+len(name))
+		a.checkUnknownName(a.tree.termID(value), name, start, start+len(name))
 		return simpleTypeUnknown
 	}
 	if name != "" {
 		typ := a.lookupNamedTerm(value)
 		if typ == simpleTypeUnknown {
-			a.checkUnknownName(a.tree.termID(&value), name, start, start+len(name))
+			a.checkUnknownName(a.tree.termID(value), name, start, start+len(name))
 		}
 		return typ
 	}
-	call := a.tree.termCall(&value)
-	if call == nil {
+	call, ok := a.tree.termCall(value)
+	if !ok {
 		return simpleTypeFromTerm(a.tree, value)
 	}
-	if fact, ok := a.functionFactForCall(*call); ok {
-		return a.checkCallArguments(fact, *call)
+	if fact, ok := a.functionFactForCall(call); ok {
+		return a.checkCallArguments(fact, call)
 	}
 	return simpleTypeUnknown
 }
@@ -1751,9 +1781,9 @@ func (a *analysisState) checkTableAssignable(expected, actual tableFact, span so
 	return true
 }
 
-func expressionRange(tree syntaxTree, expr expression) sourceRange {
-	terms := tree.expressionTerms(&expr)
-	if len(terms) == 0 {
+func expressionRange(tree syntaxTree, expr expressionID) sourceRange {
+	terms, ok := tree.expressionTerms(expr)
+	if !ok || len(terms) == 0 {
 		return sourceRange{}
 	}
 	span := andExpressionRange(tree, terms[0])
@@ -1763,9 +1793,9 @@ func expressionRange(tree syntaxTree, expr expression) sourceRange {
 	return span
 }
 
-func andExpressionRange(tree syntaxTree, expr andExpression) sourceRange {
-	terms := tree.andTerms(&expr)
-	if len(terms) == 0 {
+func andExpressionRange(tree syntaxTree, expr andExpressionID) sourceRange {
+	terms, ok := tree.andTerms(expr)
+	if !ok || len(terms) == 0 {
 		return sourceRange{}
 	}
 	span := comparisonExpressionRange(tree, terms[0])
@@ -1775,63 +1805,66 @@ func andExpressionRange(tree syntaxTree, expr andExpression) sourceRange {
 	return span
 }
 
-func comparisonExpressionRange(tree syntaxTree, expr comparisonExpression) sourceRange {
-	span := concatExpressionRange(tree, tree.comparisonLeft(&expr))
-	if right := tree.comparisonRight(&expr); right != nil {
-		span.end = concatExpressionRange(tree, *right).end
+func comparisonExpressionRange(tree syntaxTree, expr comparisonExpressionID) sourceRange {
+	span := concatExpressionRange(tree, tree.comparisonLeft(expr))
+	if right := tree.comparisonRight(expr); right != 0 {
+		span.end = concatExpressionRange(tree, right).end
 	}
 	return span
 }
 
-func concatExpressionRange(tree syntaxTree, expr concatExpression) sourceRange {
-	span := additiveExpressionRange(tree, tree.concatFirst(&expr))
-	for _, part := range tree.concatRest(&expr) {
+func concatExpressionRange(tree syntaxTree, expr concatExpressionID) sourceRange {
+	span := additiveExpressionRange(tree, tree.concatFirst(expr))
+	rest, _ := tree.concatRest(expr)
+	for _, part := range rest {
 		span.end = additiveExpressionRange(tree, part).end
 	}
 	return span
 }
 
-func additiveExpressionRange(tree syntaxTree, expr additiveExpression) sourceRange {
-	span := multiplicativeExpressionRange(tree, tree.additiveFirst(&expr))
-	for i := range tree.additiveRest(&expr) {
-		span.end = multiplicativeExpressionRange(tree, *tree.additivePartValue(&tree.additiveRest(&expr)[i])).end
+func additiveExpressionRange(tree syntaxTree, expr additiveExpressionID) sourceRange {
+	span := multiplicativeExpressionRange(tree, tree.additiveFirst(expr))
+	rest, _ := tree.additiveRest(expr)
+	for _, part := range rest {
+		span.end = multiplicativeExpressionRange(tree, tree.additivePartValue(part)).end
 	}
 	return span
 }
 
-func multiplicativeExpressionRange(tree syntaxTree, expr multiplicativeExpression) sourceRange {
-	span := termRange(tree, tree.multiplicativeFirst(&expr))
-	for i := range tree.multiplicativeRest(&expr) {
-		span.end = termRange(tree, *tree.multiplicativePartValue(&tree.multiplicativeRest(&expr)[i])).end
+func multiplicativeExpressionRange(tree syntaxTree, expr multiplicativeExpressionID) sourceRange {
+	span := termRange(tree, tree.multiplicativeFirst(expr))
+	rest, _ := tree.multiplicativeRest(expr)
+	for _, part := range rest {
+		span.end = termRange(tree, tree.multiplicativePartValue(part)).end
 	}
 	return span
 }
 
-func termRange(tree syntaxTree, value term) sourceRange {
-	start, end := tree.termRange(&value)
+func termRange(tree syntaxTree, value termID) sourceRange {
+	start, end := tree.termRange(value)
 	return sourceRange{start: start, end: end}
 }
 
-func (a *analysisState) functionFactForCall(call callExpression) (functionFact, bool) {
+func (a *analysisState) functionFactForCall(call arenaCallID) (functionFact, bool) {
 	return a.functionFactForCallWithDiagnostics(call, true)
 }
 
-func (a *analysisState) functionFactForCallQuiet(call callExpression) (functionFact, bool) {
+func (a *analysisState) functionFactForCallQuiet(call arenaCallID) (functionFact, bool) {
 	return a.functionFactForCallWithDiagnostics(call, false)
 }
 
-func (a *analysisState) functionFactForCallWithDiagnostics(call callExpression, diagnoseAccess bool) (functionFact, bool) {
-	callTarget := a.tree.callTarget(&call)
-	if callTarget == nil {
+func (a *analysisState) functionFactForCallWithDiagnostics(call arenaCallID, diagnoseAccess bool) (functionFact, bool) {
+	callTarget := a.tree.callTarget(call)
+	if callTarget == 0 {
 		return functionFact{}, false
 	}
-	target := termWithoutCastsAndGroups(a.tree, *callTarget)
-	name := a.tree.termName(&target)
-	selectors := a.tree.termSelectors(&target)
+	target := termWithoutCastsAndGroups(a.tree, callTarget)
+	name := a.tree.termName(target)
+	selectors, _ := a.tree.termSelectors(target)
 	if name == "" {
 		return functionFact{}, false
 	}
-	if use, ok := a.bind.use(a.tree.termID(&target)); ok {
+	if use, ok := a.bind.use(a.tree.termID(target)); ok {
 		if len(selectors) != 0 {
 			if fact, ok := a.tableFunctionFactForCallTarget(target, diagnoseAccess); ok {
 				return fact, true
@@ -1856,17 +1889,17 @@ func (a *analysisState) functionFactForCallWithDiagnostics(call callExpression, 
 	return functionFact{}, false
 }
 
-func (a *analysisState) tableFunctionFactForCallTarget(target term, diagnoseAccess bool) (functionFact, bool) {
+func (a *analysisState) tableFunctionFactForCallTarget(target termID, diagnoseAccess bool) (functionFact, bool) {
 	tree := a.tree
-	name := tree.termName(&target)
-	selectors := tree.termSelectors(&target)
-	start, end := tree.termRange(&target)
+	name := tree.termName(target)
+	selectors, _ := tree.termSelectors(target)
+	start, end := tree.termRange(target)
 	if name == "" || len(selectors) != 1 {
 		return functionFact{}, false
 	}
-	selector := &selectors[0]
-	field := tree.selectorField(selector)
-	if field == "" || tree.selectorIndex(selector) != nil {
+	selector := selectors[0]
+	field := tree.termSelectorField(selector)
+	if field == "" || tree.termSelectorIndex(selector) != 0 {
 		return functionFact{}, false
 	}
 	table, ok := a.lookupTableFact(name)
@@ -1938,9 +1971,9 @@ func (a *analysisState) functionAnnotation(annotation *typeExpression) (*typeExp
 	return annotation, substitutions
 }
 
-func (a *analysisState) inferFieldRead(value term) simpleType {
-	name := a.tree.termName(&value)
-	selectors := a.tree.termSelectors(&value)
+func (a *analysisState) inferFieldRead(value termID) simpleType {
+	name := a.tree.termName(value)
+	selectors, _ := a.tree.termSelectors(value)
 	if name == "" || len(selectors) != 1 {
 		return simpleTypeUnknown
 	}
@@ -1949,7 +1982,7 @@ func (a *analysisState) inferFieldRead(value term) simpleType {
 		return simpleTypeUnknown
 	}
 	selector := selectors[0]
-	start, end := a.tree.termRange(&value)
+	start, end := a.tree.termRange(value)
 	if field, ok := stableFieldSelector(a.tree, value); ok {
 		typ, exists := fact.fields[field]
 		if exists {
@@ -1964,10 +1997,10 @@ func (a *analysisState) inferFieldRead(value term) simpleType {
 			return typ
 		}
 	}
-	selectorIndex := a.tree.selectorIndex(&selector)
-	if selectorIndex != nil {
-		key := a.inferExpression(*selectorIndex)
-		if indexer, ok := a.tableIndexerForKey(fact, key, expressionRange(a.tree, *selectorIndex)); ok {
+	selectorIndex := a.tree.termSelectorIndex(selector)
+	if selectorIndex != 0 {
+		key := a.inferExpression(selectorIndex)
+		if indexer, ok := a.tableIndexerForKey(fact, key, expressionRange(a.tree, selectorIndex)); ok {
 			if indexer.access == "write" {
 				a.diagnostics = append(a.diagnostics, writeonlyPropertyDiagnostic(
 					"indexer",
@@ -1980,7 +2013,7 @@ func (a *analysisState) inferFieldRead(value term) simpleType {
 		}
 		return simpleTypeUnknown
 	}
-	selectorField := a.tree.selectorField(&selector)
+	selectorField := a.tree.termSelectorField(selector)
 	if selectorField == "" {
 		return simpleTypeUnknown
 	}
@@ -2038,20 +2071,20 @@ func tableIndexerForKeyType(fact tableFact, key simpleType) (tableIndexerFact, b
 	return tableIndexerFact{}, false
 }
 
-func (a *analysisState) checkCallArguments(fact functionFact, call callExpression) simpleType {
+func (a *analysisState) checkCallArguments(fact functionFact, call arenaCallID) simpleType {
 	tree := a.tree
-	target := tree.callTarget(&call)
-	receiver := tree.callReceiver(&call)
-	args := tree.callArgs(&call)
+	target := tree.callTarget(call)
+	receiver := tree.callReceiver(call)
+	args, _ := tree.callArgs(call)
 	substitutions := a.explicitGenericSubstitutions(fact, call)
 	receiverOffset := methodReceiverOffset(a.tree, call)
 	for i, expected := range fact.params {
 		generic := genericAt(fact.paramGenerics, i)
 		actual := simpleTypeNil
-		span := termRange(a.tree, *target)
-		if receiver != nil && i == 0 {
-			actual = a.inferTerm(*receiver)
-			span = termRange(a.tree, *receiver)
+		span := termRange(a.tree, target)
+		if receiver != 0 && i == 0 {
+			actual = a.inferTerm(receiver)
+			span = termRange(a.tree, receiver)
 		} else if argIndex := i - receiverOffset; argIndex >= 0 && argIndex < len(args) {
 			actual = a.inferExpression(args[argIndex])
 			span = expressionRange(a.tree, args[argIndex])
@@ -2089,8 +2122,8 @@ func (a *analysisState) checkCallArguments(fact functionFact, call callExpressio
 	return fact.returnType
 }
 
-func (a *analysisState) checkVariadicCallArguments(fact functionFact, call callExpression, substitutions map[string]simpleType) {
-	args := a.tree.callArgs(&call)
+func (a *analysisState) checkVariadicCallArguments(fact functionFact, call arenaCallID, substitutions map[string]simpleType) {
+	args, _ := a.tree.callArgs(call)
 	if fact.variadic == simpleTypeUnknown && fact.variadicGeneric == "" {
 		return
 	}
@@ -2124,15 +2157,15 @@ func (a *analysisState) checkVariadicCallArguments(fact functionFact, call callE
 	}
 }
 
-func methodReceiverOffset(tree syntaxTree, call callExpression) int {
-	if tree.callReceiver(&call) == nil {
+func methodReceiverOffset(tree syntaxTree, call arenaCallID) int {
+	if tree.callReceiver(call) == 0 {
 		return 0
 	}
 	return 1
 }
 
-func (a *analysisState) explicitGenericSubstitutions(fact functionFact, call callExpression) map[string]simpleType {
-	typeArgs := a.tree.callTypeArgs(&call)
+func (a *analysisState) explicitGenericSubstitutions(fact functionFact, call arenaCallID) map[string]simpleType {
+	typeArgs := a.tree.callTypeArgs(call)
 	substitutions := make(map[string]simpleType)
 	for i, typeParam := range fact.typeParams {
 		if i >= len(typeArgs) {
@@ -2565,20 +2598,22 @@ func optionAllows(expected, actual simpleType) bool {
 	return actual == simpleTypeNil || actual == base
 }
 
-func simpleTypeFromExpression(tree syntaxTree, expr expression) simpleType {
+func simpleTypeFromExpression(tree syntaxTree, expr expressionID) simpleType {
 	value, ok := expressionSingleTerm(tree, expr)
-	if !ok || len(tree.termSelectors(&value)) != 0 {
+	selectors, _ := tree.termSelectors(value)
+	if !ok || len(selectors) != 0 {
 		return simpleTypeUnknown
 	}
 	return simpleTypeFromTerm(tree, value)
 }
 
-func simpleTypeFromTerm(tree syntaxTree, value term) simpleType {
+func simpleTypeFromTerm(tree syntaxTree, value termID) simpleType {
 	switch {
-	case tree.termNumber(&value) != nil:
+	case func() bool { _, ok := tree.termNumber(value); return ok }():
 		return simpleTypeNumber
-	case tree.termLiteral(&value) != nil:
-		switch tree.termLiteral(&value).Kind() {
+	case func() bool { _, ok := tree.termLiteral(value); return ok }():
+		literal, _ := tree.termLiteral(value)
+		switch literal.Kind() {
 		case NilKind:
 			return simpleTypeNil
 		case BoolKind:
@@ -2588,12 +2623,13 @@ func simpleTypeFromTerm(tree syntaxTree, value term) simpleType {
 		case StringKind:
 			return simpleTypeString
 		}
-	case tree.termTable(&value) != nil:
+	case func() bool { _, ok := tree.termTable(value); return ok }():
 		return simpleTypeTable
-	case tree.termFunction(&value) != nil:
+	case func() bool { _, ok := tree.termFunction(value); return ok }():
 		return simpleTypeFunction
-	case tree.termGroup(&value) != nil:
-		return simpleTypeFromExpression(tree, *tree.termGroup(&value))
+	case func() bool { _, ok := tree.termGroup(value); return ok }():
+		group, _ := tree.termGroup(value)
+		return simpleTypeFromExpression(tree, group)
 	}
 	return simpleTypeUnknown
 }

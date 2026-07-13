@@ -75,11 +75,10 @@ func parseSourceWithLimits(source Source, limits CompileLimits) (sourceArtifact,
 		return sourceArtifact{}, &LimitError{Kind: LimitSourceBytes, Limit: limits.MaxSourceBytes, Used: uint64(len(source.Text))}
 	}
 	p := parser{source: source.Text, limits: limits}
-	prog, err := p.parse()
+	tree, err := p.parse()
 	if err != nil {
 		return sourceArtifact{}, err
 	}
-	tree := newSyntaxTree(prog)
 	return sourceArtifact{
 		source: source,
 		metrics: sourceMetrics{

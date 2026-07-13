@@ -25,8 +25,13 @@ func TestSyntaxTreeFacadePreservesRootAndPayloadIdentity(t *testing.T) {
 	if local == nil || tree.statementKind(tree.statement(0)) != syntaxStatementLocal {
 		t.Fatalf("local payload=%#v kind=%v", local, tree.statementKind(tree.statement(0)))
 	}
-	if got := tree.expressionTerms(&local.values[0]); got == nil || &got[0] != &local.values[0].terms[0] {
-		t.Fatal("expression term facade changed slice identity")
+	got, ok := tree.expressionTerms(local.values[0])
+	if !ok || len(got) == 0 {
+		t.Fatal("expression term facade did not resolve arena children")
+	}
+	node, ok := tree.arena.expression(local.values[0])
+	if !ok || got[0] != tree.arena.expressionTerms[node.terms.start] {
+		t.Fatal("expression term facade changed child identity")
 	}
 }
 
@@ -35,11 +40,20 @@ func TestSyntaxTreeFacadePreservesNilAndEmptyChildren(t *testing.T) {
 	if tree.statements() != nil {
 		t.Fatal("nil root statements became non-nil")
 	}
-	if tree.expressionTerms(nil) != nil || tree.typeArgs(nil) != nil || tree.termGroup(nil) != nil {
+	if terms, ok := tree.expressionTerms(0); ok || terms != nil {
+		t.Fatal("zero expression ID returned children")
+	}
+	if tree.typeArgs(nil) != nil {
 		t.Fatal("nil child facade returned non-nil value")
 	}
-	empty := &expression{terms: []andExpression{}}
-	if got := tree.expressionTerms(empty); got == nil || len(got) != 0 {
+	if group, ok := tree.termGroup(0); ok || group != 0 {
+		t.Fatal("zero term ID returned a group")
+	}
+	tree.arena = &syntaxArena{
+		expressions:     []arenaExpression{{terms: nodeSpan{}}},
+		expressionTerms: make([]andExpressionID, 0),
+	}
+	if got, ok := tree.expressionTerms(1); !ok || got == nil || len(got) != 0 {
 		t.Fatalf("empty expression terms=%#v, want non-nil empty slice", got)
 	}
 }

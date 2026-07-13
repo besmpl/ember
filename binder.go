@@ -256,22 +256,22 @@ func (b *binder) bindStatement(stmt statement) {
 			b.bindAssignTarget(target, true)
 		}
 	case syntaxStatementCall:
-		b.bindTerm(*b.tree.call(&stmt))
+		b.bindTerm(b.tree.call(&stmt))
 	case syntaxStatementIf:
 		ifStmt := b.tree.ifStatement(&stmt)
-		b.bindExpression(*b.tree.ifCondition(ifStmt))
+		b.bindExpression(b.tree.ifCondition(ifStmt))
 		b.bindScoped(b.tree.ifThenStatements(ifStmt))
 		b.bindScoped(b.tree.ifElseStatements(ifStmt))
 	case syntaxStatementWhile:
 		while := b.tree.whileStatement(&stmt)
-		b.bindExpression(*b.tree.whileCondition(while))
+		b.bindExpression(b.tree.whileCondition(while))
 		b.bindScoped(b.tree.whileStatements(while))
 	case syntaxStatementFor:
 		forLoop := b.tree.forStatement(&stmt)
-		b.bindExpression(*b.tree.numericForStart(forLoop))
-		b.bindExpression(*b.tree.numericForLimit(forLoop))
-		if step := b.tree.numericForStep(forLoop); step != nil {
-			b.bindExpression(*step)
+		b.bindExpression(b.tree.numericForStart(forLoop))
+		b.bindExpression(b.tree.numericForLimit(forLoop))
+		if step := b.tree.numericForStep(forLoop); step != 0 {
+			b.bindExpression(step)
 		}
 		b.pushScope()
 		b.define(b.tree.numericForName(forLoop), symbolLocal, b.tree.numericForNameID(forLoop))
@@ -292,7 +292,7 @@ func (b *binder) bindStatement(stmt statement) {
 		repeat := b.tree.repeatStatement(&stmt)
 		b.pushScope()
 		b.bindStatements(b.tree.repeatStatements(repeat))
-		b.bindExpression(*b.tree.repeatCondition(repeat))
+		b.bindExpression(b.tree.repeatCondition(repeat))
 		b.popScope()
 	case syntaxStatementBlock:
 		b.bindScoped(b.tree.blockStatements(b.tree.blockStatement(&stmt)))
@@ -335,107 +335,111 @@ func (b *binder) bindFunction(functionID int, typeParams []string, typeParamID s
 	b.popScope()
 }
 
-func (b *binder) bindExpression(expr expression) {
-	if b.tree.expressionID(&expr) > 0 {
+func (b *binder) bindExpression(expr expressionID) {
+	if expr > 0 {
 		multiret := expressionExpands(b.tree, expr)
 		arity := 1
 		if multiret {
 			arity = -1
 		}
-		facts := &b.result.nodeFacts[b.tree.expressionID(&expr)]
+		facts := &b.result.nodeFacts[b.tree.expressionSyntaxID(expr)]
 		facts.expressionArity = int32(arity)
 		facts.flags |= boundNodeExpressionValid
 		if multiret {
 			facts.flags |= boundNodeMultiret
 		}
 	}
-	for _, and := range b.tree.expressionTerms(&expr) {
-		for _, comparison := range b.tree.andTerms(&and) {
-			b.bindConcatExpression(b.tree.comparisonLeft(&comparison))
-			if right := b.tree.comparisonRight(&comparison); right != nil {
-				b.bindConcatExpression(*right)
+	terms, _ := b.tree.expressionTerms(expr)
+	for _, and := range terms {
+		comparisons, _ := b.tree.andTerms(and)
+		for _, comparison := range comparisons {
+			b.bindConcatExpression(b.tree.comparisonLeft(comparison))
+			if right := b.tree.comparisonRight(comparison); right != 0 {
+				b.bindConcatExpression(right)
 			}
 		}
 	}
 }
 
-func (b *binder) bindConcatExpression(expr concatExpression) {
-	b.bindAdditiveExpression(b.tree.concatFirst(&expr))
-	for _, part := range b.tree.concatRest(&expr) {
+func (b *binder) bindConcatExpression(expr concatExpressionID) {
+	b.bindAdditiveExpression(b.tree.concatFirst(expr))
+	parts, _ := b.tree.concatRest(expr)
+	for _, part := range parts {
 		b.bindAdditiveExpression(part)
 	}
 }
 
-func (b *binder) bindAdditiveExpression(expr additiveExpression) {
-	b.bindMultiplicativeExpression(b.tree.additiveFirst(&expr))
-	for _, part := range b.tree.additiveRest(&expr) {
-		b.bindMultiplicativeExpression(*b.tree.additivePartValue(&part))
+func (b *binder) bindAdditiveExpression(expr additiveExpressionID) {
+	b.bindMultiplicativeExpression(b.tree.additiveFirst(expr))
+	parts, _ := b.tree.additiveRest(expr)
+	for _, part := range parts {
+		b.bindMultiplicativeExpression(part.value)
 	}
 }
 
-func (b *binder) bindMultiplicativeExpression(expr multiplicativeExpression) {
-	b.bindTerm(b.tree.multiplicativeFirst(&expr))
-	for _, part := range b.tree.multiplicativeRest(&expr) {
-		b.bindTerm(*b.tree.multiplicativePartValue(&part))
+func (b *binder) bindMultiplicativeExpression(expr multiplicativeExpressionID) {
+	b.bindTerm(b.tree.multiplicativeFirst(expr))
+	parts, _ := b.tree.multiplicativeRest(expr)
+	for _, part := range parts {
+		b.bindTerm(part.value)
 	}
 }
 
-func (b *binder) bindTerm(value term) {
-	if power := b.tree.termPower(&value); power != nil {
-		b.bindTerm(*b.tree.powerBase(power))
-		b.bindTerm(*b.tree.powerExponent(power))
+func (b *binder) bindTerm(value termID) {
+	if power, ok := b.tree.termPower(value); ok {
+		b.bindTerm(b.tree.powerBase(power))
+		b.bindTerm(b.tree.powerExponent(power))
 	}
-	if table := b.tree.termTable(&value); table != nil {
-		for _, field := range b.tree.tableFields(table) {
-			if key := b.tree.tableFieldKey(&field); key != nil {
-				b.bindExpression(*key)
+	if table, ok := b.tree.termTable(value); ok {
+		fields, _ := b.tree.tableFields(table)
+		for _, field := range fields {
+			if key := b.tree.tableFieldKey(field); key != 0 {
+				b.bindExpression(key)
 			}
-			b.bindExpression(*b.tree.tableFieldValue(&field))
+			b.bindExpression(b.tree.tableFieldValue(field))
 		}
 	}
-	if function := b.tree.termFunction(&value); function != nil {
+	if function, ok := b.tree.termFunction(value); ok {
 		b.bindFunction(b.tree.functionExpressionFunctionID(function), b.tree.functionExpressionTypeParams(function), b.tree.functionExpressionTypeParamID(function), b.tree.functionExpressionTypePacks(function), b.tree.functionExpressionTypePackID(function), b.tree.functionExpressionParams(function), b.tree.functionExpressionParamID(function), b.tree.functionExpressionParamAnnotations(function), b.tree.functionExpressionVariadicAnnotation(function), b.tree.functionExpressionReturnAnnotation(function), b.tree.functionExpressionStatements(function))
 	}
-	if ifExpr := b.tree.termIf(&value); ifExpr != nil {
-		b.bindExpression(*b.tree.ifExpressionCondition(ifExpr))
-		b.bindExpression(*b.tree.ifExpressionThen(ifExpr))
-		b.bindExpression(*b.tree.ifExpressionElse(ifExpr))
+	if ifExpr, ok := b.tree.termIf(value); ok {
+		b.bindExpression(b.tree.ifExpressionCondition(ifExpr))
+		b.bindExpression(b.tree.ifExpressionThen(ifExpr))
+		b.bindExpression(b.tree.ifExpressionElse(ifExpr))
 	}
-	if call := b.tree.termCall(&value); call != nil {
-		b.bindCall(*call)
+	if call, ok := b.tree.termCall(value); ok {
+		b.bindCall(call)
 	}
-	if unaryNot := b.tree.termUnaryNot(&value); unaryNot != nil {
-		b.bindTerm(*unaryNot)
+	if child, ok := b.tree.termChild(value); ok {
+		b.bindTerm(child)
 	}
-	if unaryMinus := b.tree.termUnaryMinus(&value); unaryMinus != nil {
-		b.bindTerm(*unaryMinus)
+	if group, ok := b.tree.termGroup(value); ok {
+		b.bindExpression(group)
 	}
-	if unaryLen := b.tree.termUnaryLength(&value); unaryLen != nil {
-		b.bindTerm(*unaryLen)
+	if cast, ok := b.tree.termCast(value); ok {
+		b.bindTypeExpression(cast)
 	}
-	if group := b.tree.termGroup(&value); group != nil {
-		b.bindExpression(*group)
+	if name := b.tree.termName(value); name != "" {
+		b.recordUse(b.tree.termSyntaxID(value), name, valueNamespace)
 	}
-	b.bindTypeExpression(b.tree.termCast(&value))
-	if name := b.tree.termName(&value); name != "" {
-		b.recordUse(b.tree.termID(&value), name, valueNamespace)
-	}
-	for _, selector := range b.tree.termSelectors(&value) {
-		if index := b.tree.selectorIndex(&selector); index != nil {
-			b.bindExpression(*index)
+	selectors, _ := b.tree.termSelectors(value)
+	for _, selector := range selectors {
+		if index := selector.index; index != 0 {
+			b.bindExpression(index)
 		}
 	}
 }
 
-func (b *binder) bindCall(call callExpression) {
-	b.bindTerm(*b.tree.callTarget(&call))
-	if receiver := b.tree.callReceiver(&call); receiver != nil {
-		b.bindTerm(*receiver)
+func (b *binder) bindCall(call arenaCallID) {
+	b.bindTerm(b.tree.callTarget(call))
+	if receiver := b.tree.callReceiver(call); receiver != 0 {
+		b.bindTerm(receiver)
 	}
-	for _, arg := range b.tree.callTypeArgs(&call) {
+	for _, arg := range b.tree.callTypeArgs(call) {
 		b.bindTypeExpression(arg)
 	}
-	for _, arg := range b.tree.callArgs(&call) {
+	args, _ := b.tree.callArgs(call)
+	for _, arg := range args {
 		b.bindExpression(arg)
 	}
 }
@@ -484,8 +488,8 @@ func (b *binder) bindTypeExpression(value *typeExpression) {
 		b.bindTypeFunction(value)
 		b.popScope()
 	case typeKindTypeof:
-		if expr := b.tree.typeExpression(value); expr != nil {
-			b.bindExpression(*expr)
+		if expr := b.tree.typeExpression(value); expr != 0 {
+			b.bindExpression(expr)
 		}
 	}
 }
@@ -510,8 +514,8 @@ func (b *binder) bindAssignTarget(target assignTarget, assignment bool) {
 		}
 	}
 	for _, selector := range b.tree.assignTargetSelectors(&target) {
-		if index := b.tree.selectorIndex(&selector); index != nil {
-			b.bindExpression(*index)
+		if index := b.tree.selectorIndex(&selector); index != 0 {
+			b.bindExpression(index)
 		}
 	}
 }

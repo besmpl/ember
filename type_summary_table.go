@@ -25,6 +25,22 @@ func tableSummaryPath(tree syntaxTree, summary TypeSummary, selectors []selector
 	return current, true
 }
 
+func tableSummaryTermPath(tree syntaxTree, summary TypeSummary, selectors []arenaSelector) (TypeSummary, bool) {
+	current := summary
+	for _, selector := range selectors {
+		field := tree.termSelectorField(selector)
+		if field == "" || current.Kind != TypeSummaryTable {
+			return TypeSummary{}, false
+		}
+		next, ok := tableSummaryProperty(current, field)
+		if !ok {
+			return TypeSummary{}, false
+		}
+		current = next
+	}
+	return current, true
+}
+
 func setTableSummaryProperty(summary *TypeSummary, name string, value TypeSummary) {
 	for i := range summary.Properties {
 		if summary.Properties[i].Name == name {

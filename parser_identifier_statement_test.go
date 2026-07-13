@@ -128,6 +128,26 @@ return total`,
 			want: 2,
 		},
 		{
+			name: "indexed call statement",
+			source: `local total = 0
+local calls = {function(value)
+    total = total + value
+end}
+calls[1](2)
+return total`,
+			want: 2,
+		},
+		{
+			name: "typed call statement",
+			source: `local total = 0
+local function add<T>(value: T)
+    total = total + value
+end
+add<<number>>(2)
+return total`,
+			want: 2,
+		},
+		{
 			name: "method call statement",
 			source: `local value = {amount = 1}
 function value:add(delta)

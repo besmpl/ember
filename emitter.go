@@ -358,7 +358,7 @@ func (c *compiler) compileStatement(stmt statement) error {
 	case syntaxStatementAssign:
 		return c.compileAssignment(*c.tree.assignment(&stmt))
 	case syntaxStatementCall:
-		return c.compileCallStatement(*c.tree.call(&stmt))
+		return c.compileCallStatement(c.tree.call(&stmt))
 	case syntaxStatementIf:
 		return c.compileIf(*c.tree.ifStatement(&stmt))
 	case syntaxStatementWhile:
@@ -461,16 +461,17 @@ func (c *compiler) compileReturn(stmt returnStatement) error {
 	return nil
 }
 
-func (c *compiler) compileCallStatement(stmt term) error {
-	call := c.tree.termCall(&stmt)
-	if call == nil {
+func (c *compiler) compileCallStatement(stmt termID) error {
+	call, ok := c.tree.termCall(stmt)
+	if !ok {
 		return fmt.Errorf("compile: call statement has no call")
 	}
 	result := c.allocReg()
-	return c.compilePlannedCallToResults(planCall(c.tree, *call), c.tree.callArgs(call), result, 1)
+	args, _ := c.tree.callArgs(call)
+	return c.compilePlannedCallToResults(planCall(c.tree, call), args, result, 1)
 }
 
-func (c *compiler) compileExpressionListTo(values []expression, targets []int) error {
+func (c *compiler) compileExpressionListTo(values []expressionID, targets []int) error {
 	if len(targets) == 0 {
 		return nil
 	}
@@ -577,7 +578,7 @@ func (c *compiler) compileFunctionDraft(closure closurePlan, selfFunctionSymbol 
 	return fn.buildFunctionDraft(fn.upvalueDescs, closure.paramCount(), closure.variadic)
 }
 
-func (c *compiler) compileTempExpression(expr expression) (int, error) {
+func (c *compiler) compileTempExpression(expr expressionID) (int, error) {
 	target := c.allocTemp()
 	if err := c.compileExpressionTo(expr, target); err != nil {
 		c.releaseTemp(target)
@@ -586,7 +587,7 @@ func (c *compiler) compileTempExpression(expr expression) (int, error) {
 	return target, nil
 }
 
-func (c *compiler) compileExpressionTo(expr expression, target int) error {
+func (c *compiler) compileExpressionTo(expr expressionID, target int) error {
 	c.claimRegister(target)
 	source := expressionRange(c.tree, expr)
 	return c.withSourceRange(source, func() error {
@@ -596,8 +597,8 @@ func (c *compiler) compileExpressionTo(expr expression, target int) error {
 				return nil
 			}
 		}
-		terms := c.tree.expressionTerms(&expr)
-		if len(terms) == 0 {
+		terms, ok := c.tree.expressionTerms(expr)
+		if !ok || len(terms) == 0 {
 			return fmt.Errorf("compile: empty expression")
 		}
 
@@ -620,9 +621,9 @@ func (c *compiler) compileExpressionTo(expr expression, target int) error {
 	})
 }
 
-func (c *compiler) compileAndExpressionTo(expr andExpression, target int) error {
-	terms := c.tree.andTerms(&expr)
-	if len(terms) == 0 {
+func (c *compiler) compileAndExpressionTo(expr andExpressionID, target int) error {
+	terms, ok := c.tree.andTerms(expr)
+	if !ok || len(terms) == 0 {
 		return fmt.Errorf("compile: empty expression")
 	}
 
@@ -641,27 +642,27 @@ func (c *compiler) compileAndExpressionTo(expr andExpression, target int) error 
 	return nil
 }
 
-func (c *compiler) compileComparisonExpressionTo(expr comparisonExpression, target int) error {
-	if c.tree.comparisonOperator(&expr) == "" {
-		return c.compileConcatExpressionTo(c.tree.comparisonLeft(&expr), target)
+func (c *compiler) compileComparisonExpressionTo(expr comparisonExpressionID, target int) error {
+	if c.tree.comparisonOperator(expr) == "" {
+		return c.compileConcatExpressionTo(c.tree.comparisonLeft(expr), target)
 	}
 
-	rightExpr := c.tree.comparisonRight(&expr)
-	if rightExpr == nil {
+	rightExpr := c.tree.comparisonRight(expr)
+	if rightExpr == 0 {
 		return fmt.Errorf("compile: missing comparison right operand")
 	}
 
-	if err := c.compileConcatExpressionTo(c.tree.comparisonLeft(&expr), target); err != nil {
+	if err := c.compileConcatExpressionTo(c.tree.comparisonLeft(expr), target); err != nil {
 		return err
 	}
 
 	right := c.allocTemp()
-	if err := c.compileConcatExpressionTo(*rightExpr, right); err != nil {
+	if err := c.compileConcatExpressionTo(rightExpr, right); err != nil {
 		c.releaseTemp(right)
 		return err
 	}
 
-	switch c.tree.comparisonOperator(&expr) {
+	switch c.tree.comparisonOperator(expr) {
 	case comparisonEqual:
 		c.emit(instruction{op: opEqual, a: target, b: target, c: right})
 	case comparisonNotEqual:
@@ -676,21 +677,21 @@ func (c *compiler) compileComparisonExpressionTo(expr comparisonExpression, targ
 		c.emit(instruction{op: opGreaterEqual, a: target, b: target, c: right})
 	default:
 		c.releaseTemp(right)
-		return fmt.Errorf("compile: unsupported comparison %q", expr.op)
+		return fmt.Errorf("compile: unsupported comparison %q", c.tree.comparisonOperator(expr))
 	}
 
 	c.releaseTemp(right)
 	return nil
 }
 
-func (c *compiler) compileConcatExpressionTo(expr concatExpression, target int) error {
-	rest := c.tree.concatRest(&expr)
+func (c *compiler) compileConcatExpressionTo(expr concatExpressionID, target int) error {
+	rest, _ := c.tree.concatRest(expr)
 	operandCount := 1 + len(rest)
 	if operandCount >= 3 && target+1 >= c.nextReg {
 		return c.compileConcatChainExpressionTo(expr, target, operandCount)
 	}
 
-	if err := c.compileAdditiveExpressionTo(c.tree.concatFirst(&expr), target); err != nil {
+	if err := c.compileAdditiveExpressionTo(c.tree.concatFirst(expr), target); err != nil {
 		return err
 	}
 
@@ -707,13 +708,13 @@ func (c *compiler) compileConcatExpressionTo(expr concatExpression, target int) 
 	return nil
 }
 
-func (c *compiler) compileConcatChainExpressionTo(expr concatExpression, target int, operandCount int) error {
-	rest := c.tree.concatRest(&expr)
+func (c *compiler) compileConcatChainExpressionTo(expr concatExpressionID, target int, operandCount int) error {
+	rest, _ := c.tree.concatRest(expr)
 	end := target + operandCount
 	c.reserveRegistersThrough(end)
 	c.claimRegisterRange(target, end)
 
-	if err := c.compileAdditiveExpressionTo(c.tree.concatFirst(&expr), target); err != nil {
+	if err := c.compileAdditiveExpressionTo(c.tree.concatFirst(expr), target); err != nil {
 		return err
 	}
 	for index, part := range rest {
@@ -730,33 +731,34 @@ func (c *compiler) compileConcatChainExpressionTo(expr concatExpression, target 
 	return nil
 }
 
-func (c *compiler) compileAdditiveExpressionTo(expr additiveExpression, target int) error {
-	if err := c.compileMultiplicativeExpressionTo(c.tree.additiveFirst(&expr), target); err != nil {
+func (c *compiler) compileAdditiveExpressionTo(expr additiveExpressionID, target int) error {
+	if err := c.compileMultiplicativeExpressionTo(c.tree.additiveFirst(expr), target); err != nil {
 		return err
 	}
 
-	for _, part := range c.tree.additiveRest(&expr) {
-		if right, ok := foldNumberMultiplicative(c.tree, *c.tree.additivePartValue(&part)); ok {
+	parts, _ := c.tree.additiveRest(expr)
+	for _, part := range parts {
+		if right, ok := foldNumberMultiplicative(c.tree, part.value); ok {
 			constant := c.addConstant(NumberValue(right))
-			switch c.tree.additivePartOperator(&part) {
-			case additiveAdd:
+			switch part.op {
+			case arenaAdditiveAdd:
 				c.emit(instruction{op: opAddK, a: target, b: target, c: constant})
 				continue
-			case additiveSubtract:
+			case arenaAdditiveSubtract:
 				c.emit(instruction{op: opSubK, a: target, b: target, c: constant})
 				continue
 			}
 		}
-		partValue := *c.tree.additivePartValue(&part)
+		partValue := part.value
 		right := c.allocArithmeticOperandRegister(partValue)
 		if err := c.compileMultiplicativeExpressionTo(partValue, right); err != nil {
 			c.releaseTemp(right)
 			return err
 		}
-		switch c.tree.additivePartOperator(&part) {
-		case additiveAdd:
+		switch part.op {
+		case arenaAdditiveAdd:
 			c.emit(instruction{op: opAdd, a: target, b: target, c: right})
-		case additiveSubtract:
+		case arenaAdditiveSubtract:
 			c.emit(instruction{op: opSub, a: target, b: target, c: right})
 		default:
 			c.releaseTemp(right)
@@ -768,44 +770,48 @@ func (c *compiler) compileAdditiveExpressionTo(expr additiveExpression, target i
 	return nil
 }
 
-func (c *compiler) allocArithmeticOperandRegister(expr multiplicativeExpression) int {
+func (c *compiler) allocArithmeticOperandRegister(expr multiplicativeExpressionID) int {
 	if _, ok := multiplicativeSingleCall(c.tree, expr); ok {
 		return c.allocReg()
 	}
 	return c.allocTemp()
 }
 
-func multiplicativeSingleCall(tree syntaxTree, expr multiplicativeExpression) (callExpression, bool) {
-	if len(tree.multiplicativeRest(&expr)) != 0 {
-		return callExpression{}, false
+func multiplicativeSingleCall(tree syntaxTree, expr multiplicativeExpressionID) (arenaCallID, bool) {
+	rest, _ := tree.multiplicativeRest(expr)
+	if len(rest) != 0 {
+		return 0, false
 	}
-	value := termWithoutCasts(tree.multiplicativeFirst(&expr))
-	if tree.termCall(&value) == nil || len(tree.termSelectors(&value)) != 0 {
-		return callExpression{}, false
+	value := tree.multiplicativeFirst(expr)
+	call, ok := tree.termCall(value)
+	selectors, _ := tree.termSelectors(value)
+	if !ok || len(selectors) != 0 {
+		return 0, false
 	}
-	return *tree.termCall(&value), true
+	return call, true
 }
 
-func (c *compiler) compileMultiplicativeExpressionTo(expr multiplicativeExpression, target int) error {
-	if err := c.compileTermTo(c.tree.multiplicativeFirst(&expr), target); err != nil {
+func (c *compiler) compileMultiplicativeExpressionTo(expr multiplicativeExpressionID, target int) error {
+	if err := c.compileTermTo(c.tree.multiplicativeFirst(expr), target); err != nil {
 		return err
 	}
 
-	for _, part := range c.tree.multiplicativeRest(&expr) {
-		partValue := *c.tree.multiplicativePartValue(&part)
+	parts, _ := c.tree.multiplicativeRest(expr)
+	for _, part := range parts {
+		partValue := part.value
 		if right, ok := foldNumberTerm(c.tree, partValue); ok {
 			constant := c.addConstant(NumberValue(right))
-			switch c.tree.multiplicativePartOperator(&part) {
-			case multiplicativeMultiply:
+			switch part.op {
+			case arenaMultiplicativeMultiply:
 				c.emit(instruction{op: opMulK, a: target, b: target, c: constant})
 				continue
-			case multiplicativeDivide:
+			case arenaMultiplicativeDivide:
 				c.emit(instruction{op: opDivK, a: target, b: target, c: constant})
 				continue
-			case multiplicativeModulo:
+			case arenaMultiplicativeModulo:
 				c.emit(instruction{op: opModK, a: target, b: target, c: constant})
 				continue
-			case multiplicativeFloorDiv:
+			case arenaMultiplicativeFloorDiv:
 				c.emit(instruction{op: opIDivK, a: target, b: target, c: constant})
 				continue
 			}
@@ -815,14 +821,14 @@ func (c *compiler) compileMultiplicativeExpressionTo(expr multiplicativeExpressi
 			c.releaseTemp(right)
 			return err
 		}
-		switch c.tree.multiplicativePartOperator(&part) {
-		case multiplicativeMultiply:
+		switch part.op {
+		case arenaMultiplicativeMultiply:
 			c.emit(instruction{op: opMul, a: target, b: target, c: right})
-		case multiplicativeDivide:
+		case arenaMultiplicativeDivide:
 			c.emit(instruction{op: opDiv, a: target, b: target, c: right})
-		case multiplicativeModulo:
+		case arenaMultiplicativeModulo:
 			c.emit(instruction{op: opMod, a: target, b: target, c: right})
-		case multiplicativeFloorDiv:
+		case arenaMultiplicativeFloorDiv:
 			c.emit(instruction{op: opIDiv, a: target, b: target, c: right})
 		default:
 			c.releaseTemp(right)
@@ -834,74 +840,76 @@ func (c *compiler) compileMultiplicativeExpressionTo(expr multiplicativeExpressi
 	return nil
 }
 
-func (c *compiler) compileTermTo(term term, target int) error {
-	selectors := c.tree.termSelectors(&term)
+func (c *compiler) compileTermTo(term termID, target int) error {
+	selectors, _ := c.tree.termSelectors(term)
 	if len(selectors) > 0 {
-		base := term
-		base.selectors = nil
-		if ref, ok := c.termLocalRef(base); ok {
+		if ref, ok := c.namedTermLocalRef(term); ok {
 			return c.compileSelectorsFromBaseTo(ref.index, selectors, target)
 		}
-		if isNamedTerm(c.tree, base) {
-			if err := c.compileNamedTermTo(base, target); err != nil {
+		if isNamedTerm(c.tree, term) {
+			if err := c.compileNamedTermTo(term, target); err != nil {
 				return err
 			}
 		} else {
-			if err := c.compileTermTo(base, target); err != nil {
+			if err := c.compileTermCoreTo(term, target); err != nil {
 				return err
 			}
 		}
 		return c.compileSelectorsTo(selectors, target)
 	}
+	return c.compileTermCoreTo(term, target)
+}
 
-	if power := c.tree.termPower(&term); power != nil {
-		return c.compilePowerTo(*power, target)
+func (c *compiler) compileTermCoreTo(term termID, target int) error {
+	if power, ok := c.tree.termPower(term); ok {
+		return c.compilePowerTo(power, target)
 	}
-	if number := c.tree.termNumber(&term); number != nil {
-		c.emitLoadConst(target, NumberValue(*number))
+	if number, ok := c.tree.termNumber(term); ok {
+		c.emitLoadConst(target, NumberValue(number))
 		return nil
 	}
-	if literal := c.tree.termLiteral(&term); literal != nil {
-		c.emitLoadConst(target, *literal)
+	if literal, ok := c.tree.termLiteral(term); ok {
+		c.emitLoadConst(target, literal)
 		return nil
 	}
-	if table := c.tree.termTable(&term); table != nil {
-		return c.compileTableTo(*table, target)
+	if table, ok := c.tree.termTable(term); ok {
+		return c.compileTableTo(table, target)
 	}
-	if function := c.tree.termFunction(&term); function != nil {
-		return c.compileClosureTo(planFunctionExpression(c.tree, *function), target)
+	if function, ok := c.tree.termFunction(term); ok {
+		return c.compileClosureTo(planFunctionExpression(c.tree, function), target)
 	}
-	if ifExpr := c.tree.termIf(&term); ifExpr != nil {
-		return c.compileIfExpressionTo(*ifExpr, target)
+	if ifExpr, ok := c.tree.termIf(term); ok {
+		return c.compileIfExpressionTo(ifExpr, target)
 	}
-	if call := c.tree.termCall(&term); call != nil {
-		return c.compileCallTo(*call, target)
+	if call, ok := c.tree.termCall(term); ok {
+		return c.compileCallTo(call, target)
 	}
-	if c.tree.termVararg(&term) {
+	if c.tree.termVararg(term) {
 		return c.compileVarargToResults(term, target, 1)
 	}
-	if unaryNot := c.tree.termUnaryNot(&term); unaryNot != nil {
-		return c.compileNotTo(*unaryNot, target)
+	if child, ok := c.tree.termChild(term); ok {
+		switch c.tree.termKind(term) {
+		case syntaxTermUnaryNot:
+			return c.compileNotTo(child, target)
+		case syntaxTermUnaryMinus:
+			return c.compileUnaryMinusTo(child, target)
+		case syntaxTermUnaryLength:
+			return c.compileLengthTo(child, target)
+		}
 	}
-	if unaryMinus := c.tree.termUnaryMinus(&term); unaryMinus != nil {
-		return c.compileUnaryMinusTo(*unaryMinus, target)
-	}
-	if unaryLen := c.tree.termUnaryLength(&term); unaryLen != nil {
-		return c.compileLengthTo(*unaryLen, target)
-	}
-	if group := c.tree.termGroup(&term); group != nil {
-		return c.compileExpressionTo(*group, target)
+	if group, ok := c.tree.termGroup(term); ok {
+		return c.compileExpressionTo(group, target)
 	}
 
 	return c.compileNamedTermTo(term, target)
 }
 
-func (c *compiler) compilePowerTo(power powerExpression, target int) error {
-	if err := c.compileTermTo(power.base, target); err != nil {
+func (c *compiler) compilePowerTo(power arenaPowerID, target int) error {
+	if err := c.compileTermTo(c.tree.powerBase(power), target); err != nil {
 		return err
 	}
 	exponent := c.allocTemp()
-	if err := c.compileTermTo(power.exponent, exponent); err != nil {
+	if err := c.compileTermTo(c.tree.powerExponent(power), exponent); err != nil {
 		c.releaseTemp(exponent)
 		return err
 	}
@@ -925,20 +933,20 @@ func (c *compiler) compileClosureToSelf(closure closurePlan, target int, selfFun
 	return nil
 }
 
-func (c *compiler) compileSelectorsTo(selectors []selector, target int) error {
+func (c *compiler) compileSelectorsTo(selectors []arenaSelector, target int) error {
 	for len(selectors) > 0 {
-		if len(selectors) >= 2 && c.tree.selectorField(&selectors[0]) != "" && c.tree.selectorField(&selectors[1]) != "" {
-			firstKey := c.addStringConstant(c.tree.selectorField(&selectors[0]))
-			secondKey := c.addStringConstant(c.tree.selectorField(&selectors[1]))
+		if len(selectors) >= 2 && c.tree.termSelectorField(selectors[0]) != "" && c.tree.termSelectorField(selectors[1]) != "" {
+			firstKey := c.addStringConstant(c.tree.termSelectorField(selectors[0]))
+			secondKey := c.addStringConstant(c.tree.termSelectorField(selectors[1]))
 			c.emit(instruction{op: opGetStringField, a: target, b: target, c: firstKey})
 			c.emit(instruction{op: opGetStringField, a: target, b: target, c: secondKey})
 			selectors = selectors[2:]
 			continue
 		}
-		if len(selectors) >= 2 && c.tree.selectorField(&selectors[0]) != "" && c.tree.selectorIndex(&selectors[1]) != nil {
-			firstKey := c.addStringConstant(c.tree.selectorField(&selectors[0]))
+		if len(selectors) >= 2 && c.tree.termSelectorField(selectors[0]) != "" && c.tree.termSelectorIndex(selectors[1]) != 0 {
+			firstKey := c.addStringConstant(c.tree.termSelectorField(selectors[0]))
 			key := c.allocReg()
-			if err := c.compileExpressionTo(*c.tree.selectorIndex(&selectors[1]), key); err != nil {
+			if err := c.compileExpressionTo(c.tree.termSelectorIndex(selectors[1]), key); err != nil {
 				return err
 			}
 			c.emit(instruction{op: opGetStringFieldIndex, a: target, b: target, c: firstKey, d: key})
@@ -947,15 +955,15 @@ func (c *compiler) compileSelectorsTo(selectors []selector, target int) error {
 		}
 
 		selector := selectors[0]
-		if c.tree.selectorField(&selector) != "" {
-			key := c.addStringConstant(c.tree.selectorField(&selector))
+		if c.tree.termSelectorField(selector) != "" {
+			key := c.addStringConstant(c.tree.termSelectorField(selector))
 			c.emit(instruction{op: opGetStringField, a: target, b: target, c: key})
 			selectors = selectors[1:]
 			continue
 		}
 
 		key := c.allocReg()
-		if err := c.compileExpressionTo(*c.tree.selectorIndex(&selector), key); err != nil {
+		if err := c.compileExpressionTo(c.tree.termSelectorIndex(selector), key); err != nil {
 			return err
 		}
 		c.emit(instruction{op: opGetIndex, a: target, b: target, c: key})
@@ -964,7 +972,7 @@ func (c *compiler) compileSelectorsTo(selectors []selector, target int) error {
 	return nil
 }
 
-func (c *compiler) compileSelectorsFromBaseTo(base int, selectors []selector, target int) error {
+func (c *compiler) compileSelectorsFromBaseTo(base int, selectors []arenaSelector, target int) error {
 	if len(selectors) == 0 {
 		if target != base {
 			c.emit(instruction{op: opMove, a: target, b: base})
@@ -972,59 +980,48 @@ func (c *compiler) compileSelectorsFromBaseTo(base int, selectors []selector, ta
 		return nil
 	}
 	first := selectors[0]
-	if len(selectors) >= 2 && c.tree.selectorField(&first) != "" && c.tree.selectorField(&selectors[1]) != "" {
-		firstKey := c.addStringConstant(c.tree.selectorField(&first))
-		secondKey := c.addStringConstant(c.tree.selectorField(&selectors[1]))
+	if len(selectors) >= 2 && c.tree.termSelectorField(first) != "" && c.tree.termSelectorField(selectors[1]) != "" {
+		firstKey := c.addStringConstant(c.tree.termSelectorField(first))
+		secondKey := c.addStringConstant(c.tree.termSelectorField(selectors[1]))
 		c.emit(instruction{op: opGetStringField, a: target, b: base, c: firstKey})
 		c.emit(instruction{op: opGetStringField, a: target, b: target, c: secondKey})
 		return c.compileSelectorsTo(selectors[2:], target)
 	}
-	if len(selectors) >= 2 && c.tree.selectorField(&first) != "" && c.tree.selectorIndex(&selectors[1]) != nil {
-		firstKey := c.addStringConstant(c.tree.selectorField(&first))
+	if len(selectors) >= 2 && c.tree.termSelectorField(first) != "" && c.tree.termSelectorIndex(selectors[1]) != 0 {
+		firstKey := c.addStringConstant(c.tree.termSelectorField(first))
 		key := c.allocReg()
-		if err := c.compileExpressionTo(*c.tree.selectorIndex(&selectors[1]), key); err != nil {
+		if err := c.compileExpressionTo(c.tree.termSelectorIndex(selectors[1]), key); err != nil {
 			return err
 		}
 		c.emit(instruction{op: opGetStringFieldIndex, a: target, b: base, c: firstKey, d: key})
 		return c.compileSelectorsTo(selectors[2:], target)
 	}
-	if c.tree.selectorField(&first) != "" {
-		key := c.addStringConstant(c.tree.selectorField(&first))
+	if c.tree.termSelectorField(first) != "" {
+		key := c.addStringConstant(c.tree.termSelectorField(first))
 		c.emit(instruction{op: opGetStringField, a: target, b: base, c: key})
 		return c.compileSelectorsTo(selectors[1:], target)
 	}
 	key := c.allocReg()
-	if err := c.compileExpressionTo(*c.tree.selectorIndex(&first), key); err != nil {
+	if err := c.compileExpressionTo(c.tree.termSelectorIndex(first), key); err != nil {
 		return err
 	}
 	c.emit(instruction{op: opGetIndex, a: target, b: base, c: key})
 	return c.compileSelectorsTo(selectors[1:], target)
 }
 
-func isNamedTerm(tree syntaxTree, term term) bool {
-	return tree.termName(&term) != "" &&
-		tree.termNumber(&term) == nil &&
-		tree.termLiteral(&term) == nil &&
-		tree.termTable(&term) == nil &&
-		tree.termFunction(&term) == nil &&
-		tree.termIf(&term) == nil &&
-		tree.termCall(&term) == nil &&
-		!tree.termVararg(&term) &&
-		tree.termUnaryNot(&term) == nil &&
-		tree.termUnaryMinus(&term) == nil &&
-		tree.termUnaryLength(&term) == nil &&
-		tree.termGroup(&term) == nil &&
-		len(tree.termSelectors(&term)) == 0
+func isNamedTerm(tree syntaxTree, term termID) bool {
+	selectors, _ := tree.termSelectors(term)
+	return tree.termName(term) != "" && tree.termKind(term) == syntaxTermName && len(selectors) == 0
 }
 
-func (c *compiler) compileCallTargetTo(term term, target int) error {
+func (c *compiler) compileCallTargetTo(term termID, target int) error {
 	if isNamedTerm(c.tree, term) {
 		return c.compileNamedTermTo(term, target)
 	}
 	return c.compileTermTo(term, target)
 }
 
-func (c *compiler) compileNotTo(term term, target int) error {
+func (c *compiler) compileNotTo(term termID, target int) error {
 	if err := c.compileTermTo(term, target); err != nil {
 		return err
 	}
@@ -1042,7 +1039,7 @@ func (c *compiler) compileNotTo(term term, target int) error {
 	return nil
 }
 
-func (c *compiler) compileUnaryMinusTo(term term, target int) error {
+func (c *compiler) compileUnaryMinusTo(term termID, target int) error {
 	if err := c.compileTermTo(term, target); err != nil {
 		return err
 	}
@@ -1050,7 +1047,7 @@ func (c *compiler) compileUnaryMinusTo(term term, target int) error {
 	return nil
 }
 
-func (c *compiler) compileLengthTo(term term, target int) error {
+func (c *compiler) compileLengthTo(term termID, target int) error {
 	if err := c.compileTermTo(term, target); err != nil {
 		return err
 	}
@@ -1120,12 +1117,12 @@ func (c *compiler) canCompileSingleLocalAssignmentInPlace(stmt assignStatement, 
 	return expressionCanAssignToNameInPlace(c.tree, values[item.source], c.tree.assignTargetName(&target))
 }
 
-func expressionCanAssignToNameInPlace(tree syntaxTree, expr expression, name string) bool {
+func expressionCanAssignToNameInPlace(tree syntaxTree, expr expressionID, name string) bool {
 	if !expressionReferencesName(tree, expr, name) {
 		return true
 	}
-	terms := tree.expressionTerms(&expr)
-	if len(terms) == 0 {
+	terms, ok := tree.expressionTerms(expr)
+	if !ok || len(terms) == 0 {
 		return true
 	}
 	if !andExpressionCanAssignToNameInPlace(tree, terms[0], name) {
@@ -1139,12 +1136,12 @@ func expressionCanAssignToNameInPlace(tree syntaxTree, expr expression, name str
 	return true
 }
 
-func andExpressionCanAssignToNameInPlace(tree syntaxTree, expr andExpression, name string) bool {
+func andExpressionCanAssignToNameInPlace(tree syntaxTree, expr andExpressionID, name string) bool {
 	if !andExpressionReferencesName(tree, expr, name) {
 		return true
 	}
-	terms := tree.andTerms(&expr)
-	if len(terms) == 0 {
+	terms, ok := tree.andTerms(expr)
+	if !ok || len(terms) == 0 {
 		return true
 	}
 	if !comparisonExpressionCanAssignToNameInPlace(tree, terms[0], name) {
@@ -1158,25 +1155,26 @@ func andExpressionCanAssignToNameInPlace(tree syntaxTree, expr andExpression, na
 	return true
 }
 
-func comparisonExpressionCanAssignToNameInPlace(tree syntaxTree, expr comparisonExpression, name string) bool {
+func comparisonExpressionCanAssignToNameInPlace(tree syntaxTree, expr comparisonExpressionID, name string) bool {
 	if !comparisonExpressionReferencesName(tree, expr, name) {
 		return true
 	}
-	if !concatExpressionCanAssignToNameInPlace(tree, tree.comparisonLeft(&expr), name) {
+	if !concatExpressionCanAssignToNameInPlace(tree, tree.comparisonLeft(expr), name) {
 		return false
 	}
-	right := tree.comparisonRight(&expr)
-	return right == nil || !concatExpressionReferencesName(tree, *right, name)
+	right := tree.comparisonRight(expr)
+	return right == 0 || !concatExpressionReferencesName(tree, right, name)
 }
 
-func concatExpressionCanAssignToNameInPlace(tree syntaxTree, expr concatExpression, name string) bool {
+func concatExpressionCanAssignToNameInPlace(tree syntaxTree, expr concatExpressionID, name string) bool {
 	if !concatExpressionReferencesName(tree, expr, name) {
 		return true
 	}
-	if !additiveExpressionCanAssignToNameInPlace(tree, tree.concatFirst(&expr), name) {
+	if !additiveExpressionCanAssignToNameInPlace(tree, tree.concatFirst(expr), name) {
 		return false
 	}
-	for _, part := range tree.concatRest(&expr) {
+	parts, _ := tree.concatRest(expr)
+	for _, part := range parts {
 		if additiveExpressionReferencesName(tree, part, name) {
 			return false
 		}
@@ -1184,69 +1182,67 @@ func concatExpressionCanAssignToNameInPlace(tree syntaxTree, expr concatExpressi
 	return true
 }
 
-func additiveExpressionCanAssignToNameInPlace(tree syntaxTree, expr additiveExpression, name string) bool {
+func additiveExpressionCanAssignToNameInPlace(tree syntaxTree, expr additiveExpressionID, name string) bool {
 	if !additiveExpressionReferencesName(tree, expr, name) {
 		return true
 	}
-	if !multiplicativeExpressionCanAssignToNameInPlace(tree, tree.additiveFirst(&expr), name) {
+	if !multiplicativeExpressionCanAssignToNameInPlace(tree, tree.additiveFirst(expr), name) {
 		return false
 	}
-	for _, part := range tree.additiveRest(&expr) {
-		if multiplicativeExpressionReferencesName(tree, *tree.additivePartValue(&part), name) {
+	parts, _ := tree.additiveRest(expr)
+	for _, part := range parts {
+		if multiplicativeExpressionReferencesName(tree, tree.additivePartValue(part), name) {
 			return false
 		}
 	}
 	return true
 }
 
-func multiplicativeExpressionCanAssignToNameInPlace(tree syntaxTree, expr multiplicativeExpression, name string) bool {
+func multiplicativeExpressionCanAssignToNameInPlace(tree syntaxTree, expr multiplicativeExpressionID, name string) bool {
 	if !multiplicativeExpressionReferencesName(tree, expr, name) {
 		return true
 	}
-	if !termCanAssignToNameInPlace(tree, tree.multiplicativeFirst(&expr), name) {
+	if !termCanAssignToNameInPlace(tree, tree.multiplicativeFirst(expr), name) {
 		return false
 	}
-	for _, part := range tree.multiplicativeRest(&expr) {
-		if termReferencesName(tree, *tree.multiplicativePartValue(&part), name) {
+	parts, _ := tree.multiplicativeRest(expr)
+	for _, part := range parts {
+		if termReferencesName(tree, tree.multiplicativePartValue(part), name) {
 			return false
 		}
 	}
 	return true
 }
 
-func termCanAssignToNameInPlace(tree syntaxTree, term term, name string) bool {
+func termCanAssignToNameInPlace(tree syntaxTree, term termID, name string) bool {
 	if !termReferencesName(tree, term, name) {
 		return true
 	}
-	if tree.termName(&term) == name {
-		for _, selector := range tree.termSelectors(&term) {
-			if index := tree.selectorIndex(&selector); index != nil && expressionReferencesName(tree, *index, name) {
+	if tree.termName(term) == name {
+		selectors, _ := tree.termSelectors(term)
+		for _, selector := range selectors {
+			if index := tree.termSelectorIndex(selector); index != 0 && expressionReferencesName(tree, index, name) {
 				return false
 			}
 		}
 		return true
 	}
-	if unaryNot := tree.termUnaryNot(&term); unaryNot != nil {
-		return termCanAssignToNameInPlace(tree, *unaryNot, name)
+	if child, ok := tree.termChild(term); ok {
+		return termCanAssignToNameInPlace(tree, child, name)
 	}
-	if unaryMinus := tree.termUnaryMinus(&term); unaryMinus != nil {
-		return termCanAssignToNameInPlace(tree, *unaryMinus, name)
+	if power, ok := tree.termPower(term); ok {
+		return termCanAssignToNameInPlace(tree, tree.powerBase(power), name) &&
+			!termReferencesName(tree, tree.powerExponent(power), name)
 	}
-	if unaryLen := tree.termUnaryLength(&term); unaryLen != nil {
-		return termCanAssignToNameInPlace(tree, *unaryLen, name)
-	}
-	if power := tree.termPower(&term); power != nil {
-		return termCanAssignToNameInPlace(tree, *tree.powerBase(power), name) &&
-			!termReferencesName(tree, *tree.powerExponent(power), name)
-	}
-	if group := tree.termGroup(&term); group != nil {
-		return expressionCanAssignToNameInPlace(tree, *group, name)
+	if group, ok := tree.termGroup(term); ok {
+		return expressionCanAssignToNameInPlace(tree, group, name)
 	}
 	return false
 }
 
-func expressionReferencesName(tree syntaxTree, expr expression, name string) bool {
-	for _, term := range tree.expressionTerms(&expr) {
+func expressionReferencesName(tree syntaxTree, expr expressionID, name string) bool {
+	terms, _ := tree.expressionTerms(expr)
+	for _, term := range terms {
 		if andExpressionReferencesName(tree, term, name) {
 			return true
 		}
@@ -1254,8 +1250,9 @@ func expressionReferencesName(tree syntaxTree, expr expression, name string) boo
 	return false
 }
 
-func andExpressionReferencesName(tree syntaxTree, expr andExpression, name string) bool {
-	for _, term := range tree.andTerms(&expr) {
+func andExpressionReferencesName(tree syntaxTree, expr andExpressionID, name string) bool {
+	terms, _ := tree.andTerms(expr)
+	for _, term := range terms {
 		if comparisonExpressionReferencesName(tree, term, name) {
 			return true
 		}
@@ -1263,19 +1260,20 @@ func andExpressionReferencesName(tree syntaxTree, expr andExpression, name strin
 	return false
 }
 
-func comparisonExpressionReferencesName(tree syntaxTree, expr comparisonExpression, name string) bool {
-	if concatExpressionReferencesName(tree, tree.comparisonLeft(&expr), name) {
+func comparisonExpressionReferencesName(tree syntaxTree, expr comparisonExpressionID, name string) bool {
+	if concatExpressionReferencesName(tree, tree.comparisonLeft(expr), name) {
 		return true
 	}
-	right := tree.comparisonRight(&expr)
-	return right != nil && concatExpressionReferencesName(tree, *right, name)
+	right := tree.comparisonRight(expr)
+	return right != 0 && concatExpressionReferencesName(tree, right, name)
 }
 
-func concatExpressionReferencesName(tree syntaxTree, expr concatExpression, name string) bool {
-	if additiveExpressionReferencesName(tree, tree.concatFirst(&expr), name) {
+func concatExpressionReferencesName(tree syntaxTree, expr concatExpressionID, name string) bool {
+	if additiveExpressionReferencesName(tree, tree.concatFirst(expr), name) {
 		return true
 	}
-	for _, part := range tree.concatRest(&expr) {
+	parts, _ := tree.concatRest(expr)
+	for _, part := range parts {
 		if additiveExpressionReferencesName(tree, part, name) {
 			return true
 		}
@@ -1283,90 +1281,89 @@ func concatExpressionReferencesName(tree syntaxTree, expr concatExpression, name
 	return false
 }
 
-func additiveExpressionReferencesName(tree syntaxTree, expr additiveExpression, name string) bool {
-	if multiplicativeExpressionReferencesName(tree, tree.additiveFirst(&expr), name) {
+func additiveExpressionReferencesName(tree syntaxTree, expr additiveExpressionID, name string) bool {
+	if multiplicativeExpressionReferencesName(tree, tree.additiveFirst(expr), name) {
 		return true
 	}
-	for _, part := range tree.additiveRest(&expr) {
-		if multiplicativeExpressionReferencesName(tree, *tree.additivePartValue(&part), name) {
+	parts, _ := tree.additiveRest(expr)
+	for _, part := range parts {
+		if multiplicativeExpressionReferencesName(tree, tree.additivePartValue(part), name) {
 			return true
 		}
 	}
 	return false
 }
 
-func multiplicativeExpressionReferencesName(tree syntaxTree, expr multiplicativeExpression, name string) bool {
-	if termReferencesName(tree, tree.multiplicativeFirst(&expr), name) {
+func multiplicativeExpressionReferencesName(tree syntaxTree, expr multiplicativeExpressionID, name string) bool {
+	if termReferencesName(tree, tree.multiplicativeFirst(expr), name) {
 		return true
 	}
-	for _, part := range tree.multiplicativeRest(&expr) {
-		if termReferencesName(tree, *tree.multiplicativePartValue(&part), name) {
+	parts, _ := tree.multiplicativeRest(expr)
+	for _, part := range parts {
+		if termReferencesName(tree, tree.multiplicativePartValue(part), name) {
 			return true
 		}
 	}
 	return false
 }
 
-func termReferencesName(tree syntaxTree, term term, name string) bool {
-	if tree.termName(&term) == name {
+func termReferencesName(tree syntaxTree, term termID, name string) bool {
+	if tree.termName(term) == name {
 		return true
 	}
-	if table := tree.termTable(&term); table != nil && tableExpressionReferencesName(tree, *table, name) {
+	if table, ok := tree.termTable(term); ok && tableExpressionReferencesName(tree, table, name) {
 		return true
 	}
-	if ifExpr := tree.termIf(&term); ifExpr != nil &&
-		(expressionReferencesName(tree, *tree.ifExpressionCondition(ifExpr), name) ||
-			expressionReferencesName(tree, *tree.ifExpressionThen(ifExpr), name) ||
-			expressionReferencesName(tree, *tree.ifExpressionElse(ifExpr), name)) {
+	if ifExpr, ok := tree.termIf(term); ok &&
+		(expressionReferencesName(tree, tree.ifExpressionCondition(ifExpr), name) ||
+			expressionReferencesName(tree, tree.ifExpressionThen(ifExpr), name) ||
+			expressionReferencesName(tree, tree.ifExpressionElse(ifExpr), name)) {
 		return true
 	}
-	if call := tree.termCall(&term); call != nil && callExpressionReferencesName(tree, *call, name) {
+	if call, ok := tree.termCall(term); ok && callExpressionReferencesName(tree, call, name) {
 		return true
 	}
-	if unaryNot := tree.termUnaryNot(&term); unaryNot != nil && termReferencesName(tree, *unaryNot, name) {
+	if child, ok := tree.termChild(term); ok && termReferencesName(tree, child, name) {
 		return true
 	}
-	if unaryMinus := tree.termUnaryMinus(&term); unaryMinus != nil && termReferencesName(tree, *unaryMinus, name) {
+	if power, ok := tree.termPower(term); ok &&
+		(termReferencesName(tree, tree.powerBase(power), name) || termReferencesName(tree, tree.powerExponent(power), name)) {
 		return true
 	}
-	if unaryLen := tree.termUnaryLength(&term); unaryLen != nil && termReferencesName(tree, *unaryLen, name) {
+	if group, ok := tree.termGroup(term); ok && expressionReferencesName(tree, group, name) {
 		return true
 	}
-	if power := tree.termPower(&term); power != nil &&
-		(termReferencesName(tree, *tree.powerBase(power), name) || termReferencesName(tree, *tree.powerExponent(power), name)) {
-		return true
-	}
-	if group := tree.termGroup(&term); group != nil && expressionReferencesName(tree, *group, name) {
-		return true
-	}
-	for _, selector := range tree.termSelectors(&term) {
-		if index := tree.selectorIndex(&selector); index != nil && expressionReferencesName(tree, *index, name) {
+	selectors, _ := tree.termSelectors(term)
+	for _, selector := range selectors {
+		if index := tree.termSelectorIndex(selector); index != 0 && expressionReferencesName(tree, index, name) {
 			return true
 		}
 	}
 	return false
 }
 
-func tableExpressionReferencesName(tree syntaxTree, table tableExpression, name string) bool {
-	for _, field := range tree.tableFields(&table) {
-		if key := tree.tableFieldKey(&field); key != nil && expressionReferencesName(tree, *key, name) {
+func tableExpressionReferencesName(tree syntaxTree, table arenaTableID, name string) bool {
+	fields, _ := tree.tableFields(table)
+	for _, field := range fields {
+		if key := tree.tableFieldKey(field); key != 0 && expressionReferencesName(tree, key, name) {
 			return true
 		}
-		if expressionReferencesName(tree, *tree.tableFieldValue(&field), name) {
+		if value := tree.tableFieldValue(field); value != 0 && expressionReferencesName(tree, value, name) {
 			return true
 		}
 	}
 	return false
 }
 
-func callExpressionReferencesName(tree syntaxTree, call callExpression, name string) bool {
-	if termReferencesName(tree, *tree.callTarget(&call), name) {
+func callExpressionReferencesName(tree syntaxTree, call arenaCallID, name string) bool {
+	if termReferencesName(tree, tree.callTarget(call), name) {
 		return true
 	}
-	if receiver := tree.callReceiver(&call); receiver != nil && termReferencesName(tree, *receiver, name) {
+	if receiver := tree.callReceiver(call); receiver != 0 && termReferencesName(tree, receiver, name) {
 		return true
 	}
-	for _, arg := range tree.callArgs(&call) {
+	args, _ := tree.callArgs(call)
+	for _, arg := range args {
 		if expressionReferencesName(tree, arg, name) {
 			return true
 		}
@@ -1377,13 +1374,13 @@ func callExpressionReferencesName(tree syntaxTree, call callExpression, name str
 type addStringFieldAssignment struct {
 	table   int
 	field   string
-	operand expression
+	operand multiplicativeExpressionID
 }
 
 type subStringFieldAssignment struct {
 	table   int
 	field   string
-	operand expression
+	operand multiplicativeExpressionID
 }
 
 func (c *compiler) addStringFieldAssignment(stmt assignStatement, plan valueListPlan) (addStringFieldAssignment, bool) {
@@ -1452,86 +1449,85 @@ func (c *compiler) subStringFieldAssignment(stmt assignStatement, plan valueList
 	}, true
 }
 
-func fieldAddAssignmentOperand(tree syntaxTree, expr expression, target assignTarget) (expression, bool) {
+func fieldAddAssignmentOperand(tree syntaxTree, expr expressionID, target assignTarget) (multiplicativeExpressionID, bool) {
 	return fieldAddSubAssignmentOperand(tree, expr, target, additiveAdd)
 }
 
-func fieldSubAssignmentOperand(tree syntaxTree, expr expression, target assignTarget) (expression, bool) {
+func fieldSubAssignmentOperand(tree syntaxTree, expr expressionID, target assignTarget) (multiplicativeExpressionID, bool) {
 	return fieldAddSubAssignmentOperand(tree, expr, target, additiveSubtract)
 }
 
-func fieldAddSubAssignmentOperand(tree syntaxTree, expr expression, target assignTarget, op additiveOperator) (expression, bool) {
-	terms := tree.expressionTerms(&expr)
-	if len(terms) != 1 {
-		return expression{}, false
+func fieldAddSubAssignmentOperand(tree syntaxTree, expr expressionID, target assignTarget, op additiveOperator) (multiplicativeExpressionID, bool) {
+	terms, ok := tree.expressionTerms(expr)
+	if !ok || len(terms) != 1 {
+		return 0, false
 	}
-	comparisons := tree.andTerms(&terms[0])
-	if len(comparisons) != 1 {
-		return expression{}, false
+	comparisons, ok := tree.andTerms(terms[0])
+	if !ok || len(comparisons) != 1 {
+		return 0, false
 	}
 	comparison := comparisons[0]
-	left := tree.comparisonLeft(&comparison)
-	if tree.comparisonOperator(&comparison) != "" || tree.comparisonRight(&comparison) != nil || len(tree.concatRest(&left)) != 0 {
-		return expression{}, false
+	left := tree.comparisonLeft(comparison)
+	if tree.comparisonOperator(comparison) != "" || tree.comparisonRight(comparison) != 0 {
+		return 0, false
 	}
-	additive := tree.concatFirst(&left)
-	parts := tree.additiveRest(&additive)
-	if len(parts) != 1 || tree.additivePartOperator(&parts[0]) != op {
-		return expression{}, false
+	concatRest, ok := tree.concatRest(left)
+	if !ok || len(concatRest) != 0 {
+		return 0, false
 	}
-	if !multiplicativeMatchesAssignTarget(tree, tree.additiveFirst(&additive), target) {
-		return expression{}, false
+	additive := tree.concatFirst(left)
+	parts, ok := tree.additiveRest(additive)
+	if !ok || len(parts) != 1 || tree.additivePartOperator(parts[0]) != op {
+		return 0, false
 	}
-	operand := *tree.additivePartValue(&parts[0])
+	if !multiplicativeMatchesAssignTarget(tree, tree.additiveFirst(additive), target) {
+		return 0, false
+	}
+	operand := tree.additivePartValue(parts[0])
 	if !multiplicativeIsSideEffectFreeSingleValue(tree, operand) {
-		return expression{}, false
+		return 0, false
 	}
-	return expression{
-		terms: []andExpression{{
-			terms: []comparisonExpression{{
-				left: concatExpression{
-					first: additiveExpression{
-						first: operand,
-					},
-				},
-			}},
-		}},
-	}, true
+	return operand, true
 }
 
-func multiplicativeMatchesAssignTarget(tree syntaxTree, expr multiplicativeExpression, target assignTarget) bool {
-	if len(tree.multiplicativeRest(&expr)) != 0 {
+func multiplicativeMatchesAssignTarget(tree syntaxTree, expr multiplicativeExpressionID, target assignTarget) bool {
+	rest, _ := tree.multiplicativeRest(expr)
+	if len(rest) != 0 {
 		return false
 	}
-	value := termWithoutCastsAndGroups(tree, tree.multiplicativeFirst(&expr))
-	selectors := tree.termSelectors(&value)
+	value := termWithoutCastsAndGroups(tree, tree.multiplicativeFirst(expr))
+	selectors, _ := tree.termSelectors(value)
 	targetSelectors := tree.assignTargetSelectors(&target)
-	if tree.termName(&value) != tree.assignTargetName(&target) || len(selectors) != len(targetSelectors) {
+	if tree.termName(value) != tree.assignTargetName(&target) || len(selectors) != len(targetSelectors) {
 		return false
 	}
 	for i, selector := range selectors {
 		targetSelector := targetSelectors[i]
-		if tree.selectorField(&selector) != tree.selectorField(&targetSelector) || tree.selectorIndex(&selector) != nil || tree.selectorIndex(&targetSelector) != nil {
+		if tree.termSelectorField(selector) != tree.selectorField(&targetSelector) || tree.termSelectorIndex(selector) != 0 || tree.selectorIndex(&targetSelector) != 0 {
 			return false
 		}
 	}
 	return true
 }
 
-func multiplicativeIsSideEffectFreeSingleValue(tree syntaxTree, expr multiplicativeExpression) bool {
-	if len(tree.multiplicativeRest(&expr)) != 0 {
+func multiplicativeIsSideEffectFreeSingleValue(tree syntaxTree, expr multiplicativeExpressionID) bool {
+	rest, _ := tree.multiplicativeRest(expr)
+	if len(rest) != 0 {
 		return false
 	}
-	value := termWithoutCastsAndGroups(tree, tree.multiplicativeFirst(&expr))
-	if tree.termName(&value) != "" && len(tree.termSelectors(&value)) == 0 {
+	value := termWithoutCastsAndGroups(tree, tree.multiplicativeFirst(expr))
+	selectors, _ := tree.termSelectors(value)
+	if tree.termName(value) != "" && len(selectors) == 0 {
 		return true
 	}
-	return tree.termNumber(&value) != nil || tree.termLiteral(&value) != nil
+	_, number := tree.termNumber(value)
+	_, literal := tree.termLiteral(value)
+	return number || literal
 }
 
 func (c *compiler) compileAddStringFieldAssignment(addField addStringFieldAssignment) error {
 	operand := c.allocTemp()
-	if err := c.compileExpressionTo(addField.operand, operand); err != nil {
+	if err := c.compileMultiplicativeExpressionTo(addField.operand, operand); err != nil {
 		c.releaseTemp(operand)
 		return err
 	}
@@ -1547,7 +1543,7 @@ func (c *compiler) compileAddStringFieldAssignment(addField addStringFieldAssign
 
 func (c *compiler) compileSubStringFieldAssignment(subField subStringFieldAssignment) error {
 	operand := c.allocTemp()
-	if err := c.compileExpressionTo(subField.operand, operand); err != nil {
+	if err := c.compileMultiplicativeExpressionTo(subField.operand, operand); err != nil {
 		c.releaseTemp(operand)
 		return err
 	}
@@ -1590,7 +1586,7 @@ func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value in
 			return nil
 		}
 		key := c.allocReg()
-		if err := c.compileExpressionTo(*c.tree.selectorIndex(&last), key); err != nil {
+		if err := c.compileExpressionTo(c.tree.selectorIndex(&last), key); err != nil {
 			return err
 		}
 		c.emit(instruction{op: opSetIndex, a: ref.index, b: key, c: value})
@@ -1609,10 +1605,10 @@ func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value in
 			c.releaseTemp(table)
 			return nil
 		}
-		if c.tree.selectorField(&first) != "" && c.tree.selectorIndex(&second) != nil {
+		if c.tree.selectorField(&first) != "" && c.tree.selectorIndex(&second) != 0 {
 			firstKey := c.addStringConstant(c.tree.selectorField(&first))
 			key := c.allocReg()
-			if err := c.compileExpressionTo(*c.tree.selectorIndex(&second), key); err != nil {
+			if err := c.compileExpressionTo(c.tree.selectorIndex(&second), key); err != nil {
 				return err
 			}
 			c.emit(instruction{op: opSetStringFieldIndex, a: ref.index, b: firstKey, c: key, d: value})
@@ -1626,7 +1622,7 @@ func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value in
 	}
 
 	receivers := selectors[:len(selectors)-1]
-	if err := c.compileSelectorsTo(receivers, table); err != nil {
+	if err := c.compileTargetSelectorsTo(receivers, table); err != nil {
 		return err
 	}
 
@@ -1638,10 +1634,47 @@ func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value in
 	}
 
 	key := c.allocReg()
-	if err := c.compileExpressionTo(*c.tree.selectorIndex(&last), key); err != nil {
+	if err := c.compileExpressionTo(c.tree.selectorIndex(&last), key); err != nil {
 		return err
 	}
 	c.emit(instruction{op: opSetIndex, a: table, b: key, c: value})
+	return nil
+}
+
+func (c *compiler) compileTargetSelectorsTo(selectors []selector, target int) error {
+	for len(selectors) > 0 {
+		if len(selectors) >= 2 && c.tree.selectorField(&selectors[0]) != "" && c.tree.selectorField(&selectors[1]) != "" {
+			firstKey := c.addStringConstant(c.tree.selectorField(&selectors[0]))
+			secondKey := c.addStringConstant(c.tree.selectorField(&selectors[1]))
+			c.emit(instruction{op: opGetStringField, a: target, b: target, c: firstKey})
+			c.emit(instruction{op: opGetStringField, a: target, b: target, c: secondKey})
+			selectors = selectors[2:]
+			continue
+		}
+		if len(selectors) >= 2 && c.tree.selectorField(&selectors[0]) != "" && c.tree.selectorIndex(&selectors[1]) != 0 {
+			firstKey := c.addStringConstant(c.tree.selectorField(&selectors[0]))
+			key := c.allocReg()
+			if err := c.compileExpressionTo(c.tree.selectorIndex(&selectors[1]), key); err != nil {
+				return err
+			}
+			c.emit(instruction{op: opGetStringFieldIndex, a: target, b: target, c: firstKey, d: key})
+			selectors = selectors[2:]
+			continue
+		}
+		selector := selectors[0]
+		if c.tree.selectorField(&selector) != "" {
+			key := c.addStringConstant(c.tree.selectorField(&selector))
+			c.emit(instruction{op: opGetStringField, a: target, b: target, c: key})
+			selectors = selectors[1:]
+			continue
+		}
+		key := c.allocReg()
+		if err := c.compileExpressionTo(c.tree.selectorIndex(&selector), key); err != nil {
+			return err
+		}
+		c.emit(instruction{op: opGetIndex, a: target, b: target, c: key})
+		selectors = selectors[1:]
+	}
 	return nil
 }
 
@@ -1666,12 +1699,12 @@ func (c *compiler) compileIfSlowPath(branch ifStatement) error {
 
 func (c *compiler) compileIfDefault(branch ifStatement) error {
 	conditionExpr := c.tree.ifCondition(&branch)
-	jumpIfFalse, ok, err := c.compileConditionJumpIfFalse(*conditionExpr)
+	jumpIfFalse, ok, err := c.compileConditionJumpIfFalse(conditionExpr)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		condition, err := c.compileTempExpression(*conditionExpr)
+		condition, err := c.compileTempExpression(conditionExpr)
 		if err != nil {
 			return err
 		}
@@ -1701,7 +1734,7 @@ func (c *compiler) compileIfDefault(branch ifStatement) error {
 
 type stringTagElseIfArm struct {
 	value  string
-	guards []comparisonExpression
+	guards []comparisonExpressionID
 	body   []statement
 }
 
@@ -1728,25 +1761,12 @@ func (c *compiler) compileStringTagElseIfChain(branch ifStatement) (bool, error)
 		value := c.addStringConstant(arm.value)
 		nextArmJumps := []int{c.emit(instruction{op: opJumpIfNotEqualK, a: tag, b: value})}
 		if len(arm.guards) > 0 {
-			guardJump, ok, err := c.compileConditionJumpIfFalse(expression{
-				terms: []andExpression{{terms: arm.guards}},
-			})
+			guardJumps, err := c.compileComparisonGuardJumps(arm.guards)
 			if err != nil {
 				c.releaseTemp(tag)
 				return true, err
 			}
-			if !ok {
-				guardCondition, err := c.compileTempExpression(expression{
-					terms: []andExpression{{terms: arm.guards}},
-				})
-				if err != nil {
-					c.releaseTemp(tag)
-					return true, err
-				}
-				guardJump = c.emitJumpIfFalse(guardCondition)
-				c.releaseTemp(guardCondition)
-			}
-			nextArmJumps = append(nextArmJumps, guardJump)
+			nextArmJumps = append(nextArmJumps, guardJumps...)
 		}
 		if err := c.compileStatements(arm.body); err != nil {
 			c.releaseTemp(tag)
@@ -1780,7 +1800,7 @@ func (c *compiler) compileStringTagElseIfChain(branch ifStatement) (bool, error)
 }
 
 func (c *compiler) stringTagElseIfChain(branch ifStatement) (stringTagElseIfChain, bool) {
-	first, firstGuards, ok := c.stringTagArmCondition(*c.tree.ifCondition(&branch))
+	first, firstGuards, ok := c.stringTagArmCondition(c.tree.ifCondition(&branch))
 	if !ok {
 		return stringTagElseIfChain{}, false
 	}
@@ -1800,7 +1820,7 @@ func (c *compiler) stringTagElseIfChain(branch ifStatement) (stringTagElseIfChai
 	elseBody := c.tree.ifElseStatements(&branch)
 	for len(elseBody) == 1 && c.tree.statementKind(&elseBody[0]) == syntaxStatementIf {
 		nextBranch := *c.tree.ifStatement(&elseBody[0])
-		condition, guards, ok := c.stringTagArmCondition(*c.tree.ifCondition(&nextBranch))
+		condition, guards, ok := c.stringTagArmCondition(c.tree.ifCondition(&nextBranch))
 		if !ok ||
 			condition.table != chain.table ||
 			condition.field != chain.field {
@@ -1824,43 +1844,43 @@ func (c *compiler) stringTagElseIfChain(branch ifStatement) (stringTagElseIfChai
 	return chain, true
 }
 
-func (c *compiler) stringTagArmCondition(expr expression) (stringFieldEqualityCondition, []comparisonExpression, bool) {
-	terms := c.tree.expressionTerms(&expr)
-	if len(terms) != 1 {
+func (c *compiler) stringTagArmCondition(expr expressionID) (stringFieldEqualityCondition, []comparisonExpressionID, bool) {
+	terms, ok := c.tree.expressionTerms(expr)
+	if !ok || len(terms) != 1 {
 		return stringFieldEqualityCondition{}, nil, false
 	}
-	comparisons := c.tree.andTerms(&terms[0])
-	if len(comparisons) == 0 {
+	comparisons, ok := c.tree.andTerms(terms[0])
+	if !ok || len(comparisons) == 0 {
 		return stringFieldEqualityCondition{}, nil, false
 	}
 	condition, ok := c.stringFieldEqualityCondition(comparisons[0])
 	if !ok {
 		return stringFieldEqualityCondition{}, nil, false
 	}
-	guards := append([]comparisonExpression(nil), comparisons[1:]...)
+	guards := append([]comparisonExpressionID(nil), comparisons[1:]...)
 	return condition, guards, true
 }
 
-func (c *compiler) singleStringFieldEqualityCondition(expr expression) (stringFieldEqualityCondition, bool) {
-	terms := c.tree.expressionTerms(&expr)
-	if len(terms) != 1 {
+func (c *compiler) singleStringFieldEqualityCondition(expr expressionID) (stringFieldEqualityCondition, bool) {
+	terms, ok := c.tree.expressionTerms(expr)
+	if !ok || len(terms) != 1 {
 		return stringFieldEqualityCondition{}, false
 	}
-	comparisons := c.tree.andTerms(&terms[0])
-	if len(comparisons) != 1 {
+	comparisons, ok := c.tree.andTerms(terms[0])
+	if !ok || len(comparisons) != 1 {
 		return stringFieldEqualityCondition{}, false
 	}
 	return c.stringFieldEqualityCondition(comparisons[0])
 }
 
-func (c *compiler) compileIfExpressionTo(expr ifExpression, target int) error {
-	conditionExpr := c.tree.ifExpressionCondition(&expr)
-	jumpIfFalse, ok, err := c.compileConditionJumpIfFalse(*conditionExpr)
+func (c *compiler) compileIfExpressionTo(expr arenaIfExpressionID, target int) error {
+	conditionExpr := c.tree.ifExpressionCondition(expr)
+	jumpIfFalse, ok, err := c.compileConditionJumpIfFalse(conditionExpr)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		condition, err := c.compileTempExpression(*conditionExpr)
+		condition, err := c.compileTempExpression(conditionExpr)
 		if err != nil {
 			return err
 		}
@@ -1868,14 +1888,14 @@ func (c *compiler) compileIfExpressionTo(expr ifExpression, target int) error {
 		c.releaseTemp(condition)
 	}
 
-	if err := c.compileExpressionTo(*c.tree.ifExpressionThen(&expr), target); err != nil {
+	if err := c.compileExpressionTo(c.tree.ifExpressionThen(expr), target); err != nil {
 		return err
 	}
 
 	jumpEnd := c.emitJump()
 
 	c.patchJump(jumpIfFalse, c.pc())
-	if err := c.compileExpressionTo(*c.tree.ifExpressionElse(&expr), target); err != nil {
+	if err := c.compileExpressionTo(c.tree.ifExpressionElse(expr), target); err != nil {
 		return err
 	}
 
@@ -1883,7 +1903,7 @@ func (c *compiler) compileIfExpressionTo(expr ifExpression, target int) error {
 	return nil
 }
 
-func (c *compiler) compileConditionJumpIfFalse(expr expression) (int, bool, error) {
+func (c *compiler) compileConditionJumpIfFalse(expr expressionID) (int, bool, error) {
 	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
 		return 0, false, nil
 	}
@@ -1902,19 +1922,19 @@ func (c *compiler) compileConditionJumpIfFalse(expr expression) (int, bool, erro
 	if jump, ok, err := c.compileAndChainJumpIfFalse(expr); ok || err != nil {
 		return jump, ok, err
 	}
-	comparison, ok := singleComparison(c.tree, &expr)
+	comparison, ok := singleComparison(c.tree, expr)
 	if !ok {
 		return 0, false, nil
 	}
 	rightExpr := c.tree.comparisonRight(comparison)
-	if rightExpr == nil {
+	if rightExpr == 0 {
 		return 0, false, nil
 	}
-	right, ok := foldNumberConcat(c.tree, *rightExpr)
+	right, ok := foldNumberConcat(c.tree, rightExpr)
 	if !ok {
-		return c.compileRegisterNumericJumpIfFalse(*comparison)
+		return c.compileRegisterNumericJumpIfFalse(comparison)
 	}
-	if condition, ok := c.moduloConstantEqualityCondition(*comparison, right); ok {
+	if condition, ok := c.moduloConstantEqualityCondition(comparison, right); ok {
 		mod := c.addConstant(NumberValue(condition.mod))
 		value := c.addConstant(NumberValue(condition.value))
 		modResult := c.allocTemp()
@@ -1955,25 +1975,25 @@ func (c *compiler) compileConditionJumpIfFalse(expr expression) (int, bool, erro
 	}
 }
 
-func singleComparison(tree syntaxTree, expr *expression) (*comparisonExpression, bool) {
-	terms := tree.expressionTerms(expr)
-	if len(terms) != 1 {
-		return nil, false
+func singleComparison(tree syntaxTree, expr expressionID) (comparisonExpressionID, bool) {
+	terms, ok := tree.expressionTerms(expr)
+	if !ok || len(terms) != 1 {
+		return 0, false
 	}
-	comparisons := tree.andTerms(&terms[0])
-	if len(comparisons) != 1 {
-		return nil, false
+	comparisons, ok := tree.andTerms(terms[0])
+	if !ok || len(comparisons) != 1 {
+		return 0, false
 	}
-	return &comparisons[0], true
+	return comparisons[0], true
 }
 
-func (c *compiler) compileRegisterNumericJumpIfFalse(comparison comparisonExpression) (int, bool, error) {
-	rightExpr := c.tree.comparisonRight(&comparison)
-	if rightExpr == nil {
+func (c *compiler) compileRegisterNumericJumpIfFalse(comparison comparisonExpressionID) (int, bool, error) {
+	rightExpr := c.tree.comparisonRight(comparison)
+	if rightExpr == 0 {
 		return 0, false, nil
 	}
 	var op opcode
-	switch c.tree.comparisonOperator(&comparison) {
+	switch c.tree.comparisonOperator(comparison) {
 	case comparisonLess:
 		op = opJumpIfNotLess
 	case comparisonGreater:
@@ -1985,11 +2005,11 @@ func (c *compiler) compileRegisterNumericJumpIfFalse(comparison comparisonExpres
 	default:
 		return 0, false, nil
 	}
-	left, releaseLeft, err := c.compileConditionLeftRegister(c.tree.comparisonLeft(&comparison))
+	left, releaseLeft, err := c.compileConditionLeftRegister(c.tree.comparisonLeft(comparison))
 	if err != nil {
 		return 0, false, err
 	}
-	right, releaseRight, err := c.compileConditionLeftRegister(*rightExpr)
+	right, releaseRight, err := c.compileConditionLeftRegister(rightExpr)
 	if err != nil {
 		releaseLeft()
 		return 0, false, err
@@ -2009,13 +2029,13 @@ type andChainBranchPlan struct {
 	rightField string
 }
 
-func (c *compiler) compileAndChainJumpIfFalse(expr expression) (int, bool, error) {
-	terms := c.tree.expressionTerms(&expr)
-	if len(terms) != 1 {
+func (c *compiler) compileAndChainJumpIfFalse(expr expressionID) (int, bool, error) {
+	terms, ok := c.tree.expressionTerms(expr)
+	if !ok || len(terms) != 1 {
 		return 0, false, nil
 	}
-	comparisons := c.tree.andTerms(&terms[0])
-	if len(comparisons) < 2 {
+	comparisons, ok := c.tree.andTerms(terms[0])
+	if !ok || len(comparisons) < 2 {
 		return 0, false, nil
 	}
 	plans := make([]andChainBranchPlan, 0, len(comparisons))
@@ -2064,9 +2084,63 @@ func (c *compiler) compileAndChainJumpIfFalse(expr expression) (int, bool, error
 	return exitJump, true, nil
 }
 
-func (c *compiler) andChainBranchPlan(comparison comparisonExpression) (andChainBranchPlan, bool) {
-	rightExpr := c.tree.comparisonRight(&comparison)
-	if rightExpr == nil {
+// compileComparisonGuardJumps emits false branches for each comparison in an
+// already-parsed && chain. The returned jumps are all patched by the caller to
+// the next source arm. Keeping the comparison IDs avoids constructing a
+// temporary expression tree for the arena-backed representation.
+func (c *compiler) compileComparisonGuardJumps(comparisons []comparisonExpressionID) ([]int, error) {
+	if len(comparisons) == 0 {
+		return nil, nil
+	}
+	plans := make([]andChainBranchPlan, len(comparisons))
+	optimized := true
+	for i, comparison := range comparisons {
+		plan, ok := c.andChainBranchPlan(comparison)
+		if !ok {
+			optimized = false
+			break
+		}
+		plans[i] = plan
+	}
+	if !optimized {
+		jumps := make([]int, 0, len(comparisons))
+		for _, comparison := range comparisons {
+			condition := c.allocTemp()
+			if err := c.compileComparisonExpressionTo(comparison, condition); err != nil {
+				c.releaseTemp(condition)
+				return nil, err
+			}
+			jumps = append(jumps, c.emitJumpIfFalse(condition))
+			c.releaseTemp(condition)
+		}
+		return jumps, nil
+	}
+	jumps := make([]int, 0, len(plans))
+	for _, plan := range plans {
+		switch plan.op {
+		case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
+			if plan.field != "" {
+				jumps = append(jumps, c.emitAndChainFieldPairBranch(plan))
+			} else {
+				jumps = append(jumps, c.emit(instruction{op: plan.op, a: plan.a, b: plan.b}))
+			}
+		case opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
+			constant := c.addConstant(NumberValue(plan.constant))
+			if plan.field != "" {
+				jumps = append(jumps, c.emitAndChainStringFieldNumericBranch(plan, constant))
+			} else {
+				jumps = append(jumps, c.emit(instruction{op: plan.op, a: plan.a, b: constant}))
+			}
+		default:
+			return nil, fmt.Errorf("compile: unsupported guard branch %d", plan.op)
+		}
+	}
+	return jumps, nil
+}
+
+func (c *compiler) andChainBranchPlan(comparison comparisonExpressionID) (andChainBranchPlan, bool) {
+	rightExpr := c.tree.comparisonRight(comparison)
+	if rightExpr == 0 {
 		return andChainBranchPlan{}, false
 	}
 	if plan, ok := c.andChainStringFieldNumericPlan(comparison); ok {
@@ -2076,7 +2150,7 @@ func (c *compiler) andChainBranchPlan(comparison comparisonExpression) (andChain
 		return plan, true
 	}
 	var op opcode
-	switch c.tree.comparisonOperator(&comparison) {
+	switch c.tree.comparisonOperator(comparison) {
 	case comparisonLess:
 		op = opJumpIfNotLess
 	case comparisonGreater:
@@ -2088,22 +2162,22 @@ func (c *compiler) andChainBranchPlan(comparison comparisonExpression) (andChain
 	default:
 		return andChainBranchPlan{}, false
 	}
-	left, ok := c.concatLocalRef(c.tree.comparisonLeft(&comparison))
+	left, ok := c.concatLocalRef(c.tree.comparisonLeft(comparison))
 	if !ok {
 		return andChainBranchPlan{}, false
 	}
-	if right, ok := c.concatLocalRef(*rightExpr); ok {
+	if right, ok := c.concatLocalRef(rightExpr); ok {
 		return andChainBranchPlan{
 			op: op,
 			a:  left.index,
 			b:  right.index,
 		}, true
 	}
-	right, ok := foldNumberConcat(c.tree, *rightExpr)
+	right, ok := foldNumberConcat(c.tree, rightExpr)
 	if !ok {
 		return andChainBranchPlan{}, false
 	}
-	switch c.tree.comparisonOperator(&comparison) {
+	switch c.tree.comparisonOperator(comparison) {
 	case comparisonLess:
 		op = opJumpIfNotLessK
 	case comparisonGreater:
@@ -2146,21 +2220,21 @@ func (c *compiler) emitLocalStringFieldLoad(target int, table int, field string)
 	c.emit(instruction{op: opGetStringField, a: target, b: table, c: key})
 }
 
-func (c *compiler) andChainStringFieldNumericPlan(comparison comparisonExpression) (andChainBranchPlan, bool) {
-	rightExpr := c.tree.comparisonRight(&comparison)
-	if rightExpr == nil {
+func (c *compiler) andChainStringFieldNumericPlan(comparison comparisonExpressionID) (andChainBranchPlan, bool) {
+	rightExpr := c.tree.comparisonRight(comparison)
+	if rightExpr == 0 {
 		return andChainBranchPlan{}, false
 	}
-	table, field, ok := c.concatLocalStringFieldRef(c.tree.comparisonLeft(&comparison))
+	table, field, ok := c.concatLocalStringFieldRef(c.tree.comparisonLeft(comparison))
 	if !ok {
 		return andChainBranchPlan{}, false
 	}
-	right, ok := foldNumberConcat(c.tree, *rightExpr)
+	right, ok := foldNumberConcat(c.tree, rightExpr)
 	if !ok {
 		return andChainBranchPlan{}, false
 	}
 	var op opcode
-	switch c.tree.comparisonOperator(&comparison) {
+	switch c.tree.comparisonOperator(comparison) {
 	case comparisonGreater:
 		op = opJumpIfNotGreaterK
 	case comparisonLessEqual:
@@ -2176,21 +2250,21 @@ func (c *compiler) andChainStringFieldNumericPlan(comparison comparisonExpressio
 	}, true
 }
 
-func (c *compiler) andChainStringFieldPairNumericPlan(comparison comparisonExpression) (andChainBranchPlan, bool) {
-	rightExpr := c.tree.comparisonRight(&comparison)
-	if rightExpr == nil {
+func (c *compiler) andChainStringFieldPairNumericPlan(comparison comparisonExpressionID) (andChainBranchPlan, bool) {
+	rightExpr := c.tree.comparisonRight(comparison)
+	if rightExpr == 0 {
 		return andChainBranchPlan{}, false
 	}
-	leftTable, leftField, ok := c.concatLocalStringFieldRef(c.tree.comparisonLeft(&comparison))
+	leftTable, leftField, ok := c.concatLocalStringFieldRef(c.tree.comparisonLeft(comparison))
 	if !ok {
 		return andChainBranchPlan{}, false
 	}
-	rightTable, rightField, ok := c.concatLocalStringFieldRef(*rightExpr)
+	rightTable, rightField, ok := c.concatLocalStringFieldRef(rightExpr)
 	if !ok {
 		return andChainBranchPlan{}, false
 	}
 	var op opcode
-	switch c.tree.comparisonOperator(&comparison) {
+	switch c.tree.comparisonOperator(comparison) {
 	case comparisonLess:
 		op = opJumpIfNotLess
 	case comparisonGreater:
@@ -2217,29 +2291,30 @@ type moduloConstantEqualityCondition struct {
 	value  float64
 }
 
-func (c *compiler) moduloConstantEqualityCondition(comparison comparisonExpression, right float64) (moduloConstantEqualityCondition, bool) {
-	left := c.tree.comparisonLeft(&comparison)
-	if c.tree.comparisonOperator(&comparison) != comparisonEqual || c.tree.comparisonRight(&comparison) == nil || len(c.tree.concatRest(&left)) != 0 {
+func (c *compiler) moduloConstantEqualityCondition(comparison comparisonExpressionID, right float64) (moduloConstantEqualityCondition, bool) {
+	left := c.tree.comparisonLeft(comparison)
+	if c.tree.comparisonOperator(comparison) != comparisonEqual || c.tree.comparisonRight(comparison) == 0 {
 		return moduloConstantEqualityCondition{}, false
 	}
-	additive := c.tree.concatFirst(&left)
-	if len(c.tree.additiveRest(&additive)) != 0 {
+	additive := c.tree.concatFirst(left)
+	additiveRest, _ := c.tree.additiveRest(additive)
+	if len(additiveRest) != 0 {
 		return moduloConstantEqualityCondition{}, false
 	}
-	multiplicative := c.tree.additiveFirst(&additive)
-	parts := c.tree.multiplicativeRest(&multiplicative)
+	multiplicative := c.tree.additiveFirst(additive)
+	parts, _ := c.tree.multiplicativeRest(multiplicative)
 	if len(parts) != 1 {
 		return moduloConstantEqualityCondition{}, false
 	}
 	modPart := parts[0]
-	if c.tree.multiplicativePartOperator(&modPart) != multiplicativeModulo {
+	if c.tree.multiplicativePartOperator(modPart) != multiplicativeModulo {
 		return moduloConstantEqualityCondition{}, false
 	}
-	mod, ok := foldNumberTerm(c.tree, *c.tree.multiplicativePartValue(&modPart))
+	mod, ok := foldNumberTerm(c.tree, c.tree.multiplicativePartValue(modPart))
 	if !ok {
 		return moduloConstantEqualityCondition{}, false
 	}
-	source, ok := c.termLocalRef(c.tree.multiplicativeFirst(&multiplicative))
+	source, ok := c.termLocalRef(c.tree.multiplicativeFirst(multiplicative))
 	if !ok || source.kind != variableLocal {
 		return moduloConstantEqualityCondition{}, false
 	}
@@ -2252,14 +2327,20 @@ type stringFieldEqualityCondition struct {
 	value Value
 }
 
-func (c *compiler) compileStringFieldEqualityJumpIfFalse(expr expression) (int, bool, error) {
-	terms := c.tree.expressionTerms(&expr)
+func (c *compiler) compileStringFieldEqualityJumpIfFalse(expr expressionID) (int, bool, error) {
+	terms, ok := c.tree.expressionTerms(expr)
+	if !ok {
+		return 0, false, nil
+	}
 	if len(terms) == 0 || len(terms) > 2 {
 		return 0, false, nil
 	}
 	conditions := make([]stringFieldEqualityCondition, 0, len(terms))
 	for _, term := range terms {
-		comparisons := c.tree.andTerms(&term)
+		comparisons, ok := c.tree.andTerms(term)
+		if !ok {
+			return 0, false, nil
+		}
 		if len(comparisons) != 1 {
 			return 0, false, nil
 		}
@@ -2298,16 +2379,16 @@ func (c *compiler) emitStringFieldEqualityJump(condition stringFieldEqualityCond
 	return jump
 }
 
-func (c *compiler) stringFieldEqualityCondition(expr comparisonExpression) (stringFieldEqualityCondition, bool) {
-	right := c.tree.comparisonRight(&expr)
-	if c.tree.comparisonOperator(&expr) != comparisonEqual || right == nil {
+func (c *compiler) stringFieldEqualityCondition(expr comparisonExpressionID) (stringFieldEqualityCondition, bool) {
+	right := c.tree.comparisonRight(expr)
+	if c.tree.comparisonOperator(expr) != comparisonEqual || right == 0 {
 		return stringFieldEqualityCondition{}, false
 	}
-	table, field, ok := c.concatLocalStringFieldRef(c.tree.comparisonLeft(&expr))
+	table, field, ok := c.concatLocalStringFieldRef(c.tree.comparisonLeft(expr))
 	if !ok {
 		return stringFieldEqualityCondition{}, false
 	}
-	value, ok := concatNonNilLiteral(c.tree, *right)
+	value, ok := concatNonNilLiteral(c.tree, right)
 	if !ok {
 		return stringFieldEqualityCondition{}, false
 	}
@@ -2318,89 +2399,93 @@ func (c *compiler) stringFieldEqualityCondition(expr comparisonExpression) (stri
 	}, true
 }
 
-func (c *compiler) concatLocalStringFieldRef(expr concatExpression) (variableRef, string, bool) {
-	term, ok := concatSingleTerm(c.tree, &expr)
+func (c *compiler) concatLocalStringFieldRef(expr concatExpressionID) (variableRef, string, bool) {
+	term, ok := concatSingleTerm(c.tree, expr)
 	if !ok {
 		return variableRef{}, "", false
 	}
-	value := termWithoutCastsAndGroups(c.tree, *term)
-	selectors := c.tree.termSelectors(&value)
-	if len(selectors) != 1 || c.tree.selectorField(&selectors[0]) == "" || c.tree.selectorIndex(&selectors[0]) != nil {
+	value := termWithoutCastsAndGroups(c.tree, term)
+	selectors, _ := c.tree.termSelectors(value)
+	if len(selectors) != 1 || c.tree.termSelectorField(selectors[0]) == "" || c.tree.termSelectorIndex(selectors[0]) != 0 {
 		return variableRef{}, "", false
 	}
-	field := c.tree.selectorField(&selectors[0])
-	value.selectors = nil
-	ref, ok := c.termLocalRef(value)
+	field := c.tree.termSelectorField(selectors[0])
+	ref, ok := c.namedTermLocalRef(value)
 	return ref, field, ok
 }
 
-func concatStringLiteral(tree syntaxTree, expr concatExpression) (string, bool) {
-	value, ok := concatSingleTerm(tree, &expr)
+func concatStringLiteral(tree syntaxTree, expr concatExpressionID) (string, bool) {
+	value, ok := concatSingleTerm(tree, expr)
 	if !ok {
 		return "", false
 	}
-	term := termWithoutCastsAndGroups(tree, *value)
-	literal := tree.termLiteral(&term)
-	if !isNamedTerm(tree, term) && literal != nil && len(tree.termSelectors(&term)) == 0 {
+	term := termWithoutCastsAndGroups(tree, value)
+	literal, ok := tree.termLiteral(term)
+	selectors, _ := tree.termSelectors(term)
+	if !isNamedTerm(tree, term) && ok && len(selectors) == 0 {
 		text, ok := literal.String()
 		return text, ok
 	}
 	return "", false
 }
 
-func concatNonNilLiteral(tree syntaxTree, expr concatExpression) (Value, bool) {
-	value, ok := concatSingleTerm(tree, &expr)
+func concatNonNilLiteral(tree syntaxTree, expr concatExpressionID) (Value, bool) {
+	value, ok := concatSingleTerm(tree, expr)
 	if !ok {
 		return NilValue(), false
 	}
-	term := termWithoutCastsAndGroups(tree, *value)
-	if isNamedTerm(tree, term) || len(tree.termSelectors(&term)) != 0 {
+	term := termWithoutCastsAndGroups(tree, value)
+	selectors, _ := tree.termSelectors(term)
+	if isNamedTerm(tree, term) || len(selectors) != 0 {
 		return NilValue(), false
 	}
-	if number := tree.termNumber(&term); number != nil {
-		return NumberValue(*number), true
+	if number, ok := tree.termNumber(term); ok {
+		return NumberValue(number), true
 	}
-	literal := tree.termLiteral(&term)
-	if literal == nil || valueKind(*literal) == NilKind {
+	literal, ok := tree.termLiteral(term)
+	if !ok || valueKind(literal) == NilKind {
 		return NilValue(), false
 	}
-	switch valueKind(*literal) {
+	switch valueKind(literal) {
 	case BoolKind, NumberKind, StringKind:
-		return *literal, true
+		return literal, true
 	default:
 		return NilValue(), false
 	}
 }
 
-func concatSingleTerm(tree syntaxTree, expr *concatExpression) (*term, bool) {
-	if expr == nil || len(tree.concatRest(expr)) != 0 {
-		return nil, false
+func concatSingleTerm(tree syntaxTree, expr concatExpressionID) (termID, bool) {
+	rest, ok := tree.concatRest(expr)
+	if !ok || len(rest) != 0 {
+		return 0, false
 	}
-	additive := tree.concatFirstRef(expr)
-	if len(tree.additiveRest(additive)) != 0 {
-		return nil, false
+	additive := tree.concatFirst(expr)
+	additiveRest, ok := tree.additiveRest(additive)
+	if !ok || len(additiveRest) != 0 {
+		return 0, false
 	}
-	multiplicative := tree.additiveFirstRef(additive)
-	if len(tree.multiplicativeRest(multiplicative)) != 0 {
-		return nil, false
+	multiplicative := tree.additiveFirst(additive)
+	multiplicativeRest, ok := tree.multiplicativeRest(multiplicative)
+	if !ok || len(multiplicativeRest) != 0 {
+		return 0, false
 	}
-	return tree.multiplicativeFirstRef(multiplicative), true
+	return tree.multiplicativeFirst(multiplicative), true
 }
 
-func (c *compiler) compileStringFieldNumericJumpIfFalse(expr expression) (int, bool, error) {
-	comparison, ok := singleComparison(c.tree, &expr)
+func (c *compiler) compileStringFieldNumericJumpIfFalse(expr expressionID) (int, bool, error) {
+	comparison, ok := singleComparison(c.tree, expr)
 	if !ok {
 		return 0, false, nil
 	}
 	rightExpr := c.tree.comparisonRight(comparison)
-	if rightExpr == nil {
+	if rightExpr == 0 {
 		return 0, false, nil
 	}
 	table, field, ok := c.concatLocalStringFieldRef(c.tree.comparisonLeft(comparison))
 	if !ok {
 		return 0, false, nil
 	}
-	right, ok := foldNumberConcat(c.tree, *rightExpr)
+	right, ok := foldNumberConcat(c.tree, rightExpr)
 	if !ok {
 		return 0, false, nil
 	}
@@ -2424,16 +2509,16 @@ func (c *compiler) compileStringFieldNumericJumpIfFalse(expr expression) (int, b
 	}
 }
 
-func (c *compiler) compileRegisterStringFieldNumericJumpIfFalse(expr expression) (int, bool, error) {
-	comparison, ok := singleComparison(c.tree, &expr)
+func (c *compiler) compileRegisterStringFieldNumericJumpIfFalse(expr expressionID) (int, bool, error) {
+	comparison, ok := singleComparison(c.tree, expr)
 	if !ok {
 		return 0, false, nil
 	}
 	rightExpr := c.tree.comparisonRight(comparison)
-	if c.tree.comparisonOperator(comparison) != comparisonLess || rightExpr == nil {
+	if c.tree.comparisonOperator(comparison) != comparisonLess || rightExpr == 0 {
 		return 0, false, nil
 	}
-	table, field, ok := c.concatLocalStringFieldRef(*rightExpr)
+	table, field, ok := c.concatLocalStringFieldRef(rightExpr)
 	if !ok {
 		return 0, false, nil
 	}
@@ -2450,12 +2535,12 @@ func (c *compiler) compileRegisterStringFieldNumericJumpIfFalse(expr expression)
 	return jump, true, nil
 }
 
-func (c *compiler) compileStringFieldTruthyJumpIfFalse(expr expression) (int, bool, error) {
-	comparison, ok := singleComparison(c.tree, &expr)
+func (c *compiler) compileStringFieldTruthyJumpIfFalse(expr expressionID) (int, bool, error) {
+	comparison, ok := singleComparison(c.tree, expr)
 	if !ok {
 		return 0, false, nil
 	}
-	if c.tree.comparisonOperator(comparison) != "" || c.tree.comparisonRight(comparison) != nil {
+	if c.tree.comparisonOperator(comparison) != "" || c.tree.comparisonRight(comparison) != 0 {
 		return 0, false, nil
 	}
 	table, field, ok := c.concatLocalStringFieldRef(c.tree.comparisonLeft(comparison))
@@ -2470,7 +2555,7 @@ func (c *compiler) compileStringFieldTruthyJumpIfFalse(expr expression) (int, bo
 	return jump, true, nil
 }
 
-func (c *compiler) compileConditionLeftRegister(expr concatExpression) (int, func(), error) {
+func (c *compiler) compileConditionLeftRegister(expr concatExpressionID) (int, func(), error) {
 	if ref, ok := c.concatLocalRef(expr); ok {
 		return ref.index, func() {}, nil
 	}
@@ -2482,29 +2567,29 @@ func (c *compiler) compileConditionLeftRegister(expr concatExpression) (int, fun
 	return left, func() { c.releaseTemp(left) }, nil
 }
 
-func (c *compiler) concatLocalRef(expr concatExpression) (variableRef, bool) {
-	term, ok := concatSingleTerm(c.tree, &expr)
+func (c *compiler) concatLocalRef(expr concatExpressionID) (variableRef, bool) {
+	term, ok := concatSingleTerm(c.tree, expr)
 	if !ok {
 		return variableRef{}, false
 	}
-	if !isNamedTerm(c.tree, *term) {
+	if !isNamedTerm(c.tree, term) {
 		return variableRef{}, false
 	}
 	ref, ok := c.resolveBoundUseNoError(c.tree.termID(term))
 	return ref, ok && ref.kind == variableLocal
 }
 
-func (c *compiler) expressionLocalRef(expr expression) (variableRef, bool) {
+func (c *compiler) expressionLocalRef(expr expressionID) (variableRef, bool) {
 	if c.options.optimizations.enabled(optimizationHIRSimplify) {
 		if _, ok := foldConstantExpression(c.tree, expr); ok {
 			return variableRef{}, false
 		}
 	}
-	comparison, ok := singleComparison(c.tree, &expr)
+	comparison, ok := singleComparison(c.tree, expr)
 	if !ok {
 		return variableRef{}, false
 	}
-	if c.tree.comparisonOperator(comparison) != "" || c.tree.comparisonRight(comparison) != nil {
+	if c.tree.comparisonOperator(comparison) != "" || c.tree.comparisonRight(comparison) != 0 {
 		return variableRef{}, false
 	}
 	return c.concatLocalRef(c.tree.comparisonLeft(comparison))
@@ -2539,12 +2624,12 @@ func (c *compiler) compileWhile(stmt whileStatement) error {
 	conditionStart := c.pc()
 	condition := c.tree.whileCondition(&stmt)
 
-	jumpIfFalse, ok, err := c.compileConditionJumpIfFalse(*condition)
+	jumpIfFalse, ok, err := c.compileConditionJumpIfFalse(condition)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		conditionReg, err := c.compileTempExpression(*condition)
+		conditionReg, err := c.compileTempExpression(condition)
 		if err != nil {
 			return err
 		}
@@ -2572,14 +2657,14 @@ func (c *compiler) compileFor(stmt forStatement) error {
 	limit := c.allocReg()
 	step := c.allocReg()
 
-	if err := c.compileExpressionTo(*c.tree.numericForStart(&stmt), loopVar); err != nil {
+	if err := c.compileExpressionTo(c.tree.numericForStart(&stmt), loopVar); err != nil {
 		return err
 	}
-	if err := c.compileExpressionTo(*c.tree.numericForLimit(&stmt), limit); err != nil {
+	if err := c.compileExpressionTo(c.tree.numericForLimit(&stmt), limit); err != nil {
 		return err
 	}
-	if stepExpr := c.tree.numericForStep(&stmt); stepExpr != nil {
-		if err := c.compileExpressionTo(*stepExpr, step); err != nil {
+	if stepExpr := c.tree.numericForStep(&stmt); stepExpr != 0 {
+		if err := c.compileExpressionTo(stepExpr, step); err != nil {
 			return err
 		}
 	} else {
@@ -2691,7 +2776,7 @@ func (c *compiler) compileRepeat(stmt repeatStatement) error {
 		c.patchJump(jump, conditionStart)
 	}
 
-	condition, err := c.compileTempExpression(*c.tree.repeatCondition(&stmt))
+	condition, err := c.compileTempExpression(c.tree.repeatCondition(&stmt))
 	if err != nil {
 		return err
 	}
@@ -2711,30 +2796,31 @@ func (c *compiler) compileBlock(stmt blockStatement) error {
 	return nil
 }
 
-func (c *compiler) compileTableTo(table tableExpression, target int) error {
+func (c *compiler) compileTableTo(table arenaTableID, target int) error {
 	arrayCapacity, fieldCapacity := tableCapacity(c.tree, table)
 	c.emit(instruction{op: opNewTable, a: target, b: arrayCapacity, c: fieldCapacity})
-	for _, field := range c.tree.tableFields(&table) {
+	fields, _ := c.tree.tableFields(table)
+	for _, field := range fields {
 		value := c.allocTemp()
-		if err := c.compileExpressionTo(*c.tree.tableFieldValue(&field), value); err != nil {
+		if err := c.compileExpressionTo(c.tree.tableFieldValue(field), value); err != nil {
 			c.releaseTemp(value)
 			return err
 		}
 		switch {
-		case c.tree.tableFieldKey(&field) != nil:
+		case c.tree.tableFieldKey(field) != 0:
 			key := c.allocTemp()
-			if err := c.compileExpressionTo(*c.tree.tableFieldKey(&field), key); err != nil {
+			if err := c.compileExpressionTo(c.tree.tableFieldKey(field), key); err != nil {
 				c.releaseTemp(key)
 				c.releaseTemp(value)
 				return err
 			}
 			c.emit(instruction{op: opSetIndex, a: target, b: key, c: value})
 			c.releaseTemp(key)
-		case c.tree.tableFieldArrayIndex(&field) != 0:
-			key := c.addConstant(NumberValue(float64(c.tree.tableFieldArrayIndex(&field))))
+		case c.tree.tableFieldArrayIndex(field) != 0:
+			key := c.addConstant(NumberValue(float64(c.tree.tableFieldArrayIndex(field))))
 			c.emit(instruction{op: opSetField, a: target, b: key, c: value})
-		case c.tree.tableFieldName(&field) != "":
-			key := c.addStringConstant(c.tree.tableFieldName(&field))
+		case c.tree.tableFieldName(field) != "":
+			key := c.addStringConstant(c.tree.tableFieldName(field))
 			c.emit(instruction{op: opSetStringField, a: target, b: key, c: value})
 		default:
 			c.releaseTemp(value)
@@ -2745,16 +2831,17 @@ func (c *compiler) compileTableTo(table tableExpression, target int) error {
 	return nil
 }
 
-func tableCapacity(tree syntaxTree, table tableExpression) (int, int) {
+func tableCapacity(tree syntaxTree, table arenaTableID) (int, int) {
 	arrayCapacity := 0
 	fieldCapacity := 0
-	for _, field := range tree.tableFields(&table) {
+	fields, _ := tree.tableFields(table)
+	for _, field := range fields {
 		switch {
-		case tree.tableFieldArrayIndex(&field) != 0:
-			if tree.tableFieldArrayIndex(&field) > arrayCapacity {
-				arrayCapacity = tree.tableFieldArrayIndex(&field)
+		case tree.tableFieldArrayIndex(field) != 0:
+			if tree.tableFieldArrayIndex(field) > arrayCapacity {
+				arrayCapacity = tree.tableFieldArrayIndex(field)
 			}
-		case tree.tableFieldName(&field) != "" || tree.tableFieldKey(&field) != nil:
+		case tree.tableFieldName(field) != "" || tree.tableFieldKey(field) != 0:
 			fieldCapacity++
 		}
 	}
@@ -2766,23 +2853,36 @@ func (c *compiler) compileGlobalNameTo(name string, target int) {
 	c.emit(instruction{op: opLoadGlobal, a: target, b: constant})
 }
 
-func (c *compiler) compileNamedTermTo(term term, target int) error {
-	ref, bound, err := c.resolveBoundUse(c.tree.termID(&term))
+func (c *compiler) compileNamedTermTo(term termID, target int) error {
+	ref, bound, err := c.resolveBoundUse(c.tree.termID(term))
 	if err != nil {
 		return err
 	}
 	if bound {
 		return c.compileVariableRefTo(ref, target)
 	}
-	c.compileGlobalNameTo(c.tree.termName(&term), target)
+	c.compileGlobalNameTo(c.tree.termName(term), target)
 	return nil
 }
 
-func (c *compiler) termLocalRef(term term) (variableRef, bool) {
+func (c *compiler) termLocalRef(term termID) (variableRef, bool) {
 	if !isNamedTerm(c.tree, term) {
 		return variableRef{}, false
 	}
-	if ref, ok := c.resolveBoundUseNoError(c.tree.termID(&term)); ok && ref.kind == variableLocal {
+	if ref, ok := c.resolveBoundUseNoError(c.tree.termID(term)); ok && ref.kind == variableLocal {
+		return ref, true
+	}
+	return variableRef{}, false
+}
+
+// namedTermLocalRef resolves the binding for a named term that carries one or
+// more selectors. Arena terms keep selectors in immutable spans, so callers
+// cannot clear them on a local copy as the old pointer tree did.
+func (c *compiler) namedTermLocalRef(term termID) (variableRef, bool) {
+	if c.tree.termKind(term) != syntaxTermName || c.tree.termName(term) == "" {
+		return variableRef{}, false
+	}
+	if ref, ok := c.resolveBoundUseNoError(c.tree.termID(term)); ok && ref.kind == variableLocal {
 		return ref, true
 	}
 	return variableRef{}, false
@@ -2938,16 +3038,17 @@ func (c *compiler) resolveBoundUseNoError(node syntaxID) (variableRef, bool) {
 	return ref, true
 }
 
-func (c *compiler) compileCallTo(call callExpression, target int) error {
+func (c *compiler) compileCallTo(call arenaCallID, target int) error {
 	return c.compileCallToResults(call, target, 1)
 }
 
-func (c *compiler) compileCallToResults(call callExpression, target int, resultCount int) error {
+func (c *compiler) compileCallToResults(call arenaCallID, target int, resultCount int) error {
 	plan := planCall(c.tree, call)
-	return c.compilePlannedCallToResults(plan, c.tree.callArgs(&call), target, resultCount)
+	args, _ := c.tree.callArgs(call)
+	return c.compilePlannedCallToResults(plan, args, target, resultCount)
 }
 
-func (c *compiler) compilePlannedCallToResults(plan callPlan, args []expression, target int, resultCount int) error {
+func (c *compiler) compilePlannedCallToResults(plan callPlan, args []expressionID, target int, resultCount int) error {
 	if c.callNeedsScratch(target, resultCount) {
 		scratch := c.nextReg
 		if err := c.compilePlannedCallToResultsDirect(plan, args, scratch, resultCount); err != nil {
@@ -2976,7 +3077,7 @@ func (c *compiler) registerIsLocal(register int) bool {
 	return c.localRegisters.contains(register)
 }
 
-func (c *compiler) compilePlannedCallToResultsDirect(lowered callPlan, args []expression, target int, resultCount int) error {
+func (c *compiler) compilePlannedCallToResultsDirect(lowered callPlan, args []expressionID, target int, resultCount int) error {
 	if c.selectVarargCountCall(lowered, args, resultCount) {
 		return c.compileSelectVarargCountToResults(target, resultCount)
 	}
@@ -3010,23 +3111,21 @@ type methodOneResultCall struct {
 }
 
 func (c *compiler) methodOneResultCall(lowered callPlan, resultCount int) (methodOneResultCall, bool) {
-	if resultCount != 1 || lowered.receiver == nil {
+	if resultCount != 1 || lowered.receiver == 0 {
 		return methodOneResultCall{}, false
 	}
 	target := lowered.target
-	selectors := c.tree.termSelectors(&target)
+	selectors, _ := c.tree.termSelectors(target)
 	if len(selectors) != 1 ||
-		c.tree.selectorField(&selectors[0]) == "" ||
-		c.tree.selectorIndex(&selectors[0]) != nil {
+		c.tree.termSelectorField(selectors[0]) == "" ||
+		c.tree.termSelectorIndex(selectors[0]) != 0 {
 		return methodOneResultCall{}, false
 	}
-	base := target
-	base.selectors = nil
-	receiver, ok := c.termLocalRef(*lowered.receiver)
+	receiver, ok := c.termLocalRef(lowered.receiver)
 	if !ok {
 		return methodOneResultCall{}, false
 	}
-	targetBase, ok := c.termLocalRef(base)
+	targetBase, ok := c.namedTermLocalRef(target)
 	if !ok || targetBase.index != receiver.index {
 		return methodOneResultCall{}, false
 	}
@@ -3037,14 +3136,14 @@ func (c *compiler) methodOneResultCall(lowered callPlan, resultCount int) (metho
 	}
 	return methodOneResultCall{
 		receiver: receiver.index,
-		field:    c.tree.selectorField(&selectors[0]),
+		field:    c.tree.termSelectorField(selectors[0]),
 	}, true
 }
 
 func (c *compiler) compileMethodOneResultCallToResults(
 	method methodOneResultCall,
 	lowered callPlan,
-	args []expression,
+	args []expressionID,
 	target int,
 ) error {
 	span := len(args) + 2
@@ -3061,8 +3160,8 @@ func (c *compiler) compileMethodOneResultCallToResults(
 	return nil
 }
 
-func (c *compiler) selectVarargCountCall(lowered callPlan, args []expression, resultCount int) bool {
-	if resultCount == 0 || lowered.receiver != nil || !c.variadic {
+func (c *compiler) selectVarargCountCall(lowered callPlan, args []expressionID, resultCount int) bool {
+	if resultCount == 0 || lowered.receiver != 0 || !c.variadic {
 		return false
 	}
 	if !c.isUnboundGlobalName(lowered.target, "select") {
@@ -3090,32 +3189,33 @@ func (c *compiler) compileSelectVarargCountToResults(target int, resultCount int
 
 func (c *compiler) rawLenIntrinsicCall(lowered callPlan) bool {
 	return c.options.optimizations.enabled(optimizationBytecodePeephole) &&
-		lowered.receiver == nil &&
+		lowered.receiver == 0 &&
 		c.isUnboundGlobalName(lowered.target, "rawlen")
 }
 
-func (c *compiler) isUnboundGlobalName(term term, name string) bool {
-	if !isNamedTerm(c.tree, term) || c.tree.termName(&term) != name {
+func (c *compiler) isUnboundGlobalName(term termID, name string) bool {
+	if !isNamedTerm(c.tree, term) || c.tree.termName(term) != name {
 		return false
 	}
-	return c.bind.useClassification(c.tree.termID(&term)) == boundUseGlobal
+	return c.bind.useClassification(c.tree.termID(term)) == boundUseGlobal
 }
 
-func expressionStringLiteral(tree syntaxTree, expr expression) (string, bool) {
+func expressionStringLiteral(tree syntaxTree, expr expressionID) (string, bool) {
 	value, ok := expressionSingleTerm(tree, expr)
-	literal := tree.termLiteral(&value)
-	if !ok || literal == nil {
+	literal, okLiteral := tree.termLiteral(value)
+	if !ok || !okLiteral {
 		return "", false
 	}
 	return literal.String()
 }
 
 func (c *compiler) upvalueOneResultCall(lowered callPlan, resultCount int) (int, bool) {
-	if resultCount != 1 || lowered.receiver != nil {
+	if resultCount != 1 || lowered.receiver != 0 {
 		return 0, false
 	}
 	target := lowered.target
-	if !isNamedTerm(c.tree, target) || len(c.tree.termSelectors(&target)) != 0 {
+	selectors, _ := c.tree.termSelectors(target)
+	if !isNamedTerm(c.tree, target) || len(selectors) != 0 {
 		return 0, false
 	}
 	for i := range lowered.args.len() {
@@ -3123,16 +3223,17 @@ func (c *compiler) upvalueOneResultCall(lowered callPlan, resultCount int) (int,
 			return 0, false
 		}
 	}
-	ref, ok := c.resolveBoundUseNoError(c.tree.termID(&target))
+	ref, ok := c.resolveBoundUseNoError(c.tree.termID(target))
 	return ref.index, ok && ref.kind == variableUpvalue
 }
 
 func (c *compiler) selfUpvalueOneResultCall(lowered callPlan, resultCount int) (int, bool) {
-	if c.selfFunctionSymbol < 0 || resultCount != 1 || lowered.receiver != nil {
+	if c.selfFunctionSymbol < 0 || resultCount != 1 || lowered.receiver != 0 {
 		return 0, false
 	}
 	target := lowered.target
-	if !isNamedTerm(c.tree, target) || len(c.tree.termSelectors(&target)) != 0 {
+	selectors, _ := c.tree.termSelectors(target)
+	if !isNamedTerm(c.tree, target) || len(selectors) != 0 {
 		return 0, false
 	}
 	for i := range lowered.args.len() {
@@ -3140,7 +3241,7 @@ func (c *compiler) selfUpvalueOneResultCall(lowered callPlan, resultCount int) (
 			return 0, false
 		}
 	}
-	classification := c.bind.useClassification(c.tree.termID(&target))
+	classification := c.bind.useClassification(c.tree.termID(target))
 	if classification != boundUseClassification(c.selfFunctionSymbol) {
 		return 0, false
 	}
@@ -3149,11 +3250,12 @@ func (c *compiler) selfUpvalueOneResultCall(lowered callPlan, resultCount int) (
 }
 
 func (c *compiler) localOneResultCall(lowered callPlan, resultCount int) (int, bool) {
-	if resultCount != 1 || lowered.receiver != nil {
+	if resultCount != 1 || lowered.receiver != 0 {
 		return 0, false
 	}
 	target := lowered.target
-	if !isNamedTerm(c.tree, target) || len(c.tree.termSelectors(&target)) != 0 {
+	selectors, _ := c.tree.termSelectors(target)
+	if !isNamedTerm(c.tree, target) || len(selectors) != 0 {
 		return 0, false
 	}
 	for i := range lowered.args.len() {
@@ -3161,11 +3263,11 @@ func (c *compiler) localOneResultCall(lowered callPlan, resultCount int) (int, b
 			return 0, false
 		}
 	}
-	ref, ok := c.resolveBoundUseNoError(c.tree.termID(&target))
+	ref, ok := c.resolveBoundUseNoError(c.tree.termID(target))
 	return ref.index, ok && ref.kind == variableLocal
 }
 
-func (c *compiler) compileLocalOneResultCallToResults(local int, lowered callPlan, args []expression, target int) error {
+func (c *compiler) compileLocalOneResultCallToResults(local int, lowered callPlan, args []expressionID, target int) error {
 	span := len(args)
 	if span <= 0 {
 		span = 1
@@ -3182,7 +3284,7 @@ func (c *compiler) compileLocalOneResultCallToResults(local int, lowered callPla
 	return nil
 }
 
-func (c *compiler) compileUpvalueOneResultCallToResults(upvalue int, lowered callPlan, args []expression, target int) error {
+func (c *compiler) compileUpvalueOneResultCallToResults(upvalue int, lowered callPlan, args []expressionID, target int) error {
 	span := len(args)
 	if span <= 0 {
 		span = 1
@@ -3199,7 +3301,7 @@ func (c *compiler) compileUpvalueOneResultCallToResults(upvalue int, lowered cal
 	return nil
 }
 
-func (c *compiler) compileSelfUpvalueOneResultCallToResults(upvalue int, lowered callPlan, args []expression, target int) error {
+func (c *compiler) compileSelfUpvalueOneResultCallToResults(upvalue int, lowered callPlan, args []expressionID, target int) error {
 	if source, constant, ok := c.selfCallSubtractConstantArg(args); ok {
 		c.reserveRegistersThrough(target + 1)
 		c.claimRegister(target)
@@ -3224,33 +3326,38 @@ func (c *compiler) compileSelfUpvalueOneResultCallToResults(upvalue int, lowered
 	return nil
 }
 
-func (c *compiler) selfCallSubtractConstantArg(args []expression) (int, int, bool) {
+func (c *compiler) selfCallSubtractConstantArg(args []expressionID) (int, int, bool) {
 	if len(args) != 1 {
 		return 0, 0, false
 	}
 	expr := args[0]
-	comparison, ok := singleComparison(c.tree, &expr)
+	comparison, ok := singleComparison(c.tree, expr)
 	if !ok {
 		return 0, 0, false
 	}
 	left := c.tree.comparisonLeft(comparison)
-	if c.tree.comparisonOperator(comparison) != "" || c.tree.comparisonRight(comparison) != nil || len(c.tree.concatRest(&left)) != 0 {
+	if c.tree.comparisonOperator(comparison) != "" || c.tree.comparisonRight(comparison) != 0 {
 		return 0, 0, false
 	}
-	additive := c.tree.concatFirst(&left)
-	parts := c.tree.additiveRest(&additive)
-	if len(parts) != 1 || c.tree.additivePartOperator(&parts[0]) != additiveSubtract {
+	concatRest, _ := c.tree.concatRest(left)
+	if len(concatRest) != 0 {
 		return 0, 0, false
 	}
-	multiplicative := c.tree.additiveFirst(&additive)
-	if len(c.tree.multiplicativeRest(&multiplicative)) != 0 {
+	additive := c.tree.concatFirst(left)
+	parts, _ := c.tree.additiveRest(additive)
+	if len(parts) != 1 || c.tree.additivePartOperator(parts[0]) != additiveSubtract {
 		return 0, 0, false
 	}
-	ref, ok := c.termLocalRef(termWithoutCastsAndGroups(c.tree, c.tree.multiplicativeFirst(&multiplicative)))
+	multiplicative := c.tree.additiveFirst(additive)
+	multiplicativeRest, _ := c.tree.multiplicativeRest(multiplicative)
+	if len(multiplicativeRest) != 0 {
+		return 0, 0, false
+	}
+	ref, ok := c.termLocalRef(termWithoutCastsAndGroups(c.tree, c.tree.multiplicativeFirst(multiplicative)))
 	if !ok {
 		return 0, 0, false
 	}
-	number, ok := foldNumberMultiplicative(c.tree, *c.tree.additivePartValue(&parts[0]))
+	number, ok := foldNumberMultiplicative(c.tree, c.tree.additivePartValue(parts[0]))
 	if !ok {
 		return 0, 0, false
 	}
@@ -3271,12 +3378,12 @@ func (c *compiler) mathIntrinsicCall(lowered callPlan) (nativeFuncID, bool) {
 
 func (c *compiler) baseFieldIntrinsicCall(lowered callPlan, globalName string) (nativeFuncID, bool) {
 	if !c.options.optimizations.enabled(optimizationBytecodePeephole) ||
-		lowered.receiver != nil ||
+		lowered.receiver != 0 ||
 		!c.isUnboundBaseField(lowered.target, globalName) {
 		return nativeFuncUnknown, false
 	}
-	selectors := c.tree.termSelectors(&lowered.target)
-	field := c.tree.selectorField(&selectors[0])
+	selectors, _ := c.tree.termSelectors(lowered.target)
+	field := c.tree.termSelectorField(selectors[0])
 	intrinsic, ok := baseFieldIntrinsic(globalName, field)
 	if !ok {
 		return nativeFuncUnknown, false
@@ -3284,23 +3391,21 @@ func (c *compiler) baseFieldIntrinsicCall(lowered callPlan, globalName string) (
 	return intrinsic.nativeID, true
 }
 
-func (c *compiler) isUnboundBaseField(term term, name string) bool {
-	base := term
-	base.selectors = nil
-	selectors := c.tree.termSelectors(&term)
-	if !isNamedTerm(c.tree, base) || c.tree.termName(&base) != name ||
+func (c *compiler) isUnboundBaseField(term termID, name string) bool {
+	selectors, _ := c.tree.termSelectors(term)
+	if c.tree.termKind(term) != syntaxTermName || c.tree.termName(term) != name ||
 		len(selectors) != 1 ||
-		c.tree.selectorField(&selectors[0]) == "" ||
-		c.tree.selectorIndex(&selectors[0]) != nil {
+		c.tree.termSelectorField(selectors[0]) == "" ||
+		c.tree.termSelectorIndex(selectors[0]) != 0 {
 		return false
 	}
-	return c.bind.useClassification(c.tree.termID(&term)) == boundUseGlobal
+	return c.bind.useClassification(c.tree.termID(term)) == boundUseGlobal
 }
 
 func (c *compiler) compileBaseIntrinsicCallToResults(
 	nativeID nativeFuncID,
 	lowered callPlan,
-	args []expression,
+	args []expressionID,
 	target int,
 	resultCount int,
 ) error {
@@ -3333,16 +3438,16 @@ func (c *compiler) compileBaseIntrinsicCallToResults(
 	return nil
 }
 
-func (c *compiler) compilePlannedCallToResultsGeneric(lowered callPlan, args []expression, target int, resultCount int) error {
+func (c *compiler) compilePlannedCallToResultsGeneric(lowered callPlan, args []expressionID, target int, resultCount int) error {
 	if err := c.compileCallTargetTo(lowered.target, target); err != nil {
 		return err
 	}
 
 	firstArg := target + 1
 	fixedArgCount := 0
-	if lowered.receiver != nil {
+	if lowered.receiver != 0 {
 		c.reserveRegistersThrough(target + 2 + len(args))
-		if err := c.compileCallTargetTo(*lowered.receiver, firstArg); err != nil {
+		if err := c.compileCallTargetTo(lowered.receiver, firstArg); err != nil {
 			return err
 		}
 		firstArg++
@@ -3394,7 +3499,7 @@ func (c *compiler) compilePlannedCallToResultsGeneric(lowered callPlan, args []e
 	return nil
 }
 
-func (c *compiler) compileVarargToResults(_ term, target int, resultCount int) error {
+func (c *compiler) compileVarargToResults(_ termID, target int, resultCount int) error {
 	if !c.variadic {
 		return fmt.Errorf("compile: vararg outside variadic function")
 	}

@@ -2,6 +2,7 @@ package ember
 
 import (
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -27,7 +28,7 @@ type statement struct {
 	localFunc  *localFunctionStatement
 	funcDecl   *functionDeclarationStatement
 	assign     *assignStatement
-	call       *term
+	call       termID
 	ifStmt     *ifStatement
 	while      *whileStatement
 	forLoop    *forStatement
@@ -45,7 +46,7 @@ type localStatement struct {
 	nameID      syntaxID
 	nameRanges  []sourceRange
 	annotations []*typeExpression
-	values      []expression
+	values      []expressionID
 }
 
 type typeAliasStatement struct {
@@ -101,7 +102,7 @@ type functionDeclarationStatement struct {
 	method             bool
 }
 
-type functionExpression struct {
+type parserFunctionDraft struct {
 	id                 syntaxID
 	functionID         int
 	typeParams         []string
@@ -149,7 +150,7 @@ type typeExpression struct {
 	typeParamID syntaxID
 	typePacks   []string
 	typePackID  syntaxID
-	expr        *expression
+	expr        expressionID
 	literal     *Value
 }
 
@@ -168,7 +169,7 @@ type typeFunctionParam struct {
 
 type assignStatement struct {
 	targets []assignTarget
-	values  []expression
+	values  []expressionID
 }
 
 type assignTarget struct {
@@ -180,35 +181,29 @@ type assignTarget struct {
 }
 
 type ifStatement struct {
-	condition      expression
+	condition      expressionID
 	thenStatements []statement
 	elseStatements []statement
 }
 
-type ifExpression struct {
-	condition expression
-	thenValue expression
-	elseValue expression
-}
-
 type whileStatement struct {
-	condition  expression
+	condition  expressionID
 	statements []statement
 }
 
 type forStatement struct {
 	nameID     syntaxID
 	name       string
-	start      expression
-	limit      expression
-	step       *expression
+	start      expressionID
+	limit      expressionID
+	step       expressionID
 	statements []statement
 }
 
 type genericForStatement struct {
 	names      []string
 	nameID     syntaxID
-	values     []expression
+	values     []expressionID
 	statements []statement
 }
 
@@ -219,7 +214,7 @@ type parsedForStatement struct {
 
 type repeatStatement struct {
 	statements []statement
-	condition  expression
+	condition  expressionID
 }
 
 type blockStatement struct {
@@ -229,22 +224,7 @@ type blockStatement struct {
 type returnStatement struct {
 	start  int
 	end    int
-	values []expression
-}
-
-type expression struct {
-	id    syntaxID
-	terms []andExpression
-}
-
-type andExpression struct {
-	terms []comparisonExpression
-}
-
-type comparisonExpression struct {
-	left  concatExpression
-	op    comparisonOperator
-	right *concatExpression
+	values []expressionID
 }
 
 type comparisonOperator string
@@ -258,19 +238,9 @@ const (
 	comparisonGreaterEqual comparisonOperator = ">="
 )
 
-type additiveExpression struct {
-	first multiplicativeExpression
-	rest  []additivePart
-}
-
-type concatExpression struct {
-	first additiveExpression
-	rest  []additiveExpression
-}
-
 type additivePart struct {
 	op    additiveOperator
-	value multiplicativeExpression
+	value multiplicativeExpressionID
 }
 
 type additiveOperator string
@@ -279,16 +249,6 @@ const (
 	additiveAdd      additiveOperator = "+"
 	additiveSubtract additiveOperator = "-"
 )
-
-type multiplicativeExpression struct {
-	first term
-	rest  []multiplicativePart
-}
-
-type multiplicativePart struct {
-	op    multiplicativeOperator
-	value term
-}
 
 type multiplicativeOperator string
 
@@ -299,53 +259,9 @@ const (
 	multiplicativeFloorDiv multiplicativeOperator = "//"
 )
 
-type powerExpression struct {
-	base     term
-	exponent term
-}
-
-type term struct {
-	id         syntaxID
-	start      int
-	end        int
-	number     *float64
-	lit        *Value
-	table      *tableExpression
-	function   *functionExpression
-	ifExpr     *ifExpression
-	call       *callExpression
-	vararg     bool
-	unaryNot   *term
-	unaryMinus *term
-	unaryLen   *term
-	power      *powerExpression
-	group      *expression
-	cast       *typeExpression
-	selectors  []selector
-	name       string
-}
-
-type tableExpression struct {
-	fields []tableField
-}
-
-type tableField struct {
-	name       string
-	arrayIndex int
-	key        *expression
-	value      expression
-}
-
-type callExpression struct {
-	target   term
-	receiver *term
-	typeArgs []*typeExpression
-	args     []expression
-}
-
 type selector struct {
 	field string
-	index *expression
+	index expressionID
 }
 
 type parserCheckpoint struct {
@@ -363,6 +279,7 @@ type parser struct {
 	tokens     []sourceToken
 	stringPool []string
 	tokenIndex int
+	arena      *syntaxArena
 }
 
 func (p *parser) enterNesting(kind string) error {
@@ -391,10 +308,13 @@ func (p *parser) restore(checkpoint parserCheckpoint) {
 	p.tokenIndex = checkpoint.tokenIndex
 }
 
-func (p *parser) parse() (program, error) {
+func (p *parser) parse() (syntaxTree, error) {
 	lexed, err := lexSourceForCompileWithTokenLimit(p.source, p.limits.MaxTokens)
 	if err != nil {
-		return program{}, err
+		return syntaxTree{}, err
+	}
+	if p.arena == nil {
+		p.arena = newSyntaxArena(len(lexed.tokens))
 	}
 	p.mode = lexed.mode
 	p.tokens = lexed.tokens
@@ -402,18 +322,18 @@ func (p *parser) parse() (program, error) {
 
 	statements, err := p.parseBlock()
 	if err != nil {
-		return program{}, err
+		return syntaxTree{}, err
 	}
 
 	p.skipSpace()
 	if !p.done() {
-		return program{}, p.errorf("unexpected input %q", p.source[p.pos:])
+		return syntaxTree{}, p.errorf("unexpected input %q", p.source[p.pos:])
 	}
-	tree := newSyntaxTree(program{statements: statements, mode: p.mode})
+	tree := newSyntaxTreeWithArena(program{statements: statements, mode: p.mode}, p.arena)
 	if err := assignSyntaxTreeIDsWithLimit(&tree, p.limits.MaxSyntaxNodes); err != nil {
-		return program{}, err
+		return syntaxTree{}, err
 	}
-	return tree.root, nil
+	return tree, nil
 }
 
 func (p *parser) parseBlock(stopKeywords ...string) ([]statement, error) {
@@ -673,43 +593,52 @@ func (p *parser) parseFunctionDeclarationTarget() (assignTarget, bool, error) {
 	}
 }
 
-func (p *parser) parseFunctionExpression() (functionExpression, error) {
+func (p *parser) parseFunctionExpression() (arenaFunctionID, error) {
 	if !p.consumeKeyword("function") {
-		return functionExpression{}, p.errorf("expected function")
+		return 0, p.errorf("expected function")
 	}
 
-	return p.parseFunctionBody()
+	body, err := p.parseFunctionBody()
+	if err != nil {
+		return 0, err
+	}
+	return p.arena.appendFunction(arenaFunction{
+		typeParams: body.typeParams, typePacks: body.typePacks, params: body.params,
+		paramAnnotations: body.paramAnnotations, variadic: body.variadic,
+		variadicAnnotation: body.variadicAnnotation, returnAnnotation: body.returnAnnotation,
+		statements: body.statements,
+	}), nil
 }
 
-func (p *parser) parseFunctionBody() (functionExpression, error) {
+func (p *parser) parseFunctionBody() (parserFunctionDraft, error) {
 	if err := p.enterNesting("function"); err != nil {
-		return functionExpression{}, err
+		return parserFunctionDraft{}, err
 	}
 	defer p.leaveNesting()
 	typeParams, typePacks, err := p.parseOptionalTypeParameterList()
 	if err != nil {
-		return functionExpression{}, err
+		return parserFunctionDraft{}, err
 	}
 
 	params, annotations, variadic, variadicAnnotation, err := p.parseParameterList()
 	if err != nil {
-		return functionExpression{}, err
+		return parserFunctionDraft{}, err
 	}
 	returnAnnotation, err := p.parseOptionalTypeAnnotation()
 	if err != nil {
-		return functionExpression{}, err
+		return parserFunctionDraft{}, err
 	}
 
 	statements, err := p.parseBlock("end")
 	if err != nil {
-		return functionExpression{}, err
+		return parserFunctionDraft{}, err
 	}
 	p.skipSpace()
 	if !p.consumeKeyword("end") {
-		return functionExpression{}, p.errorf("expected end")
+		return parserFunctionDraft{}, p.errorf("expected end")
 	}
 
-	return functionExpression{
+	return parserFunctionDraft{
 		typeParams:         typeParams,
 		typePacks:          typePacks,
 		params:             params,
@@ -769,51 +698,70 @@ func (p *parser) parseParameterList() ([]string, []*typeExpression, bool, *typeE
 }
 
 func (p *parser) parseIdentifierStatement() (statement, error) {
-	value, err := p.parseIdentifierStatementTerm()
+	target, err := p.parseAssignTarget()
 	if err != nil {
 		return statement{}, err
 	}
-	if value.call != nil {
-		return identifierCallStatement(value), nil
-	}
 
-	target := assignTargetFromIdentifierTerm(value)
 	targets := []assignTarget{target}
-	for {
+	p.skipSpace()
+	for p.consumeByte(',') {
 		p.skipSpace()
-		if !p.consumeByte(',') {
-			break
-		}
-		p.skipSpace()
-		target, err := p.parseAssignTarget()
+		next, err := p.parseAssignTarget()
 		if err != nil {
 			return statement{}, err
 		}
-		targets = append(targets, target)
+		targets = append(targets, next)
+		p.skipSpace()
 	}
 
-	if !p.consumeByte('=') {
+	if p.consumeByte('=') {
+		values, err := p.parseExpressionList()
+		if err != nil {
+			return statement{}, err
+		}
+		return statement{assign: &assignStatement{targets: targets, values: values}}, nil
+	}
+	if len(targets) != 1 {
 		return statement{}, p.errorf("expected =")
 	}
-	values, err := p.parseExpressionList()
+
+	if !p.currentSymbol("(") && !p.currentSymbol(":") && !p.currentSymbol("<<") {
+		return statement{}, p.errorf("expected =")
+	}
+
+	selectors := idListBuilder[arenaSelector]{}
+	for _, selector := range target.selectors {
+		selectors.append(arenaSelector{field: p.stringID(selector.field), index: selector.index})
+	}
+	selectorSpan, ok := selectors.span(&p.arena.selectors)
+	if !ok {
+		return statement{}, p.errorf("expression arena exhausted")
+	}
+	value := p.arena.appendTerm(arenaTerm{
+		start:     target.start,
+		end:       target.end,
+		kind:      termKindName,
+		payload:   uint64(p.stringID(target.name)),
+		selectors: selectorSpan,
+	})
+	value, err = p.parseTermSuffixesWithCasts(value, false)
 	if err != nil {
 		return statement{}, err
 	}
-	return statement{assign: &assignStatement{targets: targets, values: values}}, nil
+	node, ok := p.arena.term(value)
+	if !ok {
+		return statement{}, p.errorf("invalid identifier term")
+	}
+	if node.kind != termKindCall {
+		return statement{}, p.errorf("expected =")
+	}
+	return identifierCallStatement(value), nil
 }
 
 // Keep call-term address-taking out of the assignment path so ordinary terms stay stack-allocated.
-func identifierCallStatement(value term) statement {
-	return statement{call: &value}
-}
-
-func assignTargetFromIdentifierTerm(value term) assignTarget {
-	return assignTarget{
-		start:     value.start,
-		end:       value.end,
-		name:      value.name,
-		selectors: value.selectors,
-	}
+func identifierCallStatement(value termID) statement {
+	return statement{call: value}
 }
 
 func (p *parser) parseReturnStatement() (returnStatement, error) {
@@ -828,13 +776,13 @@ func (p *parser) parseReturnStatement() (returnStatement, error) {
 	return returnStatement{values: values}, nil
 }
 
-func (p *parser) parseExpressionList() ([]expression, error) {
+func (p *parser) parseExpressionList() ([]expressionID, error) {
 	value, err := p.parseExpression()
 	if err != nil {
 		return nil, err
 	}
 
-	values := []expression{value}
+	values := []expressionID{value}
 	for {
 		p.skipSpace()
 		if !p.consumeByte(',') {
@@ -1007,7 +955,7 @@ func (p *parser) parseForStatement() (parsedForStatement, error) {
 		return parsedForStatement{}, err
 	}
 
-	var step *expression
+	var step expressionID
 	p.skipSpace()
 	if p.consumeByte(',') {
 		p.skipSpace()
@@ -1015,7 +963,7 @@ func (p *parser) parseForStatement() (parsedForStatement, error) {
 		if err != nil {
 			return parsedForStatement{}, err
 		}
-		step = &value
+		step = value
 	}
 
 	p.skipSpace()
@@ -1305,7 +1253,7 @@ func (p *parser) tryParseTypeofType() (*typeExpression, bool, error) {
 	if !p.consumeByte(')') {
 		return nil, true, p.errorf("expected )")
 	}
-	return &typeExpression{start: start, end: p.pos, kind: typeKindTypeof, expr: &expr}, true, nil
+	return &typeExpression{start: start, end: p.pos, kind: typeKindTypeof, expr: expr}, true, nil
 }
 
 func (p *parser) parseGenericFunctionType(start int) (*typeExpression, error) {
@@ -1643,7 +1591,7 @@ func (p *parser) parseAssignTarget() (assignTarget, error) {
 			if !p.consumeByte(']') {
 				return assignTarget{}, p.errorf("expected ]")
 			}
-			target.selectors = append(target.selectors, selector{index: &index})
+			target.selectors = append(target.selectors, selector{index: index})
 			target.end = p.pos
 			continue
 		}
@@ -1653,17 +1601,17 @@ func (p *parser) parseAssignTarget() (assignTarget, error) {
 	return target, nil
 }
 
-func (p *parser) parseExpression() (expression, error) {
+func (p *parser) parseExpression() (expressionID, error) {
 	if err := p.enterNesting("expression"); err != nil {
-		return expression{}, err
+		return 0, err
 	}
 	defer p.leaveNesting()
 	first, err := p.parseAndExpression()
 	if err != nil {
-		return expression{}, err
+		return 0, err
 	}
-
-	expr := expression{terms: []andExpression{first}}
+	terms := idListBuilder[andExpressionID]{}
+	terms.append(first)
 
 	for {
 		p.skipSpace()
@@ -1673,21 +1621,24 @@ func (p *parser) parseExpression() (expression, error) {
 
 		next, err := p.parseAndExpression()
 		if err != nil {
-			return expression{}, err
+			return 0, err
 		}
-		expr.terms = append(expr.terms, next)
+		terms.append(next)
 	}
-
-	return expr, nil
+	span, ok := terms.span(&p.arena.expressionTerms)
+	if !ok {
+		return 0, p.errorf("expression arena exhausted")
+	}
+	return p.arena.appendExpression(arenaExpression{terms: span}), nil
 }
 
-func (p *parser) parseAndExpression() (andExpression, error) {
+func (p *parser) parseAndExpression() (andExpressionID, error) {
 	first, err := p.parseComparisonExpression()
 	if err != nil {
-		return andExpression{}, err
+		return 0, err
 	}
-
-	expr := andExpression{terms: []comparisonExpression{first}}
+	terms := idListBuilder[comparisonExpressionID]{}
+	terms.append(first)
 
 	for {
 		p.skipSpace()
@@ -1697,21 +1648,23 @@ func (p *parser) parseAndExpression() (andExpression, error) {
 
 		next, err := p.parseComparisonExpression()
 		if err != nil {
-			return andExpression{}, err
+			return 0, err
 		}
-		expr.terms = append(expr.terms, next)
+		terms.append(next)
 	}
-
-	return expr, nil
+	span, ok := terms.span(&p.arena.andTerms)
+	if !ok {
+		return 0, p.errorf("expression arena exhausted")
+	}
+	return p.arena.appendAnd(arenaAndExpression{terms: span}), nil
 }
 
-func (p *parser) parseComparisonExpression() (comparisonExpression, error) {
+func (p *parser) parseComparisonExpression() (comparisonExpressionID, error) {
 	left, err := p.parseConcatExpression()
 	if err != nil {
-		return comparisonExpression{}, err
+		return 0, err
 	}
-
-	expr := comparisonExpression{left: left}
+	node := arenaComparisonExpression{left: left}
 
 	p.skipSpace()
 	var op comparisonOperator
@@ -1729,27 +1682,26 @@ func (p *parser) parseComparisonExpression() (comparisonExpression, error) {
 		op = comparisonGreater
 	}
 	if op == "" {
-		return expr, nil
+		return p.arena.appendComparison(node), nil
 	}
 
 	p.skipSpace()
 	right, err := p.parseConcatExpression()
 	if err != nil {
-		return comparisonExpression{}, err
+		return 0, err
 	}
-	expr.op = op
-	expr.right = &right
-	return expr, nil
+	node.op = arenaComparisonOperator(op)
+	node.right = right
+	return p.arena.appendComparison(node), nil
 }
 
-func (p *parser) parseConcatExpression() (concatExpression, error) {
+func (p *parser) parseConcatExpression() (concatExpressionID, error) {
 	p.skipSpace()
 	first, err := p.parseAdditiveExpression()
 	if err != nil {
-		return concatExpression{}, err
+		return 0, err
 	}
-
-	expr := concatExpression{first: first}
+	rest := idListBuilder[additiveExpressionID]{}
 
 	for {
 		p.skipSpace()
@@ -1760,22 +1712,24 @@ func (p *parser) parseConcatExpression() (concatExpression, error) {
 		p.skipSpace()
 		next, err := p.parseAdditiveExpression()
 		if err != nil {
-			return concatExpression{}, err
+			return 0, err
 		}
-		expr.rest = append(expr.rest, next)
+		rest.append(next)
 	}
-
-	return expr, nil
+	span, ok := rest.span(&p.arena.concatRest)
+	if !ok {
+		return 0, p.errorf("expression arena exhausted")
+	}
+	return p.arena.appendConcat(arenaConcatExpression{first: first, rest: span}), nil
 }
 
-func (p *parser) parseAdditiveExpression() (additiveExpression, error) {
+func (p *parser) parseAdditiveExpression() (additiveExpressionID, error) {
 	p.skipSpace()
 	first, err := p.parseMultiplicativeExpression()
 	if err != nil {
-		return additiveExpression{}, err
+		return 0, err
 	}
-
-	expr := additiveExpression{first: first}
+	parts := idListBuilder[arenaAdditivePart]{}
 
 	for {
 		p.skipSpace()
@@ -1791,22 +1745,24 @@ func (p *parser) parseAdditiveExpression() (additiveExpression, error) {
 		p.skipSpace()
 		next, err := p.parseMultiplicativeExpression()
 		if err != nil {
-			return additiveExpression{}, err
+			return 0, err
 		}
-		expr.rest = append(expr.rest, additivePart{op: op, value: next})
+		parts.append(arenaAdditivePart{op: arenaAdditiveOperator(op), value: next})
 	}
-
-	return expr, nil
+	span, ok := parts.span(&p.arena.additiveRest)
+	if !ok {
+		return 0, p.errorf("expression arena exhausted")
+	}
+	return p.arena.appendAdditive(arenaAdditiveExpression{first: first, rest: span}), nil
 }
 
-func (p *parser) parseMultiplicativeExpression() (multiplicativeExpression, error) {
+func (p *parser) parseMultiplicativeExpression() (multiplicativeExpressionID, error) {
 	p.skipSpace()
 	first, err := p.parseTerm()
 	if err != nil {
-		return multiplicativeExpression{}, err
+		return 0, err
 	}
-
-	expr := multiplicativeExpression{first: first}
+	parts := idListBuilder[arenaMultiplicativePart]{}
 
 	for {
 		p.skipSpace()
@@ -1826,17 +1782,20 @@ func (p *parser) parseMultiplicativeExpression() (multiplicativeExpression, erro
 		p.skipSpace()
 		next, err := p.parseTerm()
 		if err != nil {
-			return multiplicativeExpression{}, err
+			return 0, err
 		}
-		expr.rest = append(expr.rest, multiplicativePart{op: op, value: next})
+		parts.append(arenaMultiplicativePart{op: arenaMultiplicativeOperator(op), value: next})
 	}
-
-	return expr, nil
+	span, ok := parts.span(&p.arena.multiplicativeRest)
+	if !ok {
+		return 0, p.errorf("expression arena exhausted")
+	}
+	return p.arena.appendMultiplicative(arenaMultiplicativeExpression{first: first, rest: span}), nil
 }
 
-func (p *parser) parseTerm() (term, error) {
+func (p *parser) parseTerm() (termID, error) {
 	if err := p.enterNesting("term"); err != nil {
-		return term{}, err
+		return 0, err
 	}
 	defer p.leaveNesting()
 	p.skipSpace()
@@ -1844,289 +1803,385 @@ func (p *parser) parseTerm() (term, error) {
 	if p.consumeKeyword("not") {
 		value, err := p.parseTerm()
 		if err != nil {
-			return term{}, err
+			return 0, err
 		}
-		return term{start: start, end: value.end, unaryNot: &value}, nil
+		return p.appendUnaryTerm(termKindUnaryNot, value, start), nil
 	}
 	if p.consumeByte('-') {
 		value, err := p.parseTerm()
 		if err != nil {
-			return term{}, err
+			return 0, err
 		}
-		return term{start: start, end: value.end, unaryMinus: &value}, nil
+		return p.appendUnaryTerm(termKindUnaryMinus, value, start), nil
 	}
 	if p.consumeByte('#') {
 		value, err := p.parseTerm()
 		if err != nil {
-			return term{}, err
+			return 0, err
 		}
-		return term{start: start, end: value.end, unaryLen: &value}, nil
+		return p.appendUnaryTerm(termKindUnaryLength, value, start), nil
 	}
 
 	value, err := p.parsePrimaryTerm()
 	if err != nil {
-		return term{}, err
+		return 0, err
 	}
 	value, err = p.parseTermSuffixes(value)
 	if err != nil {
-		return term{}, err
+		return 0, err
 	}
 	p.skipSpace()
 	if p.consumeByte('^') {
 		exponent, err := p.parseTerm()
 		if err != nil {
-			return term{}, err
+			return 0, err
 		}
-		return term{start: value.start, end: exponent.end, power: &powerExpression{base: value, exponent: exponent}}, nil
+		base, _ := p.arena.term(value)
+		power := p.arena.appendPower(arenaPower{base: value, exponent: exponent})
+		return p.arena.appendTerm(arenaTerm{start: base.start, end: p.termEnd(exponent), kind: termKindPower, payload: uint64(power)}), nil
 	}
 	return value, nil
 }
 
-func (p *parser) parseIdentifierStatementTerm() (term, error) {
-	p.skipSpace()
-	start := p.pos
-	name, err := p.parseIdentifier()
-	if err != nil {
-		return term{}, err
+func (p *parser) termEnd(id termID) int {
+	if node, ok := p.arena.term(id); ok {
+		return node.end
 	}
-	value := term{start: start, end: p.pos, name: name}
-	return p.parseTermSuffixesWithCasts(value, false)
+	return 0
 }
 
-func (p *parser) parsePrimaryTerm() (term, error) {
+func (p *parser) appendUnaryTerm(kind termKind, child termID, start int) termID {
+	return p.arena.appendTerm(arenaTerm{start: start, end: p.termEnd(child), kind: kind, payload: uint64(child)})
+}
+
+func (p *parser) stringID(value string) stringID {
+	if value == "" {
+		return 0
+	}
+	p.arena.strings = append(p.arena.strings, value)
+	return stringID(len(p.arena.strings))
+}
+
+func (p *parser) literalStringID(value string) stringID {
+	id := p.stringID(value)
+	if p.arena.stringLiterals == nil {
+		p.arena.stringLiterals = make(map[stringID]Value)
+	}
+	p.arena.stringLiterals[id] = StringValue(value)
+	return id
+}
+
+func (p *parser) parsePrimaryTerm() (termID, error) {
 	p.skipSpace()
 	start := p.pos
 	if p.consumeByte('(') {
 		value, err := p.parseExpression()
 		if err != nil {
-			return term{}, err
+			return 0, err
 		}
 		p.skipSpace()
 		if !p.consumeByte(')') {
-			return term{}, p.errorf("expected )")
+			return 0, p.errorf("expected )")
 		}
-		return term{start: start, end: p.pos, group: &value}, nil
+		return p.arena.appendTerm(arenaTerm{start: start, end: p.pos, kind: termKindGroup, payload: uint64(value)}), nil
 	}
 	if p.matchKeyword("if") {
 		ifExpr, err := p.parseIfExpression()
 		if err != nil {
-			return term{}, err
+			return 0, err
 		}
-		return term{start: start, end: p.pos, ifExpr: &ifExpr}, nil
+		return p.arena.appendTerm(arenaTerm{start: start, end: p.pos, kind: termKindIf, payload: uint64(ifExpr)}), nil
 	}
 	if p.consumeKeyword("nil") {
-		v := NilValue()
-		return term{start: start, end: p.pos, lit: &v}, nil
+		return p.arena.appendTerm(arenaTerm{start: start, end: p.pos, kind: termKindNil}), nil
 	}
 	if p.consumeKeyword("true") {
-		v := BoolValue(true)
-		return term{start: start, end: p.pos, lit: &v}, nil
+		return p.arena.appendTerm(arenaTerm{start: start, end: p.pos, kind: termKindBool, payload: 1}), nil
 	}
 	if p.consumeKeyword("false") {
-		v := BoolValue(false)
-		return term{start: start, end: p.pos, lit: &v}, nil
+		return p.arena.appendTerm(arenaTerm{start: start, end: p.pos, kind: termKindBool}), nil
 	}
 	if p.consumeString("...") {
-		return term{start: start, end: p.pos, vararg: true}, nil
+		return p.arena.appendTerm(arenaTerm{start: start, end: p.pos, kind: termKindVararg}), nil
 	}
 	if p.matchKeyword("function") {
 		fn, err := p.parseFunctionExpression()
 		if err != nil {
-			return term{}, err
+			return 0, err
 		}
-		return term{start: start, end: p.pos, function: &fn}, nil
+		return p.arena.appendTerm(arenaTerm{start: start, end: p.pos, kind: termKindFunction, payload: uint64(fn)}), nil
 	}
 	if p.currentDoubleQuotedString() {
 		s, err := p.parseString()
 		if err != nil {
-			return term{}, err
+			return 0, err
 		}
-		v := StringValue(s)
-		return term{start: start, end: p.pos, lit: &v}, nil
+		return p.arena.appendTerm(arenaTerm{start: start, end: p.pos, kind: termKindString, payload: uint64(p.literalStringID(s))}), nil
 	}
 	if p.currentSymbol("{") {
 		table, err := p.parseTable()
 		if err != nil {
-			return term{}, err
+			return 0, err
 		}
-		return term{start: start, end: p.pos, table: &table}, nil
+		return p.arena.appendTerm(arenaTerm{start: start, end: p.pos, kind: termKindTable, payload: uint64(table)}), nil
 	}
 	if p.currentTokenKind(tokenNumber) {
 		n, err := p.parseNumber()
 		if err != nil {
-			return term{}, err
+			return 0, err
 		}
-		return term{start: start, end: p.pos, number: &n}, nil
+		return p.arena.appendTerm(arenaTerm{start: start, end: p.pos, kind: termKindNumber, payload: math.Float64bits(n)}), nil
 	}
 
 	name, err := p.parseIdentifier()
 	if err != nil {
-		return term{}, err
+		return 0, err
 	}
-	return term{start: start, end: p.pos, name: name}, nil
+	return p.arena.appendTerm(arenaTerm{start: start, end: p.pos, kind: termKindName, payload: uint64(p.stringID(name))}), nil
 }
 
-func (p *parser) parseIfExpression() (ifExpression, error) {
+func (p *parser) parseIfExpression() (arenaIfExpressionID, error) {
 	if !p.consumeKeyword("if") {
-		return ifExpression{}, p.errorf("expected if")
+		return 0, p.errorf("expected if")
 	}
 	return p.parseIfExpressionBody()
 }
 
-func (p *parser) parseIfExpressionBody() (ifExpression, error) {
+func (p *parser) parseIfExpressionBody() (arenaIfExpressionID, error) {
 	if err := p.enterNesting("if-expression"); err != nil {
-		return ifExpression{}, err
+		return 0, err
 	}
 	defer p.leaveNesting()
 	p.skipSpace()
 	condition, err := p.parseExpression()
 	if err != nil {
-		return ifExpression{}, err
+		return 0, err
 	}
 
 	p.skipSpace()
 	if !p.consumeKeyword("then") {
-		return ifExpression{}, p.errorf("expected then")
+		return 0, p.errorf("expected then")
 	}
 
 	p.skipSpace()
 	thenValue, err := p.parseExpression()
 	if err != nil {
-		return ifExpression{}, err
+		return 0, err
 	}
 
 	p.skipSpace()
-	var elseValue expression
+	var elseValue expressionID
 	if p.consumeKeyword("elseif") {
 		nested, err := p.parseIfExpressionBody()
 		if err != nil {
-			return ifExpression{}, err
+			return 0, err
 		}
-		elseValue = expressionFromTerm(term{ifExpr: &nested})
+		term := p.arena.appendTerm(arenaTerm{kind: termKindIf, payload: uint64(nested)})
+		elseValue, err = p.wrapTermExpression(term)
+		if err != nil {
+			return 0, err
+		}
 	} else if p.consumeKeyword("else") {
 		p.skipSpace()
 		elseValue, err = p.parseExpression()
 		if err != nil {
-			return ifExpression{}, err
+			return 0, err
 		}
 	} else {
-		return ifExpression{}, p.errorf("expected elseif or else")
+		return 0, p.errorf("expected elseif or else")
 	}
-
-	return ifExpression{
-		condition: condition,
-		thenValue: thenValue,
-		elseValue: elseValue,
-	}, nil
+	return p.arena.appendIfExpression(arenaIfExpression{condition: condition, thenValue: thenValue, elseValue: elseValue}), nil
 }
 
-func expressionFromTerm(value term) expression {
-	return expression{terms: []andExpression{{
-		terms: []comparisonExpression{{
-			left: concatExpression{
-				first: additiveExpression{
-					first: multiplicativeExpression{
-						first: value,
-					},
-				},
-			},
-		}},
-	}}}
+func (p *parser) wrapTermExpression(value termID) (expressionID, error) {
+	mul := p.arena.appendMultiplicative(arenaMultiplicativeExpression{first: value})
+	add := p.arena.appendAdditive(arenaAdditiveExpression{first: mul})
+	cat := p.arena.appendConcat(arenaConcatExpression{first: add})
+	cmp := p.arena.appendComparison(arenaComparisonExpression{left: cat})
+	var comparisons idListBuilder[comparisonExpressionID]
+	comparisons.append(cmp)
+	comparisonSpan, ok := comparisons.span(&p.arena.andTerms)
+	if !ok {
+		return 0, p.errorf("expression arena exhausted")
+	}
+	and := p.arena.appendAnd(arenaAndExpression{terms: comparisonSpan})
+	var ands idListBuilder[andExpressionID]
+	ands.append(and)
+	andSpan, ok := ands.span(&p.arena.expressionTerms)
+	if !ok {
+		return 0, p.errorf("expression arena exhausted")
+	}
+	return p.arena.appendExpression(arenaExpression{terms: andSpan}), nil
 }
 
-func (p *parser) parseTermSuffixes(value term) (term, error) {
+func (p *parser) parseTermSuffixes(value termID) (termID, error) {
 	return p.parseTermSuffixesWithCasts(value, true)
 }
 
-func (p *parser) parseTermSuffixesWithCasts(value term, allowCasts bool) (term, error) {
+func (p *parser) parseTermSuffixesWithCasts(value termID, allowCasts bool) (termID, error) {
+	var selectors idListBuilder[arenaSelector]
+	flushSelectors := func() error {
+		if selectors.count == 0 {
+			return nil
+		}
+		node, ok := p.arena.term(value)
+		if !ok || node.selectors.count != 0 {
+			return p.errorf("invalid term selector state")
+		}
+		span, ok := selectors.span(&p.arena.selectors)
+		if !ok {
+			return p.errorf("expression arena exhausted")
+		}
+		node.selectors = span
+		p.arena.terms[value-1] = node
+		return nil
+	}
+	finish := func() (termID, error) {
+		if err := flushSelectors(); err != nil {
+			return 0, err
+		}
+		return value, nil
+	}
+
 	for {
 		p.skipSpace()
 		if p.currentSymbol("..") {
-			return value, nil
+			return finish()
 		}
 		if allowCasts && p.consumeString("::") {
 			p.skipSpace()
 			cast, err := p.parseType()
 			if err != nil {
-				return term{}, err
+				return 0, err
 			}
-			value.cast = cast
-			value.end = cast.end
+			node, ok := p.arena.term(value)
+			if !ok {
+				return 0, p.errorf("invalid term")
+			}
+			if node.castType == 0 {
+				if uint64(len(p.arena.castTypes)) >= math.MaxUint32 {
+					return 0, p.errorf("expression arena exhausted")
+				}
+				p.arena.castTypes = append(p.arena.castTypes, cast)
+				node.castType = arenaCastID(len(p.arena.castTypes))
+			} else {
+				p.arena.castTypes[node.castType-1] = cast
+			}
+			node.end = cast.end
+			p.arena.terms[value-1] = node
 			continue
 		}
 		if !allowCasts && p.currentSymbol("::") {
-			return value, nil
+			return finish()
 		}
 		if p.consumeByte('.') {
 			field, err := p.parseIdentifier()
 			if err != nil {
-				return term{}, err
+				return 0, err
 			}
-			value.selectors = append(value.selectors, selector{field: field})
-			value.end = p.pos
+			selectors.append(arenaSelector{field: p.stringID(field)})
+			node, ok := p.arena.term(value)
+			if !ok {
+				return 0, p.errorf("invalid term")
+			}
+			node.end = p.pos
+			p.arena.terms[value-1] = node
 			continue
 		}
 		if p.consumeByte('[') {
 			index, err := p.parseExpression()
 			if err != nil {
-				return term{}, err
+				return 0, err
 			}
 			p.skipSpace()
 			if !p.consumeByte(']') {
-				return term{}, p.errorf("expected ]")
+				return 0, p.errorf("expected ]")
 			}
-			value.selectors = append(value.selectors, selector{index: &index})
-			value.end = p.pos
+			selectors.append(arenaSelector{index: index})
+			node, ok := p.arena.term(value)
+			if !ok {
+				return 0, p.errorf("invalid term")
+			}
+			node.end = p.pos
+			p.arena.terms[value-1] = node
 			continue
 		}
 		typeArgs, err := p.parseOptionalCallTypeArguments()
 		if err != nil {
-			return term{}, err
+			return 0, err
 		}
 		if p.consumeByte('(') {
-			callStart := value.start
-			args, err := p.parseArguments()
-			if err != nil {
-				return term{}, err
+			if err := flushSelectors(); err != nil {
+				return 0, err
 			}
-			value = term{start: callStart, end: p.pos, call: &callExpression{target: value, typeArgs: typeArgs, args: args}}
+			target, ok := p.arena.term(value)
+			if !ok {
+				return 0, p.errorf("invalid term")
+			}
+			argSpan, err := p.parseArguments()
+			if err != nil {
+				return 0, err
+			}
+			call := p.arena.appendCall(arenaCall{target: value, typeArgs: typeArgs, args: argSpan})
+			value = p.arena.appendTerm(arenaTerm{start: target.start, end: p.pos, kind: termKindCall, payload: uint64(call)})
+			selectors = idListBuilder[arenaSelector]{}
 			continue
 		}
 		if len(typeArgs) > 0 {
-			return term{}, p.errorf("expected (")
+			return 0, p.errorf("expected (")
 		}
 		if p.consumeByte(':') {
+			if err := flushSelectors(); err != nil {
+				return 0, err
+			}
 			method, err := p.parseIdentifier()
 			if err != nil {
-				return term{}, err
+				return 0, err
 			}
 			methodEnd := p.pos
 			p.skipSpace()
 			typeArgs, err := p.parseOptionalCallTypeArguments()
 			if err != nil {
-				return term{}, err
+				return 0, err
 			}
 			if !p.consumeByte('(') {
-				return term{}, p.errorf("expected (")
+				return 0, p.errorf("expected (")
 			}
-			callStart := value.start
-			args, err := p.parseArguments()
+			argSpan, err := p.parseArguments()
 			if err != nil {
-				return term{}, err
+				return 0, err
 			}
 			receiver := value
-			target := value
-			target.selectors = append(target.selectors, selector{field: method})
-			target.end = methodEnd
-			value = term{start: callStart, end: p.pos, call: &callExpression{
-				target:   target,
-				receiver: &receiver,
-				typeArgs: typeArgs,
-				args:     args,
-			}}
+			receiverNode, ok := p.arena.term(receiver)
+			if !ok {
+				return 0, p.errorf("invalid term")
+			}
+			targetSelectors := idListBuilder[arenaSelector]{}
+			if receiverNode.selectors.count != 0 {
+				existing, ok := p.arena.selectorIDs(receiverNode.selectors)
+				if !ok {
+					return 0, p.errorf("invalid term selector state")
+				}
+				for _, selector := range existing {
+					targetSelectors.append(selector)
+				}
+			}
+			targetSelectors.append(arenaSelector{field: p.stringID(method)})
+			targetSpan, ok := targetSelectors.span(&p.arena.selectors)
+			if !ok {
+				return 0, p.errorf("expression arena exhausted")
+			}
+			targetNode := receiverNode
+			targetNode.id = 0
+			targetNode.end = methodEnd
+			targetNode.selectors = targetSpan
+			target := p.arena.appendTerm(targetNode)
+			call := p.arena.appendCall(arenaCall{target: target, receiver: receiver, typeArgs: typeArgs, args: argSpan})
+			value = p.arena.appendTerm(arenaTerm{start: receiverNode.start, end: p.pos, kind: termKindCall, payload: uint64(call)})
+			selectors = idListBuilder[arenaSelector]{}
 			continue
 		}
-		return value, nil
+		return finish()
 	}
 }
 
@@ -2155,19 +2210,26 @@ func (p *parser) parseOptionalCallTypeArguments() ([]*typeExpression, error) {
 	}
 }
 
-func (p *parser) parseTable() (tableExpression, error) {
+func (p *parser) parseTable() (arenaTableID, error) {
 	if err := p.enterNesting("table"); err != nil {
-		return tableExpression{}, err
+		return 0, err
 	}
 	defer p.leaveNesting()
 	if !p.consumeByte('{') {
-		return tableExpression{}, p.errorf("expected table")
+		return 0, p.errorf("expected table")
 	}
 
-	var table tableExpression
+	fields := idListBuilder[arenaTableField]{}
+	finish := func() (arenaTableID, error) {
+		span, ok := fields.span(&p.arena.tableFields)
+		if !ok {
+			return 0, p.errorf("expression arena exhausted")
+		}
+		return p.arena.appendTable(arenaTable{fields: span}), nil
+	}
 	p.skipSpace()
 	if p.consumeByte('}') {
-		return table, nil
+		return finish()
 	}
 
 	arrayIndex := 1
@@ -2176,28 +2238,28 @@ func (p *parser) parseTable() (tableExpression, error) {
 		if p.consumeByte('[') {
 			key, err := p.parseExpression()
 			if err != nil {
-				return tableExpression{}, err
+				return 0, err
 			}
 			p.skipSpace()
 			if !p.consumeByte(']') {
-				return tableExpression{}, p.errorf("expected ]")
+				return 0, p.errorf("expected ]")
 			}
 			p.skipSpace()
 			if !p.consumeByte('=') {
-				return tableExpression{}, p.errorf("expected =")
+				return 0, p.errorf("expected =")
 			}
 			p.skipSpace()
 			value, err := p.parseExpression()
 			if err != nil {
-				return tableExpression{}, err
+				return 0, err
 			}
-			table.fields = append(table.fields, tableField{key: &key, value: value})
+			fields.append(arenaTableField{key: key, value: value})
 			done, err := p.finishTableField()
 			if err != nil {
-				return tableExpression{}, err
+				return 0, err
 			}
 			if done {
-				return table, nil
+				return finish()
 			}
 			continue
 		}
@@ -2206,22 +2268,22 @@ func (p *parser) parseTable() (tableExpression, error) {
 			fieldCheckpoint := p.mark()
 			name, err := p.parseIdentifier()
 			if err != nil {
-				return tableExpression{}, err
+				return 0, err
 			}
 
 			p.skipSpace()
 			if p.consumeByte('=') {
 				value, err := p.parseExpression()
 				if err != nil {
-					return tableExpression{}, err
+					return 0, err
 				}
-				table.fields = append(table.fields, tableField{name: name, value: value})
+				fields.append(arenaTableField{name: p.stringID(name), value: value})
 				done, err := p.finishTableField()
 				if err != nil {
-					return tableExpression{}, err
+					return 0, err
 				}
 				if done {
-					return table, nil
+					return finish()
 				}
 				continue
 			}
@@ -2230,16 +2292,16 @@ func (p *parser) parseTable() (tableExpression, error) {
 
 		value, err := p.parseExpression()
 		if err != nil {
-			return tableExpression{}, err
+			return 0, err
 		}
-		table.fields = append(table.fields, tableField{arrayIndex: arrayIndex, value: value})
+		fields.append(arenaTableField{arrayIndex: arrayIndex, value: value})
 		arrayIndex++
 		done, err := p.finishTableField()
 		if err != nil {
-			return tableExpression{}, err
+			return 0, err
 		}
 		if done {
-			return table, nil
+			return finish()
 		}
 	}
 }
@@ -2256,26 +2318,30 @@ func (p *parser) finishTableField() (bool, error) {
 	return p.consumeByte('}'), nil
 }
 
-func (p *parser) parseArguments() ([]expression, error) {
+func (p *parser) parseArguments() (nodeSpan, error) {
 	p.skipSpace()
 	if p.consumeByte(')') {
-		return nil, nil
+		return nodeSpan{}, nil
 	}
 
-	var args []expression
+	args := idListBuilder[expressionID]{}
 	for {
 		arg, err := p.parseExpression()
 		if err != nil {
-			return nil, err
+			return nodeSpan{}, err
 		}
-		args = append(args, arg)
+		args.append(arg)
 
 		p.skipSpace()
 		if p.consumeByte(')') {
-			return args, nil
+			span, ok := args.span(&p.arena.callArgs)
+			if !ok {
+				return nodeSpan{}, p.errorf("expression arena exhausted")
+			}
+			return span, nil
 		}
 		if !p.consumeByte(',') {
-			return nil, p.errorf("expected , or )")
+			return nodeSpan{}, p.errorf("expected , or )")
 		}
 	}
 }

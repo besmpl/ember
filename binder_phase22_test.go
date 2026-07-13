@@ -17,22 +17,21 @@ func TestPhase22BoundFactsUseCompactStorage(t *testing.T) {
 }
 
 func TestPhase22BindingDistinguishesGlobalsFromUnvisitedNodes(t *testing.T) {
-	prog := parseSourceForBindTest(t, "return hostGlobal, 1")
-	tree := newSyntaxTree(prog)
-	result := bindProgram(prog)
+	tree := parseSourceForBindTest(t, "return hostGlobal, 1")
+	result := bindSyntaxTree(tree)
 
-	global, ok := expressionSingleTerm(tree, prog.statements[0].ret.values[0])
+	global, ok := expressionSingleTerm(tree, tree.root.statements[0].ret.values[0])
 	if !ok {
 		t.Fatal("global expression is not a single term")
 	}
-	if got := result.useClassification(global.id); got != boundUseGlobal {
+	if got := result.useClassification(tree.termSyntaxID(global)); got != boundUseGlobal {
 		t.Fatalf("global use classification = %v, want global", got)
 	}
-	literal, ok := expressionSingleTerm(tree, prog.statements[0].ret.values[1])
+	literal, ok := expressionSingleTerm(tree, tree.root.statements[0].ret.values[1])
 	if !ok {
 		t.Fatal("literal expression is not a single term")
 	}
-	if got := result.useClassification(literal.id); got != boundUseUnvisited {
+	if got := result.useClassification(tree.termSyntaxID(literal)); got != boundUseUnvisited {
 		t.Fatalf("literal use classification = %v, want unvisited", got)
 	}
 }
@@ -47,7 +46,7 @@ func TestPhase22CaptureStorageIsSparse(t *testing.T) {
 	}
 	source.WriteString("local function inner() return first end\nreturn inner()\n")
 
-	result := bindProgram(parseSourceForBindTest(t, source.String()))
+	result := bindSyntaxTree(parseSourceForBindTest(t, source.String()))
 	if len(result.scopes) < 2 {
 		t.Fatalf("scopes = %d, want nested function scope", len(result.scopes))
 	}
@@ -75,7 +74,7 @@ func TestPhase22CaptureStorageDedupesLargeLists(t *testing.T) {
 	}
 	source.WriteString(" end\nreturn inner()\n")
 
-	result := bindProgram(parseSourceForBindTest(t, source.String()))
+	result := bindSyntaxTree(parseSourceForBindTest(t, source.String()))
 	if len(result.scopes) < 2 {
 		t.Fatalf("scopes = %d, want nested function scope", len(result.scopes))
 	}
@@ -124,32 +123,31 @@ return read(), value
 }
 
 func TestPhase22ValueAndTypeNamespacesDoNotShadowEachOther(t *testing.T) {
-	prog := parseSourceForBindTest(t, `
+	tree := parseSourceForBindTest(t, `
 local T = 1
 type T = string
 local value: T = "typed"
 return T, value
 `)
-	result := bindProgram(prog)
-	tree := newSyntaxTree(prog)
+	result := bindSyntaxTree(tree)
 	value := result.mustSymbol(t, "T", symbolLocal, 0)
 	alias := result.mustSymbol(t, "T", symbolTypeAlias, 0)
 
-	annotation := prog.statements[2].local.annotations[0]
+	annotation := tree.root.statements[2].local.annotations[0]
 	if use, ok := result.use(annotation.id); !ok || use.symbol != alias.id {
 		t.Fatalf("type annotation use = %#v, %t, want type alias %d", use, ok, alias.id)
 	}
-	returnValue, ok := expressionSingleTerm(tree, prog.statements[3].ret.values[0])
+	returnValue, ok := expressionSingleTerm(tree, tree.root.statements[3].ret.values[0])
 	if !ok {
 		t.Fatal("return T expression is not a single term")
 	}
-	if use, ok := result.use(returnValue.id); !ok || use.symbol != value.id {
+	if use, ok := result.use(tree.termSyntaxID(returnValue)); !ok || use.symbol != value.id {
 		t.Fatalf("value use = %#v, %t, want local symbol %d", use, ok, value.id)
 	}
 }
 
 func TestPhase22NestedValueAndTypeNamespacesRestoreIndependently(t *testing.T) {
-	prog := parseSourceForBindTest(t, `
+	tree := parseSourceForBindTest(t, `
 type T = string
 local T = 1
 do
@@ -160,26 +158,25 @@ end
 local after: T = "done"
 return T
 `)
-	result := bindProgram(prog)
-	tree := newSyntaxTree(prog)
+	result := bindSyntaxTree(tree)
 	outerValue := result.mustSymbol(t, "T", symbolLocal, 0)
 	outerType := result.mustSymbol(t, "T", symbolTypeAlias, 0)
 	blockValue := result.mustSymbol(t, "T", symbolLocal, 2)
 	blockType := result.mustSymbol(t, "T", symbolTypeAlias, 2)
 
-	inside := prog.statements[2].block.statements[2].local.annotations[0]
+	inside := tree.root.statements[2].block.statements[2].local.annotations[0]
 	if use, ok := result.use(inside.id); !ok || use.symbol != blockType.id {
 		t.Fatalf("nested type use = %#v, %t, want block type %d", use, ok, blockType.id)
 	}
-	after := prog.statements[3].local.annotations[0]
+	after := tree.root.statements[3].local.annotations[0]
 	if use, ok := result.use(after.id); !ok || use.symbol != outerType.id {
 		t.Fatalf("restored type use = %#v, %t, want outer type %d", use, ok, outerType.id)
 	}
-	returnValue, ok := expressionSingleTerm(tree, prog.statements[4].ret.values[0])
+	returnValue, ok := expressionSingleTerm(tree, tree.root.statements[4].ret.values[0])
 	if !ok {
 		t.Fatal("return T expression is not a single term")
 	}
-	if use, ok := result.use(returnValue.id); !ok || use.symbol != outerValue.id {
+	if use, ok := result.use(tree.termSyntaxID(returnValue)); !ok || use.symbol != outerValue.id {
 		t.Fatalf("restored value use = %#v, %t, want outer value %d", use, ok, outerValue.id)
 	}
 	if blockValue.shadowed != outerValue.id || blockType.shadowed != outerType.id {
@@ -188,7 +185,7 @@ return T
 }
 
 func TestPhase22ScopeSymbolLinksRestoreEveryDefinition(t *testing.T) {
-	prog := parseSourceForBindTest(t, `
+	tree := parseSourceForBindTest(t, `
 local outer = 0
 do
 	local x = 1
@@ -197,7 +194,7 @@ do
 end
 return outer
 `)
-	result := bindProgram(prog)
+	result := bindSyntaxTree(tree)
 	xSymbols := make([]boundSymbol, 0, 2)
 	for _, symbol := range result.symbols {
 		if symbol.name == "x" {
@@ -219,7 +216,7 @@ return outer
 }
 
 func TestPhase22NestedCaptureMutationFacts(t *testing.T) {
-	prog := parseSourceForBindTest(t, `
+	tree := parseSourceForBindTest(t, `
 local value = 0
 local function outer()
 	local function inner()
@@ -230,7 +227,7 @@ end
 value = 1
 return outer()
 `)
-	result := bindProgram(prog)
+	result := bindSyntaxTree(tree)
 	value := result.mustSymbol(t, "value", symbolLocal, 0)
 	facts := result.symbols[value.id].facts
 	if !facts.assigned || !facts.captured || !facts.mutatedAfterCapture || facts.immutableCopyEligible {
@@ -268,9 +265,9 @@ return outer()
 		{name: "nested", source: nested, maxAllocs: 64},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			prog := parseSourceForBindTest(t, tc.source)
+			tree := parseSourceForBindTest(t, tc.source)
 			allocs := testing.AllocsPerRun(20, func() {
-				compilerStageBindSink = bindProgram(prog)
+				compilerStageBindSink = bindSyntaxTree(tree)
 			})
 			if allocs > float64(tc.maxAllocs) {
 				t.Fatalf("bind allocations = %.0f, want <= %d", allocs, tc.maxAllocs)
@@ -288,11 +285,11 @@ func TestPhase22BinderRetainedByteBudgets(t *testing.T) {
 		{name: "nested", source: phase22RepeatedSource(192, true)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			prog := parseSourceForBindTest(t, tc.source)
-			result := bindProgram(prog)
+			tree := parseSourceForBindTest(t, tc.source)
+			result := bindSyntaxTree(tree)
 			got := phase22BindRetainedBytes(result)
 			legacy := phase22LegacyBindRetainedBytes(result)
-			t.Logf("node_count=%d symbols=%d scopes=%d retained=%d legacy_estimate=%d ratio=%.3f", prog.nodeCount, len(result.symbols), len(result.scopes), got, legacy, float64(got)/float64(legacy))
+			t.Logf("node_count=%d symbols=%d scopes=%d retained=%d legacy_estimate=%d ratio=%.3f", tree.nodeCount(), len(result.symbols), len(result.scopes), got, legacy, float64(got)/float64(legacy))
 			if got*2 > legacy {
 				t.Fatalf("bind retained bytes = %d, legacy estimate = %d, want at least 50%% reduction", got, legacy)
 			}

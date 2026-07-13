@@ -16,16 +16,16 @@ type valuePlan struct {
 
 type valueListPlan struct {
 	tree        syntaxTree
-	values      []expression
+	values      []expressionID
 	targetCount int
 	open        bool
 }
 
-func fixedValueListPlan(tree syntaxTree, values []expression, targetCount int) valueListPlan {
+func fixedValueListPlan(tree syntaxTree, values []expressionID, targetCount int) valueListPlan {
 	return valueListPlan{tree: tree, values: values, targetCount: targetCount}
 }
 
-func openValueListPlan(tree syntaxTree, values []expression) valueListPlan {
+func openValueListPlan(tree syntaxTree, values []expressionID) valueListPlan {
 	return valueListPlan{tree: tree, values: values, targetCount: len(values), open: true}
 }
 
@@ -51,21 +51,23 @@ func (p valueListPlan) item(index int) valuePlan {
 }
 
 type callPlan struct {
-	target        term
-	receiver      *term
+	target        termID
+	receiver      termID
 	args          valueListPlan
 	fixedArgCount int
 }
 
-func planCall(tree syntaxTree, call callExpression) callPlan {
+func planCall(tree syntaxTree, call arenaCallID) callPlan {
 	fixedArgCount := 0
-	if tree.callReceiver(&call) != nil {
+	receiver := tree.callReceiver(call)
+	if receiver != 0 {
 		fixedArgCount = 1
 	}
+	args, _ := tree.callArgs(call)
 	return callPlan{
-		target:        *tree.callTarget(&call),
-		receiver:      tree.callReceiver(&call),
-		args:          openValueListPlan(tree, tree.callArgs(&call)),
+		target:        tree.callTarget(call),
+		receiver:      receiver,
+		args:          openValueListPlan(tree, args),
 		fixedArgCount: fixedArgCount,
 	}
 }
@@ -79,12 +81,12 @@ type closurePlan struct {
 	functionName   string
 }
 
-func planFunctionExpression(tree syntaxTree, fn functionExpression) closurePlan {
+func planFunctionExpression(tree syntaxTree, fn arenaFunctionID) closurePlan {
 	return closurePlan{
-		params:       tree.functionExpressionParams(&fn),
-		paramID:      tree.functionExpressionParamID(&fn),
-		variadic:     tree.functionExpressionVariadic(&fn),
-		body:         tree.functionExpressionStatements(&fn),
+		params:       tree.functionExpressionParams(fn),
+		paramID:      tree.functionExpressionParamID(fn),
+		variadic:     tree.functionExpressionVariadic(fn),
+		body:         tree.functionExpressionStatements(fn),
 		functionName: "<anonymous>",
 	}
 }
@@ -147,7 +149,7 @@ func (p closurePlan) param(index int) (string, syntaxID) {
 	return p.params[index], syntaxNameID(p.paramID, index)
 }
 
-func expressionExpands(tree syntaxTree, expr expression) bool {
+func expressionExpands(tree syntaxTree, expr expressionID) bool {
 	if _, ok := expressionSingleVararg(tree, expr); ok {
 		return true
 	}

@@ -1,13 +1,22 @@
 package ember
 
-// syntaxTree is the storage seam for the parser tree. It deliberately returns
-// the existing concrete slices and pointers: later arena-backed storage can
-// change these implementations without changing compiler consumers.
+import "math"
+
+// syntaxTree owns parser storage and is the only read seam used by compiler
+// consumers. Statements and types remain concrete until E7; expressions are
+// resolved through the arena-backed typed-ID accessors below.
 type syntaxTree struct {
-	root program
+	root  program
+	arena *syntaxArena
 }
 
-func newSyntaxTree(root program) syntaxTree { return syntaxTree{root: root} }
+func newSyntaxTree(root program) syntaxTree {
+	return syntaxTree{root: root}
+}
+
+func newSyntaxTreeWithArena(root program, arena *syntaxArena) syntaxTree {
+	return syntaxTree{root: root, arena: arena}
+}
 
 func (tree syntaxTree) statements() []statement { return tree.root.statements }
 func (tree syntaxTree) mode() sourceMode        { return tree.root.mode }
@@ -26,6 +35,81 @@ func (tree syntaxTree) statementID(stmt *statement) syntaxID {
 		return 0
 	}
 	return stmt.id
+}
+
+// Arena accessors form the checked facade used by ID-based parser consumers.
+// A zero ID, a nil arena, or a malformed child span always resolves as absent.
+func (tree syntaxTree) arenaExpression(id expressionID) (arenaExpression, bool) {
+	if tree.arena == nil {
+		return arenaExpression{}, false
+	}
+	return tree.arena.expression(id)
+}
+func (tree syntaxTree) arenaAnd(id andExpressionID) (arenaAndExpression, bool) {
+	if tree.arena == nil {
+		return arenaAndExpression{}, false
+	}
+	return tree.arena.and(id)
+}
+func (tree syntaxTree) arenaComparison(id comparisonExpressionID) (arenaComparisonExpression, bool) {
+	if tree.arena == nil {
+		return arenaComparisonExpression{}, false
+	}
+	return tree.arena.comparison(id)
+}
+func (tree syntaxTree) arenaConcat(id concatExpressionID) (arenaConcatExpression, bool) {
+	if tree.arena == nil {
+		return arenaConcatExpression{}, false
+	}
+	return tree.arena.concat(id)
+}
+func (tree syntaxTree) arenaAdditive(id additiveExpressionID) (arenaAdditiveExpression, bool) {
+	if tree.arena == nil {
+		return arenaAdditiveExpression{}, false
+	}
+	return tree.arena.additive(id)
+}
+func (tree syntaxTree) arenaMultiplicative(id multiplicativeExpressionID) (arenaMultiplicativeExpression, bool) {
+	if tree.arena == nil {
+		return arenaMultiplicativeExpression{}, false
+	}
+	return tree.arena.multiplicative(id)
+}
+func (tree syntaxTree) arenaTerm(id termID) (arenaTerm, bool) {
+	if tree.arena == nil {
+		return arenaTerm{}, false
+	}
+	return tree.arena.term(id)
+}
+func (tree syntaxTree) arenaExpressionTerms(span nodeSpan) ([]andExpressionID, bool) {
+	if tree.arena == nil {
+		return nil, false
+	}
+	return tree.arena.andIDs(span)
+}
+func (tree syntaxTree) arenaAndTerms(span nodeSpan) ([]comparisonExpressionID, bool) {
+	if tree.arena == nil {
+		return nil, false
+	}
+	return tree.arena.comparisonIDs(span)
+}
+func (tree syntaxTree) arenaConcatRest(span nodeSpan) ([]additiveExpressionID, bool) {
+	if tree.arena == nil {
+		return nil, false
+	}
+	return tree.arena.concatIDs(span)
+}
+func (tree syntaxTree) arenaAdditiveRest(span nodeSpan) ([]arenaAdditivePart, bool) {
+	if tree.arena == nil {
+		return nil, false
+	}
+	return tree.arena.additiveParts(span)
+}
+func (tree syntaxTree) arenaMultiplicativeRest(span nodeSpan) ([]arenaMultiplicativePart, bool) {
+	if tree.arena == nil {
+		return nil, false
+	}
+	return tree.arena.multiplicativeParts(span)
 }
 
 type syntaxStatementKind uint8
@@ -62,7 +146,7 @@ func (tree syntaxTree) statementKind(stmt *statement) syntaxStatementKind {
 		return syntaxStatementFunctionDeclaration
 	case stmt.assign != nil:
 		return syntaxStatementAssign
-	case stmt.call != nil:
+	case stmt.call != 0:
 		return syntaxStatementCall
 	case stmt.ifStmt != nil:
 		return syntaxStatementIf
@@ -114,9 +198,9 @@ func (tree syntaxTree) assignment(stmt *statement) *assignStatement {
 	}
 	return stmt.assign
 }
-func (tree syntaxTree) call(stmt *statement) *term {
+func (tree syntaxTree) call(stmt *statement) termID {
 	if stmt == nil {
-		return nil
+		return 0
 	}
 	return stmt.call
 }
@@ -195,7 +279,7 @@ func (tree syntaxTree) localAnnotations(stmt *localStatement) []*typeExpression 
 	}
 	return stmt.annotations
 }
-func (tree syntaxTree) localValues(stmt *localStatement) []expression {
+func (tree syntaxTree) localValues(stmt *localStatement) []expressionID {
 	if stmt == nil {
 		return nil
 	}
@@ -373,7 +457,7 @@ func (tree syntaxTree) assignmentTargets(stmt *assignStatement) []assignTarget {
 	}
 	return stmt.targets
 }
-func (tree syntaxTree) assignmentValues(stmt *assignStatement) []expression {
+func (tree syntaxTree) assignmentValues(stmt *assignStatement) []expressionID {
 	if stmt == nil {
 		return nil
 	}
@@ -409,9 +493,9 @@ func (tree syntaxTree) selectorField(value *selector) string {
 	}
 	return value.field
 }
-func (tree syntaxTree) selectorIndex(value *selector) *expression {
+func (tree syntaxTree) selectorIndex(value *selector) expressionID {
 	if value == nil {
-		return nil
+		return 0
 	}
 	return value.index
 }
@@ -479,11 +563,11 @@ func (tree syntaxTree) typeAliasNameRange(stmt *typeAliasStatement) (int, int) {
 	}
 	return stmt.nameStart, stmt.nameEnd
 }
-func (tree syntaxTree) ifCondition(stmt *ifStatement) *expression {
+func (tree syntaxTree) ifCondition(stmt *ifStatement) expressionID {
 	if stmt == nil {
-		return nil
+		return 0
 	}
-	return &stmt.condition
+	return stmt.condition
 }
 func (tree syntaxTree) ifThenStatements(stmt *ifStatement) []statement {
 	if stmt == nil {
@@ -497,11 +581,11 @@ func (tree syntaxTree) ifElseStatements(stmt *ifStatement) []statement {
 	}
 	return stmt.elseStatements
 }
-func (tree syntaxTree) whileCondition(stmt *whileStatement) *expression {
+func (tree syntaxTree) whileCondition(stmt *whileStatement) expressionID {
 	if stmt == nil {
-		return nil
+		return 0
 	}
-	return &stmt.condition
+	return stmt.condition
 }
 func (tree syntaxTree) whileStatements(stmt *whileStatement) []statement {
 	if stmt == nil {
@@ -521,21 +605,21 @@ func (tree syntaxTree) numericForNameID(stmt *forStatement) syntaxID {
 	}
 	return stmt.nameID
 }
-func (tree syntaxTree) numericForStart(stmt *forStatement) *expression {
+func (tree syntaxTree) numericForStart(stmt *forStatement) expressionID {
 	if stmt == nil {
-		return nil
+		return 0
 	}
-	return &stmt.start
+	return stmt.start
 }
-func (tree syntaxTree) numericForLimit(stmt *forStatement) *expression {
+func (tree syntaxTree) numericForLimit(stmt *forStatement) expressionID {
 	if stmt == nil {
-		return nil
+		return 0
 	}
-	return &stmt.limit
+	return stmt.limit
 }
-func (tree syntaxTree) numericForStep(stmt *forStatement) *expression {
-	if stmt == nil || stmt.step == nil {
-		return nil
+func (tree syntaxTree) numericForStep(stmt *forStatement) expressionID {
+	if stmt == nil || stmt.step == 0 {
+		return 0
 	}
 	return stmt.step
 }
@@ -557,7 +641,7 @@ func (tree syntaxTree) genericForNameID(stmt *genericForStatement) syntaxID {
 	}
 	return stmt.nameID
 }
-func (tree syntaxTree) genericForValues(stmt *genericForStatement) []expression {
+func (tree syntaxTree) genericForValues(stmt *genericForStatement) []expressionID {
 	if stmt == nil {
 		return nil
 	}
@@ -575,11 +659,11 @@ func (tree syntaxTree) repeatStatements(stmt *repeatStatement) []statement {
 	}
 	return stmt.statements
 }
-func (tree syntaxTree) repeatCondition(stmt *repeatStatement) *expression {
+func (tree syntaxTree) repeatCondition(stmt *repeatStatement) expressionID {
 	if stmt == nil {
-		return nil
+		return 0
 	}
-	return &stmt.condition
+	return stmt.condition
 }
 func (tree syntaxTree) blockStatements(stmt *blockStatement) []statement {
 	if stmt == nil {
@@ -587,7 +671,7 @@ func (tree syntaxTree) blockStatements(stmt *blockStatement) []statement {
 	}
 	return stmt.statements
 }
-func (tree syntaxTree) returnValues(stmt *returnStatement) []expression {
+func (tree syntaxTree) returnValues(stmt *returnStatement) []expressionID {
 	if stmt == nil {
 		return nil
 	}
@@ -600,125 +684,135 @@ func (tree syntaxTree) returnRange(stmt *returnStatement) (int, int) {
 	return stmt.start, stmt.end
 }
 
-func (tree syntaxTree) expressionTerms(expr *expression) []andExpression {
-	if expr == nil {
-		return nil
+func (tree syntaxTree) expressionTerms(id expressionID) ([]andExpressionID, bool) {
+	node, ok := tree.arenaExpression(id)
+	if !ok {
+		return nil, false
 	}
-	return expr.terms
+	return tree.arenaExpressionTerms(node.terms)
 }
-func (tree syntaxTree) expressionID(expr *expression) syntaxID {
-	if expr == nil {
+func (tree syntaxTree) expressionSyntaxID(id expressionID) syntaxID {
+	node, ok := tree.arenaExpression(id)
+	if !ok {
 		return 0
 	}
-	return expr.id
+	return node.id
 }
-func (tree syntaxTree) andTerms(expr *andExpression) []comparisonExpression {
-	if expr == nil {
-		return nil
+func (tree syntaxTree) expressionID(id expressionID) syntaxID { return tree.expressionSyntaxID(id) }
+func (tree syntaxTree) andTerms(id andExpressionID) ([]comparisonExpressionID, bool) {
+	node, ok := tree.arenaAnd(id)
+	if !ok {
+		return nil, false
 	}
-	return expr.terms
+	return tree.arenaAndTerms(node.terms)
 }
-func (tree syntaxTree) comparisonLeft(expr *comparisonExpression) concatExpression {
-	if expr == nil {
-		return concatExpression{}
+func (tree syntaxTree) comparisonLeft(id comparisonExpressionID) concatExpressionID {
+	node, ok := tree.arenaComparison(id)
+	if !ok {
+		return 0
 	}
-	return expr.left
+	return node.left
 }
-func (tree syntaxTree) comparisonLeftRef(expr *comparisonExpression) *concatExpression {
-	if expr == nil {
-		return nil
-	}
-	return &expr.left
-}
-func (tree syntaxTree) comparisonOperator(expr *comparisonExpression) comparisonOperator {
-	if expr == nil {
+func (tree syntaxTree) comparisonOperator(id comparisonExpressionID) comparisonOperator {
+	node, ok := tree.arenaComparison(id)
+	if !ok {
 		return ""
 	}
-	return expr.op
-}
-func (tree syntaxTree) comparisonRight(expr *comparisonExpression) *concatExpression {
-	if expr == nil {
-		return nil
-	}
-	return expr.right
-}
-func (tree syntaxTree) concatFirst(expr *concatExpression) additiveExpression {
-	if expr == nil {
-		return additiveExpression{}
-	}
-	return expr.first
-}
-func (tree syntaxTree) concatFirstRef(expr *concatExpression) *additiveExpression {
-	if expr == nil {
-		return nil
-	}
-	return &expr.first
-}
-func (tree syntaxTree) concatRest(expr *concatExpression) []additiveExpression {
-	if expr == nil {
-		return nil
-	}
-	return expr.rest
-}
-func (tree syntaxTree) additiveFirst(expr *additiveExpression) multiplicativeExpression {
-	if expr == nil {
-		return multiplicativeExpression{}
-	}
-	return expr.first
-}
-func (tree syntaxTree) additiveFirstRef(expr *additiveExpression) *multiplicativeExpression {
-	if expr == nil {
-		return nil
-	}
-	return &expr.first
-}
-func (tree syntaxTree) additivePartOperator(part *additivePart) additiveOperator {
-	if part == nil {
+	switch node.op {
+	case arenaComparisonEqual:
+		return comparisonEqual
+	case arenaComparisonNotEqual:
+		return comparisonNotEqual
+	case arenaComparisonLess:
+		return comparisonLess
+	case arenaComparisonLessEqual:
+		return comparisonLessEqual
+	case arenaComparisonGreater:
+		return comparisonGreater
+	case arenaComparisonGreaterEqual:
+		return comparisonGreaterEqual
+	default:
 		return ""
 	}
-	return part.op
 }
-func (tree syntaxTree) additivePartValue(part *additivePart) *multiplicativeExpression {
-	if part == nil {
-		return nil
+func (tree syntaxTree) comparisonRight(id comparisonExpressionID) concatExpressionID {
+	node, ok := tree.arenaComparison(id)
+	if !ok {
+		return 0
 	}
-	return &part.value
+	return node.right
 }
-func (tree syntaxTree) additiveRest(expr *additiveExpression) []additivePart {
-	if expr == nil {
-		return nil
+func (tree syntaxTree) concatFirst(id concatExpressionID) additiveExpressionID {
+	node, ok := tree.arenaConcat(id)
+	if !ok {
+		return 0
 	}
-	return expr.rest
+	return node.first
 }
-func (tree syntaxTree) multiplicativeFirst(expr *multiplicativeExpression) term {
-	if expr == nil {
-		return term{}
+func (tree syntaxTree) concatRest(id concatExpressionID) ([]additiveExpressionID, bool) {
+	node, ok := tree.arenaConcat(id)
+	if !ok {
+		return nil, false
 	}
-	return expr.first
+	return tree.arenaConcatRest(node.rest)
 }
-func (tree syntaxTree) multiplicativeFirstRef(expr *multiplicativeExpression) *term {
-	if expr == nil {
-		return nil
+func (tree syntaxTree) additiveFirst(id additiveExpressionID) multiplicativeExpressionID {
+	node, ok := tree.arenaAdditive(id)
+	if !ok {
+		return 0
 	}
-	return &expr.first
+	return node.first
 }
-func (tree syntaxTree) multiplicativePartOperator(part *multiplicativePart) multiplicativeOperator {
-	if part == nil {
+func (tree syntaxTree) additiveRest(id additiveExpressionID) ([]arenaAdditivePart, bool) {
+	node, ok := tree.arenaAdditive(id)
+	if !ok {
+		return nil, false
+	}
+	return tree.arenaAdditiveRest(node.rest)
+}
+func (tree syntaxTree) additivePartOperator(part arenaAdditivePart) additiveOperator {
+	switch part.op {
+	case arenaAdditiveAdd:
+		return additiveAdd
+	case arenaAdditiveSubtract:
+		return additiveSubtract
+	default:
 		return ""
 	}
-	return part.op
 }
-func (tree syntaxTree) multiplicativePartValue(part *multiplicativePart) *term {
-	if part == nil {
-		return nil
-	}
-	return &part.value
+func (tree syntaxTree) additivePartValue(part arenaAdditivePart) multiplicativeExpressionID {
+	return part.value
 }
-func (tree syntaxTree) multiplicativeRest(expr *multiplicativeExpression) []multiplicativePart {
-	if expr == nil {
-		return nil
+func (tree syntaxTree) multiplicativeFirst(id multiplicativeExpressionID) termID {
+	node, ok := tree.arenaMultiplicative(id)
+	if !ok {
+		return 0
 	}
-	return expr.rest
+	return node.first
+}
+func (tree syntaxTree) multiplicativeRest(id multiplicativeExpressionID) ([]arenaMultiplicativePart, bool) {
+	node, ok := tree.arenaMultiplicative(id)
+	if !ok {
+		return nil, false
+	}
+	return tree.arenaMultiplicativeRest(node.rest)
+}
+func (tree syntaxTree) multiplicativePartOperator(part arenaMultiplicativePart) multiplicativeOperator {
+	switch part.op {
+	case arenaMultiplicativeMultiply:
+		return multiplicativeMultiply
+	case arenaMultiplicativeDivide:
+		return multiplicativeDivide
+	case arenaMultiplicativeModulo:
+		return multiplicativeModulo
+	case arenaMultiplicativeFloorDiv:
+		return multiplicativeFloorDiv
+	default:
+		return ""
+	}
+}
+func (tree syntaxTree) multiplicativePartValue(part arenaMultiplicativePart) termID {
+	return part.value
 }
 
 type syntaxTermKind uint8
@@ -741,301 +835,363 @@ const (
 	syntaxTermName
 )
 
-func (tree syntaxTree) termKind(value *term) syntaxTermKind {
-	if value == nil {
+func (tree syntaxTree) termKind(id termID) syntaxTermKind {
+	node, ok := tree.arenaTerm(id)
+	if !ok {
 		return syntaxTermUnknown
 	}
-	switch {
-	case value.number != nil:
-		return syntaxTermNumber
-	case value.lit != nil:
-		return syntaxTermLiteral
-	case value.table != nil:
-		return syntaxTermTable
-	case value.function != nil:
-		return syntaxTermFunction
-	case value.ifExpr != nil:
-		return syntaxTermIf
-	case value.call != nil:
-		return syntaxTermCall
-	case value.vararg:
-		return syntaxTermVararg
-	case value.unaryNot != nil:
-		return syntaxTermUnaryNot
-	case value.unaryMinus != nil:
-		return syntaxTermUnaryMinus
-	case value.unaryLen != nil:
-		return syntaxTermUnaryLength
-	case value.power != nil:
-		return syntaxTermPower
-	case value.group != nil:
-		return syntaxTermGroup
-	case value.cast != nil:
+	if node.kind == termKindName && node.castType != 0 {
 		return syntaxTermCast
-	case value.name != "":
+	}
+	switch node.kind {
+	case termKindNumber:
+		return syntaxTermNumber
+	case termKindNil, termKindBool, termKindString:
+		return syntaxTermLiteral
+	case termKindTable:
+		return syntaxTermTable
+	case termKindFunction:
+		return syntaxTermFunction
+	case termKindIf:
+		return syntaxTermIf
+	case termKindCall:
+		return syntaxTermCall
+	case termKindVararg:
+		return syntaxTermVararg
+	case termKindUnaryNot:
+		return syntaxTermUnaryNot
+	case termKindUnaryMinus:
+		return syntaxTermUnaryMinus
+	case termKindUnaryLength:
+		return syntaxTermUnaryLength
+	case termKindPower:
+		return syntaxTermPower
+	case termKindGroup:
+		return syntaxTermGroup
+	case termKindName:
 		return syntaxTermName
 	default:
 		return syntaxTermUnknown
 	}
 }
-func (tree syntaxTree) termID(value *term) syntaxID {
-	if value == nil {
+func (tree syntaxTree) termSyntaxID(id termID) syntaxID {
+	node, ok := tree.arenaTerm(id)
+	if !ok {
 		return 0
 	}
-	return value.id
+	return node.id
 }
-func (tree syntaxTree) termRange(value *term) (int, int) {
-	if value == nil {
+func (tree syntaxTree) termID(id termID) syntaxID { return tree.termSyntaxID(id) }
+func (tree syntaxTree) termRange(id termID) (int, int) {
+	node, ok := tree.arenaTerm(id)
+	if !ok {
 		return 0, 0
 	}
-	return value.start, value.end
+	return node.start, node.end
 }
-func (tree syntaxTree) termVararg(value *term) bool {
-	return value != nil && value.vararg
-}
-func (tree syntaxTree) termSelectors(value *term) []selector {
-	if value == nil {
-		return nil
+func (tree syntaxTree) termVararg(id termID) bool { return tree.termKind(id) == syntaxTermVararg }
+func (tree syntaxTree) termSelectors(id termID) ([]arenaSelector, bool) {
+	node, ok := tree.arenaTerm(id)
+	if !ok {
+		return nil, false
 	}
-	return value.selectors
+	return tree.arena.selectorIDs(node.selectors)
 }
-
-func (tree syntaxTree) termNumber(value *term) *float64 {
-	if value == nil {
-		return nil
-	}
-	return value.number
-}
-func (tree syntaxTree) termLiteral(value *term) *Value {
-	if value == nil {
-		return nil
-	}
-	return value.lit
-}
-func (tree syntaxTree) termTable(value *term) *tableExpression {
-	if value == nil {
-		return nil
-	}
-	return value.table
-}
-func (tree syntaxTree) termFunction(value *term) *functionExpression {
-	if value == nil {
-		return nil
-	}
-	return value.function
-}
-func (tree syntaxTree) termIf(value *term) *ifExpression {
-	if value == nil {
-		return nil
-	}
-	return value.ifExpr
-}
-func (tree syntaxTree) termCall(value *term) *callExpression {
-	if value == nil {
-		return nil
-	}
-	return value.call
-}
-func (tree syntaxTree) termUnaryNot(value *term) *term {
-	if value == nil {
-		return nil
-	}
-	return value.unaryNot
-}
-func (tree syntaxTree) termUnaryMinus(value *term) *term {
-	if value == nil {
-		return nil
-	}
-	return value.unaryMinus
-}
-func (tree syntaxTree) termUnaryLength(value *term) *term {
-	if value == nil {
-		return nil
-	}
-	return value.unaryLen
-}
-func (tree syntaxTree) termPower(value *term) *powerExpression {
-	if value == nil {
-		return nil
-	}
-	return value.power
-}
-func (tree syntaxTree) termGroup(value *term) *expression {
-	if value == nil {
-		return nil
-	}
-	return value.group
-}
-func (tree syntaxTree) termCast(value *term) *typeExpression {
-	if value == nil {
-		return nil
-	}
-	return value.cast
-}
-func (tree syntaxTree) termName(value *term) string {
-	if value == nil {
+func (tree syntaxTree) termSelectorField(value arenaSelector) string {
+	if value.field == 0 || tree.arena == nil || int(value.field) > len(tree.arena.strings) {
 		return ""
 	}
-	return value.name
+	return tree.arena.strings[value.field-1]
 }
-func (tree syntaxTree) tableFields(value *tableExpression) []tableField {
-	if value == nil {
-		return nil
+func (tree syntaxTree) termSelectorIndex(value arenaSelector) expressionID { return value.index }
+func (tree syntaxTree) termNumber(id termID) (float64, bool) {
+	node, ok := tree.arenaTerm(id)
+	if !ok || node.kind != termKindNumber {
+		return 0, false
 	}
-	return value.fields
+	return math.Float64frombits(node.payload), true
 }
-func (tree syntaxTree) tableFieldName(value *tableField) string {
-	if value == nil {
+func (tree syntaxTree) termLiteral(id termID) (Value, bool) {
+	node, ok := tree.arenaTerm(id)
+	if !ok {
+		return Value{}, false
+	}
+	switch node.kind {
+	case termKindNil:
+		return NilValue(), true
+	case termKindBool:
+		return BoolValue(node.payload != 0), true
+	case termKindString:
+		if node.payload == 0 || int(node.payload) > len(tree.arena.strings) {
+			return Value{}, false
+		}
+		if literal, ok := tree.arena.stringLiterals[stringID(node.payload)]; ok {
+			return literal, true
+		}
+		return StringValue(tree.arena.strings[node.payload-1]), true
+	default:
+		return Value{}, false
+	}
+}
+func (tree syntaxTree) termChild(id termID) (termID, bool) {
+	node, ok := tree.arenaTerm(id)
+	if !ok {
+		return 0, false
+	}
+	if node.kind != termKindUnaryNot && node.kind != termKindUnaryMinus && node.kind != termKindUnaryLength {
+		return 0, false
+	}
+	child := termID(node.payload)
+	_, ok = tree.arenaTerm(child)
+	return child, ok
+}
+func (tree syntaxTree) termName(id termID) string {
+	node, ok := tree.arenaTerm(id)
+	if !ok || node.kind != termKindName || node.payload == 0 || int(node.payload) > len(tree.arena.strings) {
 		return ""
 	}
-	return value.name
+	return tree.arena.strings[node.payload-1]
 }
-func (tree syntaxTree) tableFieldArrayIndex(value *tableField) int {
-	if value == nil {
+func (tree syntaxTree) stringValue(id stringID) (string, bool) {
+	if tree.arena == nil {
+		return "", false
+	}
+	return tree.arena.stringValue(id)
+}
+func (tree syntaxTree) termPayload(id termID) uint64 {
+	node, ok := tree.arenaTerm(id)
+	if !ok {
 		return 0
 	}
-	return value.arrayIndex
+	return node.payload
 }
-func (tree syntaxTree) tableFieldKey(value *tableField) *expression {
-	if value == nil {
-		return nil
+func (tree syntaxTree) termTable(id termID) (arenaTableID, bool) {
+	node, ok := tree.arenaTerm(id)
+	if !ok || node.kind != termKindTable {
+		return 0, false
 	}
-	return value.key
+	value := arenaTableID(node.payload)
+	_, ok = tree.arena.table(value)
+	return value, ok
 }
-func (tree syntaxTree) tableFieldValue(value *tableField) *expression {
-	if value == nil {
-		return nil
+func (tree syntaxTree) termFunction(id termID) (arenaFunctionID, bool) {
+	node, ok := tree.arenaTerm(id)
+	if !ok || node.kind != termKindFunction {
+		return 0, false
 	}
-	return &value.value
+	value := arenaFunctionID(node.payload)
+	_, ok = tree.arena.function(value)
+	return value, ok
 }
-func (tree syntaxTree) callTarget(value *callExpression) *term {
-	if value == nil {
-		return nil
+func (tree syntaxTree) termIf(id termID) (arenaIfExpressionID, bool) {
+	node, ok := tree.arenaTerm(id)
+	if !ok || node.kind != termKindIf {
+		return 0, false
 	}
-	return &value.target
+	value := arenaIfExpressionID(node.payload)
+	_, ok = tree.arena.ifExpression(value)
+	return value, ok
 }
-func (tree syntaxTree) callReceiver(value *callExpression) *term {
-	if value == nil {
-		return nil
+func (tree syntaxTree) termCall(id termID) (arenaCallID, bool) {
+	node, ok := tree.arenaTerm(id)
+	if !ok || node.kind != termKindCall {
+		return 0, false
 	}
-	return value.receiver
+	value := arenaCallID(node.payload)
+	_, ok = tree.arena.call(value)
+	return value, ok
 }
-func (tree syntaxTree) callTypeArgs(value *callExpression) []*typeExpression {
-	if value == nil {
-		return nil
+func (tree syntaxTree) termPower(id termID) (arenaPowerID, bool) {
+	node, ok := tree.arenaTerm(id)
+	if !ok || node.kind != termKindPower {
+		return 0, false
 	}
-	return value.typeArgs
+	value := arenaPowerID(node.payload)
+	_, ok = tree.arena.power(value)
+	return value, ok
 }
-func (tree syntaxTree) callArgs(value *callExpression) []expression {
-	if value == nil {
-		return nil
+func (tree syntaxTree) termGroup(id termID) (expressionID, bool) {
+	node, ok := tree.arenaTerm(id)
+	if !ok || node.kind != termKindGroup {
+		return 0, false
 	}
-	return value.args
+	value := expressionID(node.payload)
+	_, ok = tree.arenaExpression(value)
+	return value, ok
 }
-func (tree syntaxTree) powerBase(value *powerExpression) *term {
-	if value == nil {
-		return nil
+func (tree syntaxTree) termCast(id termID) (*typeExpression, bool) {
+	node, ok := tree.arenaTerm(id)
+	if !ok || node.castType == 0 {
+		return nil, false
 	}
-	return &value.base
+	return tree.arena.cast(uint32(node.castType))
 }
-func (tree syntaxTree) powerExponent(value *powerExpression) *term {
-	if value == nil {
-		return nil
+func (tree syntaxTree) tableFields(id arenaTableID) ([]arenaTableField, bool) {
+	node, ok := tree.arena.table(id)
+	if !ok {
+		return nil, false
 	}
-	return &value.exponent
+	return tree.arena.tableFieldsIDs(node.fields)
 }
-func (tree syntaxTree) ifExpressionCondition(value *ifExpression) *expression {
-	if value == nil {
-		return nil
+func (tree syntaxTree) tableFieldName(field arenaTableField) string {
+	if field.name == 0 || int(field.name) > len(tree.arena.strings) {
+		return ""
 	}
-	return &value.condition
+	return tree.arena.strings[field.name-1]
 }
-func (tree syntaxTree) ifExpressionThen(value *ifExpression) *expression {
-	if value == nil {
-		return nil
-	}
-	return &value.thenValue
-}
-func (tree syntaxTree) ifExpressionElse(value *ifExpression) *expression {
-	if value == nil {
-		return nil
-	}
-	return &value.elseValue
-}
-func (tree syntaxTree) functionExpressionID(value *functionExpression) syntaxID {
-	if value == nil {
+func (tree syntaxTree) tableFieldKey(field arenaTableField) expressionID   { return field.key }
+func (tree syntaxTree) tableFieldValue(field arenaTableField) expressionID { return field.value }
+func (tree syntaxTree) tableFieldArrayIndex(field arenaTableField) int     { return field.arrayIndex }
+func (tree syntaxTree) callTarget(call arenaCallID) termID {
+	node, ok := tree.arena.call(call)
+	if !ok {
 		return 0
 	}
-	return value.id
+	return node.target
 }
-func (tree syntaxTree) functionExpressionFunctionID(value *functionExpression) int {
-	if value == nil {
+func (tree syntaxTree) callReceiver(call arenaCallID) termID {
+	node, ok := tree.arena.call(call)
+	if !ok {
 		return 0
 	}
-	return value.functionID
+	return node.receiver
 }
-func (tree syntaxTree) functionExpressionTypeParams(value *functionExpression) []string {
-	if value == nil {
+func (tree syntaxTree) callTypeArgs(call arenaCallID) []*typeExpression {
+	node, ok := tree.arena.call(call)
+	if !ok {
 		return nil
 	}
-	return value.typeParams
+	return node.typeArgs
 }
-func (tree syntaxTree) functionExpressionTypeParamID(value *functionExpression) syntaxID {
-	if value == nil {
+func (tree syntaxTree) callArgs(call arenaCallID) ([]expressionID, bool) {
+	node, ok := tree.arena.call(call)
+	if !ok {
+		return nil, false
+	}
+	return tree.arena.callArgIDs(node.args)
+}
+func (tree syntaxTree) powerBase(power arenaPowerID) termID {
+	node, ok := tree.arena.power(power)
+	if !ok {
 		return 0
 	}
-	return value.typeParamID
+	return node.base
 }
-func (tree syntaxTree) functionExpressionTypePacks(value *functionExpression) []string {
-	if value == nil {
-		return nil
-	}
-	return value.typePacks
-}
-func (tree syntaxTree) functionExpressionTypePackID(value *functionExpression) syntaxID {
-	if value == nil {
+func (tree syntaxTree) powerExponent(power arenaPowerID) termID {
+	node, ok := tree.arena.power(power)
+	if !ok {
 		return 0
 	}
-	return value.typePackID
+	return node.exponent
 }
-func (tree syntaxTree) functionExpressionParams(value *functionExpression) []string {
-	if value == nil {
-		return nil
-	}
-	return value.params
-}
-func (tree syntaxTree) functionExpressionParamID(value *functionExpression) syntaxID {
-	if value == nil {
+func (tree syntaxTree) ifExpressionCondition(value arenaIfExpressionID) expressionID {
+	node, ok := tree.arena.ifExpression(value)
+	if !ok {
 		return 0
 	}
-	return value.paramID
+	return node.condition
 }
-func (tree syntaxTree) functionExpressionParamAnnotations(value *functionExpression) []*typeExpression {
-	if value == nil {
+func (tree syntaxTree) ifExpressionThen(value arenaIfExpressionID) expressionID {
+	node, ok := tree.arena.ifExpression(value)
+	if !ok {
+		return 0
+	}
+	return node.thenValue
+}
+func (tree syntaxTree) ifExpressionElse(value arenaIfExpressionID) expressionID {
+	node, ok := tree.arena.ifExpression(value)
+	if !ok {
+		return 0
+	}
+	return node.elseValue
+}
+func (tree syntaxTree) functionExpressionID(value arenaFunctionID) syntaxID {
+	node, ok := tree.arena.function(value)
+	if !ok {
+		return 0
+	}
+	return node.id
+}
+func (tree syntaxTree) functionExpressionFunctionID(value arenaFunctionID) int {
+	node, ok := tree.arena.function(value)
+	if !ok {
+		return 0
+	}
+	return node.functionID
+}
+func (tree syntaxTree) functionExpressionTypeParams(value arenaFunctionID) []string {
+	node, ok := tree.arena.function(value)
+	if !ok {
 		return nil
 	}
-	return value.paramAnnotations
+	return node.typeParams
 }
-func (tree syntaxTree) functionExpressionVariadic(value *functionExpression) bool {
-	return value != nil && value.variadic
+func (tree syntaxTree) functionExpressionTypeParamID(value arenaFunctionID) syntaxID {
+	node, ok := tree.arena.function(value)
+	if !ok {
+		return 0
+	}
+	return node.typeParamID
 }
-func (tree syntaxTree) functionExpressionVariadicAnnotation(value *functionExpression) *typeExpression {
-	if value == nil {
+func (tree syntaxTree) functionExpressionTypePacks(value arenaFunctionID) []string {
+	node, ok := tree.arena.function(value)
+	if !ok {
 		return nil
 	}
-	return value.variadicAnnotation
+	return node.typePacks
 }
-func (tree syntaxTree) functionExpressionReturnAnnotation(value *functionExpression) *typeExpression {
-	if value == nil {
+func (tree syntaxTree) functionExpressionTypePackID(value arenaFunctionID) syntaxID {
+	node, ok := tree.arena.function(value)
+	if !ok {
+		return 0
+	}
+	return node.typePackID
+}
+func (tree syntaxTree) functionExpressionParams(value arenaFunctionID) []string {
+	node, ok := tree.arena.function(value)
+	if !ok {
 		return nil
 	}
-	return value.returnAnnotation
+	return node.params
 }
-func (tree syntaxTree) functionExpressionStatements(value *functionExpression) []statement {
-	if value == nil {
+func (tree syntaxTree) functionExpressionParamID(value arenaFunctionID) syntaxID {
+	node, ok := tree.arena.function(value)
+	if !ok {
+		return 0
+	}
+	return node.paramID
+}
+func (tree syntaxTree) functionExpressionParamAnnotations(value arenaFunctionID) []*typeExpression {
+	node, ok := tree.arena.function(value)
+	if !ok {
 		return nil
 	}
-	return value.statements
+	return node.paramAnnotations
+}
+func (tree syntaxTree) functionExpressionVariadic(value arenaFunctionID) bool {
+	node, ok := tree.arena.function(value)
+	return ok && node.variadic
+}
+func (tree syntaxTree) functionExpressionVariadicAnnotation(value arenaFunctionID) *typeExpression {
+	node, ok := tree.arena.function(value)
+	if !ok {
+		return nil
+	}
+	return node.variadicAnnotation
+}
+func (tree syntaxTree) functionExpressionReturnAnnotation(value arenaFunctionID) *typeExpression {
+	node, ok := tree.arena.function(value)
+	if !ok {
+		return nil
+	}
+	return node.returnAnnotation
+}
+func (tree syntaxTree) functionExpressionStatements(value arenaFunctionID) []statement {
+	node, ok := tree.arena.function(value)
+	if !ok {
+		return nil
+	}
+	return node.statements
 }
 
 func (tree syntaxTree) typeArgs(value *typeExpression) []*typeExpression {
@@ -1086,9 +1242,9 @@ func (tree syntaxTree) typePackID(value *typeExpression) syntaxID {
 	}
 	return value.typePackID
 }
-func (tree syntaxTree) typeExpression(value *typeExpression) *expression {
+func (tree syntaxTree) typeExpression(value *typeExpression) expressionID {
 	if value == nil {
-		return nil
+		return 0
 	}
 	return value.expr
 }

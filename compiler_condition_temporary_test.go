@@ -114,7 +114,7 @@ return add(2, 3)`
 
 func TestCompileTempExpressionReleasesOnError(t *testing.T) {
 	c := compiler{}
-	if _, err := c.compileTempExpression(expression{}); err == nil {
+	if _, err := c.compileTempExpression(expressionID(0)); err == nil {
 		t.Fatal("compileTempExpression succeeded for an empty expression")
 	}
 	if c.nextReg != 1 {

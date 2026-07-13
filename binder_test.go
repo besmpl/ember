@@ -3,7 +3,7 @@ package ember
 import "testing"
 
 func TestBindProgramRecordsLexicalSymbolsAndScopes(t *testing.T) {
-	prog := parseSourceForBindTest(t, `
+	tree := parseSourceForBindTest(t, `
 local value = 1
 do
 	local value = 2
@@ -15,7 +15,7 @@ end
 return value
 `)
 
-	result := bindProgram(prog)
+	result := bindSyntaxTree(tree)
 
 	rootValue := result.mustSymbol(t, "value", symbolLocal, 0)
 	blockValue := result.mustSymbol(t, "value", symbolLocal, 1)
@@ -31,7 +31,7 @@ return value
 }
 
 func TestBindProgramDoesNotShadowWithClosedScopeSymbols(t *testing.T) {
-	prog := parseSourceForBindTest(t, `
+	tree := parseSourceForBindTest(t, `
 do
 	local closed = 1
 end
@@ -39,7 +39,7 @@ local closed = 2
 return closed
 `)
 
-	result := bindProgram(prog)
+	result := bindSyntaxTree(tree)
 	outer := result.mustSymbol(t, "closed", symbolLocal, 0)
 	if outer.shadowed != -1 {
 		t.Fatalf("outer closed shadows symbol %d from a closed scope, want -1", outer.shadowed)
@@ -61,7 +61,7 @@ return value
 }
 
 func TestBindResultFindsSymbolsByScopeAndKind(t *testing.T) {
-	prog := parseSourceForBindTest(t, `
+	tree := parseSourceForBindTest(t, `
 local value = 1
 do
 	local value = 2
@@ -69,7 +69,7 @@ end
 return value
 `)
 
-	result := bindProgram(prog)
+	result := bindSyntaxTree(tree)
 	symbol := result.mustSymbol(t, "value", symbolLocal, 1)
 	if symbol.scope != 1 || symbol.name != "value" || symbol.kind != symbolLocal {
 		t.Fatalf("symbol = %#v, want block value local", symbol)
@@ -84,9 +84,9 @@ local function add(inner)
 end
 return add(2)
 `
-	prog := parseSourceForBindTest(t, source)
+	tree := parseSourceForBindTest(t, source)
 
-	result := bindProgram(prog)
+	result := bindSyntaxTree(tree)
 	outer := result.mustSymbol(t, "outer", symbolLocal, 0)
 	inner := result.mustSymbol(t, "inner", symbolParameter, 1)
 
@@ -104,11 +104,11 @@ local value = 1
 value = value + 1
 return value
 `
-	prog := parseSourceForBindTest(t, source)
-	result := bindProgram(prog)
+	tree := parseSourceForBindTest(t, source)
+	result := bindSyntaxTree(tree)
 	value := result.mustSymbol(t, "value", symbolLocal, 0)
 
-	targetID := prog.statements[1].assign.targets[0].id
+	targetID := tree.root.statements[1].assign.targets[0].id
 	targetUse, ok := result.use(targetID)
 	if !ok {
 		t.Fatalf("assignment target use(%d) was not resolved", targetID)
@@ -128,8 +128,8 @@ local function convert(param: Alias): Alias
 end
 return convert(value)
 `
-	prog := parseSourceForBindTest(t, source)
-	result := bindProgram(prog)
+	tree := parseSourceForBindTest(t, source)
+	result := bindSyntaxTree(tree)
 
 	alias := result.mustSymbol(t, "Alias", symbolTypeAlias, 0)
 	typeParam := result.mustSymbol(t, "T", symbolTypeParameter, 2)
@@ -143,35 +143,35 @@ return convert(value)
 }
 
 func TestBindProgramIndexesUsesAndDefinitionsByStableSyntaxID(t *testing.T) {
-	prog := parseSourceForBindTest(t, `
+	tree := parseSourceForBindTest(t, `
 local value = 1
 value = value + 1
 return value
 `)
-	result := bindProgram(prog)
-	tree := newSyntaxTree(prog)
+	result := bindSyntaxTree(tree)
 
-	definitionID := prog.statements[0].local.nameID
+	definitionID := tree.root.statements[0].local.nameID
 	symbol, ok := result.definition(definitionID)
 	if !ok || symbol.name != "value" {
 		t.Fatalf("definition(%d) = %#v, %t, want value symbol", definitionID, symbol, ok)
 	}
-	assignmentID := prog.statements[1].assign.targets[0].id
+	assignmentID := tree.root.statements[1].assign.targets[0].id
 	use, ok := result.use(assignmentID)
 	if !ok || use.symbol != symbol.id {
 		t.Fatalf("use(%d) = %#v, %t, want symbol %d", assignmentID, use, ok, symbol.id)
 	}
-	returnTerm, ok := expressionSingleTerm(tree, prog.statements[2].ret.values[0])
+	returnTerm, ok := expressionSingleTerm(tree, tree.root.statements[2].ret.values[0])
 	if !ok {
 		t.Fatal("return expression is not a single term")
 	}
-	if use, ok := result.use(returnTerm.id); !ok || use.symbol != symbol.id {
-		t.Fatalf("use(%d) = %#v, %t, want symbol %d", returnTerm.id, use, ok, symbol.id)
+	returnID := tree.termSyntaxID(returnTerm)
+	if use, ok := result.use(returnID); !ok || use.symbol != symbol.id {
+		t.Fatalf("use(%d) = %#v, %t, want symbol %d", returnID, use, ok, symbol.id)
 	}
 }
 
 func TestBindProgramRecordsDenseCaptureAndExpressionFacts(t *testing.T) {
-	prog := parseSourceForBindTest(t, `
+	tree := parseSourceForBindTest(t, `
 local before = 0
 before = 1
 local readBefore = function() return before end
@@ -182,7 +182,7 @@ after = 1
 
 return before, after, readAfter()
 `)
-	result := bindProgram(prog)
+	result := bindSyntaxTree(tree)
 	before := result.mustSymbol(t, "before", symbolLocal, 0)
 	after := result.mustSymbol(t, "after", symbolLocal, 0)
 
@@ -195,14 +195,15 @@ return before, after, readAfter()
 		t.Fatalf("after facts = %#v, want assigned captured mutation after capture", afterFacts)
 	}
 
-	ret := prog.statements[len(prog.statements)-1].ret
-	if fact, ok := result.expressionFact(ret.values[0].id); !ok || fact.multiret {
+	statements := tree.statements()
+	ret := statements[len(statements)-1].ret
+	if fact, ok := result.expressionFact(tree.expressionSyntaxID(ret.values[0])); !ok || fact.multiret {
 		t.Fatalf("first return expression fact = %#v, %t, want single result", fact, ok)
 	}
-	if fact, ok := result.expressionFact(ret.values[1].id); !ok || fact.multiret {
+	if fact, ok := result.expressionFact(tree.expressionSyntaxID(ret.values[1])); !ok || fact.multiret {
 		t.Fatalf("second return expression fact = %#v, %t, want single result", fact, ok)
 	}
-	if fact, ok := result.expressionFact(ret.values[2].id); !ok || !fact.multiret || fact.arity != -1 {
+	if fact, ok := result.expressionFact(tree.expressionSyntaxID(ret.values[2])); !ok || !fact.multiret || fact.arity != -1 {
 		t.Fatalf("third return expression fact = %#v, %t, want open multiret", fact, ok)
 	}
 }
@@ -213,39 +214,41 @@ local function outer(value)
 	return function() return value end
 end
 `
-	first := parseSourceForBindTest(t, source)
-	second := parseSourceForBindTest(t, source)
-	firstTree := newSyntaxTree(first)
-	secondTree := newSyntaxTree(second)
-	outerFirst := first.statements[0].localFunc
-	outerSecond := second.statements[0].localFunc
-	innerFirst, ok := expressionSingleTerm(firstTree, outerFirst.statements[0].ret.values[0])
-	if !ok || innerFirst.function == nil {
+	firstTree := parseSourceForBindTest(t, source)
+	secondTree := parseSourceForBindTest(t, source)
+	outerFirst := firstTree.root.statements[0].localFunc
+	outerSecond := secondTree.root.statements[0].localFunc
+	innerFirstTerm, ok := expressionSingleTerm(firstTree, outerFirst.statements[0].ret.values[0])
+	innerFirst, isFunction := firstTree.termFunction(innerFirstTerm)
+	if !ok || !isFunction {
 		t.Fatal("inner expression is not a function")
 	}
-	innerSecond, ok := expressionSingleTerm(secondTree, outerSecond.statements[0].ret.values[0])
-	if !ok || innerSecond.function == nil {
+	innerSecondTerm, ok := expressionSingleTerm(secondTree, outerSecond.statements[0].ret.values[0])
+	innerSecond, isFunction := secondTree.termFunction(innerSecondTerm)
+	if !ok || !isFunction {
 		t.Fatal("second inner expression is not a function")
 	}
-	if outerFirst.functionID <= 0 || innerFirst.function.functionID <= 0 || outerFirst.functionID == innerFirst.function.functionID {
-		t.Fatalf("function IDs = outer %d inner %d, want distinct positive IDs", outerFirst.functionID, innerFirst.function.functionID)
+	innerFirstID := firstTree.functionExpressionFunctionID(innerFirst)
+	innerSecondID := secondTree.functionExpressionFunctionID(innerSecond)
+	if outerFirst.functionID <= 0 || innerFirstID <= 0 || outerFirst.functionID == innerFirstID {
+		t.Fatalf("function IDs = outer %d inner %d, want distinct positive IDs", outerFirst.functionID, innerFirstID)
 	}
 	if outerFirst.functionID != outerSecond.functionID {
 		t.Fatalf("outer function ID changed from %d to %d", outerFirst.functionID, outerSecond.functionID)
 	}
-	if innerFirst.function.functionID != innerSecond.function.functionID {
-		t.Fatalf("inner function ID changed from %d to %d", innerFirst.function.functionID, innerSecond.function.functionID)
+	if innerFirstID != innerSecondID {
+		t.Fatalf("inner function ID changed from %d to %d", innerFirstID, innerSecondID)
 	}
 }
 
-func parseSourceForBindTest(t *testing.T, source string) program {
+func parseSourceForBindTest(t *testing.T, source string) syntaxTree {
 	t.Helper()
 	p := parser{source: source}
-	prog, err := p.parse()
+	tree, err := p.parse()
 	if err != nil {
 		t.Fatalf("parse returned error: %v", err)
 	}
-	return prog
+	return tree
 }
 
 func (r bindResult) mustUse(t *testing.T, name string, symbolID int, captured bool) boundUse {
