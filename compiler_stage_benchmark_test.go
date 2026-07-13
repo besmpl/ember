@@ -372,7 +372,8 @@ func compilerStageSource(size int) string {
 }
 
 func emitCompilerStage(artifact sourceArtifact) (compilerStageEmission, error) {
-	return emitCompilerStageWithCapacity(artifact, estimatedIRCapacity(artifact.tree.nodeCount(), len(artifact.tree.statements())))
+	statements, _ := artifact.tree.statementIDs()
+	return emitCompilerStageWithCapacity(artifact, estimatedIRCapacity(artifact.tree.nodeCount(), len(statements)))
 }
 
 func emitCompilerStageWithCapacity(artifact sourceArtifact, capacity int) (compilerStageEmission, error) {
@@ -388,10 +389,11 @@ func emitCompilerStageWithCapacity(artifact sourceArtifact, capacity int) (compi
 		functionName:       "<module>",
 	}
 	c.sourceText = artifact.source.Text
-	if err := c.compileStatements(artifact.tree.statements()); err != nil {
+	statements, _ := artifact.tree.statementIDs()
+	if err := c.compileStatements(statements); err != nil {
 		return compilerStageEmission{}, err
 	}
-	if !statementsHaveReturn(artifact.tree.statements()) {
+	if !statementIDsHaveReturn(artifact.tree, statements) {
 		c.emit(instruction{op: opReturn})
 	}
 	if c.conversionErr != nil {

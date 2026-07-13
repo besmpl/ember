@@ -67,7 +67,19 @@ func TestSlice23CompileRejectsMissingBindingFact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
-	term, ok := expressionSingleTerm(artifact.tree, artifact.tree.returnValues(artifact.tree.statements()[0].ret)[0])
+	statements, ok := artifact.tree.statementIDs()
+	if !ok || len(statements) != 1 {
+		t.Fatalf("statement IDs = %v, want one return statement", statements)
+	}
+	ret, ok := artifact.tree.returnArena(statements[0])
+	if !ok {
+		t.Fatal("return statement is not present in the statement arena")
+	}
+	values, ok := artifact.tree.statementExpressions(ret.values)
+	if !ok || len(values) != 1 {
+		t.Fatalf("return values = %v, want one expression", values)
+	}
+	term, ok := expressionSingleTerm(artifact.tree, values[0])
 	if !ok {
 		t.Fatal("return expression is not a single term")
 	}
@@ -91,7 +103,19 @@ func TestSlice23CompileRejectsStaleBindingIDWithoutValidFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
-	term, ok := expressionSingleTerm(artifact.tree, artifact.tree.returnValues(artifact.tree.statements()[0].ret)[0])
+	statements, ok := artifact.tree.statementIDs()
+	if !ok || len(statements) != 1 {
+		t.Fatalf("statement IDs = %v, want one return statement", statements)
+	}
+	ret, ok := artifact.tree.returnArena(statements[0])
+	if !ok {
+		t.Fatal("return statement is not present in the statement arena")
+	}
+	values, ok := artifact.tree.statementExpressions(ret.values)
+	if !ok || len(values) != 1 {
+		t.Fatalf("return values = %v, want one expression", values)
+	}
+	term, ok := expressionSingleTerm(artifact.tree, values[0])
 	if !ok {
 		t.Fatal("return expression is not a single term")
 	}
@@ -122,6 +146,119 @@ func TestSlice23CompileRejectsCorruptDefinitionSymbol(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid binding symbol") {
 		t.Fatalf("compileProgram error is %q, want invalid binding symbol", err)
+	}
+}
+
+func TestSlice23CompileRejectsMalformedRootStatementSpan(t *testing.T) {
+	artifact, err := parseSource(Source{Text: "return 1"})
+	if err != nil {
+		t.Fatalf("parseSource returned error: %v", err)
+	}
+	artifact.tree.root.statementSpan = nodeSpan{start: ^uint32(0), count: 1}
+
+	_, err = compileProgram(artifact)
+	if err == nil {
+		t.Fatal("compileProgram succeeded with malformed root statement span")
+	}
+	if !strings.Contains(err.Error(), "invalid root statement span") {
+		t.Fatalf("compileProgram error is %q, want invalid root statement span", err)
+	}
+}
+
+func TestSlice23CompileRejectsMalformedReturnValueSpan(t *testing.T) {
+	artifact, err := parseSource(Source{Text: "return 1"})
+	if err != nil {
+		t.Fatalf("parseSource returned error: %v", err)
+	}
+	artifact.tree.arena.statements.returnStatements[0].values = nodeSpan{start: ^uint32(0), count: 1}
+
+	_, err = compileProgram(artifact)
+	if err == nil {
+		t.Fatal("compileProgram succeeded with malformed return value span")
+	}
+	if !strings.Contains(err.Error(), "invalid return value span") {
+		t.Fatalf("compileProgram error is %q, want invalid return value span", err)
+	}
+}
+
+func TestSlice23CompileRejectsMalformedBlockBodySpan(t *testing.T) {
+	artifact, err := parseSource(Source{Text: "do\nreturn 1\nend"})
+	if err != nil {
+		t.Fatalf("parseSource returned error: %v", err)
+	}
+	artifact.tree.arena.statements.blockStatements[0].statements = nodeSpan{start: ^uint32(0), count: 1}
+
+	_, err = compileProgram(artifact)
+	if err == nil {
+		t.Fatal("compileProgram succeeded with malformed block body span")
+	}
+	if !strings.Contains(err.Error(), "invalid block body span") {
+		t.Fatalf("compileProgram error is %q, want invalid block body span", err)
+	}
+}
+
+func TestSlice23CompileRejectsMalformedFunctionBodySpan(t *testing.T) {
+	artifact, err := parseSource(Source{Text: "local function read()\nreturn 1\nend\nreturn read()"})
+	if err != nil {
+		t.Fatalf("parseSource returned error: %v", err)
+	}
+	artifact.tree.arena.statements.localFuncs[0].statements = nodeSpan{start: ^uint32(0), count: 1}
+
+	_, err = compileProgram(artifact)
+	if err == nil {
+		t.Fatal("compileProgram succeeded with malformed function body span")
+	}
+	if !strings.Contains(err.Error(), "invalid function body span") {
+		t.Fatalf("compileProgram error is %q, want invalid function body span", err)
+	}
+}
+
+func TestSlice23CompileRejectsInvalidSelectorFieldID(t *testing.T) {
+	artifact, err := parseSource(Source{Text: "local object = {}\nobject.value = 1\nreturn object"})
+	if err != nil {
+		t.Fatalf("parseSource returned error: %v", err)
+	}
+	artifact.tree.arena.selectors[0].field = stringID(len(artifact.tree.arena.strings) + 1)
+
+	_, err = compileProgram(artifact)
+	if err == nil {
+		t.Fatal("compileProgram succeeded with invalid selector field ID")
+	}
+	if !strings.Contains(err.Error(), "invalid selector field") {
+		t.Fatalf("compileProgram error is %q, want invalid selector field", err)
+	}
+}
+
+func TestSlice23CompileRejectsEmptySelectorField(t *testing.T) {
+	artifact, err := parseSource(Source{Text: "local object = {}\nobject.value = 1\nreturn object"})
+	if err != nil {
+		t.Fatalf("parseSource returned error: %v", err)
+	}
+	fieldID := artifact.tree.arena.selectors[0].field
+	artifact.tree.arena.strings[int(fieldID)-1] = ""
+
+	_, err = compileProgram(artifact)
+	if err == nil {
+		t.Fatal("compileProgram succeeded with empty selector field")
+	}
+	if !strings.Contains(err.Error(), "invalid selector field") {
+		t.Fatalf("compileProgram error is %q, want invalid selector field", err)
+	}
+}
+
+func TestSlice23CompileRejectsInvalidAssignmentTargetName(t *testing.T) {
+	artifact, err := parseSource(Source{Text: "hostValue = 1\nreturn 1"})
+	if err != nil {
+		t.Fatalf("parseSource returned error: %v", err)
+	}
+	artifact.tree.arena.statements.assignTargets[0].name = stringID(len(artifact.tree.arena.strings) + 1)
+
+	_, err = compileProgram(artifact)
+	if err == nil {
+		t.Fatal("compileProgram succeeded with invalid assignment target name")
+	}
+	if !strings.Contains(err.Error(), "invalid assignment target name") {
+		t.Fatalf("compileProgram error is %q, want invalid assignment target name", err)
 	}
 }
 
@@ -162,7 +299,19 @@ func TestSlice23CompilerUsesBoundGlobalClassification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
-	term, ok := expressionSingleTerm(artifact.tree, artifact.tree.returnValues(artifact.tree.statements()[0].ret)[0])
+	statements, ok := artifact.tree.statementIDs()
+	if !ok || len(statements) != 1 {
+		t.Fatalf("statement IDs = %v, want one return statement", statements)
+	}
+	ret, ok := artifact.tree.returnArena(statements[0])
+	if !ok {
+		t.Fatal("return statement is not present in the statement arena")
+	}
+	values, ok := artifact.tree.statementExpressions(ret.values)
+	if !ok || len(values) != 1 {
+		t.Fatalf("return values = %v, want one expression", values)
+	}
+	term, ok := expressionSingleTerm(artifact.tree, values[0])
 	if !ok {
 		t.Fatal("return expression is not a single term")
 	}
@@ -192,7 +341,19 @@ func TestSlice23MissingBindingErrorIncludesNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
-	term, ok := expressionSingleTerm(artifact.tree, artifact.tree.returnValues(artifact.tree.statements()[0].ret)[0])
+	statements, ok := artifact.tree.statementIDs()
+	if !ok || len(statements) != 1 {
+		t.Fatalf("statement IDs = %v, want one return statement", statements)
+	}
+	ret, ok := artifact.tree.returnArena(statements[0])
+	if !ok {
+		t.Fatal("return statement is not present in the statement arena")
+	}
+	values, ok := artifact.tree.statementExpressions(ret.values)
+	if !ok || len(values) != 1 {
+		t.Fatalf("return values = %v, want one expression", values)
+	}
+	term, ok := expressionSingleTerm(artifact.tree, values[0])
 	if !ok {
 		t.Fatal("return expression is not a single term")
 	}

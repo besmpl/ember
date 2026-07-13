@@ -10,7 +10,12 @@ func TestValueListPlanComputesItemsWithoutMaterializingSlice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse returned error: %v", err)
 	}
-	values := tree.root.statements[0].ret.values
+	ids, _ := tree.statementIDs()
+	ret, ok := tree.returnArena(ids[0])
+	if !ok {
+		t.Fatal("return payload missing")
+	}
+	values, _ := tree.statementExpressions(ret.values)
 	plan := fixedValueListPlan(tree, values, 4)
 	want := []valuePlan{
 		{kind: valuePlanSingle, source: 0, resultCount: 1},
@@ -26,15 +31,31 @@ func TestValueListPlanComputesItemsWithoutMaterializingSlice(t *testing.T) {
 }
 
 func TestClosurePlanViewsMethodSelfWithoutCopyingParams(t *testing.T) {
-	params := []string{"amount"}
-	stmt := functionDeclarationStatement{
-		params:  params,
-		paramID: 10,
-		selfID:  9,
-		method:  true,
+	arena := &syntaxArena{
+		strings:   []string{"amount", "object", "method"},
+		selectors: []arenaSelector{{field: 3}},
+		statements: statementArena{
+			stringIDs: []stringID{1},
+			assignTargets: []arenaAssignTarget{{
+				name: 2, selectors: nodeSpan{count: 1},
+			}},
+			functionDecls: []arenaFunctionStatement{{
+				target: 1, params: nodeSpan{count: 1}, paramID: 10, selfID: 9, method: true,
+			}},
+			statements:   []arenaStatement{{kind: syntaxStatementFunctionDeclaration, payload: 1}},
+			statementIDs: []statementID{1},
+		},
 	}
-	tree := newSyntaxTree(program{statements: []statement{{funcDecl: &stmt}}})
-	plan := planFunctionDeclaration(tree, *tree.functionDeclaration(tree.statement(0)))
+	arena.statements.functionDecls[0].params = nodeSpan{count: 1}
+	tree := newSyntaxTreeWithArena(program{statementSpan: nodeSpan{count: 1}}, arena)
+	stmt, ok := tree.functionDeclarationArena(1)
+	if !ok {
+		t.Fatal("function declaration payload missing")
+	}
+	plan, err := planFunctionDeclaration(tree, stmt)
+	if err != nil {
+		t.Fatalf("planFunctionDeclaration returned error: %v", err)
+	}
 	if plan.paramCount() != 2 {
 		t.Fatalf("param count = %d, want 2", plan.paramCount())
 	}
@@ -44,9 +65,9 @@ func TestClosurePlanViewsMethodSelfWithoutCopyingParams(t *testing.T) {
 	if name, id := plan.param(1); name != "amount" || id != 10 {
 		t.Fatalf("param 1 = %q, %d, want amount, 10", name, id)
 	}
-	params[0] = "updated"
+	arena.strings[0] = "updated"
 	if name, _ := plan.param(1); name != "updated" {
-		t.Fatalf("plan copied params; got %q after source update", name)
+		t.Fatalf("param 1 = %q after arena update, want updated", name)
 	}
 }
 

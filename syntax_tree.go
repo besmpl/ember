@@ -19,9 +19,184 @@ func newSyntaxTreeWithArena(root program, arena *syntaxArena) syntaxTree {
 }
 
 func (tree syntaxTree) statements() []statement { return tree.root.statements }
-func (tree syntaxTree) mode() sourceMode        { return tree.root.mode }
-func (tree syntaxTree) nodeCount() int          { return tree.root.nodeCount }
-func (tree syntaxTree) id() syntaxID            { return tree.root.id }
+func (tree syntaxTree) statementIDs() ([]statementID, bool) {
+	if tree.arena == nil {
+		return nil, false
+	}
+	return tree.arena.statements.spanStatements(tree.root.statementSpan)
+}
+func (tree syntaxTree) statementAt(index int) (statementID, bool) {
+	ids, ok := tree.statementIDs()
+	if !ok || index < 0 || index >= len(ids) {
+		return 0, false
+	}
+	return ids[index], true
+}
+func (tree syntaxTree) statementNode(id statementID) (arenaStatement, bool) {
+	if tree.arena == nil {
+		return arenaStatement{}, false
+	}
+	return tree.arena.statements.statement(id)
+}
+func (tree syntaxTree) statementKindID(id statementID) syntaxStatementKind {
+	node, ok := tree.statementNode(id)
+	if !ok {
+		return syntaxStatementUnknown
+	}
+	return node.kind
+}
+func (tree syntaxTree) localArena(id statementID) (arenaLocalStatement, bool) {
+	node, ok := tree.statementNode(id)
+	if !ok || node.kind != syntaxStatementLocal {
+		return arenaLocalStatement{}, false
+	}
+	return arenaNode(tree.arena.statements.locals, uint32(node.payload))
+}
+func (tree syntaxTree) localFunctionArena(id statementID) (arenaFunctionStatement, bool) {
+	node, ok := tree.statementNode(id)
+	if !ok || node.kind != syntaxStatementLocalFunction {
+		return arenaFunctionStatement{}, false
+	}
+	return arenaNode(tree.arena.statements.localFuncs, uint32(node.payload))
+}
+func (tree syntaxTree) functionDeclarationArena(id statementID) (arenaFunctionStatement, bool) {
+	node, ok := tree.statementNode(id)
+	if !ok || node.kind != syntaxStatementFunctionDeclaration {
+		return arenaFunctionStatement{}, false
+	}
+	return arenaNode(tree.arena.statements.functionDecls, uint32(node.payload))
+}
+func (tree syntaxTree) assignmentArena(id statementID) (arenaAssignStatement, bool) {
+	node, ok := tree.statementNode(id)
+	if !ok || node.kind != syntaxStatementAssign {
+		return arenaAssignStatement{}, false
+	}
+	return arenaNode(tree.arena.statements.assigns, uint32(node.payload))
+}
+func (tree syntaxTree) ifArena(id statementID) (arenaIfStatement, bool) {
+	node, ok := tree.statementNode(id)
+	if !ok || node.kind != syntaxStatementIf {
+		return arenaIfStatement{}, false
+	}
+	return arenaNode(tree.arena.statements.ifStatements, uint32(node.payload))
+}
+func (tree syntaxTree) whileArena(id statementID) (arenaWhileStatement, bool) {
+	node, ok := tree.statementNode(id)
+	if !ok || node.kind != syntaxStatementWhile {
+		return arenaWhileStatement{}, false
+	}
+	return arenaNode(tree.arena.statements.whileStatements, uint32(node.payload))
+}
+func (tree syntaxTree) forArena(id statementID) (arenaForStatement, bool) {
+	node, ok := tree.statementNode(id)
+	if !ok || node.kind != syntaxStatementFor {
+		return arenaForStatement{}, false
+	}
+	return arenaNode(tree.arena.statements.forStatements, uint32(node.payload))
+}
+func (tree syntaxTree) genericForArena(id statementID) (arenaGenericForStatement, bool) {
+	node, ok := tree.statementNode(id)
+	if !ok || node.kind != syntaxStatementGenericFor {
+		return arenaGenericForStatement{}, false
+	}
+	return arenaNode(tree.arena.statements.genericForStatements, uint32(node.payload))
+}
+func (tree syntaxTree) repeatArena(id statementID) (arenaRepeatStatement, bool) {
+	node, ok := tree.statementNode(id)
+	if !ok || node.kind != syntaxStatementRepeat {
+		return arenaRepeatStatement{}, false
+	}
+	return arenaNode(tree.arena.statements.repeatStatements, uint32(node.payload))
+}
+func (tree syntaxTree) blockArena(id statementID) (arenaBlockStatement, bool) {
+	node, ok := tree.statementNode(id)
+	if !ok || node.kind != syntaxStatementBlock {
+		return arenaBlockStatement{}, false
+	}
+	return arenaNode(tree.arena.statements.blockStatements, uint32(node.payload))
+}
+func (tree syntaxTree) returnArena(id statementID) (arenaReturnStatement, bool) {
+	node, ok := tree.statementNode(id)
+	if !ok || node.kind != syntaxStatementReturn {
+		return arenaReturnStatement{}, false
+	}
+	return arenaNode(tree.arena.statements.returnStatements, uint32(node.payload))
+}
+func (tree syntaxTree) typeAliasArena(id statementID) (arenaTypeAliasStatement, bool) {
+	node, ok := tree.statementNode(id)
+	if !ok || node.kind != syntaxStatementTypeAlias {
+		return arenaTypeAliasStatement{}, false
+	}
+	return arenaNode(tree.arena.statements.typeAliases, uint32(node.payload))
+}
+func (tree syntaxTree) callStatementTerm(id statementID) (termID, bool) {
+	node, ok := tree.statementNode(id)
+	if !ok || node.kind != syntaxStatementCall || node.payload == 0 {
+		return 0, false
+	}
+	term := termID(node.payload)
+	if _, ok := tree.arenaTerm(term); !ok {
+		return 0, false
+	}
+	return term, true
+}
+func (tree syntaxTree) statementArenaTarget(id assignTargetID) (arenaAssignTarget, bool) {
+	if tree.arena == nil {
+		return arenaAssignTarget{}, false
+	}
+	return tree.arena.statements.assignTarget(id)
+}
+func (tree syntaxTree) statementType(id typeID) (*typeExpression, bool) {
+	if tree.arena == nil {
+		return nil, false
+	}
+	return tree.arena.typeNode(id)
+}
+func (tree syntaxTree) statementStrings(span nodeSpan) ([]stringID, bool) {
+	if tree.arena == nil {
+		return nil, false
+	}
+	return tree.arena.statements.spanStrings(span)
+}
+func (tree syntaxTree) statementTypes(span nodeSpan) ([]typeID, bool) {
+	if tree.arena == nil {
+		return nil, false
+	}
+	return tree.arena.statements.spanTypes(span)
+}
+func (tree syntaxTree) statementExpressions(span nodeSpan) ([]expressionID, bool) {
+	if tree.arena == nil {
+		return nil, false
+	}
+	return tree.arena.statements.spanExpressions(span)
+}
+func (tree syntaxTree) statementChildren(span nodeSpan) ([]statementID, bool) {
+	if tree.arena == nil {
+		return nil, false
+	}
+	return tree.arena.statements.spanStatements(span)
+}
+func (tree syntaxTree) statementTargets(span nodeSpan) ([]assignTargetID, bool) {
+	if tree.arena == nil {
+		return nil, false
+	}
+	return tree.arena.statements.spanAssignTargets(span)
+}
+func (tree syntaxTree) statementRanges(span nodeSpan) ([]sourceRange, bool) {
+	if tree.arena == nil {
+		return nil, false
+	}
+	return tree.arena.statements.spanRanges(span)
+}
+func (tree syntaxTree) selectorSpan(span nodeSpan) ([]arenaSelector, bool) {
+	if tree.arena == nil {
+		return nil, false
+	}
+	return tree.arena.selectorIDs(span)
+}
+func (tree syntaxTree) mode() sourceMode { return tree.root.mode }
+func (tree syntaxTree) nodeCount() int   { return tree.root.nodeCount }
+func (tree syntaxTree) id() syntaxID     { return tree.root.id }
 
 func (tree syntaxTree) statement(index int) *statement {
 	if index < 0 || index >= len(tree.root.statements) {
@@ -33,6 +208,11 @@ func (tree syntaxTree) statement(index int) *statement {
 func (tree syntaxTree) statementID(stmt *statement) syntaxID {
 	if stmt == nil {
 		return 0
+	}
+	if stmt.arenaID != 0 {
+		if node, ok := tree.statementNode(stmt.arenaID); ok {
+			return node.id
+		}
 	}
 	return stmt.id
 }
@@ -136,6 +316,9 @@ const (
 func (tree syntaxTree) statementKind(stmt *statement) syntaxStatementKind {
 	if stmt == nil {
 		return syntaxStatementUnknown
+	}
+	if stmt.arenaID != 0 {
+		return tree.statementKindID(stmt.arenaID)
 	}
 	switch {
 	case stmt.local != nil:
@@ -1124,7 +1307,17 @@ func (tree syntaxTree) functionExpressionTypeParams(value arenaFunctionID) []str
 	if !ok {
 		return nil
 	}
-	return node.typeParams
+	ids, ok := tree.arena.statements.spanStrings(node.typeParams)
+	if !ok {
+		return nil
+	}
+	values := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if name, ok := tree.stringValue(id); ok {
+			values = append(values, name)
+		}
+	}
+	return values
 }
 func (tree syntaxTree) functionExpressionTypeParamID(value arenaFunctionID) syntaxID {
 	node, ok := tree.arena.function(value)
@@ -1138,7 +1331,17 @@ func (tree syntaxTree) functionExpressionTypePacks(value arenaFunctionID) []stri
 	if !ok {
 		return nil
 	}
-	return node.typePacks
+	ids, ok := tree.arena.statements.spanStrings(node.typePacks)
+	if !ok {
+		return nil
+	}
+	values := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if name, ok := tree.stringValue(id); ok {
+			values = append(values, name)
+		}
+	}
+	return values
 }
 func (tree syntaxTree) functionExpressionTypePackID(value arenaFunctionID) syntaxID {
 	node, ok := tree.arena.function(value)
@@ -1152,7 +1355,17 @@ func (tree syntaxTree) functionExpressionParams(value arenaFunctionID) []string 
 	if !ok {
 		return nil
 	}
-	return node.params
+	ids, ok := tree.arena.statements.spanStrings(node.params)
+	if !ok {
+		return nil
+	}
+	values := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if name, ok := tree.stringValue(id); ok {
+			values = append(values, name)
+		}
+	}
+	return values
 }
 func (tree syntaxTree) functionExpressionParamID(value arenaFunctionID) syntaxID {
 	node, ok := tree.arena.function(value)
@@ -1166,7 +1379,16 @@ func (tree syntaxTree) functionExpressionParamAnnotations(value arenaFunctionID)
 	if !ok {
 		return nil
 	}
-	return node.paramAnnotations
+	ids, ok := tree.arena.statements.spanTypes(node.paramAnnotations)
+	if !ok {
+		return nil
+	}
+	values := make([]*typeExpression, 0, len(ids))
+	for _, id := range ids {
+		value, _ := tree.arena.typeNode(id)
+		values = append(values, value)
+	}
+	return values
 }
 func (tree syntaxTree) functionExpressionVariadic(value arenaFunctionID) bool {
 	node, ok := tree.arena.function(value)
@@ -1177,21 +1399,71 @@ func (tree syntaxTree) functionExpressionVariadicAnnotation(value arenaFunctionI
 	if !ok {
 		return nil
 	}
-	return node.variadicAnnotation
+	annotation, _ := tree.arena.typeNode(node.variadicAnnotation)
+	return annotation
 }
 func (tree syntaxTree) functionExpressionReturnAnnotation(value arenaFunctionID) *typeExpression {
 	node, ok := tree.arena.function(value)
 	if !ok {
 		return nil
 	}
-	return node.returnAnnotation
+	annotation, _ := tree.arena.typeNode(node.returnAnnotation)
+	return annotation
 }
 func (tree syntaxTree) functionExpressionStatements(value arenaFunctionID) []statement {
 	node, ok := tree.arena.function(value)
 	if !ok {
 		return nil
 	}
-	return node.statements
+	ids, ok := tree.arena.statements.spanStatements(node.statements)
+	if !ok {
+		return nil
+	}
+	values := make([]statement, 0, len(ids))
+	for _, id := range ids {
+		if int(id) <= 0 || int(id) > len(tree.arena.statements.statements) {
+			continue
+		}
+		// The legacy parser body remains available through the root only; typed
+		// consumers should use statementIDs/statementNode instead.
+	}
+	return values
+}
+
+func (tree syntaxTree) functionExpressionTypeParamIDs(value arenaFunctionID) (nodeSpan, bool) {
+	node, ok := tree.arena.function(value)
+	if !ok {
+		return nodeSpan{}, false
+	}
+	return node.typeParams, true
+}
+func (tree syntaxTree) functionExpressionTypePackIDs(value arenaFunctionID) (nodeSpan, bool) {
+	node, ok := tree.arena.function(value)
+	if !ok {
+		return nodeSpan{}, false
+	}
+	return node.typePacks, true
+}
+func (tree syntaxTree) functionExpressionParamIDs(value arenaFunctionID) (nodeSpan, bool) {
+	node, ok := tree.arena.function(value)
+	if !ok {
+		return nodeSpan{}, false
+	}
+	return node.params, true
+}
+func (tree syntaxTree) functionExpressionParamAnnotationIDs(value arenaFunctionID) (nodeSpan, bool) {
+	node, ok := tree.arena.function(value)
+	if !ok {
+		return nodeSpan{}, false
+	}
+	return node.paramAnnotations, true
+}
+func (tree syntaxTree) functionExpressionStatementIDs(value arenaFunctionID) (nodeSpan, bool) {
+	node, ok := tree.arena.function(value)
+	if !ok {
+		return nodeSpan{}, false
+	}
+	return node.statements, true
 }
 
 func (tree syntaxTree) typeArgs(value *typeExpression) []*typeExpression {

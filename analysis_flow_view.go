@@ -96,13 +96,14 @@ func (a *analysisState) hasTableFact(name string) bool {
 	return false
 }
 
-func (a *analysisState) defineTypeAlias(stmt typeAliasStatement) {
+func (a *analysisState) defineTypeAlias(stmt arenaTypeAliasStatement) {
 	tree := a.tree
-	name := tree.typeAliasName(&stmt)
+	name, _ := tree.stringValue(stmt.name)
+	value, _ := tree.statementType(stmt.value)
 	a.currentAliasScope()[name] = typeAliasFact{
-		typeParams: append([]string(nil), tree.typeAliasTypeParams(&stmt)...),
-		typePacks:  append([]string(nil), tree.typeAliasTypePacks(&stmt)...),
-		value:      tree.typeAliasValue(&stmt),
+		typeParams: consumerStatementStrings(tree, stmt.typeParams),
+		typePacks:  consumerStatementStrings(tree, stmt.typePacks),
+		value:      value,
 	}
 }
 

@@ -6,6 +6,19 @@ import (
 	"unsafe"
 )
 
+func firstReturnExpressionIDs(tree syntaxTree) []expressionID {
+	ids, ok := tree.statementIDs()
+	if !ok || len(ids) == 0 {
+		return nil
+	}
+	ret, ok := tree.returnArena(ids[0])
+	if !ok {
+		return nil
+	}
+	values, _ := tree.statementExpressions(ret.values)
+	return values
+}
+
 func TestExpressionArenaStoresTypedIDsAndContiguousChildren(t *testing.T) {
 	tree := syntaxTree{arena: &syntaxArena{
 		expressions:     []arenaExpression{{terms: nodeSpan{start: 0, count: 2}}},
@@ -127,9 +140,16 @@ func TestSyntaxIDsPersistInFunctionArenaPayload(t *testing.T) {
 		additives:       []arenaAdditiveExpression{{first: 1}},
 		multiplicatives: []arenaMultiplicativeExpression{{first: 1}},
 		terms:           []arenaTerm{{kind: termKindFunction, payload: 1}},
-		functions:       []arenaFunction{{params: []string{"value"}}},
+		functions:       []arenaFunction{{params: nodeSpan{start: 0, count: 1}}},
+		statements: statementArena{
+			statements:       []arenaStatement{{kind: syntaxStatementReturn, payload: 1}},
+			statementIDs:     []statementID{1},
+			returnStatements: []arenaReturnStatement{{values: nodeSpan{start: 0, count: 1}}},
+			expressionIDs:    []expressionID{1},
+			stringIDs:        []stringID{1},
+		},
 	}
-	tree := newSyntaxTreeWithArena(program{statements: []statement{{ret: &returnStatement{values: []expressionID{1}}}}}, arena)
+	tree := newSyntaxTreeWithArena(program{statementSpan: nodeSpan{start: 0, count: 1}}, arena)
 	if err := assignSyntaxTreeIDsWithLimit(&tree, 0); err != nil {
 		t.Fatalf("assignSyntaxTreeIDsWithLimit returned error: %v", err)
 	}
@@ -147,11 +167,11 @@ func TestParserAssignsReachableExpressionArenaIDs(t *testing.T) {
 	if artifact.tree.arena == nil {
 		t.Fatal("parser did not attach an arena")
 	}
-	ret := artifact.tree.returnStatement(artifact.tree.statement(0))
-	if ret == nil || len(ret.values) != 1 || ret.values[0] == 0 {
-		t.Fatalf("return expression arena ID missing: %#v", ret)
+	values := firstReturnExpressionIDs(artifact.tree)
+	if len(values) != 1 || values[0] == 0 {
+		t.Fatalf("return expression arena ID missing: %#v", values)
 	}
-	root, ok := artifact.tree.arena.expression(ret.values[0])
+	root, ok := artifact.tree.arena.expression(values[0])
 	if !ok {
 		t.Fatal("root expression arena ID did not resolve")
 	}
@@ -176,8 +196,8 @@ func TestExpressionArenaPreservesRangesSelectorsAndStableSyntaxIDs(t *testing.T)
 	if err != nil {
 		t.Fatalf("second parseSource returned error: %v", err)
 	}
-	firstValue := first.tree.returnValues(first.tree.returnStatement(first.tree.statement(0)))[0]
-	secondValue := second.tree.returnValues(second.tree.returnStatement(second.tree.statement(0)))[0]
+	firstValue := firstReturnExpressionIDs(first.tree)[0]
+	secondValue := firstReturnExpressionIDs(second.tree)[0]
 	firstTerm, ok := expressionSingleTerm(first.tree, firstValue)
 	if !ok {
 		t.Fatal("first return value is not a single term")
@@ -206,8 +226,7 @@ func TestExpressionArenaSyntaxIDAssignmentIsRepeatable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
-	ret := artifact.tree.returnStatement(artifact.tree.statement(0))
-	value := ret.values[0]
+	value := firstReturnExpressionIDs(artifact.tree)[0]
 	term, ok := expressionSingleTerm(artifact.tree, value)
 	if !ok {
 		t.Fatal("return value is not a single term")
@@ -234,8 +253,8 @@ func TestExpressionArenaPreservesOperatorPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
-	ret := artifact.tree.returnStatement(artifact.tree.statement(0))
-	orTerms, ok := artifact.tree.expressionTerms(ret.values[0])
+	values := firstReturnExpressionIDs(artifact.tree)
+	orTerms, ok := artifact.tree.expressionTerms(values[0])
 	if !ok || len(orTerms) != 2 {
 		t.Fatalf("or terms=%v, ok=%t, want two", orTerms, ok)
 	}
@@ -269,8 +288,8 @@ func TestExpressionArenaStoresTableCallFunctionAndIfTerms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
-	ret := artifact.tree.returnStatement(artifact.tree.statement(0))
-	tableTerm, ok := expressionSingleTerm(artifact.tree, ret.values[0])
+	values := firstReturnExpressionIDs(artifact.tree)
+	tableTerm, ok := expressionSingleTerm(artifact.tree, values[0])
 	if !ok {
 		t.Fatal("return value is not a single table term")
 	}

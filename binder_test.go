@@ -54,7 +54,8 @@ return value
 	if err != nil {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
-	if len(artifact.tree.statements()) == 0 {
+	statements, ok := artifact.tree.statementIDs()
+	if !ok || len(statements) == 0 {
 		t.Fatal("parseSource returned no statements")
 	}
 	artifact.bind.mustSymbol(t, "value", symbolLocal, 0)
@@ -108,7 +109,17 @@ return value
 	result := bindSyntaxTree(tree)
 	value := result.mustSymbol(t, "value", symbolLocal, 0)
 
-	targetID := tree.root.statements[1].assign.targets[0].id
+	statements, _ := tree.statementIDs()
+	assign, ok := tree.assignmentArena(statements[1])
+	if !ok {
+		t.Fatal("assignment statement is not present in the statement arena")
+	}
+	targets, _ := tree.statementTargets(assign.targets)
+	target, ok := tree.statementArenaTarget(targets[0])
+	if !ok {
+		t.Fatal("assignment target is not present in the statement arena")
+	}
+	targetID := target.id
 	targetUse, ok := result.use(targetID)
 	if !ok {
 		t.Fatalf("assignment target use(%d) was not resolved", targetID)
@@ -150,17 +161,36 @@ return value
 `)
 	result := bindSyntaxTree(tree)
 
-	definitionID := tree.root.statements[0].local.nameID
+	statements, _ := tree.statementIDs()
+	local, ok := tree.localArena(statements[0])
+	if !ok {
+		t.Fatal("local statement is not present in the statement arena")
+	}
+	definitionID := local.nameID
 	symbol, ok := result.definition(definitionID)
 	if !ok || symbol.name != "value" {
 		t.Fatalf("definition(%d) = %#v, %t, want value symbol", definitionID, symbol, ok)
 	}
-	assignmentID := tree.root.statements[1].assign.targets[0].id
+	assign, ok := tree.assignmentArena(statements[1])
+	if !ok {
+		t.Fatal("assignment statement is not present in the statement arena")
+	}
+	targets, _ := tree.statementTargets(assign.targets)
+	target, ok := tree.statementArenaTarget(targets[0])
+	if !ok {
+		t.Fatal("assignment target is not present in the statement arena")
+	}
+	assignmentID := target.id
 	use, ok := result.use(assignmentID)
 	if !ok || use.symbol != symbol.id {
 		t.Fatalf("use(%d) = %#v, %t, want symbol %d", assignmentID, use, ok, symbol.id)
 	}
-	returnTerm, ok := expressionSingleTerm(tree, tree.root.statements[2].ret.values[0])
+	ret, ok := tree.returnArena(statements[2])
+	if !ok {
+		t.Fatal("return statement is not present in the statement arena")
+	}
+	values, _ := tree.statementExpressions(ret.values)
+	returnTerm, ok := expressionSingleTerm(tree, values[0])
 	if !ok {
 		t.Fatal("return expression is not a single term")
 	}
@@ -195,15 +225,19 @@ return before, after, readAfter()
 		t.Fatalf("after facts = %#v, want assigned captured mutation after capture", afterFacts)
 	}
 
-	statements := tree.statements()
-	ret := statements[len(statements)-1].ret
-	if fact, ok := result.expressionFact(tree.expressionSyntaxID(ret.values[0])); !ok || fact.multiret {
+	statementIDs, _ := tree.statementIDs()
+	ret, ok := tree.returnArena(statementIDs[len(statementIDs)-1])
+	if !ok {
+		t.Fatal("return statement is not present in the statement arena")
+	}
+	values, _ := tree.statementExpressions(ret.values)
+	if fact, ok := result.expressionFact(tree.expressionSyntaxID(values[0])); !ok || fact.multiret {
 		t.Fatalf("first return expression fact = %#v, %t, want single result", fact, ok)
 	}
-	if fact, ok := result.expressionFact(tree.expressionSyntaxID(ret.values[1])); !ok || fact.multiret {
+	if fact, ok := result.expressionFact(tree.expressionSyntaxID(values[1])); !ok || fact.multiret {
 		t.Fatalf("second return expression fact = %#v, %t, want single result", fact, ok)
 	}
-	if fact, ok := result.expressionFact(tree.expressionSyntaxID(ret.values[2])); !ok || !fact.multiret || fact.arity != -1 {
+	if fact, ok := result.expressionFact(tree.expressionSyntaxID(values[2])); !ok || !fact.multiret || fact.arity != -1 {
 		t.Fatalf("third return expression fact = %#v, %t, want open multiret", fact, ok)
 	}
 }
@@ -216,14 +250,34 @@ end
 `
 	firstTree := parseSourceForBindTest(t, source)
 	secondTree := parseSourceForBindTest(t, source)
-	outerFirst := firstTree.root.statements[0].localFunc
-	outerSecond := secondTree.root.statements[0].localFunc
-	innerFirstTerm, ok := expressionSingleTerm(firstTree, outerFirst.statements[0].ret.values[0])
+	firstStatements, _ := firstTree.statementIDs()
+	secondStatements, _ := secondTree.statementIDs()
+	outerFirst, ok := firstTree.localFunctionArena(firstStatements[0])
+	if !ok {
+		t.Fatal("outer function is not present in the statement arena")
+	}
+	outerSecond, ok := secondTree.localFunctionArena(secondStatements[0])
+	if !ok {
+		t.Fatal("second outer function is not present in the statement arena")
+	}
+	firstBody, _ := firstTree.statementChildren(outerFirst.statements)
+	firstReturn, ok := firstTree.returnArena(firstBody[0])
+	if !ok {
+		t.Fatal("first function return is not present in the statement arena")
+	}
+	firstValues, _ := firstTree.statementExpressions(firstReturn.values)
+	innerFirstTerm, ok := expressionSingleTerm(firstTree, firstValues[0])
 	innerFirst, isFunction := firstTree.termFunction(innerFirstTerm)
 	if !ok || !isFunction {
 		t.Fatal("inner expression is not a function")
 	}
-	innerSecondTerm, ok := expressionSingleTerm(secondTree, outerSecond.statements[0].ret.values[0])
+	secondBody, _ := secondTree.statementChildren(outerSecond.statements)
+	secondReturn, ok := secondTree.returnArena(secondBody[0])
+	if !ok {
+		t.Fatal("second function return is not present in the statement arena")
+	}
+	secondValues, _ := secondTree.statementExpressions(secondReturn.values)
+	innerSecondTerm, ok := expressionSingleTerm(secondTree, secondValues[0])
 	innerSecond, isFunction := secondTree.termFunction(innerSecondTerm)
 	if !ok || !isFunction {
 		t.Fatal("second inner expression is not a function")

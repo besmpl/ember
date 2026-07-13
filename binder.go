@@ -182,10 +182,6 @@ type binder struct {
 	activeTypeNames  map[string]int
 }
 
-func bindProgram(prog program) bindResult {
-	return bindSyntaxTree(newSyntaxTree(prog))
-}
-
 func bindSyntaxTree(tree syntaxTree) bindResult {
 	if tree.nodeCount() == 0 {
 		assignSyntaxTreeIDs(&tree)
@@ -204,7 +200,8 @@ func bindSyntaxTree(tree syntaxTree) bindResult {
 		activeTypeNames:  make(map[string]int),
 	}
 	b.pushScopeForFunction(0)
-	b.bindStatements(tree.statements())
+	statements, _ := tree.statementIDs()
+	b.bindStatements(statements)
 	b.popScope()
 	for i := range b.result.symbols {
 		facts := &b.result.symbols[i].facts
@@ -213,126 +210,199 @@ func bindSyntaxTree(tree syntaxTree) bindResult {
 	return b.result
 }
 
-func (b *binder) bindStatements(statements []statement) {
+func (b *binder) bindStatements(statements []statementID) {
 	for _, stmt := range statements {
 		b.bindStatement(stmt)
 	}
 }
 
-func (b *binder) bindStatement(stmt statement) {
-	switch b.tree.statementKind(&stmt) {
+func (b *binder) bindStatement(stmt statementID) {
+	node, ok := b.tree.statementNode(stmt)
+	if !ok {
+		return
+	}
+	switch node.kind {
 	case syntaxStatementLocal:
-		local := b.tree.local(&stmt)
-		for _, annotation := range b.tree.localAnnotations(local) {
-			b.bindTypeExpression(annotation)
+		local, ok := b.tree.localArena(stmt)
+		if !ok {
+			return
 		}
-		for _, value := range b.tree.localValues(local) {
+		annotations, _ := b.tree.statementTypes(local.annotations)
+		for _, annotation := range annotations {
+			value, _ := b.tree.statementType(annotation)
+			b.bindTypeExpression(value)
+		}
+		values, _ := b.tree.statementExpressions(local.values)
+		for _, value := range values {
 			b.bindExpression(value)
 		}
-		for i, name := range b.tree.localNames(local) {
-			b.define(name, symbolLocal, syntaxNameID(b.tree.localNameID(local), i))
+		names, _ := b.tree.statementStrings(local.names)
+		for i, nameID := range names {
+			b.defineArenaName(nameID, symbolLocal, syntaxNameID(local.nameID, i))
 		}
 	case syntaxStatementLocalFunction:
-		localFunc := b.tree.localFunction(&stmt)
-		b.define(b.tree.localFunctionName(localFunc), symbolLocalFunction, b.tree.localFunctionNameID(localFunc))
-		b.bindFunction(b.tree.localFunctionID(localFunc), b.tree.localFunctionTypeParams(localFunc), b.tree.localFunctionTypeParamID(localFunc), b.tree.localFunctionTypePacks(localFunc), b.tree.localFunctionTypePackID(localFunc), b.tree.localFunctionParams(localFunc), b.tree.localFunctionParamID(localFunc), b.tree.localFunctionParamAnnotations(localFunc), b.tree.localFunctionVariadicAnnotation(localFunc), b.tree.localFunctionReturnAnnotation(localFunc), b.tree.localFunctionStatements(localFunc))
-	case syntaxStatementFunctionDeclaration:
-		funcDecl := b.tree.functionDeclaration(&stmt)
-		target := b.tree.functionDeclarationTarget(funcDecl)
-		b.bindAssignTarget(*target, true)
-		params := b.tree.functionDeclarationParams(funcDecl)
-		paramID := b.tree.functionDeclarationParamID(funcDecl)
-		if b.tree.functionDeclarationMethod(funcDecl) {
-			params = append([]string{"self"}, params...)
-			paramID = b.tree.functionDeclarationSelfID(funcDecl)
+		localFunc, ok := b.tree.localFunctionArena(stmt)
+		if !ok {
+			return
 		}
-		b.bindFunction(b.tree.functionDeclarationID(funcDecl), b.tree.functionDeclarationTypeParams(funcDecl), b.tree.functionDeclarationTypeParamID(funcDecl), b.tree.functionDeclarationTypePacks(funcDecl), b.tree.functionDeclarationTypePackID(funcDecl), params, paramID, b.tree.functionDeclarationParamAnnotations(funcDecl), b.tree.functionDeclarationVariadicAnnotation(funcDecl), b.tree.functionDeclarationReturnAnnotation(funcDecl), b.tree.functionDeclarationStatements(funcDecl))
+		b.defineArenaName(localFunc.name, symbolLocalFunction, localFunc.nameID)
+		b.bindFunctionStatement(localFunc)
+	case syntaxStatementFunctionDeclaration:
+		funcDecl, ok := b.tree.functionDeclarationArena(stmt)
+		if !ok {
+			return
+		}
+		b.bindAssignTargetID(funcDecl.target, true)
+		b.bindFunctionStatement(funcDecl)
 	case syntaxStatementAssign:
-		assign := b.tree.assignment(&stmt)
-		for _, value := range b.tree.assignmentValues(assign) {
+		assign, ok := b.tree.assignmentArena(stmt)
+		if !ok {
+			return
+		}
+		values, _ := b.tree.statementExpressions(assign.values)
+		for _, value := range values {
 			b.bindExpression(value)
 		}
-		for _, target := range b.tree.assignmentTargets(assign) {
-			b.bindAssignTarget(target, true)
+		targets, _ := b.tree.statementTargets(assign.targets)
+		for _, target := range targets {
+			b.bindAssignTargetID(target, true)
 		}
 	case syntaxStatementCall:
-		b.bindTerm(b.tree.call(&stmt))
+		b.bindTerm(termID(node.payload))
 	case syntaxStatementIf:
-		ifStmt := b.tree.ifStatement(&stmt)
-		b.bindExpression(b.tree.ifCondition(ifStmt))
-		b.bindScoped(b.tree.ifThenStatements(ifStmt))
-		b.bindScoped(b.tree.ifElseStatements(ifStmt))
+		ifStmt, ok := b.tree.ifArena(stmt)
+		if !ok {
+			return
+		}
+		b.bindExpression(ifStmt.condition)
+		thenBody, _ := b.tree.statementChildren(ifStmt.thenStatements)
+		elseBody, _ := b.tree.statementChildren(ifStmt.elseStatements)
+		b.bindScoped(thenBody)
+		b.bindScoped(elseBody)
 	case syntaxStatementWhile:
-		while := b.tree.whileStatement(&stmt)
-		b.bindExpression(b.tree.whileCondition(while))
-		b.bindScoped(b.tree.whileStatements(while))
+		while, ok := b.tree.whileArena(stmt)
+		if !ok {
+			return
+		}
+		b.bindExpression(while.condition)
+		body, _ := b.tree.statementChildren(while.statements)
+		b.bindScoped(body)
 	case syntaxStatementFor:
-		forLoop := b.tree.forStatement(&stmt)
-		b.bindExpression(b.tree.numericForStart(forLoop))
-		b.bindExpression(b.tree.numericForLimit(forLoop))
-		if step := b.tree.numericForStep(forLoop); step != 0 {
-			b.bindExpression(step)
+		forLoop, ok := b.tree.forArena(stmt)
+		if !ok {
+			return
+		}
+		b.bindExpression(forLoop.start)
+		b.bindExpression(forLoop.limit)
+		if forLoop.step != 0 {
+			b.bindExpression(forLoop.step)
 		}
 		b.pushScope()
-		b.define(b.tree.numericForName(forLoop), symbolLocal, b.tree.numericForNameID(forLoop))
-		b.bindStatements(b.tree.numericForStatements(forLoop))
+		b.defineArenaName(forLoop.name, symbolLocal, forLoop.nameID)
+		body, _ := b.tree.statementChildren(forLoop.statements)
+		b.bindStatements(body)
 		b.popScope()
 	case syntaxStatementGenericFor:
-		genericFor := b.tree.genericForStatement(&stmt)
-		for _, value := range b.tree.genericForValues(genericFor) {
+		genericFor, ok := b.tree.genericForArena(stmt)
+		if !ok {
+			return
+		}
+		values, _ := b.tree.statementExpressions(genericFor.values)
+		for _, value := range values {
 			b.bindExpression(value)
 		}
 		b.pushScope()
-		for i, name := range b.tree.genericForNames(genericFor) {
-			b.define(name, symbolLocal, syntaxNameID(b.tree.genericForNameID(genericFor), i))
+		names, _ := b.tree.statementStrings(genericFor.names)
+		for i, nameID := range names {
+			b.defineArenaName(nameID, symbolLocal, syntaxNameID(genericFor.nameID, i))
 		}
-		b.bindStatements(b.tree.genericForStatements(genericFor))
+		body, _ := b.tree.statementChildren(genericFor.statements)
+		b.bindStatements(body)
 		b.popScope()
 	case syntaxStatementRepeat:
-		repeat := b.tree.repeatStatement(&stmt)
+		repeat, ok := b.tree.repeatArena(stmt)
+		if !ok {
+			return
+		}
 		b.pushScope()
-		b.bindStatements(b.tree.repeatStatements(repeat))
-		b.bindExpression(b.tree.repeatCondition(repeat))
+		body, _ := b.tree.statementChildren(repeat.statements)
+		b.bindStatements(body)
+		b.bindExpression(repeat.condition)
 		b.popScope()
 	case syntaxStatementBlock:
-		b.bindScoped(b.tree.blockStatements(b.tree.blockStatement(&stmt)))
+		block, ok := b.tree.blockArena(stmt)
+		if !ok {
+			return
+		}
+		body, _ := b.tree.statementChildren(block.statements)
+		b.bindScoped(body)
 	case syntaxStatementReturn:
-		for _, value := range b.tree.returnValues(b.tree.returnStatement(&stmt)) {
+		ret, ok := b.tree.returnArena(stmt)
+		if !ok {
+			return
+		}
+		values, _ := b.tree.statementExpressions(ret.values)
+		for _, value := range values {
 			b.bindExpression(value)
 		}
 	case syntaxStatementTypeAlias:
-		typeAlias := b.tree.typeAliasStatement(&stmt)
-		b.define(b.tree.typeAliasName(typeAlias), symbolTypeAlias, b.tree.typeAliasNameID(typeAlias))
+		typeAlias, ok := b.tree.typeAliasArena(stmt)
+		if !ok {
+			return
+		}
+		b.defineArenaName(typeAlias.name, symbolTypeAlias, typeAlias.nameID)
 		b.pushScope()
-		for i, name := range b.tree.typeAliasTypeParams(typeAlias) {
-			b.define(name, symbolTypeParameter, syntaxNameID(b.tree.typeAliasTypeParamID(typeAlias), i))
+		typeParams, _ := b.tree.statementStrings(typeAlias.typeParams)
+		for i, nameID := range typeParams {
+			b.defineArenaName(nameID, symbolTypeParameter, syntaxNameID(typeAlias.typeParamID, i))
 		}
-		for i, name := range b.tree.typeAliasTypePacks(typeAlias) {
-			b.define(name, symbolTypePack, syntaxNameID(b.tree.typeAliasTypePackID(typeAlias), i))
+		typePacks, _ := b.tree.statementStrings(typeAlias.typePacks)
+		for i, nameID := range typePacks {
+			b.defineArenaName(nameID, symbolTypePack, syntaxNameID(typeAlias.typePackID, i))
 		}
-		b.bindTypeExpression(b.tree.typeAliasValue(typeAlias))
+		value, _ := b.tree.statementType(typeAlias.value)
+		b.bindTypeExpression(value)
 		b.popScope()
 	}
 }
 
-func (b *binder) bindFunction(functionID int, typeParams []string, typeParamID syntaxID, typePacks []string, typePackID syntaxID, params []string, paramID syntaxID, paramAnnotations []*typeExpression, variadicAnnotation *typeExpression, returnAnnotation *typeExpression, statements []statement) {
+func (b *binder) bindFunctionParts(functionID int, typeParams nodeSpan, typeParamID syntaxID, typePacks nodeSpan, typePackID syntaxID, params nodeSpan, paramID syntaxID, selfID syntaxID, paramAnnotations nodeSpan, variadic bool, variadicAnnotation typeID, returnAnnotation typeID, statements nodeSpan) {
 	b.pushScopeForFunction(functionID)
-	for i, name := range typeParams {
-		b.define(name, symbolTypeParameter, syntaxNameID(typeParamID, i))
+	typeParamIDs, _ := b.tree.statementStrings(typeParams)
+	for i, nameID := range typeParamIDs {
+		b.defineArenaName(nameID, symbolTypeParameter, syntaxNameID(typeParamID, i))
 	}
-	for i, name := range typePacks {
-		b.define(name, symbolTypePack, syntaxNameID(typePackID, i))
+	typePackIDs, _ := b.tree.statementStrings(typePacks)
+	for i, nameID := range typePackIDs {
+		b.defineArenaName(nameID, symbolTypePack, syntaxNameID(typePackID, i))
 	}
-	for _, annotation := range paramAnnotations {
+	annotations, _ := b.tree.statementTypes(paramAnnotations)
+	for _, annotationID := range annotations {
+		annotation, _ := b.tree.statementType(annotationID)
 		b.bindTypeExpression(annotation)
 	}
-	b.bindTypeExpression(variadicAnnotation)
-	b.bindTypeExpression(returnAnnotation)
-	for i, name := range params {
-		b.define(name, symbolParameter, syntaxNameID(paramID, i))
+	variadicValue, _ := b.tree.statementType(variadicAnnotation)
+	b.bindTypeExpression(variadicValue)
+	returnValue, _ := b.tree.statementType(returnAnnotation)
+	b.bindTypeExpression(returnValue)
+	if selfID != 0 {
+		b.define("self", symbolParameter, selfID)
 	}
-	b.bindStatements(statements)
+	paramIDs, _ := b.tree.statementStrings(params)
+	for i, nameID := range paramIDs {
+		b.defineArenaName(nameID, symbolParameter, syntaxNameID(paramID, i))
+	}
+	body, _ := b.tree.statementChildren(statements)
+	b.bindStatements(body)
 	b.popScope()
+}
+
+func (b *binder) bindFunctionStatement(fn arenaFunctionStatement) {
+	b.bindFunctionParts(fn.functionID, fn.typeParams, fn.typeParamID, fn.typePacks, fn.typePackID, fn.params, fn.paramID, fn.selfID, fn.paramAnnotations, fn.variadic, fn.variadicAnnotation, fn.returnAnnotation, fn.statements)
+}
+
+func (b *binder) bindFunctionExpression(fn arenaFunction) {
+	b.bindFunctionParts(fn.functionID, fn.typeParams, fn.typeParamID, fn.typePacks, fn.typePackID, fn.params, fn.paramID, 0, fn.paramAnnotations, fn.variadic, fn.variadicAnnotation, fn.returnAnnotation, fn.statements)
 }
 
 func (b *binder) bindExpression(expr expressionID) {
@@ -400,7 +470,11 @@ func (b *binder) bindTerm(value termID) {
 		}
 	}
 	if function, ok := b.tree.termFunction(value); ok {
-		b.bindFunction(b.tree.functionExpressionFunctionID(function), b.tree.functionExpressionTypeParams(function), b.tree.functionExpressionTypeParamID(function), b.tree.functionExpressionTypePacks(function), b.tree.functionExpressionTypePackID(function), b.tree.functionExpressionParams(function), b.tree.functionExpressionParamID(function), b.tree.functionExpressionParamAnnotations(function), b.tree.functionExpressionVariadicAnnotation(function), b.tree.functionExpressionReturnAnnotation(function), b.tree.functionExpressionStatements(function))
+		if b.tree.arena != nil {
+			if fn, valid := b.tree.arena.function(function); valid {
+				b.bindFunctionExpression(fn)
+			}
+		}
 	}
 	if ifExpr, ok := b.tree.termIf(value); ok {
 		b.bindExpression(b.tree.ifExpressionCondition(ifExpr))
@@ -501,11 +575,19 @@ func (b *binder) bindTypeFunction(value *typeExpression) {
 	b.bindTypeExpression(b.tree.typeReturn(value))
 }
 
-func (b *binder) bindAssignTarget(target assignTarget, assignment bool) {
-	targetID := b.tree.assignTargetID(&target)
-	b.recordUse(targetID, b.tree.assignTargetName(&target), valueNamespace)
-	if assignment && len(b.tree.assignTargetSelectors(&target)) == 0 {
-		if use, ok := b.result.use(targetID); ok {
+func (b *binder) bindAssignTargetID(targetID assignTargetID, assignment bool) {
+	target, ok := b.tree.statementArenaTarget(targetID)
+	if !ok {
+		return
+	}
+	name, ok := resolveArenaName(b.tree, target.name)
+	if !ok {
+		return
+	}
+	b.recordUse(target.id, name, valueNamespace)
+	selectors, _ := b.tree.selectorSpan(target.selectors)
+	if assignment && len(selectors) == 0 {
+		if use, ok := b.result.use(syntaxID(target.id)); ok {
 			facts := &b.result.symbols[use.symbol].facts
 			facts.assigned = true
 			if facts.captured {
@@ -513,14 +595,22 @@ func (b *binder) bindAssignTarget(target assignTarget, assignment bool) {
 			}
 		}
 	}
-	for _, selector := range b.tree.assignTargetSelectors(&target) {
-		if index := b.tree.selectorIndex(&selector); index != 0 {
+	for _, selector := range selectors {
+		if index := selector.index; index != 0 {
 			b.bindExpression(index)
 		}
 	}
 }
 
-func (b *binder) bindScoped(statements []statement) {
+func (b *binder) defineArenaName(nameID stringID, kind symbolKind, node syntaxID) {
+	name, ok := resolveArenaName(b.tree, nameID)
+	if !ok {
+		return
+	}
+	b.define(name, kind, node)
+}
+
+func (b *binder) bindScoped(statements []statementID) {
 	b.pushScope()
 	b.bindStatements(statements)
 	b.popScope()

@@ -3828,7 +3828,8 @@ func TestCompilerAttachesExpressionSourceMetadataToBytecodeIR(t *testing.T) {
 		},
 	})
 
-	if err := compiler.compileStatements(artifact.tree.statements()); err != nil {
+	statements, _ := artifact.tree.statementIDs()
+	if err := compiler.compileStatements(statements); err != nil {
 		t.Fatalf("compileStatements returned error: %v", err)
 	}
 	add, ok := findBytecodeIRInstruction(compiler.ir, opAdd)
@@ -9708,7 +9709,9 @@ func parseSourceForBytecodeIRTest(t *testing.T, source string) sourceArtifact {
 
 func compilerForBytecodeIRTest(artifact sourceArtifact, options compilerOptions) compiler {
 	return compiler{
+		tree:            artifact.tree,
 		bind:            artifact.bind,
+		sourceLines:     newSourceLineMap(artifact.source.Text),
 		symbolRegisters: newDenseSymbolSlots(len(artifact.bind.symbols)),
 		options:         options,
 	}

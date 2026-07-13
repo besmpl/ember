@@ -16,53 +16,102 @@ func checkTypedSource(t *testing.T, body string) (string, checkResult) {
 	return source, result
 }
 
-func firstLocalStatement(t *testing.T, result checkResult) *localStatement {
+func firstStatementID(t *testing.T, result checkResult) statementID {
 	t.Helper()
 
-	if len(result.tree.statements()) < 1 || result.tree.statements()[0].local == nil {
-		t.Fatalf("first statement is %#v, want local statement", result.tree.statements())
+	statements, ok := result.tree.statementIDs()
+	if !ok || len(statements) == 0 {
+		t.Fatal("syntax tree has no statements")
 	}
-	return result.tree.statements()[0].local
+	return statements[0]
 }
 
-func firstTypeAlias(t *testing.T, result checkResult) *typeAliasStatement {
+func statementTypeExpressions(t *testing.T, tree syntaxTree, span nodeSpan) []*typeExpression {
 	t.Helper()
 
-	if len(result.tree.statements()) < 1 || result.tree.statements()[0].typeAlias == nil {
-		t.Fatalf("first statement is %#v, want type alias", result.tree.statements())
+	typeIDs, ok := tree.statementTypes(span)
+	if !ok {
+		t.Fatalf("type span is %#v, want valid statement type span", span)
 	}
-	return result.tree.statements()[0].typeAlias
+	types := make([]*typeExpression, len(typeIDs))
+	for i, typeID := range typeIDs {
+		types[i], _ = tree.statementType(typeID)
+	}
+	return types
 }
 
-func firstLocalFunction(t *testing.T, result checkResult) *localFunctionStatement {
+func statementStringValues(t *testing.T, tree syntaxTree, span nodeSpan) []string {
 	t.Helper()
 
-	if len(result.tree.statements()) < 1 || result.tree.statements()[0].localFunc == nil {
-		t.Fatalf("first statement is %#v, want local function", result.tree.statements())
+	stringIDs, ok := tree.statementStrings(span)
+	if !ok {
+		t.Fatalf("string span is %#v, want valid statement string span", span)
 	}
-	return result.tree.statements()[0].localFunc
+	values := make([]string, len(stringIDs))
+	for i, stringID := range stringIDs {
+		values[i], _ = tree.stringValue(stringID)
+	}
+	return values
 }
 
-func firstReturnStatement(t *testing.T, result checkResult) *returnStatement {
+func firstLocalStatement(t *testing.T, result checkResult) arenaLocalStatement {
 	t.Helper()
 
-	for _, stmt := range result.tree.statements() {
-		if stmt.ret != nil {
-			return stmt.ret
+	statement := firstStatementID(t, result)
+	local, ok := result.tree.localArena(statement)
+	if !ok {
+		t.Fatalf("first statement kind is %d, want local statement", result.tree.statementKindID(statement))
+	}
+	return local
+}
+
+func firstTypeAlias(t *testing.T, result checkResult) arenaTypeAliasStatement {
+	t.Helper()
+
+	statement := firstStatementID(t, result)
+	alias, ok := result.tree.typeAliasArena(statement)
+	if !ok {
+		t.Fatalf("first statement kind is %d, want type alias", result.tree.statementKindID(statement))
+	}
+	return alias
+}
+
+func firstLocalFunction(t *testing.T, result checkResult) arenaFunctionStatement {
+	t.Helper()
+
+	statement := firstStatementID(t, result)
+	function, ok := result.tree.localFunctionArena(statement)
+	if !ok {
+		t.Fatalf("first statement kind is %d, want local function", result.tree.statementKindID(statement))
+	}
+	return function
+}
+
+func firstReturnStatement(t *testing.T, result checkResult) arenaReturnStatement {
+	t.Helper()
+
+	statements, ok := result.tree.statementIDs()
+	if !ok {
+		t.Fatal("syntax tree has no statement arena")
+	}
+	for _, statement := range statements {
+		if ret, ok := result.tree.returnArena(statement); ok {
+			return ret
 		}
 	}
-	t.Fatalf("statements are %#v, want return statement", result.tree.statements())
-	return nil
+	t.Fatalf("statement IDs are %#v, want return statement", statements)
+	return arenaReturnStatement{}
 }
 
 func firstReturnedTerm(t *testing.T, result checkResult) termID {
 	t.Helper()
 
 	ret := firstReturnStatement(t, result)
-	if len(ret.values) < 1 {
+	values, ok := result.tree.statementExpressions(ret.values)
+	if !ok || len(values) == 0 {
 		t.Fatal("return statement has no values")
 	}
-	ands, ok := result.tree.expressionTerms(ret.values[0])
+	ands, ok := result.tree.expressionTerms(values[0])
 	if !ok || len(ands) == 0 {
 		t.Fatal("first returned expression has no or terms")
 	}
@@ -110,7 +159,8 @@ local value: number | string? = 1
 return value
 `)
 
-	annotations := firstLocalStatement(t, result).annotations
+	local := firstLocalStatement(t, result)
+	annotations := statementTypeExpressions(t, result.tree, local.annotations)
 	if len(annotations) != 1 {
 		t.Fatalf("local has %d annotations, want 1", len(annotations))
 	}
@@ -147,19 +197,22 @@ return 1
 	if !alias.exported {
 		t.Fatal("alias exported is false, want true")
 	}
-	if alias.name != "ScoreMap" {
-		t.Fatalf("alias name is %q, want ScoreMap", alias.name)
+	name, _ := result.tree.stringValue(alias.name)
+	if name != "ScoreMap" {
+		t.Fatalf("alias name is %q, want ScoreMap", name)
 	}
-	if len(alias.typeParams) != 1 || alias.typeParams[0] != "T" {
-		t.Fatalf("alias type params are %#v, want T", alias.typeParams)
+	typeParams := statementStringValues(t, result.tree, alias.typeParams)
+	if len(typeParams) != 1 || typeParams[0] != "T" {
+		t.Fatalf("alias type params are %#v, want T", typeParams)
 	}
-	if alias.value == nil || alias.value.kind != typeKindTable {
-		t.Fatalf("alias value is %#v, want table type", alias.value)
+	value, _ := result.tree.statementType(alias.value)
+	if value == nil || value.kind != typeKindTable {
+		t.Fatalf("alias value is %#v, want table type", value)
 	}
-	if len(alias.value.fields) != 1 {
-		t.Fatalf("table has %d fields, want 1", len(alias.value.fields))
+	if len(value.fields) != 1 {
+		t.Fatalf("table has %d fields, want 1", len(value.fields))
 	}
-	field := alias.value.fields[0]
+	field := value.fields[0]
 	if field.key == nil || len(field.key.name) != 1 || field.key.name[0] != "string" {
 		t.Fatalf("indexer key is %#v, want string", field.key)
 	}
@@ -177,16 +230,19 @@ return identity(1)
 `)
 
 	fn := firstLocalFunction(t, result)
-	if len(fn.typeParams) != 1 || fn.typeParams[0] != "T" {
-		t.Fatalf("function type params are %#v, want T", fn.typeParams)
+	typeParams := statementStringValues(t, result.tree, fn.typeParams)
+	if len(typeParams) != 1 || typeParams[0] != "T" {
+		t.Fatalf("function type params are %#v, want T", typeParams)
 	}
-	if len(fn.paramAnnotations) != 1 {
-		t.Fatalf("function has %d param annotations, want 1", len(fn.paramAnnotations))
+	paramAnnotations := statementTypeExpressions(t, result.tree, fn.paramAnnotations)
+	if len(paramAnnotations) != 1 {
+		t.Fatalf("function has %d param annotations, want 1", len(paramAnnotations))
 	}
-	if param := fn.paramAnnotations[0]; param == nil || len(param.name) != 1 || param.name[0] != "T" {
+	if param := paramAnnotations[0]; param == nil || len(param.name) != 1 || param.name[0] != "T" {
 		t.Fatalf("param annotation is %#v, want T", param)
 	}
-	if ret := fn.returnAnnotation; ret == nil || len(ret.name) != 1 || ret.name[0] != "T" {
+	ret, _ := result.tree.statementType(fn.returnAnnotation)
+	if ret == nil || len(ret.name) != 1 || ret.name[0] != "T" {
 		t.Fatalf("return annotation is %#v, want T", ret)
 	}
 }
@@ -210,23 +266,26 @@ return 1
 `)
 
 	alias := firstTypeAlias(t, result)
-	if len(alias.typeParams) != 1 || alias.typeParams[0] != "T" {
-		t.Fatalf("alias type params are %#v, want T", alias.typeParams)
+	typeParams := statementStringValues(t, result.tree, alias.typeParams)
+	if len(typeParams) != 1 || typeParams[0] != "T" {
+		t.Fatalf("alias type params are %#v, want T", typeParams)
 	}
-	if len(alias.typePacks) != 1 || alias.typePacks[0] != "U" {
-		t.Fatalf("alias type packs are %#v, want U", alias.typePacks)
+	typePacks := statementStringValues(t, result.tree, alias.typePacks)
+	if len(typePacks) != 1 || typePacks[0] != "U" {
+		t.Fatalf("alias type packs are %#v, want U", typePacks)
 	}
-	if alias.value == nil || alias.value.kind != typeKindFunction {
-		t.Fatalf("alias value is %#v, want function type", alias.value)
+	value, _ := result.tree.statementType(alias.value)
+	if value == nil || value.kind != typeKindFunction {
+		t.Fatalf("alias value is %#v, want function type", value)
 	}
-	if len(alias.value.params) != 2 {
-		t.Fatalf("function type has %d params, want 2", len(alias.value.params))
+	if len(value.params) != 2 {
+		t.Fatalf("function type has %d params, want 2", len(value.params))
 	}
-	packParam := alias.value.params[1].value
+	packParam := value.params[1].value
 	if packParam == nil || packParam.kind != typeKindGenericPack || len(packParam.name) != 1 || packParam.name[0] != "U" {
 		t.Fatalf("second param is %#v, want U generic pack", packParam)
 	}
-	ret := alias.value.returnType
+	ret := value.returnType
 	if ret == nil || ret.kind != typeKindVariadic || ret.inner == nil || len(ret.inner.name) != 1 || ret.inner.name[0] != "T" {
 		t.Fatalf("return type is %#v, want variadic T", ret)
 	}
@@ -258,7 +317,8 @@ local value: number | string? = 1
 return value
 `)
 
-	annotation := firstLocalStatement(t, result).annotations[0]
+	local := firstLocalStatement(t, result)
+	annotation := statementTypeExpressions(t, result.tree, local.annotations)[0]
 	if got := source[annotation.start:annotation.end]; got != "number | string?" {
 		t.Fatalf("annotation source is %q, want number | string?", got)
 	}
@@ -282,10 +342,11 @@ return 1
 `)
 
 	alias := firstTypeAlias(t, result)
-	if alias == nil || alias.value == nil || alias.value.kind != typeKindTable {
-		t.Fatalf("alias value is %#v, want table type", alias)
+	value, _ := result.tree.statementType(alias.value)
+	if value == nil || value.kind != typeKindTable {
+		t.Fatalf("alias value is %#v, want table type", value)
 	}
-	fields := alias.value.fields
+	fields := value.fields
 	if len(fields) != 2 {
 		t.Fatalf("table has %d fields, want 2", len(fields))
 	}

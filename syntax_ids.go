@@ -38,7 +38,11 @@ func assignSyntaxTreeIDsWithLimit(tree *syntaxTree, limit uint64) error {
 	}
 	a := syntaxIDAssigner{limit: limit, tree: *tree}
 	tree.root.id = a.node()
-	a.statements(tree.statements())
+	if ids, ok := tree.statementIDs(); ok && len(ids) > 0 {
+		a.arenaStatements(tree.root.statementSpan)
+	} else {
+		a.statements(tree.statements())
+	}
 	tree.root.nodeCount = int(a.nextNode)
 	return a.err
 }
@@ -77,6 +81,228 @@ func (a *syntaxIDAssigner) names(names []string) syntaxID {
 		}
 	}
 	return first
+}
+
+func (a *syntaxIDAssigner) arenaNames(span nodeSpan) syntaxID {
+	if a.tree.arena == nil {
+		return 0
+	}
+	ids, ok := a.tree.arena.statements.spanStrings(span)
+	if !ok || len(ids) == 0 || a.err != nil {
+		return 0
+	}
+	first := a.node()
+	for range ids[1:] {
+		a.node()
+	}
+	return first
+}
+
+func (a *syntaxIDAssigner) arenaTypes(span nodeSpan) {
+	if a.tree.arena == nil {
+		return
+	}
+	ids, ok := a.tree.arena.statements.spanTypes(span)
+	if !ok {
+		return
+	}
+	for _, id := range ids {
+		a.arenaTypeID(id)
+	}
+}
+
+func (a *syntaxIDAssigner) arenaTypeID(id typeID) {
+	if id == 0 || a.tree.arena == nil || a.err != nil {
+		return
+	}
+	value, ok := a.tree.arena.typeNode(id)
+	if !ok {
+		return
+	}
+	a.typeExpression(value)
+}
+
+func (a *syntaxIDAssigner) arenaStatements(span nodeSpan) {
+	if a.tree.arena == nil {
+		return
+	}
+	ids, ok := a.tree.arena.statements.spanStatements(span)
+	if !ok {
+		return
+	}
+	for _, id := range ids {
+		if a.err != nil {
+			return
+		}
+		a.arenaStatement(id)
+	}
+}
+
+func (a *syntaxIDAssigner) arenaStatement(id statementID) {
+	node, ok := a.tree.arena.statements.statement(id)
+	if !ok {
+		return
+	}
+	node.id = a.node()
+	a.tree.arena.statements.statements[uint64(id)-1] = node
+	s := a.tree.arena.statements
+	switch node.kind {
+	case syntaxStatementLocal:
+		payload, valid := arenaNode(s.locals, node.payload)
+		if !valid {
+			return
+		}
+		payload.nameID = a.arenaNames(payload.names)
+		a.arenaTypes(payload.annotations)
+		a.arenaExpressions(payload.values)
+		s.locals[node.payload-1] = payload
+	case syntaxStatementLocalFunction:
+		payload, valid := arenaNode(s.localFuncs, node.payload)
+		if !valid {
+			return
+		}
+		a.arenaLocalFunctionStatement(&payload)
+		s.localFuncs[node.payload-1] = payload
+	case syntaxStatementFunctionDeclaration:
+		payload, valid := arenaNode(s.functionDecls, node.payload)
+		if !valid {
+			return
+		}
+		a.arenaFunctionDeclarationStatement(&payload)
+		s.functionDecls[node.payload-1] = payload
+	case syntaxStatementAssign:
+		payload, valid := arenaNode(s.assigns, node.payload)
+		if !valid {
+			return
+		}
+		if targets, ok := s.spanAssignTargets(payload.targets); ok {
+			for _, target := range targets {
+				a.arenaAssignTarget(target)
+			}
+		}
+		a.arenaExpressions(payload.values)
+	case syntaxStatementCall:
+		a.term(termID(node.payload))
+	case syntaxStatementIf:
+		payload, valid := arenaNode(s.ifStatements, node.payload)
+		if !valid {
+			return
+		}
+		a.expression(payload.condition)
+		a.arenaStatements(payload.thenStatements)
+		a.arenaStatements(payload.elseStatements)
+	case syntaxStatementWhile:
+		payload, valid := arenaNode(s.whileStatements, node.payload)
+		if !valid {
+			return
+		}
+		a.expression(payload.condition)
+		a.arenaStatements(payload.statements)
+	case syntaxStatementFor:
+		payload, valid := arenaNode(s.forStatements, node.payload)
+		if !valid {
+			return
+		}
+		payload.nameID = a.node()
+		a.expression(payload.start)
+		a.expression(payload.limit)
+		a.expression(payload.step)
+		a.arenaStatements(payload.statements)
+		s.forStatements[node.payload-1] = payload
+	case syntaxStatementGenericFor:
+		payload, valid := arenaNode(s.genericForStatements, node.payload)
+		if !valid {
+			return
+		}
+		payload.nameID = a.arenaNames(payload.names)
+		a.arenaExpressions(payload.values)
+		a.arenaStatements(payload.statements)
+		s.genericForStatements[node.payload-1] = payload
+	case syntaxStatementRepeat:
+		payload, valid := arenaNode(s.repeatStatements, node.payload)
+		if !valid {
+			return
+		}
+		a.arenaStatements(payload.statements)
+		a.expression(payload.condition)
+	case syntaxStatementBlock:
+		payload, valid := arenaNode(s.blockStatements, node.payload)
+		if !valid {
+			return
+		}
+		a.arenaStatements(payload.statements)
+	case syntaxStatementReturn:
+		payload, valid := arenaNode(s.returnStatements, node.payload)
+		if !valid {
+			return
+		}
+		a.arenaExpressions(payload.values)
+	case syntaxStatementTypeAlias:
+		payload, valid := arenaNode(s.typeAliases, node.payload)
+		if !valid {
+			return
+		}
+		payload.id, payload.nameID = a.node(), a.node()
+		payload.typeParamID, payload.typePackID = a.arenaNames(payload.typeParams), a.arenaNames(payload.typePacks)
+		a.arenaTypeID(payload.value)
+		s.typeAliases[node.payload-1] = payload
+	}
+}
+
+func (a *syntaxIDAssigner) arenaFunctionStatement(fn *arenaFunctionStatement) {
+	fn.id, fn.nameID, fn.functionID = a.node(), a.node(), a.function()
+	fn.typeParamID, fn.typePackID, fn.paramID = a.arenaNames(fn.typeParams), a.arenaNames(fn.typePacks), a.arenaNames(fn.params)
+	if fn.method {
+		fn.selfID = a.node()
+	}
+	a.arenaTypes(fn.paramAnnotations)
+	a.arenaTypeID(fn.variadicAnnotation)
+	a.arenaTypeID(fn.returnAnnotation)
+	a.arenaStatements(fn.statements)
+}
+
+func (a *syntaxIDAssigner) arenaLocalFunctionStatement(fn *arenaFunctionStatement) {
+	a.arenaFunctionStatement(fn)
+}
+
+func (a *syntaxIDAssigner) arenaFunctionDeclarationStatement(fn *arenaFunctionStatement) {
+	fn.id, fn.functionID = a.node(), a.function()
+	if fn.target != 0 {
+		a.arenaAssignTarget(fn.target)
+	}
+	fn.typeParamID, fn.typePackID = a.arenaNames(fn.typeParams), a.arenaNames(fn.typePacks)
+	if fn.method {
+		fn.selfID = a.node()
+	}
+	fn.paramID = a.arenaNames(fn.params)
+	a.arenaTypes(fn.paramAnnotations)
+	a.arenaTypeID(fn.variadicAnnotation)
+	a.arenaTypeID(fn.returnAnnotation)
+	a.arenaStatements(fn.statements)
+}
+
+func (a *syntaxIDAssigner) arenaAssignTarget(id assignTargetID) {
+	target, ok := a.tree.arena.statements.assignTarget(id)
+	if !ok {
+		return
+	}
+	target.id = a.node()
+	a.tree.arena.statements.assignTargets[uint64(id)-1] = target
+	selectors, ok := a.tree.arena.selectorIDs(target.selectors)
+	if !ok {
+		return
+	}
+	for _, selector := range selectors {
+		a.expression(selector.index)
+	}
+}
+
+func (a *syntaxIDAssigner) arenaExpressions(span nodeSpan) {
+	values, ok := a.tree.arena.statements.spanExpressions(span)
+	if !ok {
+		return
+	}
+	a.expressions(values)
 }
 
 func syntaxNameID(first syntaxID, index int) syntaxID { return first + syntaxID(index) }
@@ -288,11 +514,11 @@ func (a *syntaxIDAssigner) term(id termID) {
 		fn, ok := a.tree.arena.function(arenaFunctionID(node.payload))
 		if ok {
 			fn.id, fn.functionID = a.node(), a.function()
-			fn.typeParamID, fn.typePackID, fn.paramID = a.names(fn.typeParams), a.names(fn.typePacks), a.names(fn.params)
-			a.types(fn.paramAnnotations)
-			a.typeExpression(fn.variadicAnnotation)
-			a.typeExpression(fn.returnAnnotation)
-			a.statements(fn.statements)
+			fn.typeParamID, fn.typePackID, fn.paramID = a.arenaNames(fn.typeParams), a.arenaNames(fn.typePacks), a.arenaNames(fn.params)
+			a.arenaTypes(fn.paramAnnotations)
+			a.arenaTypeID(fn.variadicAnnotation)
+			a.arenaTypeID(fn.returnAnnotation)
+			a.arenaStatements(fn.statements)
 			a.tree.arena.functions[arenaFunctionID(node.payload)-1] = fn
 		}
 	case termKindIf:

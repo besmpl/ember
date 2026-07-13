@@ -11,25 +11,29 @@ func TestSyntaxTreeFacadePreservesRootAndPayloadIdentity(t *testing.T) {
 	if tree.nodeCount() != tree.root.nodeCount || tree.mode() != tree.root.mode {
 		t.Fatalf("root metadata changed through facade")
 	}
-	statements := tree.statements()
-	if len(statements) != len(tree.root.statements) || len(statements) == 0 {
-		t.Fatalf("statements=%d, want non-empty root view", len(statements))
+	statements, ok := tree.statementIDs()
+	if !ok || len(statements) != 2 {
+		t.Fatalf("statements=%d, want two typed root IDs", len(statements))
 	}
-	if tree.statement(0) != &tree.root.statements[0] {
-		t.Fatal("statement accessor changed pointer identity")
+	if _, ok := tree.statementAt(-1); ok {
+		t.Fatal("negative statement index resolved")
 	}
-	if tree.statement(-1) != nil || tree.statement(len(statements)) != nil {
-		t.Fatal("out-of-range statement accessor was non-nil")
+	if _, ok := tree.statementAt(len(statements)); ok {
+		t.Fatal("out-of-range statement index resolved")
 	}
-	local := tree.local(tree.statement(0))
-	if local == nil || tree.statementKind(tree.statement(0)) != syntaxStatementLocal {
-		t.Fatalf("local payload=%#v kind=%v", local, tree.statementKind(tree.statement(0)))
+	local, ok := tree.localArena(statements[0])
+	if !ok || tree.statementKindID(statements[0]) != syntaxStatementLocal {
+		t.Fatalf("local payload=%#v kind=%v", local, tree.statementKindID(statements[0]))
 	}
-	got, ok := tree.expressionTerms(local.values[0])
+	values, ok := tree.statementExpressions(local.values)
+	if !ok || len(values) != 1 {
+		t.Fatalf("local values=%v, ok=%t", values, ok)
+	}
+	got, ok := tree.expressionTerms(values[0])
 	if !ok || len(got) == 0 {
 		t.Fatal("expression term facade did not resolve arena children")
 	}
-	node, ok := tree.arena.expression(local.values[0])
+	node, ok := tree.arena.expression(values[0])
 	if !ok || got[0] != tree.arena.expressionTerms[node.terms.start] {
 		t.Fatal("expression term facade changed child identity")
 	}
@@ -37,8 +41,8 @@ func TestSyntaxTreeFacadePreservesRootAndPayloadIdentity(t *testing.T) {
 
 func TestSyntaxTreeFacadePreservesNilAndEmptyChildren(t *testing.T) {
 	tree := newSyntaxTree(program{})
-	if tree.statements() != nil {
-		t.Fatal("nil root statements became non-nil")
+	if ids, ok := tree.statementIDs(); ok && ids != nil {
+		t.Fatal("nil root statements became non-nil typed IDs")
 	}
 	if terms, ok := tree.expressionTerms(0); ok || terms != nil {
 		t.Fatal("zero expression ID returned children")

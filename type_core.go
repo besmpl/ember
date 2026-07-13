@@ -108,44 +108,50 @@ func (s *typeStore) addPack(node typePackNode) PackRef {
 	return PackRef(len(s.packs))
 }
 
-func lowerTypeAliases(store *typeStore, statements []statement) []loweredTypeAlias {
+func lowerTypeAliases(store *typeStore, statements []statementID) []loweredTypeAlias {
 	if store == nil {
 		return nil
 	}
 	store.bindAliases(statements)
 	var aliases []loweredTypeAlias
-	for i := range statements {
-		stmt := &statements[i]
-		alias := store.tree.typeAliasStatement(stmt)
-		if alias == nil {
+	for _, statement := range statements {
+		alias, ok := store.tree.typeAliasArena(statement)
+		if !ok {
 			continue
 		}
+		name, _ := store.tree.stringValue(alias.name)
+		value, _ := store.tree.statementType(alias.value)
 		aliases = append(aliases, loweredTypeAlias{
-			name:       store.tree.typeAliasName(alias),
-			exported:   store.tree.typeAliasExported(alias),
-			typeParams: append([]string(nil), store.tree.typeAliasTypeParams(alias)...),
-			typePacks:  append([]string(nil), store.tree.typeAliasTypePacks(alias)...),
-			typ:        store.lowerType(store.tree.typeAliasValue(alias)),
+			name:       name,
+			exported:   alias.exported,
+			typeParams: consumerStatementStrings(store.tree, alias.typeParams),
+			typePacks:  consumerStatementStrings(store.tree, alias.typePacks),
+			typ:        store.lowerType(value),
+			start:      alias.start,
+			end:        alias.end,
+			nameStart:  alias.nameStart,
+			nameEnd:    alias.nameEnd,
 		})
 	}
 	return aliases
 }
 
-func (s *typeStore) bindAliases(statements []statement) {
+func (s *typeStore) bindAliases(statements []statementID) {
 	if s.aliases == nil {
 		s.aliases = make(map[string]*typeExpression)
 	}
-	for i := range statements {
-		stmt := &statements[i]
-		alias := s.tree.typeAliasStatement(stmt)
-		if alias == nil || len(s.tree.typeAliasTypeParams(alias)) != 0 || len(s.tree.typeAliasTypePacks(alias)) != 0 {
+	for _, statement := range statements {
+		alias, ok := s.tree.typeAliasArena(statement)
+		if !ok || alias.typeParams.count != 0 || alias.typePacks.count != 0 {
 			continue
 		}
-		s.aliases[s.tree.typeAliasName(alias)] = s.tree.typeAliasValue(alias)
+		name, _ := s.tree.stringValue(alias.name)
+		value, _ := s.tree.statementType(alias.value)
+		s.aliases[name] = value
 	}
 }
 
-func lowerExportedTypeAliases(store *typeStore, statements []statement) []loweredTypeAlias {
+func lowerExportedTypeAliases(store *typeStore, statements []statementID) []loweredTypeAlias {
 	lowered := lowerTypeAliases(store, statements)
 	exports := make([]loweredTypeAlias, 0, len(lowered))
 	for _, item := range lowered {
@@ -154,6 +160,33 @@ func lowerExportedTypeAliases(store *typeStore, statements []statement) []lowere
 		}
 	}
 	return exports
+}
+
+func consumerStatementStrings(tree syntaxTree, span nodeSpan) []string {
+	ids, ok := tree.statementStrings(span)
+	if !ok {
+		return nil
+	}
+	values := make([]string, len(ids))
+	for i, id := range ids {
+		if value, ok := tree.stringValue(id); ok {
+			values[i] = value
+		}
+	}
+	return values
+}
+
+func consumerStatementTypes(tree syntaxTree, span nodeSpan) []*typeExpression {
+	ids, ok := tree.statementTypes(span)
+	if !ok {
+		return nil
+	}
+	values := make([]*typeExpression, 0, len(ids))
+	for _, id := range ids {
+		value, _ := tree.statementType(id)
+		values = append(values, value)
+	}
+	return values
 }
 
 func (s *typeStore) lowerType(expr *typeExpression) TypeRef {

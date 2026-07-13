@@ -24,10 +24,6 @@ const (
 	simpleTypeVector         simpleType = "vector"
 )
 
-func analyzeProgram(source Source, prog program, bind bindResult, mode SourceMode, env typeEnv, summaries moduleSummaryEnv) []Diagnostic {
-	return analyzeSyntaxTree(source, newSyntaxTree(prog), bind, mode, env, summaries)
-}
-
 func analyzeSyntaxTree(source Source, tree syntaxTree, bind bindResult, mode SourceMode, env typeEnv, summaries moduleSummaryEnv) []Diagnostic {
 	state := analysisState{
 		source:          source,
@@ -43,7 +39,8 @@ func analyzeSyntaxTree(source Source, tree syntaxTree, bind bindResult, mode Sou
 		aliasScopes:     []map[string]typeAliasFact{{}},
 		moduleScopes:    []map[string]ModuleSummary{{}},
 	}
-	state.analyzeStatements(tree.statements())
+	statements, _ := tree.statementIDs()
+	state.analyzeStatements(statements)
 	return state.diagnostics
 }
 
@@ -149,38 +146,54 @@ type constraintEvidence struct {
 	span sourceRange
 }
 
-func (a *analysisState) analyzeStatements(statements []statement) {
-	for i := range statements {
-		stmt := &statements[i]
-		switch a.tree.statementKind(stmt) {
+func (a *analysisState) analyzeStatements(statements []statementID) {
+	for _, statement := range statements {
+		switch a.tree.statementKindID(statement) {
 		case syntaxStatementLocal:
-			a.analyzeLocalStatement(*a.tree.local(stmt))
+			stmt, _ := a.tree.localArena(statement)
+			a.analyzeLocalStatement(stmt)
 		case syntaxStatementTypeAlias:
-			a.analyzeTypeAliasStatement(*a.tree.typeAliasStatement(stmt))
+			stmt, _ := a.tree.typeAliasArena(statement)
+			a.analyzeTypeAliasStatement(stmt)
 		case syntaxStatementAssign:
-			a.analyzeAssignStatement(*a.tree.assignment(stmt))
+			stmt, _ := a.tree.assignmentArena(statement)
+			a.analyzeAssignStatement(stmt)
 		case syntaxStatementLocalFunction:
-			a.analyzeLocalFunctionStatement(*a.tree.localFunction(stmt))
+			stmt, _ := a.tree.localFunctionArena(statement)
+			a.analyzeLocalFunctionStatement(stmt)
 		case syntaxStatementFunctionDeclaration:
-			function := a.tree.functionDeclaration(stmt)
-			a.checkFunctionParameterTypeNames(a.tree.functionDeclarationParamAnnotations(function), a.tree.functionDeclarationVariadicAnnotation(function))
-			a.analyzeFunctionBody(a.tree.functionDeclarationReturnAnnotation(function), a.tree.functionDeclarationStatements(function))
+			function, _ := a.tree.functionDeclarationArena(statement)
+			annotations := consumerStatementTypes(a.tree, function.paramAnnotations)
+			variadicAnnotation, _ := a.tree.statementType(function.variadicAnnotation)
+			returnAnnotation, _ := a.tree.statementType(function.returnAnnotation)
+			body, _ := a.tree.statementChildren(function.statements)
+			a.checkFunctionParameterTypeNames(annotations, variadicAnnotation)
+			a.analyzeFunctionBody(returnAnnotation, body)
 		case syntaxStatementCall:
-			a.analyzeCallStatement(a.tree.call(stmt))
+			node, _ := a.tree.statementNode(statement)
+			a.analyzeCallStatement(termID(node.payload))
 		case syntaxStatementReturn:
-			a.analyzeReturnStatement(*a.tree.returnStatement(stmt))
+			stmt, _ := a.tree.returnArena(statement)
+			a.analyzeReturnStatement(stmt)
 		case syntaxStatementIf:
-			a.analyzeIfStatement(*a.tree.ifStatement(stmt))
+			stmt, _ := a.tree.ifArena(statement)
+			a.analyzeIfStatement(stmt)
 		case syntaxStatementWhile:
-			a.analyzeWhileStatement(*a.tree.whileStatement(stmt))
+			stmt, _ := a.tree.whileArena(statement)
+			a.analyzeWhileStatement(stmt)
 		case syntaxStatementFor:
-			a.analyzeNumericForStatement(*a.tree.forStatement(stmt))
+			stmt, _ := a.tree.forArena(statement)
+			a.analyzeNumericForStatement(stmt)
 		case syntaxStatementGenericFor:
-			a.analyzeGenericForStatement(*a.tree.genericForStatement(stmt))
+			stmt, _ := a.tree.genericForArena(statement)
+			a.analyzeGenericForStatement(stmt)
 		case syntaxStatementRepeat:
-			a.analyzeRepeatStatement(*a.tree.repeatStatement(stmt))
+			stmt, _ := a.tree.repeatArena(statement)
+			a.analyzeRepeatStatement(stmt)
 		case syntaxStatementBlock:
-			a.analyzeScopedStatements(a.tree.blockStatements(a.tree.blockStatement(stmt)))
+			stmt, _ := a.tree.blockArena(statement)
+			body, _ := a.tree.statementChildren(stmt.statements)
+			a.analyzeScopedStatements(body)
 		}
 	}
 }
@@ -222,47 +235,51 @@ func (a *analysisState) applyAssertRefinement(call arenaCallID) {
 	a.defineLocal(valueName, narrowed)
 }
 
-func (a *analysisState) analyzeIfStatement(stmt ifStatement) {
-	condition := a.tree.ifCondition(&stmt)
+func (a *analysisState) analyzeIfStatement(stmt arenaIfStatement) {
+	condition := stmt.condition
 	a.analyzeConditionExpression(condition)
 	trueRefinements := a.trueConditionRefinements(a.tree, condition)
 
 	a.pushScope()
 	a.applyTrueRefinements(trueRefinements)
-	a.analyzeStatements(a.tree.ifThenStatements(&stmt))
+	thenStatements, _ := a.tree.statementChildren(stmt.thenStatements)
+	a.analyzeStatements(thenStatements)
 	thenFrame := a.popScope()
 
 	a.pushScope()
 	a.applyFalseConditionRefinements(a.tree, condition)
-	a.analyzeStatements(a.tree.ifElseStatements(&stmt))
+	elseStatements, _ := a.tree.statementChildren(stmt.elseStatements)
+	a.analyzeStatements(elseStatements)
 	elseFrame := a.popScope()
 
 	a.applyBranchLocalFlowJoins(thenFrame.locals, elseFrame.locals)
 	a.applyBranchTableFlowJoins(thenFrame.tables, elseFrame.tables)
 }
 
-func (a *analysisState) analyzeWhileStatement(stmt whileStatement) {
-	condition := a.tree.whileCondition(&stmt)
+func (a *analysisState) analyzeWhileStatement(stmt arenaWhileStatement) {
+	condition := stmt.condition
 	a.analyzeConditionExpression(condition)
 	a.pushScope()
 	a.applyTrueRefinements(a.trueConditionRefinements(a.tree, condition))
-	a.analyzeStatements(a.tree.whileStatements(&stmt))
+	body, _ := a.tree.statementChildren(stmt.statements)
+	a.analyzeStatements(body)
 	a.popScope()
 }
 
-func (a *analysisState) analyzeNumericForStatement(stmt forStatement) {
-	a.checkNumericForBound(a.tree.numericForStart(&stmt))
-	a.checkNumericForBound(a.tree.numericForLimit(&stmt))
-	if step := a.tree.numericForStep(&stmt); step != 0 {
+func (a *analysisState) analyzeNumericForStatement(stmt arenaForStatement) {
+	a.checkNumericForBound(stmt.start)
+	a.checkNumericForBound(stmt.limit)
+	if step := stmt.step; step != 0 {
 		a.checkNumericForBound(step)
 	}
 	a.pushScope()
-	name := a.tree.numericForName(&stmt)
+	name, _ := a.tree.stringValue(stmt.name)
 	a.defineLocal(name, simpleTypeNumber)
-	if symbol, ok := a.claimSymbol(a.tree.numericForNameID(&stmt), symbolLocal); ok {
+	if symbol, ok := a.claimSymbol(stmt.nameID, symbolLocal); ok {
 		a.symbolTypes[symbol.id] = simpleTypeNumber
 	}
-	a.analyzeStatements(a.tree.numericForStatements(&stmt))
+	body, _ := a.tree.statementChildren(stmt.statements)
+	a.analyzeStatements(body)
 	a.popScope()
 }
 
@@ -279,28 +296,30 @@ func (a *analysisState) checkNumericForBound(expr expressionID) {
 	a.checkConstraint(constraint)
 }
 
-func (a *analysisState) analyzeGenericForStatement(stmt genericForStatement) {
-	for _, value := range a.tree.genericForValues(&stmt) {
+func (a *analysisState) analyzeGenericForStatement(stmt arenaGenericForStatement) {
+	values, _ := a.tree.statementExpressions(stmt.values)
+	for _, value := range values {
 		a.inferExpression(value)
 	}
 	types := a.genericForValueTypes(stmt)
 	a.pushScope()
-	for i, name := range a.tree.genericForNames(&stmt) {
+	for i, name := range consumerStatementStrings(a.tree, stmt.names) {
 		typ := simpleTypeUnknown
 		if i < len(types) {
 			typ = types[i]
 		}
 		a.defineLocal(name, typ)
-		if symbol, ok := a.claimSymbol(syntaxNameID(a.tree.genericForNameID(&stmt), i), symbolLocal); ok {
+		if symbol, ok := a.claimSymbol(syntaxNameID(stmt.nameID, i), symbolLocal); ok {
 			a.symbolTypes[symbol.id] = typ
 		}
 	}
-	a.analyzeStatements(a.tree.genericForStatements(&stmt))
+	body, _ := a.tree.statementChildren(stmt.statements)
+	a.analyzeStatements(body)
 	a.popScope()
 }
 
-func (a *analysisState) genericForValueTypes(stmt genericForStatement) []simpleType {
-	values := a.tree.genericForValues(&stmt)
+func (a *analysisState) genericForValueTypes(stmt arenaGenericForStatement) []simpleType {
+	values, _ := a.tree.statementExpressions(stmt.values)
 	if types := a.nextTableForValueTypes(stmt); types != nil {
 		return types
 	}
@@ -350,8 +369,8 @@ func (a *analysisState) genericForValueTypes(stmt genericForStatement) []simpleT
 	return []simpleType{indexer.key, indexer.value}
 }
 
-func (a *analysisState) nextTableForValueTypes(stmt genericForStatement) []simpleType {
-	values := a.tree.genericForValues(&stmt)
+func (a *analysisState) nextTableForValueTypes(stmt arenaGenericForStatement) []simpleType {
+	values, _ := a.tree.statementExpressions(stmt.values)
 	if len(values) != 2 {
 		return nil
 	}
@@ -397,10 +416,11 @@ func tableFieldValueUnion(fact tableFact) simpleType {
 	return typ
 }
 
-func (a *analysisState) analyzeRepeatStatement(stmt repeatStatement) {
+func (a *analysisState) analyzeRepeatStatement(stmt arenaRepeatStatement) {
 	a.pushScope()
-	a.analyzeStatements(a.tree.repeatStatements(&stmt))
-	condition := a.tree.repeatCondition(&stmt)
+	body, _ := a.tree.statementChildren(stmt.statements)
+	a.analyzeStatements(body)
+	condition := stmt.condition
 	a.analyzeConditionExpression(condition)
 	refinements := a.trueConditionRefinements(a.tree, condition)
 	a.popScope()
@@ -423,24 +443,25 @@ func (a *analysisState) analyzeConditionExpression(expr expressionID) {
 	}
 }
 
-func (a *analysisState) analyzeTypeAliasStatement(stmt typeAliasStatement) {
-	if _, ok := a.claimSymbol(a.tree.typeAliasNameID(&stmt), symbolTypeAlias); ok {
+func (a *analysisState) analyzeTypeAliasStatement(stmt arenaTypeAliasStatement) {
+	if _, ok := a.claimSymbol(stmt.nameID, symbolTypeAlias); ok {
 		a.defineTypeAlias(stmt)
 	}
-	a.checkUnknownTypeNames(a.tree.typeAliasValue(&stmt))
+	value, _ := a.tree.statementType(stmt.value)
+	a.checkUnknownTypeNames(value)
 }
 
-func (a *analysisState) analyzeScopedStatements(statements []statement) {
+func (a *analysisState) analyzeScopedStatements(statements []statementID) {
 	a.pushScope()
 	a.analyzeStatements(statements)
 	a.popScope()
 }
 
-func (a *analysisState) analyzeLocalFunctionStatement(stmt localFunctionStatement) {
-	paramAnnotations := a.tree.localFunctionParamAnnotations(&stmt)
-	variadicAnnotation := a.tree.localFunctionVariadicAnnotation(&stmt)
-	returnAnnotation := a.tree.localFunctionReturnAnnotation(&stmt)
-	typeParams := a.tree.localFunctionTypeParams(&stmt)
+func (a *analysisState) analyzeLocalFunctionStatement(stmt arenaFunctionStatement) {
+	paramAnnotations := consumerStatementTypes(a.tree, stmt.paramAnnotations)
+	variadicAnnotation, _ := a.tree.statementType(stmt.variadicAnnotation)
+	returnAnnotation, _ := a.tree.statementType(stmt.returnAnnotation)
+	typeParams := consumerStatementStrings(a.tree, stmt.typeParams)
 	a.checkFunctionParameterTypeNames(paramAnnotations, variadicAnnotation)
 	paramTypes := a.simpleTypesFromAnnotations(paramAnnotations)
 	returnPack := a.returnPackFromAnnotation(returnAnnotation)
@@ -456,15 +477,16 @@ func (a *analysisState) analyzeLocalFunctionStatement(stmt localFunctionStatemen
 		returnPack:      returnPack,
 		returnGeneric:   genericAnnotationName(a.tree, returnAnnotation, typeParams),
 	}
-	if symbol, ok := a.claimSymbol(a.tree.localFunctionNameID(&stmt), symbolLocalFunction); ok {
+	if symbol, ok := a.claimSymbol(stmt.nameID, symbolLocalFunction); ok {
 		a.functions[symbol.id] = fact
 	}
-	restore := a.bindLocals(a.tree.localFunctionParams(&stmt), a.tree.localFunctionParamID(&stmt), paramTypes)
-	a.analyzeFunctionBody(returnAnnotation, a.tree.localFunctionStatements(&stmt))
+	restore := a.bindLocals(consumerStatementStrings(a.tree, stmt.params), stmt.paramID, paramTypes)
+	body, _ := a.tree.statementChildren(stmt.statements)
+	a.analyzeFunctionBody(returnAnnotation, body)
 	restore()
 }
 
-func (a *analysisState) analyzeFunctionBody(returnAnnotation *typeExpression, statements []statement) {
+func (a *analysisState) analyzeFunctionBody(returnAnnotation *typeExpression, statements []statementID) {
 	a.checkUnknownTypeNames(returnAnnotation)
 	returnPack := a.returnPackFromAnnotation(returnAnnotation)
 	a.analyzeFunctionBodyWithReturn(
@@ -476,7 +498,7 @@ func (a *analysisState) analyzeFunctionBody(returnAnnotation *typeExpression, st
 	)
 }
 
-func (a *analysisState) analyzeFunctionBodyWithReturn(returnType simpleType, returnTable tableFact, returnSpan sourceRange, returnPack returnPackFact, statements []statement) {
+func (a *analysisState) analyzeFunctionBodyWithReturn(returnType simpleType, returnTable tableFact, returnSpan sourceRange, returnPack returnPackFact, statements []statementID) {
 	a.returns = append(a.returns, returnType)
 	a.returnTables = append(a.returnTables, returnTable)
 	a.returnSpans = append(a.returnSpans, returnSpan)
@@ -513,11 +535,11 @@ func (a *analysisState) bindLocals(names []string, nameID syntaxID, types []simp
 	}
 }
 
-func (a *analysisState) analyzeLocalStatement(stmt localStatement) {
-	names := a.tree.localNames(&stmt)
-	annotations := a.tree.localAnnotations(&stmt)
-	values := a.tree.localValues(&stmt)
-	nameID := a.tree.localNameID(&stmt)
+func (a *analysisState) analyzeLocalStatement(stmt arenaLocalStatement) {
+	names := consumerStatementStrings(a.tree, stmt.names)
+	annotations := consumerStatementTypes(a.tree, stmt.annotations)
+	values, _ := a.tree.statementExpressions(stmt.values)
+	nameID := stmt.nameID
 	for i, name := range names {
 		var expected simpleType
 		var annotation *typeExpression
@@ -742,8 +764,8 @@ func expressionIsTableLiteral(tree syntaxTree, value expressionID) bool {
 	return ok && tableOK
 }
 
-func localNameRange(tree syntaxTree, stmt localStatement, index int) sourceRange {
-	ranges := tree.localNameRanges(&stmt)
+func localNameRange(tree syntaxTree, stmt arenaLocalStatement, index int) sourceRange {
+	ranges, _ := tree.statementRanges(stmt.nameRanges)
 	if index >= 0 && index < len(ranges) {
 		return ranges[index]
 	}
@@ -866,7 +888,9 @@ func (a *analysisState) analyzeAnnotatedFunctionExpression(annotation *typeExpre
 		return
 	}
 	restore := a.bindLocals(a.tree.functionExpressionParams(function), a.tree.functionExpressionParamID(function), functionExpressionParamTypes(a.tree, function, fact))
-	a.analyzeFunctionBodyWithReturn(fact.returnType, fact.returnTable, fact.returnSpan, fact.returnPack, a.tree.functionExpressionStatements(function))
+	span, _ := a.tree.functionExpressionStatementIDs(function)
+	body, _ := a.tree.statementChildren(span)
+	a.analyzeFunctionBodyWithReturn(fact.returnType, fact.returnTable, fact.returnSpan, fact.returnPack, body)
 	restore()
 }
 
@@ -879,7 +903,9 @@ func (a *analysisState) analyzeFunctionExpressionAnnotations(value expressionID)
 	a.checkUnknownTypeNames(a.tree.functionExpressionReturnAnnotation(function))
 	fact := a.functionFactFromFunctionExpression(function)
 	restore := a.bindLocals(a.tree.functionExpressionParams(function), a.tree.functionExpressionParamID(function), functionExpressionParamTypes(a.tree, function, fact))
-	a.analyzeFunctionBodyWithReturn(fact.returnType, fact.returnTable, fact.returnSpan, fact.returnPack, a.tree.functionExpressionStatements(function))
+	span, _ := a.tree.functionExpressionStatementIDs(function)
+	body, _ := a.tree.statementChildren(span)
+	a.analyzeFunctionBodyWithReturn(fact.returnType, fact.returnTable, fact.returnSpan, fact.returnPack, body)
 	restore()
 }
 
@@ -998,9 +1024,9 @@ func (p returnPackFact) firstTable(fallback tableFact) tableFact {
 	return p.tables[0]
 }
 
-func (a *analysisState) analyzeReturnStatement(stmt returnStatement) {
-	values := a.tree.returnValues(&stmt)
-	start, end := a.tree.returnRange(&stmt)
+func (a *analysisState) analyzeReturnStatement(stmt arenaReturnStatement) {
+	values, _ := a.tree.statementExpressions(stmt.values)
+	start, end := stmt.start, stmt.end
 	actual := simpleTypeNil
 	actualTable := tableFact{}
 	span := sourceRange{start: start, end: end}
@@ -1031,7 +1057,7 @@ func (a *analysisState) analyzeReturnStatement(stmt returnStatement) {
 	a.checkAdditionalReturnPackValues(stmt)
 }
 
-func (a *analysisState) checkAdditionalReturnPackValues(stmt returnStatement) {
+func (a *analysisState) checkAdditionalReturnPackValues(stmt arenaReturnStatement) {
 	if len(a.returnPacks) == 0 {
 		return
 	}
@@ -1045,9 +1071,8 @@ func (a *analysisState) checkAdditionalReturnPackValues(stmt returnStatement) {
 			continue
 		}
 		actual := simpleTypeNil
-		start, end := a.tree.returnRange(&stmt)
-		span := sourceRange{start: start, end: end}
-		values := a.tree.returnValues(&stmt)
+		span := sourceRange{start: stmt.start, end: stmt.start + len("return")}
+		values, _ := a.tree.statementExpressions(stmt.values)
 		if i < len(values) {
 			actual = a.inferExpression(values[i])
 			span = expressionRange(a.tree, values[i])
@@ -1064,7 +1089,7 @@ func (a *analysisState) checkAdditionalReturnPackValues(stmt returnStatement) {
 	}
 }
 
-func (a *analysisState) checkImplicitNilReturn(statements []statement) {
+func (a *analysisState) checkImplicitNilReturn(statements []statementID) {
 	if len(a.returns) == 0 || statementsDefinitelyReturn(a.tree, statements) {
 		return
 	}
@@ -1083,41 +1108,51 @@ func (a *analysisState) checkImplicitNilReturn(statements []statement) {
 	a.checkConstraint(constraint)
 }
 
-func statementsDefinitelyReturn(tree syntaxTree, statements []statement) bool {
-	for _, stmt := range statements {
-		if statementDefinitelyReturns(tree, stmt) {
+func statementsDefinitelyReturn(tree syntaxTree, statements []statementID) bool {
+	for _, statement := range statements {
+		if statementDefinitelyReturns(tree, statement) {
 			return true
 		}
 	}
 	return false
 }
 
-func statementDefinitelyReturns(tree syntaxTree, stmt statement) bool {
-	switch tree.statementKind(&stmt) {
+func statementDefinitelyReturns(tree syntaxTree, statement statementID) bool {
+	switch tree.statementKindID(statement) {
 	case syntaxStatementReturn:
 		return true
 	case syntaxStatementIf:
-		ifStmt := tree.ifStatement(&stmt)
-		return statementsDefinitelyReturn(tree, tree.ifThenStatements(ifStmt)) && statementsDefinitelyReturn(tree, tree.ifElseStatements(ifStmt))
+		ifStmt, _ := tree.ifArena(statement)
+		thenStatements, _ := tree.statementChildren(ifStmt.thenStatements)
+		elseStatements, _ := tree.statementChildren(ifStmt.elseStatements)
+		return statementsDefinitelyReturn(tree, thenStatements) && statementsDefinitelyReturn(tree, elseStatements)
 	case syntaxStatementBlock:
-		return statementsDefinitelyReturn(tree, tree.blockStatements(tree.blockStatement(&stmt)))
+		block, _ := tree.blockArena(statement)
+		body, _ := tree.statementChildren(block.statements)
+		return statementsDefinitelyReturn(tree, body)
 	case syntaxStatementRepeat:
-		return statementsDefinitelyReturn(tree, tree.repeatStatements(tree.repeatStatement(&stmt)))
+		repeat, _ := tree.repeatArena(statement)
+		body, _ := tree.statementChildren(repeat.statements)
+		return statementsDefinitelyReturn(tree, body)
 	default:
 		return false
 	}
 }
 
-func (a *analysisState) analyzeAssignStatement(stmt assignStatement) {
-	targets := a.tree.assignmentTargets(&stmt)
-	values := a.tree.assignmentValues(&stmt)
-	for i := range targets {
-		target := targets[i]
+func (a *analysisState) analyzeAssignStatement(stmt arenaAssignStatement) {
+	targets, _ := a.tree.statementTargets(stmt.targets)
+	values, _ := a.tree.statementExpressions(stmt.values)
+	for i, targetID := range targets {
+		target, ok := a.tree.statementArenaTarget(targetID)
+		if !ok {
+			continue
+		}
 		if i >= len(values) {
 			a.analyzeMissingAssignValue(target)
 			continue
 		}
-		if len(a.tree.assignTargetSelectors(&target)) != 0 {
+		selectors, _ := a.tree.selectorSpan(target.selectors)
+		if len(selectors) != 0 {
 			a.analyzeFieldAssign(target, values[i])
 			continue
 		}
@@ -1139,7 +1174,8 @@ func (a *analysisState) analyzeAssignStatement(stmt assignStatement) {
 			},
 		}
 		if a.checkConstraint(constraint) {
-			a.applyAssignmentRefinement(a.tree.assignTargetName(&target), actual)
+			name, _ := a.tree.stringValue(target.name)
+			a.applyAssignmentRefinement(name, actual)
 			continue
 		}
 	}
@@ -1152,8 +1188,9 @@ func (a *analysisState) applyAssignmentRefinement(name string, typ simpleType) {
 	a.defineLocal(name, typ)
 }
 
-func (a *analysisState) analyzeMissingAssignValue(target assignTarget) {
-	if len(a.tree.assignTargetSelectors(&target)) != 0 {
+func (a *analysisState) analyzeMissingAssignValue(target arenaAssignTarget) {
+	selectors, _ := a.tree.selectorSpan(target.selectors)
+	if len(selectors) != 0 {
 		return
 	}
 	expected := a.lookupAssignTarget(target)
@@ -1165,19 +1202,16 @@ func (a *analysisState) analyzeMissingAssignValue(target assignTarget) {
 		expected: expected,
 		actual:   simpleTypeNil,
 		evidence: constraintEvidence{
-			span: func() sourceRange {
-				start, end := a.tree.assignTargetRange(&target)
-				return sourceRange{start: start, end: end}
-			}(),
+			span: sourceRange{start: target.start, end: target.end},
 		},
 	}
 	a.checkConstraint(constraint)
 }
 
-func (a *analysisState) analyzeFieldAssign(target assignTarget, value expressionID) {
-	name := a.tree.assignTargetName(&target)
-	selectors := a.tree.assignTargetSelectors(&target)
-	start, end := a.tree.assignTargetRange(&target)
+func (a *analysisState) analyzeFieldAssign(target arenaAssignTarget, value expressionID) {
+	name, _ := a.tree.stringValue(target.name)
+	selectors, _ := a.tree.selectorSpan(target.selectors)
+	start, end := target.start, target.end
 	if name == "" || len(selectors) != 1 {
 		return
 	}
@@ -1186,7 +1220,7 @@ func (a *analysisState) analyzeFieldAssign(target assignTarget, value expression
 	if !ok {
 		return
 	}
-	if index := a.tree.selectorIndex(&selector); index != 0 {
+	if index := a.tree.termSelectorIndex(selector); index != 0 {
 		key := a.inferExpression(index)
 		indexer, ok := a.tableIndexerForKey(fact, key, expressionRange(a.tree, index))
 		if !ok || indexer.value == simpleTypeUnknown {
@@ -1212,7 +1246,7 @@ func (a *analysisState) analyzeFieldAssign(target assignTarget, value expression
 		a.checkConstraint(constraint)
 		return
 	}
-	field := a.tree.selectorField(&selector)
+	field := a.tree.termSelectorField(selector)
 	if field == "" {
 		return
 	}
@@ -1281,9 +1315,9 @@ func (a *analysisState) applyTableFieldAssignmentRefinement(name string, field s
 	a.defineTableField(name, field, typ)
 }
 
-func (a *analysisState) lookupAssignTarget(target assignTarget) simpleType {
-	name := a.tree.assignTargetName(&target)
-	if use, ok := a.bind.use(a.tree.assignTargetID(&target)); ok {
+func (a *analysisState) lookupAssignTarget(target arenaAssignTarget) simpleType {
+	name, _ := a.tree.stringValue(target.name)
+	if use, ok := a.bind.use(target.id); ok {
 		if typ, ok := a.symbolTypes[use.symbol]; ok {
 			return typ
 		}
@@ -1291,9 +1325,10 @@ func (a *analysisState) lookupAssignTarget(target assignTarget) simpleType {
 	return a.lookupLocal(name)
 }
 
-func (a *analysisState) tableFactFromAssignTarget(target assignTarget) tableFact {
-	name := a.tree.assignTargetName(&target)
-	if name == "" || len(a.tree.assignTargetSelectors(&target)) != 0 {
+func (a *analysisState) tableFactFromAssignTarget(target arenaAssignTarget) tableFact {
+	name, _ := a.tree.stringValue(target.name)
+	selectors, _ := a.tree.selectorSpan(target.selectors)
+	if name == "" || len(selectors) != 0 {
 		return tableFact{}
 	}
 	fact, ok := a.lookupTableFact(name)

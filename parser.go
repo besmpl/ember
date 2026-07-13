@@ -7,10 +7,11 @@ import (
 )
 
 type program struct {
-	id         syntaxID
-	statements []statement
-	mode       sourceMode
-	nodeCount  int
+	id            syntaxID
+	statements    []statement
+	statementSpan nodeSpan
+	mode          sourceMode
+	nodeCount     int
 }
 
 type sourceMode string
@@ -24,6 +25,7 @@ const (
 
 type statement struct {
 	id         syntaxID
+	arenaID    statementID
 	local      *localStatement
 	localFunc  *localFunctionStatement
 	funcDecl   *functionDeclarationStatement
@@ -320,7 +322,7 @@ func (p *parser) parse() (syntaxTree, error) {
 	p.tokens = lexed.tokens
 	p.stringPool = lexed.decodedStrings
 
-	statements, err := p.parseBlock()
+	statements, err := p.parseArenaBlock()
 	if err != nil {
 		return syntaxTree{}, err
 	}
@@ -329,11 +331,938 @@ func (p *parser) parse() (syntaxTree, error) {
 	if !p.done() {
 		return syntaxTree{}, p.errorf("unexpected input %q", p.source[p.pos:])
 	}
-	tree := newSyntaxTreeWithArena(program{statements: statements, mode: p.mode}, p.arena)
+	root := program{statementSpan: statements, mode: p.mode}
+	tree := newSyntaxTreeWithArena(root, p.arena)
 	if err := assignSyntaxTreeIDsWithLimit(&tree, p.limits.MaxSyntaxNodes); err != nil {
 		return syntaxTree{}, err
 	}
 	return tree, nil
+}
+
+// appendStatementStrings and appendStatementTypes bridge the legacy parser
+// drafts into the typed sidecars owned by syntaxArena. They are deliberately
+// one-way: consumers read spans and never retain parser-owned slices.
+func (p *parser) appendStatementStrings(values []string) nodeSpan {
+	if len(values) == 0 {
+		return nodeSpan{}
+	}
+	ids := p.arena.statements.stringIDs
+	start := uint32(len(ids))
+	for _, value := range values {
+		ids = append(ids, p.stringID(value))
+	}
+	p.arena.statements.stringIDs = ids
+	return nodeSpan{start: start, count: uint32(len(values))}
+}
+
+func (p *parser) appendStatementTypes(values []*typeExpression) nodeSpan {
+	if len(values) == 0 {
+		return nodeSpan{}
+	}
+	ids := p.arena.statements.typeIDs
+	start := uint32(len(ids))
+	for _, value := range values {
+		ids = append(ids, p.arena.appendTypeNode(value))
+	}
+	p.arena.statements.typeIDs = ids
+	return nodeSpan{start: start, count: uint32(len(values))}
+}
+
+func (p *parser) appendStatementExpressions(values []expressionID) nodeSpan {
+	if len(values) == 0 {
+		return nodeSpan{}
+	}
+	start := uint32(len(p.arena.statements.expressionIDs))
+	p.arena.statements.expressionIDs = append(p.arena.statements.expressionIDs, values...)
+	return nodeSpan{start: start, count: uint32(len(values))}
+}
+
+func (p *parser) materializeStatementSpan(values []statement) nodeSpan {
+	if len(values) == 0 {
+		return nodeSpan{}
+	}
+	start := uint32(len(p.arena.statements.statementIDs))
+	for i := range values {
+		p.arena.statements.statementIDs = append(p.arena.statements.statementIDs, p.materializeStatement(&values[i]))
+	}
+	return nodeSpan{start: start, count: uint32(len(values))}
+}
+
+func (p *parser) materializeStatement(stmt *statement) statementID {
+	if stmt == nil {
+		return 0
+	}
+	if stmt.arenaID != 0 {
+		return stmt.arenaID
+	}
+	var kind syntaxStatementKind
+	var payload uint32
+	switch {
+	case stmt.local != nil:
+		kind = syntaxStatementLocal
+		value := stmt.local
+		names := p.appendStatementStrings(value.names)
+		rangesStart := uint32(len(p.arena.statements.sourceRanges))
+		p.arena.statements.sourceRanges = append(p.arena.statements.sourceRanges, value.nameRanges...)
+		local := arenaLocalStatement{
+			nameID:      value.nameID,
+			names:       names,
+			nameRanges:  nodeSpan{start: rangesStart, count: uint32(len(value.nameRanges))},
+			annotations: p.appendStatementTypes(value.annotations),
+			values:      p.appendStatementExpressions(value.values),
+		}
+		payload = p.arena.statements.appendLocal(local)
+	case stmt.localFunc != nil:
+		kind = syntaxStatementLocalFunction
+		value := stmt.localFunc
+		fn := p.materializeFunctionStatement(value.id, value.functionID, value.name, 0, value.typeParams, value.typePacks, value.params, value.paramID, value.paramAnnotations, value.variadic, value.variadicAnnotation, value.returnAnnotation, value.statements, false)
+		payload = p.arena.statements.appendLocalFunction(fn)
+	case stmt.funcDecl != nil:
+		kind = syntaxStatementFunctionDeclaration
+		value := stmt.funcDecl
+		target := p.materializeAssignTarget(&value.target)
+		fn := p.materializeFunctionStatement(value.id, value.functionID, "", target, value.typeParams, value.typePacks, value.params, value.paramID, value.paramAnnotations, value.variadic, value.variadicAnnotation, value.returnAnnotation, value.statements, value.method)
+		fn.selfID = value.selfID
+		payload = p.arena.statements.appendFunctionDeclaration(fn)
+	case stmt.assign != nil:
+		kind = syntaxStatementAssign
+		value := stmt.assign
+		targetStart := uint32(len(p.arena.statements.assignTargetIDs))
+		for i := range value.targets {
+			p.arena.statements.assignTargetIDs = append(p.arena.statements.assignTargetIDs, p.materializeAssignTarget(&value.targets[i]))
+		}
+		assign := arenaAssignStatement{targets: nodeSpan{start: targetStart, count: uint32(len(value.targets))}, values: p.appendStatementExpressions(value.values)}
+		payload = p.arena.statements.appendAssign(assign)
+	case stmt.call != 0:
+		kind = syntaxStatementCall
+		payload = uint32(stmt.call)
+	case stmt.ifStmt != nil:
+		kind = syntaxStatementIf
+		value := stmt.ifStmt
+		payload = p.arena.statements.appendIf(arenaIfStatement{condition: value.condition, thenStatements: p.materializeStatementSpan(value.thenStatements), elseStatements: p.materializeStatementSpan(value.elseStatements)})
+	case stmt.while != nil:
+		kind = syntaxStatementWhile
+		value := stmt.while
+		payload = p.arena.statements.appendWhile(arenaWhileStatement{condition: value.condition, statements: p.materializeStatementSpan(value.statements)})
+	case stmt.forLoop != nil:
+		kind = syntaxStatementFor
+		value := stmt.forLoop
+		payload = p.arena.statements.appendFor(arenaForStatement{name: p.stringID(value.name), nameID: value.nameID, start: value.start, limit: value.limit, step: value.step, statements: p.materializeStatementSpan(value.statements)})
+	case stmt.genericFor != nil:
+		kind = syntaxStatementGenericFor
+		value := stmt.genericFor
+		payload = p.arena.statements.appendGenericFor(arenaGenericForStatement{names: p.appendStatementStrings(value.names), nameID: value.nameID, values: p.appendStatementExpressions(value.values), statements: p.materializeStatementSpan(value.statements)})
+	case stmt.repeat != nil:
+		kind = syntaxStatementRepeat
+		value := stmt.repeat
+		payload = p.arena.statements.appendRepeat(arenaRepeatStatement{statements: p.materializeStatementSpan(value.statements), condition: value.condition})
+	case stmt.block != nil:
+		kind = syntaxStatementBlock
+		payload = p.arena.statements.appendBlock(arenaBlockStatement{statements: p.materializeStatementSpan(stmt.block.statements)})
+	case stmt.typeAlias != nil:
+		kind = syntaxStatementTypeAlias
+		value := stmt.typeAlias
+		payload = p.arena.statements.appendTypeAlias(arenaTypeAliasStatement{id: value.id, exported: value.exported, name: p.stringID(value.name), nameID: value.nameID, start: value.start, end: value.end, nameStart: value.nameStart, nameEnd: value.nameEnd, typeParams: p.appendStatementStrings(value.typeParams), typeParamID: value.typeParamID, typePacks: p.appendStatementStrings(value.typePacks), typePackID: value.typePackID, value: p.arena.appendTypeNode(value.value)})
+	case stmt.breaking:
+		kind = syntaxStatementBreak
+	case stmt.continues:
+		kind = syntaxStatementContinue
+	case stmt.ret != nil:
+		kind = syntaxStatementReturn
+		value := stmt.ret
+		payload = p.arena.statements.appendReturn(arenaReturnStatement{start: value.start, end: value.end, values: p.appendStatementExpressions(value.values)})
+	default:
+		return 0
+	}
+	return p.arena.statements.appendStatement(arenaStatement{id: stmt.id, kind: kind, payload: payload})
+}
+
+func (p *parser) materializeFunctionStatement(id syntaxID, functionID int, name string, target assignTargetID, typeParams, typePacks, params []string, paramID syntaxID, annotations []*typeExpression, variadic bool, variadicAnnotation, returnAnnotation *typeExpression, statements []statement, method bool) arenaFunctionStatement {
+	return arenaFunctionStatement{id: id, functionID: functionID, name: p.stringID(name), target: target, typeParams: p.appendStatementStrings(typeParams), typePacks: p.appendStatementStrings(typePacks), params: p.appendStatementStrings(params), paramID: paramID, paramAnnotations: p.appendStatementTypes(annotations), variadic: variadic, variadicAnnotation: p.arena.appendTypeNode(variadicAnnotation), returnAnnotation: p.arena.appendTypeNode(returnAnnotation), statements: p.materializeStatementSpan(statements), method: method}
+}
+
+func (p *parser) materializeAssignTarget(value *assignTarget) assignTargetID {
+	if value == nil {
+		return 0
+	}
+	start := uint32(len(p.arena.selectors))
+	for _, selector := range value.selectors {
+		p.arena.selectors = append(p.arena.selectors, arenaSelector{field: p.stringID(selector.field), index: selector.index})
+	}
+	return p.arena.statements.appendAssignTarget(arenaAssignTarget{id: value.id, start: value.start, end: value.end, name: p.stringID(value.name), selectors: nodeSpan{start: start, count: uint32(len(value.selectors))}})
+}
+
+func (p *parser) appendStatementStringID(id stringID) nodeSpan {
+	start := uint32(len(p.arena.statements.stringIDs))
+	p.arena.statements.stringIDs = append(p.arena.statements.stringIDs, id)
+	return nodeSpan{start: start, count: 1}
+}
+
+func (p *parser) appendStatementTypeID(id typeID) nodeSpan {
+	start := uint32(len(p.arena.statements.typeIDs))
+	p.arena.statements.typeIDs = append(p.arena.statements.typeIDs, id)
+	return nodeSpan{start: start, count: 1}
+}
+
+func (p *parser) appendStatementExpressionID(id expressionID) nodeSpan {
+	start := uint32(len(p.arena.statements.expressionIDs))
+	p.arena.statements.expressionIDs = append(p.arena.statements.expressionIDs, id)
+	return nodeSpan{start: start, count: 1}
+}
+
+func (p *parser) appendStatementID(id statementID) nodeSpan {
+	start := uint32(len(p.arena.statements.statementIDs))
+	p.arena.statements.statementIDs = append(p.arena.statements.statementIDs, id)
+	return nodeSpan{start: start, count: 1}
+}
+
+func (p *parser) appendArenaStatement(kind syntaxStatementKind, payload uint32) statementID {
+	return p.arena.statements.appendStatement(arenaStatement{kind: kind, payload: payload})
+}
+
+func (p *parser) parseArenaBlock(stopKeywords ...string) (nodeSpan, error) {
+	if len(stopKeywords) > 0 {
+		if err := p.enterNesting("block"); err != nil {
+			return nodeSpan{}, err
+		}
+		defer p.leaveNesting()
+	}
+	ids := idListBuilder[statementID]{}
+	for {
+		p.skipSpace()
+		if p.done() {
+			if len(stopKeywords) > 0 {
+				return nodeSpan{}, p.errorf("expected %s", strings.Join(stopKeywords, " or "))
+			}
+			span, ok := ids.span(&p.arena.statements.statementIDs)
+			if !ok {
+				return nodeSpan{}, p.errorf("statement arena exhausted")
+			}
+			return span, nil
+		}
+		matched := false
+		for _, keyword := range stopKeywords {
+			if p.matchKeyword(keyword) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			span, ok := ids.span(&p.arena.statements.statementIDs)
+			if !ok {
+				return nodeSpan{}, p.errorf("statement arena exhausted")
+			}
+			return span, nil
+		}
+		id, err := p.parseArenaStatement()
+		if err != nil {
+			return nodeSpan{}, err
+		}
+		ids.append(id)
+	}
+}
+
+func (p *parser) parseArenaStatement() (statementID, error) {
+	token, ok := p.currentToken()
+	if !ok {
+		return 0, p.errorf("expected statement")
+	}
+	if token.matchesWordAt(p.source, p.pos, "type") || token.matchesWordAt(p.source, p.pos, "export") {
+		if alias, parsed, err := p.parseArenaTypeAliasStatement(); parsed || err != nil {
+			if err != nil {
+				return 0, err
+			}
+			return alias, nil
+		}
+	}
+	switch {
+	case token.matchesWordAt(p.source, p.pos, "local"):
+		p.consumeKeyword("local")
+		p.skipSpace()
+		if p.consumeKeyword("function") {
+			return p.parseArenaLocalFunctionStatement()
+		}
+		return p.parseArenaLocalStatement()
+	case token.matchesWordAt(p.source, p.pos, "return"):
+		start := token.startOffset()
+		end := token.endOffset()
+		p.consumeKeyword("return")
+		values, err := p.parseArenaExpressionListOptional()
+		if err != nil {
+			return 0, err
+		}
+		if values.count > 0 {
+			end = p.trimSourceEnd(p.pos)
+		}
+		payload := p.arena.statements.appendReturn(arenaReturnStatement{start: start, end: end, values: values})
+		return p.appendArenaStatement(syntaxStatementReturn, payload), nil
+	case token.matchesWordAt(p.source, p.pos, "function"):
+		p.consumeKeyword("function")
+		return p.parseArenaFunctionDeclarationStatement()
+	case token.matchesWordAt(p.source, p.pos, "if"):
+		p.consumeKeyword("if")
+		return p.parseArenaIfStatement()
+	case token.matchesWordAt(p.source, p.pos, "while"):
+		p.consumeKeyword("while")
+		return p.parseArenaWhileStatement()
+	case token.matchesWordAt(p.source, p.pos, "for"):
+		p.consumeKeyword("for")
+		return p.parseArenaForStatement()
+	case token.matchesWordAt(p.source, p.pos, "repeat"):
+		p.consumeKeyword("repeat")
+		return p.parseArenaRepeatStatement()
+	case token.matchesWordAt(p.source, p.pos, "do"):
+		p.consumeKeyword("do")
+		return p.parseArenaDoBlockStatement()
+	case token.matchesWordAt(p.source, p.pos, "break"):
+		p.consumeKeyword("break")
+		return p.appendArenaStatement(syntaxStatementBreak, 0), nil
+	case token.matchesWordAt(p.source, p.pos, "continue"):
+		p.consumeKeyword("continue")
+		return p.appendArenaStatement(syntaxStatementContinue, 0), nil
+	case token.kind == tokenIdentifier:
+		return p.parseArenaIdentifierStatement()
+	default:
+		return 0, p.errorf("expected statement")
+	}
+}
+
+func (p *parser) parseArenaExpressionListOptional() (nodeSpan, error) {
+	p.skipSpace()
+	if p.done() || p.matchKeyword("end") || p.matchKeyword("else") || p.matchKeyword("elseif") || p.matchKeyword("until") {
+		return nodeSpan{}, nil
+	}
+	return p.parseArenaExpressionList()
+}
+
+func (p *parser) parseArenaExpressionList() (nodeSpan, error) {
+	values := idListBuilder[expressionID]{}
+	for {
+		value, err := p.parseExpression()
+		if err != nil {
+			return nodeSpan{}, err
+		}
+		values.append(value)
+		p.skipSpace()
+		if !p.consumeByte(',') {
+			break
+		}
+		p.skipSpace()
+	}
+	span, ok := values.span(&p.arena.statements.expressionIDs)
+	if !ok {
+		return nodeSpan{}, p.errorf("statement arena exhausted")
+	}
+	return span, nil
+}
+
+func (p *parser) expressionSpanEnd(span nodeSpan) int {
+	values, ok := p.arena.statements.spanExpressions(span)
+	if !ok || len(values) == 0 {
+		return p.pos
+	}
+	return p.expressionEnd(values[len(values)-1])
+}
+
+func (p *parser) expressionEnd(id expressionID) int {
+	node, ok := p.arena.expression(id)
+	if !ok {
+		return p.pos
+	}
+	terms, ok := p.arena.andIDs(node.terms)
+	if !ok || len(terms) == 0 {
+		return p.pos
+	}
+	return p.andExpressionEnd(terms[len(terms)-1])
+}
+
+func (p *parser) andExpressionEnd(id andExpressionID) int {
+	node, ok := p.arena.and(id)
+	if !ok {
+		return p.pos
+	}
+	values, ok := p.arena.comparisonIDs(node.terms)
+	if !ok || len(values) == 0 {
+		return p.pos
+	}
+	return p.comparisonEnd(values[len(values)-1])
+}
+
+func (p *parser) comparisonEnd(id comparisonExpressionID) int {
+	node, ok := p.arena.comparison(id)
+	if !ok {
+		return p.pos
+	}
+	return p.concatEnd(node.right)
+}
+
+func (p *parser) concatEnd(id concatExpressionID) int {
+	node, ok := p.arena.concat(id)
+	if !ok {
+		return p.pos
+	}
+	return p.additiveEnd(node.first)
+}
+
+func (p *parser) additiveEnd(id additiveExpressionID) int {
+	node, ok := p.arena.additive(id)
+	if !ok {
+		return p.pos
+	}
+	return p.multiplicativeEnd(node.first)
+}
+
+func (p *parser) multiplicativeEnd(id multiplicativeExpressionID) int {
+	node, ok := p.arena.multiplicative(id)
+	if !ok {
+		return p.pos
+	}
+	return p.termEnd(node.first)
+}
+
+func (p *parser) parseArenaIdentifierStatement() (statementID, error) {
+	target, err := p.parseArenaAssignTarget()
+	if err != nil {
+		return 0, err
+	}
+	targets := idListBuilder[assignTargetID]{}
+	targets.append(target)
+	p.skipSpace()
+	for p.consumeByte(',') {
+		p.skipSpace()
+		next, err := p.parseArenaAssignTarget()
+		if err != nil {
+			return 0, err
+		}
+		targets.append(next)
+		p.skipSpace()
+	}
+	targetSpan, ok := targets.span(&p.arena.statements.assignTargetIDs)
+	if !ok {
+		return 0, p.errorf("statement arena exhausted")
+	}
+	if p.consumeByte('=') {
+		values, err := p.parseArenaExpressionList()
+		if err != nil {
+			return 0, err
+		}
+		payload := p.arena.statements.appendAssign(arenaAssignStatement{targets: targetSpan, values: values})
+		return p.appendArenaStatement(syntaxStatementAssign, payload), nil
+	}
+	if targetSpan.count != 1 {
+		return 0, p.errorf("expected =")
+	}
+	if !p.currentSymbol("(") && !p.currentSymbol(":") && !p.currentSymbol("<<") {
+		return 0, p.errorf("expected =")
+	}
+	targetValue, ok := p.arena.statements.assignTarget(assignTargetID(target))
+	if !ok {
+		return 0, p.errorf("invalid identifier term")
+	}
+	selectorsStart := uint32(len(p.arena.selectors))
+	selectors, _ := p.arena.selectorIDs(targetValue.selectors)
+	for _, selector := range selectors {
+		p.arena.selectors = append(p.arena.selectors, selector)
+	}
+	selectorSpan := nodeSpan{start: selectorsStart, count: uint32(len(selectors))}
+	value := p.arena.appendTerm(arenaTerm{start: targetValue.start, end: targetValue.end, kind: termKindName, payload: uint64(targetValue.name), selectors: selectorSpan})
+	value, err = p.parseTermSuffixesWithCasts(value, false)
+	if err != nil {
+		return 0, err
+	}
+	node, ok := p.arena.term(value)
+	if !ok || node.kind != termKindCall {
+		return 0, p.errorf("expected =")
+	}
+	return p.appendArenaStatement(syntaxStatementCall, uint32(value)), nil
+}
+
+func (p *parser) parseArenaAssignTarget() (assignTargetID, error) {
+	start := p.pos
+	name, err := p.parseIdentifier()
+	if err != nil {
+		return 0, err
+	}
+	selectors := idListBuilder[arenaSelector]{}
+	end := p.pos
+	for {
+		p.skipSpace()
+		if p.consumeByte('.') {
+			field, err := p.parseIdentifier()
+			if err != nil {
+				return 0, err
+			}
+			selectors.append(arenaSelector{field: p.stringID(field)})
+			end = p.pos
+			continue
+		}
+		if p.consumeByte('[') {
+			index, err := p.parseExpression()
+			if err != nil {
+				return 0, err
+			}
+			p.skipSpace()
+			if !p.consumeByte(']') {
+				return 0, p.errorf("expected ]")
+			}
+			selectors.append(arenaSelector{index: index})
+			end = p.pos
+			continue
+		}
+		break
+	}
+	selectorSpan, ok := selectors.span(&p.arena.selectors)
+	if !ok {
+		return 0, p.errorf("expression arena exhausted")
+	}
+	return p.arena.statements.appendAssignTarget(arenaAssignTarget{start: start, end: end, name: p.stringID(name), selectors: selectorSpan}), nil
+}
+
+func (p *parser) parseArenaLocalStatement() (statementID, error) {
+	nameStart := p.pos
+	name, err := p.parseIdentifier()
+	if err != nil {
+		return 0, err
+	}
+	nameIDsStart := uint32(len(p.arena.statements.stringIDs))
+	rangesStart := uint32(len(p.arena.statements.sourceRanges))
+	typesStart := uint32(len(p.arena.statements.typeIDs))
+	nameCount := uint32(0)
+	appendName := func(value string, start, end int, annotation *typeExpression) {
+		p.arena.statements.stringIDs = append(p.arena.statements.stringIDs, p.stringID(value))
+		p.arena.statements.sourceRanges = append(p.arena.statements.sourceRanges, sourceRange{start: start, end: end})
+		p.arena.statements.typeIDs = append(p.arena.statements.typeIDs, p.arena.appendTypeNode(annotation))
+		nameCount++
+	}
+	nameEnd := p.pos
+	annotation, err := p.parseOptionalTypeAnnotation()
+	if err != nil {
+		return 0, err
+	}
+	appendName(name, nameStart, nameEnd, annotation)
+	for {
+		p.skipSpace()
+		if !p.consumeByte(',') {
+			break
+		}
+		p.skipSpace()
+		start := p.pos
+		name, err := p.parseIdentifier()
+		if err != nil {
+			return 0, err
+		}
+		end := p.pos
+		annotation, err := p.parseOptionalTypeAnnotation()
+		if err != nil {
+			return 0, err
+		}
+		appendName(name, start, end, annotation)
+	}
+	p.skipSpace()
+	if !p.consumeByte('=') {
+		return 0, p.errorf("expected =")
+	}
+	values, err := p.parseArenaExpressionList()
+	if err != nil {
+		return 0, err
+	}
+	payload := p.arena.statements.appendLocal(arenaLocalStatement{names: nodeSpan{start: nameIDsStart, count: nameCount}, nameRanges: nodeSpan{start: rangesStart, count: nameCount}, annotations: nodeSpan{start: typesStart, count: nameCount}, values: values})
+	return p.appendArenaStatement(syntaxStatementLocal, payload), nil
+}
+
+func (p *parser) parseArenaTypeAliasStatement() (statementID, bool, error) {
+	checkpoint := p.mark()
+	start := checkpoint.pos
+	exported := false
+	if p.consumeKeyword("export") {
+		p.skipSpace()
+		if !p.consumeKeyword("type") {
+			p.restore(checkpoint)
+			return 0, false, nil
+		}
+		exported = true
+	} else if !p.consumeKeyword("type") {
+		return 0, false, nil
+	}
+	p.skipSpace()
+	if !p.currentIdentifier() {
+		p.restore(checkpoint)
+		return 0, false, nil
+	}
+	nameStart := p.pos
+	name, err := p.parseIdentifier()
+	if err != nil {
+		return 0, false, err
+	}
+	nameEnd := p.pos
+	typeParams, typePacks, err := p.parseOptionalTypeParameterList()
+	if err != nil {
+		return 0, true, err
+	}
+	p.skipSpace()
+	if !p.consumeByte('=') {
+		p.restore(checkpoint)
+		return 0, false, nil
+	}
+	p.skipSpace()
+	value, err := p.parseType()
+	if err != nil {
+		return 0, true, err
+	}
+	payload := p.arena.statements.appendTypeAlias(arenaTypeAliasStatement{exported: exported, name: p.stringID(name), start: start, end: p.trimSourceEnd(value.end), nameStart: nameStart, nameEnd: nameEnd, typeParams: p.appendStatementStrings(typeParams), typePacks: p.appendStatementStrings(typePacks), value: p.arena.appendTypeNode(value)})
+	return p.appendArenaStatement(syntaxStatementTypeAlias, payload), true, nil
+}
+
+func (p *parser) parseArenaLocalFunctionStatement() (statementID, error) {
+	p.skipSpace()
+	name, err := p.parseIdentifier()
+	if err != nil {
+		return 0, err
+	}
+	body, err := p.parseArenaFunctionBody()
+	if err != nil {
+		return 0, err
+	}
+	payload := p.arena.statements.appendLocalFunction(arenaFunctionStatement{name: p.stringID(name), typeParams: body.typeParams, typePacks: body.typePacks, params: body.params, paramAnnotations: body.paramAnnotations, variadic: body.variadic, variadicAnnotation: body.variadicAnnotation, returnAnnotation: body.returnAnnotation, statements: body.statements})
+	return p.appendArenaStatement(syntaxStatementLocalFunction, payload), nil
+}
+
+func (p *parser) parseArenaFunctionDeclarationStatement() (statementID, error) {
+	p.skipSpace()
+	target, method, err := p.parseArenaFunctionDeclarationTarget()
+	if err != nil {
+		return 0, err
+	}
+	body, err := p.parseArenaFunctionBody()
+	if err != nil {
+		return 0, err
+	}
+	payload := p.arena.statements.appendFunctionDeclaration(arenaFunctionStatement{target: target, typeParams: body.typeParams, typePacks: body.typePacks, params: body.params, paramAnnotations: body.paramAnnotations, variadic: body.variadic, variadicAnnotation: body.variadicAnnotation, returnAnnotation: body.returnAnnotation, statements: body.statements, method: method})
+	return p.appendArenaStatement(syntaxStatementFunctionDeclaration, payload), nil
+}
+
+func (p *parser) parseArenaFunctionDeclarationTarget() (assignTargetID, bool, error) {
+	start := p.pos
+	name, err := p.parseIdentifier()
+	if err != nil {
+		return 0, false, err
+	}
+	selectorsStart := uint32(len(p.arena.selectors))
+	count := uint32(0)
+	end := p.pos
+	method := false
+	for {
+		p.skipSpace()
+		if p.consumeByte('.') {
+			field, err := p.parseIdentifier()
+			if err != nil {
+				return 0, false, err
+			}
+			p.arena.selectors = append(p.arena.selectors, arenaSelector{field: p.stringID(field)})
+			count++
+			end = p.pos
+			continue
+		}
+		if p.consumeByte(':') {
+			field, err := p.parseIdentifier()
+			if err != nil {
+				return 0, false, err
+			}
+			p.arena.selectors = append(p.arena.selectors, arenaSelector{field: p.stringID(field)})
+			count++
+			end = p.pos
+			method = true
+			break
+		}
+		break
+	}
+	return p.arena.statements.appendAssignTarget(arenaAssignTarget{start: start, end: end, name: p.stringID(name), selectors: nodeSpan{start: selectorsStart, count: count}}), method, nil
+}
+
+type parserArenaFunctionBody struct {
+	typeParams, typePacks, params        nodeSpan
+	paramAnnotations                     nodeSpan
+	variadic                             bool
+	variadicAnnotation, returnAnnotation typeID
+	statements                           nodeSpan
+}
+
+func (p *parser) parseArenaFunctionBody() (parserArenaFunctionBody, error) {
+	if err := p.enterNesting("function"); err != nil {
+		return parserArenaFunctionBody{}, err
+	}
+	defer p.leaveNesting()
+	typeParams, typePacks, err := p.parseOptionalTypeParameterList()
+	if err != nil {
+		return parserArenaFunctionBody{}, err
+	}
+	params, annotations, variadic, variadicAnnotation, err := p.parseArenaParameterList()
+	if err != nil {
+		return parserArenaFunctionBody{}, err
+	}
+	returnAnnotation, err := p.parseOptionalTypeAnnotation()
+	if err != nil {
+		return parserArenaFunctionBody{}, err
+	}
+	statements, err := p.parseArenaBlock("end")
+	if err != nil {
+		return parserArenaFunctionBody{}, err
+	}
+	p.skipSpace()
+	if !p.consumeKeyword("end") {
+		return parserArenaFunctionBody{}, p.errorf("expected end")
+	}
+	return parserArenaFunctionBody{typeParams: p.appendStatementStrings(typeParams), typePacks: p.appendStatementStrings(typePacks), params: params, paramAnnotations: annotations, variadic: variadic, variadicAnnotation: variadicAnnotation, returnAnnotation: p.arena.appendTypeNode(returnAnnotation), statements: statements}, nil
+}
+
+func (p *parser) parseArenaParameterList() (nodeSpan, nodeSpan, bool, typeID, error) {
+	p.skipSpace()
+	if !p.consumeByte('(') {
+		return nodeSpan{}, nodeSpan{}, false, 0, p.errorf("expected (")
+	}
+	p.skipSpace()
+	if p.consumeByte(')') {
+		return nodeSpan{}, nodeSpan{}, false, 0, nil
+	}
+	params := idListBuilder[stringID]{}
+	annotations := idListBuilder[typeID]{}
+	for {
+		if p.consumeString("...") {
+			annotation, err := p.parseOptionalTypeAnnotation()
+			if err != nil {
+				return nodeSpan{}, nodeSpan{}, false, 0, err
+			}
+			p.skipSpace()
+			if !p.consumeByte(')') {
+				return nodeSpan{}, nodeSpan{}, false, 0, p.errorf("expected )")
+			}
+			paramSpan, ok := params.span(&p.arena.statements.stringIDs)
+			if !ok {
+				return nodeSpan{}, nodeSpan{}, false, 0, p.errorf("statement arena exhausted")
+			}
+			annotationSpan, ok := annotations.span(&p.arena.statements.typeIDs)
+			if !ok {
+				return nodeSpan{}, nodeSpan{}, false, 0, p.errorf("statement arena exhausted")
+			}
+			return paramSpan, annotationSpan, true, p.arena.appendTypeNode(annotation), nil
+		}
+		name, err := p.parseIdentifier()
+		if err != nil {
+			return nodeSpan{}, nodeSpan{}, false, 0, err
+		}
+		annotation, err := p.parseOptionalTypeAnnotation()
+		if err != nil {
+			return nodeSpan{}, nodeSpan{}, false, 0, err
+		}
+		params.append(p.stringID(name))
+		annotations.append(p.arena.appendTypeNode(annotation))
+		p.skipSpace()
+		if p.consumeByte(')') {
+			break
+		}
+		if !p.consumeByte(',') {
+			return nodeSpan{}, nodeSpan{}, false, 0, p.errorf("expected , or )")
+		}
+		p.skipSpace()
+	}
+	paramSpan, ok := params.span(&p.arena.statements.stringIDs)
+	if !ok {
+		return nodeSpan{}, nodeSpan{}, false, 0, p.errorf("statement arena exhausted")
+	}
+	annotationSpan, ok := annotations.span(&p.arena.statements.typeIDs)
+	if !ok {
+		return nodeSpan{}, nodeSpan{}, false, 0, p.errorf("statement arena exhausted")
+	}
+	return paramSpan, annotationSpan, false, 0, nil
+}
+
+func (p *parser) parseArenaIfStatement() (statementID, error) {
+	if err := p.enterNesting("if"); err != nil {
+		return 0, err
+	}
+	defer p.leaveNesting()
+	p.skipSpace()
+	condition, err := p.parseExpression()
+	if err != nil {
+		return 0, err
+	}
+	p.skipSpace()
+	if !p.consumeKeyword("then") {
+		return 0, p.errorf("expected then")
+	}
+	thenStatements, err := p.parseArenaBlock("elseif", "else", "end")
+	if err != nil {
+		return 0, err
+	}
+	var elseStatements nodeSpan
+	p.skipSpace()
+	if p.consumeKeyword("elseif") {
+		nested, err := p.parseArenaIfStatement()
+		if err != nil {
+			return 0, err
+		}
+		elseStatements = p.appendStatementID(nested)
+		payload := p.arena.statements.appendIf(arenaIfStatement{condition: condition, thenStatements: thenStatements, elseStatements: elseStatements})
+		return p.appendArenaStatement(syntaxStatementIf, payload), nil
+	} else if p.consumeKeyword("else") {
+		elseStatements, err = p.parseArenaBlock("end")
+		if err != nil {
+			return 0, err
+		}
+		p.skipSpace()
+	}
+	if !p.consumeKeyword("end") {
+		return 0, p.errorf("expected end")
+	}
+	payload := p.arena.statements.appendIf(arenaIfStatement{condition: condition, thenStatements: thenStatements, elseStatements: elseStatements})
+	return p.appendArenaStatement(syntaxStatementIf, payload), nil
+}
+
+func (p *parser) parseArenaWhileStatement() (statementID, error) {
+	p.skipSpace()
+	condition, err := p.parseExpression()
+	if err != nil {
+		return 0, err
+	}
+	p.skipSpace()
+	if !p.consumeKeyword("do") {
+		return 0, p.errorf("expected do")
+	}
+	statements, err := p.parseArenaBlock("end")
+	if err != nil {
+		return 0, err
+	}
+	p.skipSpace()
+	if !p.consumeKeyword("end") {
+		return 0, p.errorf("expected end")
+	}
+	payload := p.arena.statements.appendWhile(arenaWhileStatement{condition: condition, statements: statements})
+	return p.appendArenaStatement(syntaxStatementWhile, payload), nil
+}
+
+func (p *parser) parseArenaForStatement() (statementID, error) {
+	p.skipSpace()
+	namesStart := uint32(len(p.arena.statements.stringIDs))
+	name, err := p.parseIdentifier()
+	if err != nil {
+		return 0, err
+	}
+	p.arena.statements.stringIDs = append(p.arena.statements.stringIDs, p.stringID(name))
+	nameCount := uint32(1)
+	for {
+		p.skipSpace()
+		if !p.consumeByte(',') {
+			break
+		}
+		p.skipSpace()
+		name, err := p.parseIdentifier()
+		if err != nil {
+			return 0, err
+		}
+		p.arena.statements.stringIDs = append(p.arena.statements.stringIDs, p.stringID(name))
+		nameCount++
+	}
+	p.skipSpace()
+	if p.consumeKeyword("in") {
+		p.skipSpace()
+		values, err := p.parseArenaExpressionList()
+		if err != nil {
+			return 0, err
+		}
+		p.skipSpace()
+		if !p.consumeKeyword("do") {
+			return 0, p.errorf("expected do")
+		}
+		statements, err := p.parseArenaBlock("end")
+		if err != nil {
+			return 0, err
+		}
+		p.skipSpace()
+		if !p.consumeKeyword("end") {
+			return 0, p.errorf("expected end")
+		}
+		payload := p.arena.statements.appendGenericFor(arenaGenericForStatement{names: nodeSpan{start: namesStart, count: nameCount}, values: values, statements: statements})
+		return p.appendArenaStatement(syntaxStatementGenericFor, payload), nil
+	}
+	if nameCount != 1 {
+		return 0, p.errorf("expected in")
+	}
+	if !p.consumeByte('=') {
+		return 0, p.errorf("expected =")
+	}
+	p.skipSpace()
+	start, err := p.parseExpression()
+	if err != nil {
+		return 0, err
+	}
+	p.skipSpace()
+	if !p.consumeByte(',') {
+		return 0, p.errorf("expected ,")
+	}
+	p.skipSpace()
+	limit, err := p.parseExpression()
+	if err != nil {
+		return 0, err
+	}
+	var step expressionID
+	p.skipSpace()
+	if p.consumeByte(',') {
+		p.skipSpace()
+		step, err = p.parseExpression()
+		if err != nil {
+			return 0, err
+		}
+	}
+	p.skipSpace()
+	if !p.consumeKeyword("do") {
+		return 0, p.errorf("expected do")
+	}
+	statements, err := p.parseArenaBlock("end")
+	if err != nil {
+		return 0, err
+	}
+	p.skipSpace()
+	if !p.consumeKeyword("end") {
+		return 0, p.errorf("expected end")
+	}
+	names, _ := p.arena.statements.spanStrings(nodeSpan{start: namesStart, count: 1})
+	var value stringID
+	if len(names) > 0 {
+		value = names[0]
+	}
+	payload := p.arena.statements.appendFor(arenaForStatement{name: value, start: start, limit: limit, step: step, statements: statements})
+	return p.appendArenaStatement(syntaxStatementFor, payload), nil
+}
+
+func (p *parser) parseArenaRepeatStatement() (statementID, error) {
+	statements, err := p.parseArenaBlock("until")
+	if err != nil {
+		return 0, err
+	}
+	p.skipSpace()
+	if !p.consumeKeyword("until") {
+		return 0, p.errorf("expected until")
+	}
+	p.skipSpace()
+	condition, err := p.parseExpression()
+	if err != nil {
+		return 0, err
+	}
+	payload := p.arena.statements.appendRepeat(arenaRepeatStatement{statements: statements, condition: condition})
+	return p.appendArenaStatement(syntaxStatementRepeat, payload), nil
+}
+
+func (p *parser) parseArenaDoBlockStatement() (statementID, error) {
+	statements, err := p.parseArenaBlock("end")
+	if err != nil {
+		return 0, err
+	}
+	p.skipSpace()
+	if !p.consumeKeyword("end") {
+		return 0, p.errorf("expected end")
+	}
+	payload := p.arena.statements.appendBlock(arenaBlockStatement{statements: statements})
+	return p.appendArenaStatement(syntaxStatementBlock, payload), nil
 }
 
 func (p *parser) parseBlock(stopKeywords ...string) ([]statement, error) {
@@ -344,6 +1273,9 @@ func (p *parser) parseBlock(stopKeywords ...string) ([]statement, error) {
 		defer p.leaveNesting()
 	}
 	var statements []statement
+	if len(stopKeywords) == 0 && len(p.tokens) > 0 {
+		statements = make([]statement, 0, len(p.tokens)/3+1)
+	}
 	for {
 		p.skipSpace()
 
@@ -369,6 +1301,17 @@ func (p *parser) parseBlock(stopKeywords ...string) ([]statement, error) {
 }
 
 func (p *parser) parseStatement() (statement, error) {
+	value, err := p.parseStatementLegacy()
+	if err != nil {
+		return statement{}, err
+	}
+	if value.arenaID != 0 {
+		return value, nil
+	}
+	return statement{arenaID: p.materializeStatement(&value)}, nil
+}
+
+func (p *parser) parseStatementLegacy() (statement, error) {
 	token, ok := p.currentToken()
 	if !ok {
 		return statement{}, p.errorf("expected statement")
@@ -598,15 +1541,16 @@ func (p *parser) parseFunctionExpression() (arenaFunctionID, error) {
 		return 0, p.errorf("expected function")
 	}
 
-	body, err := p.parseFunctionBody()
+	body, err := p.parseArenaFunctionBody()
 	if err != nil {
 		return 0, err
 	}
 	return p.arena.appendFunction(arenaFunction{
 		typeParams: body.typeParams, typePacks: body.typePacks, params: body.params,
 		paramAnnotations: body.paramAnnotations, variadic: body.variadic,
-		variadicAnnotation: body.variadicAnnotation, returnAnnotation: body.returnAnnotation,
-		statements: body.statements,
+		variadicAnnotation: body.variadicAnnotation,
+		returnAnnotation:   body.returnAnnotation,
+		statements:         body.statements,
 	}), nil
 }
 
@@ -702,8 +1646,10 @@ func (p *parser) parseIdentifierStatement() (statement, error) {
 	if err != nil {
 		return statement{}, err
 	}
-
-	targets := []assignTarget{target}
+	targetID := p.materializeAssignTarget(&target)
+	targetStart := uint32(len(p.arena.statements.assignTargetIDs))
+	p.arena.statements.assignTargetIDs = append(p.arena.statements.assignTargetIDs, targetID)
+	targetCount := uint32(1)
 	p.skipSpace()
 	for p.consumeByte(',') {
 		p.skipSpace()
@@ -711,18 +1657,21 @@ func (p *parser) parseIdentifierStatement() (statement, error) {
 		if err != nil {
 			return statement{}, err
 		}
-		targets = append(targets, next)
+		p.arena.statements.assignTargetIDs = append(p.arena.statements.assignTargetIDs, p.materializeAssignTarget(&next))
+		targetCount++
 		p.skipSpace()
 	}
 
 	if p.consumeByte('=') {
-		values, err := p.parseExpressionList()
+		values, err := p.parseExpressionListSpan()
 		if err != nil {
 			return statement{}, err
 		}
-		return statement{assign: &assignStatement{targets: targets, values: values}}, nil
+		payload := p.arena.statements.appendAssign(arenaAssignStatement{targets: nodeSpan{start: targetStart, count: targetCount}, values: values})
+		id := p.arena.statements.appendStatement(arenaStatement{kind: syntaxStatementAssign, payload: payload})
+		return statement{arenaID: id}, nil
 	}
-	if len(targets) != 1 {
+	if targetCount != 1 {
 		return statement{}, p.errorf("expected =")
 	}
 
@@ -797,6 +1746,31 @@ func (p *parser) parseExpressionList() ([]expressionID, error) {
 	}
 
 	return values, nil
+}
+
+func (p *parser) parseExpressionListSpan() (nodeSpan, error) {
+	start := uint32(len(p.arena.statements.expressionIDs))
+	count := uint32(0)
+	value, err := p.parseExpression()
+	if err != nil {
+		return nodeSpan{}, err
+	}
+	p.arena.statements.expressionIDs = append(p.arena.statements.expressionIDs, value)
+	count++
+	for {
+		p.skipSpace()
+		if !p.consumeByte(',') {
+			break
+		}
+		p.skipSpace()
+		value, err := p.parseExpression()
+		if err != nil {
+			return nodeSpan{}, err
+		}
+		p.arena.statements.expressionIDs = append(p.arena.statements.expressionIDs, value)
+		count++
+	}
+	return nodeSpan{start: start, count: count}, nil
 }
 
 func (p *parser) parseIfStatement() (ifStatement, error) {
@@ -1863,7 +2837,13 @@ func (p *parser) stringID(value string) stringID {
 }
 
 func (p *parser) literalStringID(value string) stringID {
-	id := p.stringID(value)
+	var id stringID
+	if value == "" {
+		p.arena.strings = append(p.arena.strings, value)
+		id = stringID(len(p.arena.strings))
+	} else {
+		id = p.stringID(value)
+	}
 	if p.arena.stringLiterals == nil {
 		p.arena.stringLiterals = make(map[stringID]Value)
 	}

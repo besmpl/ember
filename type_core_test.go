@@ -16,7 +16,8 @@ return 1
 	}
 
 	store := newTypeStoreTree(artifact.tree)
-	exports := lowerExportedTypeAliases(store, artifact.tree.statements())
+	statements, _ := artifact.tree.statementIDs()
+	exports := lowerExportedTypeAliases(store, statements)
 	if len(exports) != 1 {
 		t.Fatalf("lowered %d exports, want 1", len(exports))
 	}
@@ -57,7 +58,8 @@ return 1
 	}
 
 	store := newTypeStoreTree(artifact.tree)
-	exports := lowerExportedTypeAliases(store, artifact.tree.statements())
+	statements, _ := artifact.tree.statementIDs()
+	exports := lowerExportedTypeAliases(store, statements)
 	if len(exports) != 1 {
 		t.Fatalf("lowered %d exports, want 1", len(exports))
 	}
@@ -98,7 +100,8 @@ func TestTypeStoreKeepsGenericFunctionParameters(t *testing.T) {
 	}
 
 	store := newTypeStoreTree(artifact.tree)
-	exports := lowerExportedTypeAliases(store, artifact.tree.statements())
+	statements, _ := artifact.tree.statementIDs()
+	exports := lowerExportedTypeAliases(store, statements)
 	if len(exports) != 1 {
 		t.Fatalf("lowered %d exports, want 1", len(exports))
 	}
@@ -169,7 +172,8 @@ return 1
 	}
 
 	store := newTypeStoreTree(artifact.tree)
-	exports := lowerExportedTypeAliases(store, artifact.tree.statements())
+	statements, _ := artifact.tree.statementIDs()
+	exports := lowerExportedTypeAliases(store, statements)
 	if len(exports) != 1 {
 		t.Fatalf("lowered %d exports, want 1", len(exports))
 	}

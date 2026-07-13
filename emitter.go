@@ -92,7 +92,40 @@ func compileProgram(source sourceArtifact) (*Proto, error) {
 	return compileProgramWithOptions(source, defaultCompilerOptions())
 }
 
+func statementIDsHaveReturn(tree syntaxTree, statements []statementID) bool {
+	for _, id := range statements {
+		node, ok := tree.statementNode(id)
+		if !ok {
+			continue
+		}
+		switch node.kind {
+		case syntaxStatementReturn:
+			return true
+		case syntaxStatementIf:
+			if branch, ok := tree.ifArena(id); ok {
+				thenBody, _ := tree.statementChildren(branch.thenStatements)
+				elseBody, _ := tree.statementChildren(branch.elseStatements)
+				if statementIDsHaveReturn(tree, thenBody) || statementIDsHaveReturn(tree, elseBody) {
+					return true
+				}
+			}
+		case syntaxStatementWhile:
+			if loop, ok := tree.whileArena(id); ok {
+				body, _ := tree.statementChildren(loop.statements)
+				if statementIDsHaveReturn(tree, body) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (*Proto, error) {
+	statements, ok := source.tree.statementIDs()
+	if !ok {
+		return nil, fmt.Errorf("compile: invalid root statement span")
+	}
 	sourceName := source.source.Name
 	if sourceName == "" {
 		sourceName = "<string>"
@@ -100,7 +133,7 @@ func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (
 		sourceName = strings.Clone(sourceName)
 	}
 	c := compiler{
-		bytecodeBuilder:    bytecodeBuilder{ir: make([]bytecodeIRInstruction, 0, estimatedIRCapacity(source.tree.nodeCount(), len(source.tree.statements())))},
+		bytecodeBuilder:    bytecodeBuilder{ir: make([]bytecodeIRInstruction, 0, estimatedIRCapacity(source.tree.nodeCount(), len(statements)))},
 		tree:               source.tree,
 		bind:               source.bind,
 		sourceLines:        newSourceLineMap(source.source.Text),
@@ -112,13 +145,13 @@ func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (
 	}
 	c.sourceText = source.source.Text
 
-	if err := c.compileStatements(source.tree.statements()); err != nil {
+	if err := c.compileStatements(statements); err != nil {
 		if c.conversionErr != nil {
 			return nil, c.conversionErr
 		}
 		return nil, err
 	}
-	if !statementsHaveReturn(source.tree.statements()) {
+	if !statementIDsHaveReturn(source.tree, statements) {
 		c.emit(instruction{op: opReturn})
 	}
 	if c.conversionErr != nil {
@@ -338,7 +371,7 @@ func (c *compiler) addStringConstant(value string) int {
 	return c.bytecodeBuilder.addStringConstant(value)
 }
 
-func (c *compiler) compileStatements(statements []statement) error {
+func (c *compiler) compileStatements(statements []statementID) error {
 	for _, stmt := range statements {
 		if err := c.compileStatement(stmt); err != nil {
 			return err
@@ -347,47 +380,110 @@ func (c *compiler) compileStatements(statements []statement) error {
 	return nil
 }
 
-func (c *compiler) compileStatement(stmt statement) error {
-	switch c.tree.statementKind(&stmt) {
+func (c *compiler) compileStatement(stmt statementID) error {
+	node, ok := c.tree.statementNode(stmt)
+	if !ok {
+		return fmt.Errorf("compile: empty statement")
+	}
+	switch node.kind {
 	case syntaxStatementLocal:
-		return c.compileLocal(*c.tree.local(&stmt))
+		value, ok := c.tree.localArena(stmt)
+		if !ok {
+			return fmt.Errorf("compile: invalid local statement")
+		}
+		return c.compileLocal(value)
 	case syntaxStatementLocalFunction:
-		return c.compileLocalFunction(*c.tree.localFunction(&stmt))
+		value, ok := c.tree.localFunctionArena(stmt)
+		if !ok {
+			return fmt.Errorf("compile: invalid local function statement")
+		}
+		return c.compileLocalFunction(value)
 	case syntaxStatementFunctionDeclaration:
-		return c.compileFunctionDeclaration(*c.tree.functionDeclaration(&stmt))
+		value, ok := c.tree.functionDeclarationArena(stmt)
+		if !ok {
+			return fmt.Errorf("compile: invalid function declaration")
+		}
+		return c.compileFunctionDeclaration(value)
 	case syntaxStatementAssign:
-		return c.compileAssignment(*c.tree.assignment(&stmt))
+		value, ok := c.tree.assignmentArena(stmt)
+		if !ok {
+			return fmt.Errorf("compile: invalid assignment")
+		}
+		return c.compileAssignment(value)
 	case syntaxStatementCall:
-		return c.compileCallStatement(c.tree.call(&stmt))
+		return c.compileCallStatement(termID(node.payload))
 	case syntaxStatementIf:
-		return c.compileIf(*c.tree.ifStatement(&stmt))
+		value, ok := c.tree.ifArena(stmt)
+		if !ok {
+			return fmt.Errorf("compile: invalid if statement")
+		}
+		return c.compileIf(value)
 	case syntaxStatementWhile:
-		return c.compileWhile(*c.tree.whileStatement(&stmt))
+		value, ok := c.tree.whileArena(stmt)
+		if !ok {
+			return fmt.Errorf("compile: invalid while statement")
+		}
+		return c.compileWhile(value)
 	case syntaxStatementFor:
-		return c.compileFor(*c.tree.forStatement(&stmt))
+		value, ok := c.tree.forArena(stmt)
+		if !ok {
+			return fmt.Errorf("compile: invalid numeric for statement")
+		}
+		return c.compileFor(value)
 	case syntaxStatementGenericFor:
-		return c.compileGenericFor(*c.tree.genericForStatement(&stmt))
+		value, ok := c.tree.genericForArena(stmt)
+		if !ok {
+			return fmt.Errorf("compile: invalid generic for statement")
+		}
+		return c.compileGenericFor(value)
 	case syntaxStatementRepeat:
-		return c.compileRepeat(*c.tree.repeatStatement(&stmt))
+		value, ok := c.tree.repeatArena(stmt)
+		if !ok {
+			return fmt.Errorf("compile: invalid repeat statement")
+		}
+		return c.compileRepeat(value)
 	case syntaxStatementBlock:
-		return c.compileBlock(*c.tree.blockStatement(&stmt))
+		value, ok := c.tree.blockArena(stmt)
+		if !ok {
+			return fmt.Errorf("compile: invalid block statement")
+		}
+		return c.compileBlock(value)
 	case syntaxStatementTypeAlias:
+		value, ok := c.tree.typeAliasArena(stmt)
+		if !ok {
+			return fmt.Errorf("compile: invalid type alias statement")
+		}
+		if _, ok := resolveArenaName(c.tree, value.name); !ok {
+			return fmt.Errorf("compile: invalid type alias name")
+		}
 		return nil
 	case syntaxStatementBreak:
 		return c.compileBreak()
 	case syntaxStatementContinue:
 		return c.compileContinue()
 	case syntaxStatementReturn:
-		return c.compileReturn(*c.tree.returnStatement(&stmt))
+		value, ok := c.tree.returnArena(stmt)
+		if !ok {
+			return fmt.Errorf("compile: invalid return statement")
+		}
+		return c.compileReturn(value)
 	default:
 		return fmt.Errorf("compile: empty statement")
 	}
 }
 
-func (c *compiler) compileLocal(stmt localStatement) error {
-	names := c.tree.localNames(&stmt)
+func (c *compiler) compileLocal(stmt arenaLocalStatement) error {
+	names, ok := c.tree.statementStrings(stmt.names)
+	if !ok {
+		return fmt.Errorf("compile: invalid local name span")
+	}
 	if len(names) == 0 {
 		return fmt.Errorf("compile: local statement has no names")
+	}
+	for _, nameID := range names {
+		if _, ok := resolveArenaName(c.tree, nameID); !ok {
+			return fmt.Errorf("compile: invalid local name")
+		}
 	}
 
 	first := c.allocReg()
@@ -397,21 +493,27 @@ func (c *compiler) compileLocal(stmt localStatement) error {
 	}
 	c.reserveRegistersThrough(first + len(targets))
 
-	values := c.tree.localValues(&stmt)
+	values, ok := c.tree.statementExpressions(stmt.values)
+	if !ok {
+		return fmt.Errorf("compile: invalid local value span")
+	}
 	plan := fixedValueListPlan(c.tree, values, len(targets))
 	if err := c.compileValueListTo(plan, targets); err != nil {
 		return err
 	}
 	for i := range names {
-		if err := c.assignDefinition(syntaxNameID(c.tree.localNameID(&stmt), i), symbolLocal, targets[i]); err != nil {
+		if err := c.assignDefinition(syntaxNameID(stmt.nameID, i), symbolLocal, targets[i]); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (c *compiler) compileReturn(stmt returnStatement) error {
-	values := c.tree.returnValues(&stmt)
+func (c *compiler) compileReturn(stmt arenaReturnStatement) error {
+	values, ok := c.tree.statementExpressions(stmt.values)
+	if !ok {
+		return fmt.Errorf("compile: invalid return value span")
+	}
 	if len(values) == 0 {
 		c.emit(instruction{op: opReturn})
 		return nil
@@ -510,11 +612,14 @@ func (c *compiler) compileNilTo(target int) {
 	c.emitLoadConst(target, NilValue())
 }
 
-func (c *compiler) compileLocalFunction(stmt localFunctionStatement) error {
-	closure := planLocalFunction(c.tree, stmt)
+func (c *compiler) compileLocalFunction(stmt arenaFunctionStatement) error {
+	closure, err := planLocalFunction(c.tree, stmt)
+	if err != nil {
+		return err
+	}
 	target := c.allocReg()
 	selfFunctionSymbol := -1
-	symbol, err := c.claimSymbol(c.tree.localFunctionNameID(&stmt), symbolLocalFunction)
+	symbol, err := c.claimSymbol(stmt.nameID, symbolLocalFunction)
 	if err != nil {
 		return err
 	}
@@ -528,14 +633,17 @@ func (c *compiler) compileLocalFunction(stmt localFunctionStatement) error {
 	return nil
 }
 
-func (c *compiler) compileFunctionDeclaration(stmt functionDeclarationStatement) error {
-	closure := planFunctionDeclaration(c.tree, stmt)
+func (c *compiler) compileFunctionDeclaration(stmt arenaFunctionStatement) error {
+	closure, err := planFunctionDeclaration(c.tree, stmt)
+	if err != nil {
+		return err
+	}
 
 	value := c.allocReg()
 	if err := c.compileClosureTo(closure, value); err != nil {
 		return err
 	}
-	return c.compileAssignTargetFromRegister(*c.tree.functionDeclarationTarget(&stmt), value)
+	return c.compileAssignTargetFromRegister(stmt.target, value)
 }
 
 func (c *compiler) compileFunctionDraft(closure closurePlan, selfFunctionSymbol int) (*functionDraft, error) {
@@ -567,7 +675,7 @@ func (c *compiler) compileFunctionDraft(closure closurePlan, selfFunctionSymbol 
 		}
 		return nil, err
 	}
-	if !statementsHaveReturn(closure.body) {
+	if !statementIDsHaveReturn(fn.tree, closure.body) {
 		fn.emit(instruction{op: opReturn})
 	}
 	if fn.conversionErr != nil {
@@ -876,7 +984,11 @@ func (c *compiler) compileTermCoreTo(term termID, target int) error {
 		return c.compileTableTo(table, target)
 	}
 	if function, ok := c.tree.termFunction(term); ok {
-		return c.compileClosureTo(planFunctionExpression(c.tree, function), target)
+		closure, err := planFunctionExpression(c.tree, function)
+		if err != nil {
+			return err
+		}
+		return c.compileClosureTo(closure, target)
 	}
 	if ifExpr, ok := c.tree.termIf(term); ok {
 		return c.compileIfExpressionTo(ifExpr, target)
@@ -1055,9 +1167,15 @@ func (c *compiler) compileLengthTo(term termID, target int) error {
 	return nil
 }
 
-func (c *compiler) compileAssignment(stmt assignStatement) error {
-	targets := c.tree.assignmentTargets(&stmt)
-	values := c.tree.assignmentValues(&stmt)
+func (c *compiler) compileAssignment(stmt arenaAssignStatement) error {
+	targets, ok := c.tree.statementTargets(stmt.targets)
+	if !ok {
+		return fmt.Errorf("compile: invalid assignment target span")
+	}
+	values, ok := c.tree.statementExpressions(stmt.values)
+	if !ok {
+		return fmt.Errorf("compile: invalid assignment value span")
+	}
 	if len(targets) == 0 {
 		return fmt.Errorf("compile: assignment has no targets")
 	}
@@ -1093,17 +1211,22 @@ func (c *compiler) compileAssignment(stmt assignStatement) error {
 	return nil
 }
 
-func (c *compiler) canCompileSingleLocalAssignmentInPlace(stmt assignStatement, plan valueListPlan) bool {
+func (c *compiler) canCompileSingleLocalAssignmentInPlace(stmt arenaAssignStatement, plan valueListPlan) bool {
 	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
 		return false
 	}
-	targets := c.tree.assignmentTargets(&stmt)
-	values := c.tree.assignmentValues(&stmt)
+	targets, _ := c.tree.statementTargets(stmt.targets)
+	values, _ := c.tree.statementExpressions(stmt.values)
 	if len(targets) != 1 || plan.len() != 1 {
 		return false
 	}
 	target := targets[0]
-	if len(c.tree.assignTargetSelectors(&target)) != 0 {
+	value, ok := c.tree.statementArenaTarget(target)
+	if !ok {
+		return false
+	}
+	selectors, _ := c.tree.selectorSpan(value.selectors)
+	if len(selectors) != 0 {
 		return false
 	}
 	item := plan.item(0)
@@ -1114,7 +1237,11 @@ func (c *compiler) canCompileSingleLocalAssignmentInPlace(stmt assignStatement, 
 	if !ok || ref.kind != variableLocal {
 		return false
 	}
-	return expressionCanAssignToNameInPlace(c.tree, values[item.source], c.tree.assignTargetName(&target))
+	name, ok := resolveArenaName(c.tree, value.name)
+	if !ok {
+		return false
+	}
+	return expressionCanAssignToNameInPlace(c.tree, values[item.source], name)
 }
 
 func expressionCanAssignToNameInPlace(tree syntaxTree, expr expressionID, name string) bool {
@@ -1383,12 +1510,12 @@ type subStringFieldAssignment struct {
 	operand multiplicativeExpressionID
 }
 
-func (c *compiler) addStringFieldAssignment(stmt assignStatement, plan valueListPlan) (addStringFieldAssignment, bool) {
+func (c *compiler) addStringFieldAssignment(stmt arenaAssignStatement, plan valueListPlan) (addStringFieldAssignment, bool) {
 	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
 		return addStringFieldAssignment{}, false
 	}
-	targets := c.tree.assignmentTargets(&stmt)
-	values := c.tree.assignmentValues(&stmt)
+	targets, _ := c.tree.statementTargets(stmt.targets)
+	values, _ := c.tree.statementExpressions(stmt.values)
 	if len(targets) != 1 || plan.len() != 1 {
 		return addStringFieldAssignment{}, false
 	}
@@ -1397,8 +1524,16 @@ func (c *compiler) addStringFieldAssignment(stmt assignStatement, plan valueList
 		return addStringFieldAssignment{}, false
 	}
 	target := targets[0]
-	selectors := c.tree.assignTargetSelectors(&target)
-	if len(selectors) != 1 || c.tree.selectorField(&selectors[0]) == "" {
+	targetValue, ok := c.tree.statementArenaTarget(target)
+	if !ok {
+		return addStringFieldAssignment{}, false
+	}
+	selectors, _ := c.tree.selectorSpan(targetValue.selectors)
+	if len(selectors) != 1 {
+		return addStringFieldAssignment{}, false
+	}
+	field, ok := resolveArenaSelectorField(c.tree, selectors[0])
+	if !ok {
 		return addStringFieldAssignment{}, false
 	}
 	ref, ok := c.resolveAssignTarget(target)
@@ -1411,17 +1546,17 @@ func (c *compiler) addStringFieldAssignment(stmt assignStatement, plan valueList
 	}
 	return addStringFieldAssignment{
 		table:   ref.index,
-		field:   c.tree.selectorField(&selectors[0]),
+		field:   field,
 		operand: operand,
 	}, true
 }
 
-func (c *compiler) subStringFieldAssignment(stmt assignStatement, plan valueListPlan) (subStringFieldAssignment, bool) {
+func (c *compiler) subStringFieldAssignment(stmt arenaAssignStatement, plan valueListPlan) (subStringFieldAssignment, bool) {
 	if !c.options.optimizations.enabled(optimizationBytecodePeephole) {
 		return subStringFieldAssignment{}, false
 	}
-	targets := c.tree.assignmentTargets(&stmt)
-	values := c.tree.assignmentValues(&stmt)
+	targets, _ := c.tree.statementTargets(stmt.targets)
+	values, _ := c.tree.statementExpressions(stmt.values)
 	if len(targets) != 1 || plan.len() != 1 {
 		return subStringFieldAssignment{}, false
 	}
@@ -1430,8 +1565,16 @@ func (c *compiler) subStringFieldAssignment(stmt assignStatement, plan valueList
 		return subStringFieldAssignment{}, false
 	}
 	target := targets[0]
-	selectors := c.tree.assignTargetSelectors(&target)
-	if len(selectors) != 1 || c.tree.selectorField(&selectors[0]) == "" {
+	targetValue, ok := c.tree.statementArenaTarget(target)
+	if !ok {
+		return subStringFieldAssignment{}, false
+	}
+	selectors, _ := c.tree.selectorSpan(targetValue.selectors)
+	if len(selectors) != 1 {
+		return subStringFieldAssignment{}, false
+	}
+	field, ok := resolveArenaSelectorField(c.tree, selectors[0])
+	if !ok {
 		return subStringFieldAssignment{}, false
 	}
 	ref, ok := c.resolveAssignTarget(target)
@@ -1444,20 +1587,20 @@ func (c *compiler) subStringFieldAssignment(stmt assignStatement, plan valueList
 	}
 	return subStringFieldAssignment{
 		table:   ref.index,
-		field:   c.tree.selectorField(&selectors[0]),
+		field:   field,
 		operand: operand,
 	}, true
 }
 
-func fieldAddAssignmentOperand(tree syntaxTree, expr expressionID, target assignTarget) (multiplicativeExpressionID, bool) {
+func fieldAddAssignmentOperand(tree syntaxTree, expr expressionID, target assignTargetID) (multiplicativeExpressionID, bool) {
 	return fieldAddSubAssignmentOperand(tree, expr, target, additiveAdd)
 }
 
-func fieldSubAssignmentOperand(tree syntaxTree, expr expressionID, target assignTarget) (multiplicativeExpressionID, bool) {
+func fieldSubAssignmentOperand(tree syntaxTree, expr expressionID, target assignTargetID) (multiplicativeExpressionID, bool) {
 	return fieldAddSubAssignmentOperand(tree, expr, target, additiveSubtract)
 }
 
-func fieldAddSubAssignmentOperand(tree syntaxTree, expr expressionID, target assignTarget, op additiveOperator) (multiplicativeExpressionID, bool) {
+func fieldAddSubAssignmentOperand(tree syntaxTree, expr expressionID, target assignTargetID, op additiveOperator) (multiplicativeExpressionID, bool) {
 	terms, ok := tree.expressionTerms(expr)
 	if !ok || len(terms) != 1 {
 		return 0, false
@@ -1490,20 +1633,35 @@ func fieldAddSubAssignmentOperand(tree syntaxTree, expr expressionID, target ass
 	return operand, true
 }
 
-func multiplicativeMatchesAssignTarget(tree syntaxTree, expr multiplicativeExpressionID, target assignTarget) bool {
+func multiplicativeMatchesAssignTarget(tree syntaxTree, expr multiplicativeExpressionID, target assignTargetID) bool {
 	rest, _ := tree.multiplicativeRest(expr)
 	if len(rest) != 0 {
 		return false
 	}
 	value := termWithoutCastsAndGroups(tree, tree.multiplicativeFirst(expr))
 	selectors, _ := tree.termSelectors(value)
-	targetSelectors := tree.assignTargetSelectors(&target)
-	if tree.termName(value) != tree.assignTargetName(&target) || len(selectors) != len(targetSelectors) {
+	targetValue, ok := tree.statementArenaTarget(target)
+	if !ok {
+		return false
+	}
+	targetSelectors, ok := tree.selectorSpan(targetValue.selectors)
+	if !ok {
+		return false
+	}
+	targetName, ok := resolveArenaName(tree, targetValue.name)
+	if !ok {
+		return false
+	}
+	if tree.termName(value) != targetName || len(selectors) != len(targetSelectors) {
 		return false
 	}
 	for i, selector := range selectors {
 		targetSelector := targetSelectors[i]
-		if tree.termSelectorField(selector) != tree.selectorField(&targetSelector) || tree.termSelectorIndex(selector) != 0 || tree.selectorIndex(&targetSelector) != 0 {
+		field, ok := resolveArenaSelectorField(tree, targetSelector)
+		if !ok {
+			return false
+		}
+		if tree.termSelectorField(selector) != field || tree.termSelectorIndex(selector) != 0 || targetSelector.index != 0 {
 			return false
 		}
 	}
@@ -1557,15 +1715,26 @@ func (c *compiler) compileSubStringFieldAssignment(subField subStringFieldAssign
 	return nil
 }
 
-func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value int) error {
-	selectors := c.tree.assignTargetSelectors(&target)
+func (c *compiler) compileAssignTargetFromRegister(target assignTargetID, value int) error {
+	targetValue, ok := c.tree.statementArenaTarget(target)
+	if !ok {
+		return fmt.Errorf("compile: invalid assignment target")
+	}
+	targetName, ok := resolveArenaName(c.tree, targetValue.name)
+	if !ok {
+		return fmt.Errorf("compile: invalid assignment target name")
+	}
+	selectors, ok := c.tree.selectorSpan(targetValue.selectors)
+	if !ok {
+		return fmt.Errorf("compile: invalid assignment target selector span")
+	}
 	if len(selectors) == 0 {
-		ref, bound, err := c.resolveBoundUse(c.tree.assignTargetID(&target))
+		ref, bound, err := c.resolveBoundUse(targetValue.id)
 		if err != nil {
 			return err
 		}
 		if !bound {
-			name := c.addStringConstant(c.tree.assignTargetName(&target))
+			name := c.addStringConstant(targetName)
 			c.emit(instruction{op: opSetGlobal, a: name, b: value})
 			return nil
 		}
@@ -1580,13 +1749,17 @@ func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value in
 
 	if ref, ok := c.resolveAssignTarget(target); ok && ref.kind == variableLocal && len(selectors) == 1 {
 		last := selectors[0]
-		if c.tree.selectorField(&last) != "" {
-			key := c.addStringConstant(c.tree.selectorField(&last))
+		if last.field != 0 {
+			field, ok := resolveArenaSelectorField(c.tree, last)
+			if !ok {
+				return fmt.Errorf("compile: invalid selector field")
+			}
+			key := c.addStringConstant(field)
 			c.emit(instruction{op: opSetStringField, a: ref.index, b: key, c: value})
 			return nil
 		}
 		key := c.allocReg()
-		if err := c.compileExpressionTo(c.tree.selectorIndex(&last), key); err != nil {
+		if err := c.compileExpressionTo(last.index, key); err != nil {
 			return err
 		}
 		c.emit(instruction{op: opSetIndex, a: ref.index, b: key, c: value})
@@ -1596,19 +1769,28 @@ func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value in
 	if ref, ok := c.resolveAssignTarget(target); ok && ref.kind == variableLocal && len(selectors) == 2 {
 		first := selectors[0]
 		second := selectors[1]
-		if c.tree.selectorField(&first) != "" && c.tree.selectorField(&second) != "" {
-			firstKey := c.addStringConstant(c.tree.selectorField(&first))
-			secondKey := c.addStringConstant(c.tree.selectorField(&second))
+		if first.field != 0 && second.field != 0 {
+			firstField, firstOK := resolveArenaSelectorField(c.tree, first)
+			secondField, secondOK := resolveArenaSelectorField(c.tree, second)
+			if !firstOK || !secondOK {
+				return fmt.Errorf("compile: invalid selector field")
+			}
+			firstKey := c.addStringConstant(firstField)
+			secondKey := c.addStringConstant(secondField)
 			table := c.allocTemp()
 			c.emit(instruction{op: opGetStringField, a: table, b: ref.index, c: firstKey})
 			c.emit(instruction{op: opSetStringField, a: table, b: secondKey, c: value})
 			c.releaseTemp(table)
 			return nil
 		}
-		if c.tree.selectorField(&first) != "" && c.tree.selectorIndex(&second) != 0 {
-			firstKey := c.addStringConstant(c.tree.selectorField(&first))
+		if first.field != 0 && second.index != 0 {
+			firstField, ok := resolveArenaSelectorField(c.tree, first)
+			if !ok {
+				return fmt.Errorf("compile: invalid selector field")
+			}
+			firstKey := c.addStringConstant(firstField)
 			key := c.allocReg()
-			if err := c.compileExpressionTo(c.tree.selectorIndex(&second), key); err != nil {
+			if err := c.compileExpressionTo(second.index, key); err != nil {
 				return err
 			}
 			c.emit(instruction{op: opSetStringFieldIndex, a: ref.index, b: firstKey, c: key, d: value})
@@ -1627,34 +1809,47 @@ func (c *compiler) compileAssignTargetFromRegister(target assignTarget, value in
 	}
 
 	last := selectors[len(selectors)-1]
-	if c.tree.selectorField(&last) != "" {
-		key := c.addStringConstant(c.tree.selectorField(&last))
+	if last.field != 0 {
+		field, ok := resolveArenaSelectorField(c.tree, last)
+		if !ok {
+			return fmt.Errorf("compile: invalid selector field")
+		}
+		key := c.addStringConstant(field)
 		c.emit(instruction{op: opSetStringField, a: table, b: key, c: value})
 		return nil
 	}
 
 	key := c.allocReg()
-	if err := c.compileExpressionTo(c.tree.selectorIndex(&last), key); err != nil {
+	if err := c.compileExpressionTo(last.index, key); err != nil {
 		return err
 	}
 	c.emit(instruction{op: opSetIndex, a: table, b: key, c: value})
 	return nil
 }
 
-func (c *compiler) compileTargetSelectorsTo(selectors []selector, target int) error {
+func (c *compiler) compileTargetSelectorsTo(selectors []arenaSelector, target int) error {
 	for len(selectors) > 0 {
-		if len(selectors) >= 2 && c.tree.selectorField(&selectors[0]) != "" && c.tree.selectorField(&selectors[1]) != "" {
-			firstKey := c.addStringConstant(c.tree.selectorField(&selectors[0]))
-			secondKey := c.addStringConstant(c.tree.selectorField(&selectors[1]))
+		if len(selectors) >= 2 && selectors[0].field != 0 && selectors[1].field != 0 {
+			firstField, firstOK := resolveArenaSelectorField(c.tree, selectors[0])
+			secondField, secondOK := resolveArenaSelectorField(c.tree, selectors[1])
+			if !firstOK || !secondOK {
+				return fmt.Errorf("compile: invalid selector field")
+			}
+			firstKey := c.addStringConstant(firstField)
+			secondKey := c.addStringConstant(secondField)
 			c.emit(instruction{op: opGetStringField, a: target, b: target, c: firstKey})
 			c.emit(instruction{op: opGetStringField, a: target, b: target, c: secondKey})
 			selectors = selectors[2:]
 			continue
 		}
-		if len(selectors) >= 2 && c.tree.selectorField(&selectors[0]) != "" && c.tree.selectorIndex(&selectors[1]) != 0 {
-			firstKey := c.addStringConstant(c.tree.selectorField(&selectors[0]))
+		if len(selectors) >= 2 && selectors[0].field != 0 && selectors[1].index != 0 {
+			firstField, ok := resolveArenaSelectorField(c.tree, selectors[0])
+			if !ok {
+				return fmt.Errorf("compile: invalid selector field")
+			}
+			firstKey := c.addStringConstant(firstField)
 			key := c.allocReg()
-			if err := c.compileExpressionTo(c.tree.selectorIndex(&selectors[1]), key); err != nil {
+			if err := c.compileExpressionTo(selectors[1].index, key); err != nil {
 				return err
 			}
 			c.emit(instruction{op: opGetStringFieldIndex, a: target, b: target, c: firstKey, d: key})
@@ -1662,14 +1857,18 @@ func (c *compiler) compileTargetSelectorsTo(selectors []selector, target int) er
 			continue
 		}
 		selector := selectors[0]
-		if c.tree.selectorField(&selector) != "" {
-			key := c.addStringConstant(c.tree.selectorField(&selector))
+		if selector.field != 0 {
+			field, ok := resolveArenaSelectorField(c.tree, selector)
+			if !ok {
+				return fmt.Errorf("compile: invalid selector field")
+			}
+			key := c.addStringConstant(field)
 			c.emit(instruction{op: opGetStringField, a: target, b: target, c: key})
 			selectors = selectors[1:]
 			continue
 		}
 		key := c.allocReg()
-		if err := c.compileExpressionTo(c.tree.selectorIndex(&selector), key); err != nil {
+		if err := c.compileExpressionTo(selector.index, key); err != nil {
 			return err
 		}
 		c.emit(instruction{op: opGetIndex, a: target, b: target, c: key})
@@ -1678,7 +1877,7 @@ func (c *compiler) compileTargetSelectorsTo(selectors []selector, target int) er
 	return nil
 }
 
-func (c *compiler) compileIf(stmt ifStatement) error {
+func (c *compiler) compileIf(stmt arenaIfStatement) error {
 	branch := stmt
 	if !c.suppressTagChains {
 		if ok, err := c.compileStringTagElseIfChain(branch); ok || err != nil {
@@ -1688,7 +1887,7 @@ func (c *compiler) compileIf(stmt ifStatement) error {
 	return c.compileIfDefault(branch)
 }
 
-func (c *compiler) compileIfSlowPath(branch ifStatement) error {
+func (c *compiler) compileIfSlowPath(branch arenaIfStatement) error {
 	previous := c.suppressTagChains
 	c.suppressTagChains = true
 	defer func() {
@@ -1697,8 +1896,8 @@ func (c *compiler) compileIfSlowPath(branch ifStatement) error {
 	return c.compileIfDefault(branch)
 }
 
-func (c *compiler) compileIfDefault(branch ifStatement) error {
-	conditionExpr := c.tree.ifCondition(&branch)
+func (c *compiler) compileIfDefault(branch arenaIfStatement) error {
+	conditionExpr := branch.condition
 	jumpIfFalse, ok, err := c.compileConditionJumpIfFalse(conditionExpr)
 	if err != nil {
 		return err
@@ -1712,7 +1911,11 @@ func (c *compiler) compileIfDefault(branch ifStatement) error {
 		c.releaseTemp(condition)
 	}
 
-	if err := c.compileStatements(c.tree.ifThenStatements(&branch)); err != nil {
+	thenBody, ok := c.tree.statementChildren(branch.thenStatements)
+	if !ok {
+		return fmt.Errorf("compile: invalid if body span")
+	}
+	if err := c.compileStatements(thenBody); err != nil {
 		return err
 	}
 
@@ -1721,7 +1924,10 @@ func (c *compiler) compileIfDefault(branch ifStatement) error {
 	elseStart := c.pc()
 	c.patchJump(jumpIfFalse, elseStart)
 
-	elseStatements := c.tree.ifElseStatements(&branch)
+	elseStatements, ok := c.tree.statementChildren(branch.elseStatements)
+	if !ok {
+		return fmt.Errorf("compile: invalid if else span")
+	}
 	if len(elseStatements) > 0 {
 		if err := c.compileStatements(elseStatements); err != nil {
 			return err
@@ -1735,17 +1941,17 @@ func (c *compiler) compileIfDefault(branch ifStatement) error {
 type stringTagElseIfArm struct {
 	value  string
 	guards []comparisonExpressionID
-	body   []statement
+	body   []statementID
 }
 
 type stringTagElseIfChain struct {
 	table    int
 	field    string
 	arms     []stringTagElseIfArm
-	elseBody []statement
+	elseBody []statementID
 }
 
-func (c *compiler) compileStringTagElseIfChain(branch ifStatement) (bool, error) {
+func (c *compiler) compileStringTagElseIfChain(branch arenaIfStatement) (bool, error) {
 	chain, ok := c.stringTagElseIfChain(branch)
 	if !ok {
 		return false, nil
@@ -1799,8 +2005,8 @@ func (c *compiler) compileStringTagElseIfChain(branch ifStatement) (bool, error)
 	return true, nil
 }
 
-func (c *compiler) stringTagElseIfChain(branch ifStatement) (stringTagElseIfChain, bool) {
-	first, firstGuards, ok := c.stringTagArmCondition(c.tree.ifCondition(&branch))
+func (c *compiler) stringTagElseIfChain(branch arenaIfStatement) (stringTagElseIfChain, bool) {
+	first, firstGuards, ok := c.stringTagArmCondition(branch.condition)
 	if !ok {
 		return stringTagElseIfChain{}, false
 	}
@@ -1814,13 +2020,16 @@ func (c *compiler) stringTagElseIfChain(branch ifStatement) (stringTagElseIfChai
 		arms: []stringTagElseIfArm{{
 			value:  firstValue,
 			guards: firstGuards,
-			body:   c.tree.ifThenStatements(&branch),
+			body:   statementChildValues(c.tree, branch.thenStatements),
 		}},
 	}
-	elseBody := c.tree.ifElseStatements(&branch)
-	for len(elseBody) == 1 && c.tree.statementKind(&elseBody[0]) == syntaxStatementIf {
-		nextBranch := *c.tree.ifStatement(&elseBody[0])
-		condition, guards, ok := c.stringTagArmCondition(c.tree.ifCondition(&nextBranch))
+	elseBody := statementChildValues(c.tree, branch.elseStatements)
+	for len(elseBody) == 1 && c.tree.statementKindID(elseBody[0]) == syntaxStatementIf {
+		nextBranch, valid := c.tree.ifArena(elseBody[0])
+		if !valid {
+			return stringTagElseIfChain{}, false
+		}
+		condition, guards, ok := c.stringTagArmCondition(nextBranch.condition)
 		if !ok ||
 			condition.table != chain.table ||
 			condition.field != chain.field {
@@ -1833,9 +2042,9 @@ func (c *compiler) stringTagElseIfChain(branch ifStatement) (stringTagElseIfChai
 		chain.arms = append(chain.arms, stringTagElseIfArm{
 			value:  conditionValue,
 			guards: guards,
-			body:   c.tree.ifThenStatements(&nextBranch),
+			body:   statementChildValues(c.tree, nextBranch.thenStatements),
 		})
-		elseBody = c.tree.ifElseStatements(&nextBranch)
+		elseBody = statementChildValues(c.tree, nextBranch.elseStatements)
 	}
 	if len(chain.arms) < 3 {
 		return stringTagElseIfChain{}, false
@@ -2620,9 +2829,9 @@ func (c *compiler) compileContinue() error {
 	return nil
 }
 
-func (c *compiler) compileWhile(stmt whileStatement) error {
+func (c *compiler) compileWhile(stmt arenaWhileStatement) error {
 	conditionStart := c.pc()
-	condition := c.tree.whileCondition(&stmt)
+	condition := stmt.condition
 
 	jumpIfFalse, ok, err := c.compileConditionJumpIfFalse(condition)
 	if err != nil {
@@ -2638,7 +2847,11 @@ func (c *compiler) compileWhile(stmt whileStatement) error {
 	}
 
 	c.loops = append(c.loops, loopContext{continueTarget: conditionStart})
-	if err := c.compileStatements(c.tree.whileStatements(&stmt)); err != nil {
+	body, ok := c.tree.statementChildren(stmt.statements)
+	if !ok {
+		return fmt.Errorf("compile: invalid while body span")
+	}
+	if err := c.compileStatements(body); err != nil {
 		return err
 	}
 	loop := c.loops[len(c.loops)-1]
@@ -2652,18 +2865,21 @@ func (c *compiler) compileWhile(stmt whileStatement) error {
 	return nil
 }
 
-func (c *compiler) compileFor(stmt forStatement) error {
+func (c *compiler) compileFor(stmt arenaForStatement) error {
+	if _, ok := resolveArenaName(c.tree, stmt.name); !ok {
+		return fmt.Errorf("compile: invalid numeric for name")
+	}
 	loopVar := c.allocReg()
 	limit := c.allocReg()
 	step := c.allocReg()
 
-	if err := c.compileExpressionTo(c.tree.numericForStart(&stmt), loopVar); err != nil {
+	if err := c.compileExpressionTo(stmt.start, loopVar); err != nil {
 		return err
 	}
-	if err := c.compileExpressionTo(c.tree.numericForLimit(&stmt), limit); err != nil {
+	if err := c.compileExpressionTo(stmt.limit, limit); err != nil {
 		return err
 	}
-	if stepExpr := c.tree.numericForStep(&stmt); stepExpr != 0 {
+	if stepExpr := stmt.step; stepExpr != 0 {
 		if err := c.compileExpressionTo(stepExpr, step); err != nil {
 			return err
 		}
@@ -2679,11 +2895,15 @@ func (c *compiler) compileFor(stmt forStatement) error {
 	conditionStart := c.pc()
 	jumpExit := c.emit(instruction{op: opNumericForCheck, a: loopVar, b: limit, c: step})
 
-	if err := c.assignDefinition(c.tree.numericForNameID(&stmt), symbolLocal, loopVar); err != nil {
+	if err := c.assignDefinition(stmt.nameID, symbolLocal, loopVar); err != nil {
 		return err
 	}
 	c.loops = append(c.loops, loopContext{continueTarget: -1})
-	if err := c.compileStatements(c.tree.numericForStatements(&stmt)); err != nil {
+	body, ok := c.tree.statementChildren(stmt.statements)
+	if !ok {
+		return fmt.Errorf("compile: invalid numeric for body span")
+	}
+	if err := c.compileStatements(body); err != nil {
 		return err
 	}
 	loop := c.loops[len(c.loops)-1]
@@ -2703,17 +2923,28 @@ func (c *compiler) compileFor(stmt forStatement) error {
 	return nil
 }
 
-func (c *compiler) compileGenericFor(stmt genericForStatement) error {
-	names := c.tree.genericForNames(&stmt)
+func (c *compiler) compileGenericFor(stmt arenaGenericForStatement) error {
+	names, ok := c.tree.statementStrings(stmt.names)
+	if !ok {
+		return fmt.Errorf("compile: invalid generic for name span")
+	}
 	if len(names) == 0 {
 		return fmt.Errorf("compile: generic for has no names")
+	}
+	for _, nameID := range names {
+		if _, ok := resolveArenaName(c.tree, nameID); !ok {
+			return fmt.Errorf("compile: invalid generic for name")
+		}
 	}
 
 	generator := c.allocReg()
 	state := c.allocReg()
 	control := c.allocReg()
 	targets := []int{generator, state, control}
-	values := c.tree.genericForValues(&stmt)
+	values, ok := c.tree.statementExpressions(stmt.values)
+	if !ok {
+		return fmt.Errorf("compile: invalid generic for value span")
+	}
 	if err := c.compileExpressionListTo(values, targets); err != nil {
 		return err
 	}
@@ -2741,12 +2972,16 @@ func (c *compiler) compileGenericFor(stmt genericForStatement) error {
 
 	for i := range names {
 		register := resultStart + i
-		if err := c.assignDefinition(syntaxNameID(c.tree.genericForNameID(&stmt), i), symbolLocal, register); err != nil {
+		if err := c.assignDefinition(syntaxNameID(stmt.nameID, i), symbolLocal, register); err != nil {
 			return err
 		}
 	}
 	c.loops = append(c.loops, loopContext{continueTarget: loopStart})
-	if err := c.compileStatements(c.tree.genericForStatements(&stmt)); err != nil {
+	body, ok := c.tree.statementChildren(stmt.statements)
+	if !ok {
+		return fmt.Errorf("compile: invalid generic for body span")
+	}
+	if err := c.compileStatements(body); err != nil {
 		return err
 	}
 	loop := c.loops[len(c.loops)-1]
@@ -2761,11 +2996,15 @@ func (c *compiler) compileGenericFor(stmt genericForStatement) error {
 	return nil
 }
 
-func (c *compiler) compileRepeat(stmt repeatStatement) error {
+func (c *compiler) compileRepeat(stmt arenaRepeatStatement) error {
 	bodyStart := c.pc()
 
 	c.loops = append(c.loops, loopContext{continueTarget: -1})
-	if err := c.compileStatements(c.tree.repeatStatements(&stmt)); err != nil {
+	body, ok := c.tree.statementChildren(stmt.statements)
+	if !ok {
+		return fmt.Errorf("compile: invalid repeat body span")
+	}
+	if err := c.compileStatements(body); err != nil {
 		return err
 	}
 	loop := c.loops[len(c.loops)-1]
@@ -2776,7 +3015,7 @@ func (c *compiler) compileRepeat(stmt repeatStatement) error {
 		c.patchJump(jump, conditionStart)
 	}
 
-	condition, err := c.compileTempExpression(c.tree.repeatCondition(&stmt))
+	condition, err := c.compileTempExpression(stmt.condition)
 	if err != nil {
 		return err
 	}
@@ -2789,8 +3028,12 @@ func (c *compiler) compileRepeat(stmt repeatStatement) error {
 	return nil
 }
 
-func (c *compiler) compileBlock(stmt blockStatement) error {
-	if err := c.compileStatements(c.tree.blockStatements(&stmt)); err != nil {
+func (c *compiler) compileBlock(stmt arenaBlockStatement) error {
+	body, ok := c.tree.statementChildren(stmt.statements)
+	if !ok {
+		return fmt.Errorf("compile: invalid block body span")
+	}
+	if err := c.compileStatements(body); err != nil {
 		return err
 	}
 	return nil
@@ -2888,20 +3131,32 @@ func (c *compiler) namedTermLocalRef(term termID) (variableRef, bool) {
 	return variableRef{}, false
 }
 
-func (c *compiler) compileAssignTargetBaseTo(target assignTarget, register int) error {
-	ref, bound, err := c.resolveBoundUse(c.tree.assignTargetID(&target))
+func (c *compiler) compileAssignTargetBaseTo(target assignTargetID, register int) error {
+	targetValue, ok := c.tree.statementArenaTarget(target)
+	if !ok {
+		return fmt.Errorf("compile: invalid assignment target")
+	}
+	ref, bound, err := c.resolveBoundUse(targetValue.id)
 	if err != nil {
 		return err
 	}
 	if bound {
 		return c.compileVariableRefTo(ref, register)
 	}
-	c.compileGlobalNameTo(c.tree.assignTargetName(&target), register)
+	name, ok := resolveArenaName(c.tree, targetValue.name)
+	if !ok {
+		return fmt.Errorf("compile: invalid assignment target name")
+	}
+	c.compileGlobalNameTo(name, register)
 	return nil
 }
 
-func (c *compiler) resolveAssignTarget(target assignTarget) (variableRef, bool) {
-	return c.resolveBoundUseNoError(c.tree.assignTargetID(&target))
+func (c *compiler) resolveAssignTarget(target assignTargetID) (variableRef, bool) {
+	targetValue, ok := c.tree.statementArenaTarget(target)
+	if !ok {
+		return variableRef{}, false
+	}
+	return c.resolveBoundUseNoError(targetValue.id)
 }
 
 func (c *compiler) compileVariableRefTo(ref variableRef, target int) error {

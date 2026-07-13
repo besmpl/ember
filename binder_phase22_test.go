@@ -19,15 +19,27 @@ func TestPhase22BoundFactsUseCompactStorage(t *testing.T) {
 func TestPhase22BindingDistinguishesGlobalsFromUnvisitedNodes(t *testing.T) {
 	tree := parseSourceForBindTest(t, "return hostGlobal, 1")
 	result := bindSyntaxTree(tree)
+	statements, ok := tree.statementIDs()
+	if !ok || len(statements) != 1 {
+		t.Fatalf("statement IDs = %v, want one return statement", statements)
+	}
+	ret, ok := tree.returnArena(statements[0])
+	if !ok {
+		t.Fatal("return statement is not present in the statement arena")
+	}
+	values, ok := tree.statementExpressions(ret.values)
+	if !ok || len(values) != 2 {
+		t.Fatalf("return values = %v, want two expressions", values)
+	}
 
-	global, ok := expressionSingleTerm(tree, tree.root.statements[0].ret.values[0])
+	global, ok := expressionSingleTerm(tree, values[0])
 	if !ok {
 		t.Fatal("global expression is not a single term")
 	}
 	if got := result.useClassification(tree.termSyntaxID(global)); got != boundUseGlobal {
 		t.Fatalf("global use classification = %v, want global", got)
 	}
-	literal, ok := expressionSingleTerm(tree, tree.root.statements[0].ret.values[1])
+	literal, ok := expressionSingleTerm(tree, values[1])
 	if !ok {
 		t.Fatal("literal expression is not a single term")
 	}
@@ -133,11 +145,25 @@ return T, value
 	value := result.mustSymbol(t, "T", symbolLocal, 0)
 	alias := result.mustSymbol(t, "T", symbolTypeAlias, 0)
 
-	annotation := tree.root.statements[2].local.annotations[0]
-	if use, ok := result.use(annotation.id); !ok || use.symbol != alias.id {
+	statements, _ := tree.statementIDs()
+	local, ok := tree.localArena(statements[2])
+	if !ok {
+		t.Fatal("typed local statement is not present in the statement arena")
+	}
+	annotations, _ := tree.statementTypes(local.annotations)
+	annotation, ok := tree.statementType(annotations[0])
+	if !ok {
+		t.Fatal("typed annotation is not present in the type arena")
+	}
+	if use, ok := result.use(tree.typeID(annotation)); !ok || use.symbol != alias.id {
 		t.Fatalf("type annotation use = %#v, %t, want type alias %d", use, ok, alias.id)
 	}
-	returnValue, ok := expressionSingleTerm(tree, tree.root.statements[3].ret.values[0])
+	ret, ok := tree.returnArena(statements[3])
+	if !ok {
+		t.Fatal("return statement is not present in the statement arena")
+	}
+	values, _ := tree.statementExpressions(ret.values)
+	returnValue, ok := expressionSingleTerm(tree, values[0])
 	if !ok {
 		t.Fatal("return T expression is not a single term")
 	}
@@ -164,15 +190,42 @@ return T
 	blockValue := result.mustSymbol(t, "T", symbolLocal, 2)
 	blockType := result.mustSymbol(t, "T", symbolTypeAlias, 2)
 
-	inside := tree.root.statements[2].block.statements[2].local.annotations[0]
-	if use, ok := result.use(inside.id); !ok || use.symbol != blockType.id {
+	statements, _ := tree.statementIDs()
+	block, ok := tree.blockArena(statements[2])
+	if !ok {
+		t.Fatal("block statement is not present in the statement arena")
+	}
+	blockStatements, _ := tree.statementChildren(block.statements)
+	insideLocal, ok := tree.localArena(blockStatements[2])
+	if !ok {
+		t.Fatal("nested local statement is not present in the statement arena")
+	}
+	insideTypes, _ := tree.statementTypes(insideLocal.annotations)
+	inside, ok := tree.statementType(insideTypes[0])
+	if !ok {
+		t.Fatal("nested annotation is not present in the type arena")
+	}
+	if use, ok := result.use(tree.typeID(inside)); !ok || use.symbol != blockType.id {
 		t.Fatalf("nested type use = %#v, %t, want block type %d", use, ok, blockType.id)
 	}
-	after := tree.root.statements[3].local.annotations[0]
-	if use, ok := result.use(after.id); !ok || use.symbol != outerType.id {
+	afterLocal, ok := tree.localArena(statements[3])
+	if !ok {
+		t.Fatal("after local statement is not present in the statement arena")
+	}
+	afterTypes, _ := tree.statementTypes(afterLocal.annotations)
+	after, ok := tree.statementType(afterTypes[0])
+	if !ok {
+		t.Fatal("after annotation is not present in the type arena")
+	}
+	if use, ok := result.use(tree.typeID(after)); !ok || use.symbol != outerType.id {
 		t.Fatalf("restored type use = %#v, %t, want outer type %d", use, ok, outerType.id)
 	}
-	returnValue, ok := expressionSingleTerm(tree, tree.root.statements[4].ret.values[0])
+	ret, ok := tree.returnArena(statements[4])
+	if !ok {
+		t.Fatal("return statement is not present in the statement arena")
+	}
+	values, _ := tree.statementExpressions(ret.values)
+	returnValue, ok := expressionSingleTerm(tree, values[0])
 	if !ok {
 		t.Fatal("return T expression is not a single term")
 	}

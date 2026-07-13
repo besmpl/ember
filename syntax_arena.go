@@ -155,17 +155,17 @@ type arenaCall struct {
 type arenaFunction struct {
 	id                 syntaxID
 	functionID         int
-	typeParams         []string
+	typeParams         nodeSpan // stringID
 	typeParamID        syntaxID
-	typePacks          []string
+	typePacks          nodeSpan // stringID
 	typePackID         syntaxID
-	params             []string
+	params             nodeSpan // stringID
 	paramID            syntaxID
-	paramAnnotations   []*typeExpression
+	paramAnnotations   nodeSpan // typeID
 	variadic           bool
-	variadicAnnotation *typeExpression
-	returnAnnotation   *typeExpression
-	statements         []statement
+	variadicAnnotation typeID
+	returnAnnotation   typeID
+	statements         nodeSpan // statementID
 }
 type arenaIfExpression struct {
 	condition expressionID
@@ -207,6 +207,23 @@ type syntaxArena struct {
 	functions      []arenaFunction
 	ifExpressions  []arenaIfExpression
 	powers         []arenaPower
+	statements     statementArena
+	typeNodes      []*typeExpression
+}
+
+func (a *syntaxArena) appendTypeNode(node *typeExpression) typeID {
+	if node == nil {
+		return 0
+	}
+	a.typeNodes = append(a.typeNodes, node)
+	return typeID(len(a.typeNodes))
+}
+
+func (a *syntaxArena) typeNode(id typeID) (*typeExpression, bool) {
+	if id == 0 || uint64(id) > uint64(len(a.typeNodes)) {
+		return nil, false
+	}
+	return a.typeNodes[uint64(id)-1], true
 }
 
 func newSyntaxArena(tokenCount int) *syntaxArena {
@@ -215,6 +232,8 @@ func newSyntaxArena(tokenCount int) *syntaxArena {
 	}
 	baseNodes := tokenCount/5 + 1
 	termNodes := tokenCount*2/5 + 1
+	statementNodes := tokenCount/3 + 1
+	childNodes := tokenCount/2 + 1
 	return &syntaxArena{
 		expressions:     make([]arenaExpression, 0, baseNodes),
 		andExpressions:  make([]arenaAndExpression, 0, baseNodes),
@@ -227,6 +246,29 @@ func newSyntaxArena(tokenCount int) *syntaxArena {
 		andTerms:        make([]comparisonExpressionID, 0, baseNodes),
 		additiveRest:    make([]arenaAdditivePart, 0, baseNodes),
 		strings:         make([]string, 0, baseNodes),
+		typeNodes:       make([]*typeExpression, 0, baseNodes),
+		statements: statementArena{
+			statements:           make([]arenaStatement, 0, statementNodes),
+			statementIDs:         make([]statementID, 0, statementNodes),
+			assignTargets:        make([]arenaAssignTarget, 0, childNodes),
+			locals:               make([]arenaLocalStatement, 0, baseNodes),
+			localFuncs:           make([]arenaFunctionStatement, 0, baseNodes/8+1),
+			functionDecls:        make([]arenaFunctionStatement, 0, baseNodes/8+1),
+			assigns:              make([]arenaAssignStatement, 0, baseNodes),
+			ifStatements:         make([]arenaIfStatement, 0, baseNodes/8+1),
+			whileStatements:      make([]arenaWhileStatement, 0, baseNodes/8+1),
+			forStatements:        make([]arenaForStatement, 0, baseNodes/8+1),
+			genericForStatements: make([]arenaGenericForStatement, 0, baseNodes/8+1),
+			repeatStatements:     make([]arenaRepeatStatement, 0, baseNodes/8+1),
+			blockStatements:      make([]arenaBlockStatement, 0, baseNodes/8+1),
+			returnStatements:     make([]arenaReturnStatement, 0, baseNodes/8+1),
+			typeAliases:          make([]arenaTypeAliasStatement, 0, baseNodes/8+1),
+			assignTargetIDs:      make([]assignTargetID, 0, childNodes),
+			stringIDs:            make([]stringID, 0, childNodes),
+			typeIDs:              make([]typeID, 0, childNodes),
+			expressionIDs:        make([]expressionID, 0, childNodes),
+			sourceRanges:         make([]sourceRange, 0, childNodes),
+		},
 	}
 }
 
