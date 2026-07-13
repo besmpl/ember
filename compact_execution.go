@@ -613,7 +613,7 @@ func (builder *compactProgramBuilder) callSite(functionIndex, pc int, facts []ui
 	if int(target) >= len(builder.functions) || ins.a < 0 || ins.a > math.MaxUint8 ||
 		argumentStart < 0 || argumentStart > math.MaxUint8 ||
 		argumentCount < 0 || argumentCount > math.MaxUint8 ||
-		function.boundaries[pc] < 0 || function.boundaries[pc] > math.MaxUint32 {
+		function.boundaries[pc] < 0 || uint64(function.boundaries[pc]) > uint64(^uint32(0)) {
 		return compactCallSite{}, false
 	}
 	flags := uint8(0)

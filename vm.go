@@ -2989,7 +2989,7 @@ func (thread *vmThread) maybeEnterRecordOnlyOpenArgumentCall(
 	frameDepth, frameDepthOK := vmFrameRecordUint16(frame.depth)
 	previousStackLength, previousStackLengthOK := vmFrameRecordUint32(frame.window.previousStackLength)
 	if !callerBaseOK || !callerTopOK || !returnPCOK || !resultOK || !argumentBaseOK || !argumentCountOK ||
-		!resultCountOK || !frameDepthOK || !previousStackLengthOK || childEnd > int(^uint32(0)) {
+		!resultCountOK || !frameDepthOK || !previousStackLengthOK || childEnd < 0 || uint64(childEnd) > uint64(^uint32(0)) {
 		return vmFrameRecord{}, false
 	}
 	previousLength := len(owner.values)

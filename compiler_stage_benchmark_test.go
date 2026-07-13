@@ -393,6 +393,9 @@ func emitCompilerStageWithCapacity(artifact sourceArtifact, capacity int) (compi
 	if !statementsHaveReturn(artifact.program.statements) {
 		c.emit(instruction{op: opReturn})
 	}
+	if c.conversionErr != nil {
+		return compilerStageEmission{}, c.conversionErr
+	}
 	return compilerStageEmission{
 		ir:                 append([]bytecodeIRInstruction(nil), c.ir...),
 		constants:          append([]Value(nil), c.constants...),

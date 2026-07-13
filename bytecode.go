@@ -820,22 +820,11 @@ const (
 	bytecodeOperandCount
 )
 
-type bytecodeOperand struct {
-	kind  bytecodeOperandKind
-	value int
-}
-
-type bytecodeOperands struct {
-	a bytecodeOperand
-	b bytecodeOperand
-	c bytecodeOperand
-	d bytecodeOperand
-}
-
 type bytecodeIRInstruction struct {
-	op       opcode
-	operands bytecodeOperands
-	source   sourceRange
+	a, b, c, d  int32
+	sourceStart uint32
+	sourceEnd   uint32
+	op          opcode
 }
 
 type bytecodeIROperandSlot uint8
@@ -859,19 +848,35 @@ func (ins bytecodeIRInstruction) opcodeValue() opcode {
 }
 
 func (ins bytecodeIRInstruction) sourceSpan() sourceRange {
-	return ins.source
+	span, err := ins.sourceSpanChecked()
+	if err != nil {
+		panic(err)
+	}
+	return span
+}
+
+func (ins bytecodeIRInstruction) sourceSpanChecked() (sourceRange, error) {
+	maxInt := uint64(^uint(0) >> 1)
+	if uint64(ins.sourceStart) > maxInt || uint64(ins.sourceEnd) > maxInt {
+		return sourceRange{}, fmt.Errorf("IR source range [%d,%d) overflows int", ins.sourceStart, ins.sourceEnd)
+	}
+	return sourceRange{start: int(ins.sourceStart), end: int(ins.sourceEnd)}, nil
 }
 
 func (ins bytecodeIRInstruction) operandKind(slot bytecodeIROperandSlot) bytecodeOperandKind {
+	meta, ok := opcodeMetadata(ins.op)
+	if !ok {
+		return bytecodeOperandUnused
+	}
 	switch slot {
 	case bytecodeIROperandSlotA:
-		return ins.operands.a.kind
+		return meta.operands.a
 	case bytecodeIROperandSlotB:
-		return ins.operands.b.kind
+		return meta.operands.b
 	case bytecodeIROperandSlotC:
-		return ins.operands.c.kind
+		return meta.operands.c
 	case bytecodeIROperandSlotD:
-		return ins.operands.d.kind
+		return meta.operands.d
 	default:
 		panic("invalid bytecode IR operand slot")
 	}
@@ -880,47 +885,49 @@ func (ins bytecodeIRInstruction) operandKind(slot bytecodeIROperandSlot) bytecod
 func (ins bytecodeIRInstruction) operandValue(slot bytecodeIROperandSlot) int {
 	switch slot {
 	case bytecodeIROperandSlotA:
-		return ins.operands.a.value
+		return int(ins.a)
 	case bytecodeIROperandSlotB:
-		return ins.operands.b.value
+		return int(ins.b)
 	case bytecodeIROperandSlotC:
-		return ins.operands.c.value
+		return int(ins.c)
 	case bytecodeIROperandSlotD:
-		return ins.operands.d.value
+		return int(ins.d)
 	default:
 		panic("invalid bytecode IR operand slot")
 	}
 }
 
 func (ins *bytecodeIRInstruction) setOperandValue(slot bytecodeIROperandSlot, value int) bool {
+	return ins.setOperandValueChecked(slot, value) == nil
+}
+
+func (ins *bytecodeIRInstruction) setOperandValueChecked(slot bytecodeIROperandSlot, value int) error {
 	if ins == nil {
-		return false
+		return fmt.Errorf("nil bytecode IR instruction")
+	}
+	if slot < bytecodeIROperandSlotA || slot > bytecodeIROperandSlotD {
+		return fmt.Errorf("invalid bytecode IR operand slot %d", slot)
+	}
+	if ins.operandKind(slot) == bytecodeOperandUnused {
+		return fmt.Errorf("unused bytecode IR operand slot %d", slot)
+	}
+	encoded, err := int32Checked(value, "setter")
+	if err != nil {
+		return err
 	}
 	switch slot {
 	case bytecodeIROperandSlotA:
-		if ins.operands.a.kind == bytecodeOperandUnused {
-			return false
-		}
-		ins.operands.a.value = value
+		ins.a = encoded
 	case bytecodeIROperandSlotB:
-		if ins.operands.b.kind == bytecodeOperandUnused {
-			return false
-		}
-		ins.operands.b.value = value
+		ins.b = encoded
 	case bytecodeIROperandSlotC:
-		if ins.operands.c.kind == bytecodeOperandUnused {
-			return false
-		}
-		ins.operands.c.value = value
+		ins.c = encoded
 	case bytecodeIROperandSlotD:
-		if ins.operands.d.kind == bytecodeOperandUnused {
-			return false
-		}
-		ins.operands.d.value = value
+		ins.d = encoded
 	default:
-		return false
+		return fmt.Errorf("invalid bytecode IR operand slot %d", slot)
 	}
-	return true
+	return nil
 }
 
 func (ins bytecodeIRInstruction) operandsIter() bytecodeIROperandIterator {
@@ -969,6 +976,13 @@ type bytecodeBuilder struct {
 	prototypes        []*Proto
 	source            sourceRange
 	sourceText        string
+	conversionErr     error
+}
+
+func (b *bytecodeBuilder) recordConversionError(err error) {
+	if b != nil && b.conversionErr == nil && err != nil {
+		b.conversionErr = err
+	}
 }
 
 type constantPoolKey struct {
@@ -1118,8 +1132,16 @@ func (b *bytecodeBuilder) emit(ins instruction) int {
 }
 
 func (b *bytecodeBuilder) emitWithSource(ins instruction, source sourceRange) int {
+	if b == nil || b.conversionErr != nil {
+		return -1
+	}
+	ir, err := lowerInstructionToBytecodeIRChecked(ins, source)
+	if err != nil {
+		b.recordConversionError(fmt.Errorf("lower %s: %w", opcodeName(ins.op), err))
+		return -1
+	}
 	index := len(b.ir)
-	b.ir = append(b.ir, lowerInstructionToBytecodeIR(ins, source))
+	b.ir = append(b.ir, ir)
 	return index
 }
 
@@ -1137,19 +1159,51 @@ func (b *bytecodeBuilder) emitJumpIfFalse(condition int) int {
 }
 
 func (b *bytecodeBuilder) patchJump(at int, target int) {
-	if b.ir[at].operands.b.kind == bytecodeOperandJumpTarget {
-		b.ir[at].operands.b = bytecodeOperand{kind: bytecodeOperandJumpTarget, value: target}
+	if b == nil || b.conversionErr != nil {
 		return
 	}
-	if b.ir[at].operands.d.kind == bytecodeOperandJumpTarget {
-		b.ir[at].operands.d = bytecodeOperand{kind: bytecodeOperandJumpTarget, value: target}
+	if at < 0 || at >= len(b.ir) {
+		b.recordConversionError(fmt.Errorf("patch jump at %d: instruction index out of range", at))
 		return
 	}
-	b.ir[at].operands.b = bytecodeOperand{kind: bytecodeOperandJumpTarget, value: target}
+	if target < 0 {
+		b.recordConversionError(fmt.Errorf("patch jump at %d: negative target %d", at, target))
+		return
+	}
+	meta, ok := opcodeMetadata(b.ir[at].opcodeValue())
+	if !ok || meta.jumpTarget == opcodeJumpTargetNone {
+		b.recordConversionError(fmt.Errorf("patch jump at %d: opcode has no jump target", at))
+		return
+	}
+	slot := bytecodeIROperandSlotB
+	if meta.jumpTarget == opcodeJumpTargetD {
+		slot = bytecodeIROperandSlotD
+	}
+	if err := b.ir[at].setOperandValueChecked(slot, target); err != nil {
+		b.recordConversionError(fmt.Errorf("patch jump at %d: %w", at, err))
+	}
 }
 
 func (b *bytecodeBuilder) patchJumpD(at int, target int) {
-	b.ir[at].operands.d = bytecodeOperand{kind: bytecodeOperandJumpTarget, value: target}
+	if b == nil || b.conversionErr != nil {
+		return
+	}
+	if at < 0 || at >= len(b.ir) {
+		b.recordConversionError(fmt.Errorf("patch jump D at %d: instruction index out of range", at))
+		return
+	}
+	if target < 0 {
+		b.recordConversionError(fmt.Errorf("patch jump D at %d: negative target %d", at, target))
+		return
+	}
+	meta, ok := opcodeMetadata(b.ir[at].opcodeValue())
+	if !ok || meta.jumpTarget != opcodeJumpTargetD {
+		b.recordConversionError(fmt.Errorf("patch jump D at %d: opcode has no D jump target", at))
+		return
+	}
+	if err := b.ir[at].setOperandValueChecked(bytecodeIROperandSlotD, target); err != nil {
+		b.recordConversionError(fmt.Errorf("patch jump D at %d: %w", at, err))
+	}
 }
 
 func (b *bytecodeBuilder) pc() int {
@@ -1166,10 +1220,16 @@ func (b *bytecodeBuilder) withSourceRange(source sourceRange, emit func() error)
 }
 
 func (b *bytecodeBuilder) assembledCode() []instruction {
+	if b == nil || b.conversionErr != nil {
+		return nil
+	}
 	return assembleBytecodeIR(b.ir)
 }
 
 func (b *bytecodeBuilder) optimize(options optimizationOptions) {
+	if b == nil || b.conversionErr != nil {
+		return
+	}
 	b.ir = optimizeBytecodeIRWithFacts(b.ir, bytecodeIROptimizationFacts{
 		constants:         b.constants,
 		capturedRegisters: bytecodeBuilderCapturedRegisters(b.prototypes),
@@ -1197,6 +1257,9 @@ func bytecodeBuilderCapturedRegisters(prototypes []*Proto) []bool {
 }
 
 func (b *bytecodeBuilder) proto(upvalues []upvalueDesc, registers int, params int, variadic bool) *Proto {
+	if b == nil || b.conversionErr != nil {
+		return nil
+	}
 	code := b.assembledCode()
 	proto := newProtoWithDescriptors(b.constants, code, b.prototypes, upvalues, registers, params, variadic)
 	proto.lines = bytecodeIRLines(b.sourceText, b.ir)
@@ -1205,7 +1268,16 @@ func (b *bytecodeBuilder) proto(upvalues []upvalueDesc, registers int, params in
 }
 
 func (b *bytecodeBuilder) finalizeProto(upvalues []upvalueDesc, registers int, params int, variadic bool) (*Proto, error) {
+	if b == nil {
+		return nil, fmt.Errorf("nil bytecode builder")
+	}
+	if b.conversionErr != nil {
+		return nil, b.conversionErr
+	}
 	proto := b.proto(upvalues, registers, params, variadic)
+	if proto == nil {
+		return nil, b.conversionErr
+	}
 	if proto.verifyErr != nil {
 		return nil, fmt.Errorf("invalid finalized prototype: %w", proto.verifyErr)
 	}
@@ -1213,11 +1285,64 @@ func (b *bytecodeBuilder) finalizeProto(upvalues []upvalueDesc, registers int, p
 }
 
 func lowerInstructionToBytecodeIR(ins instruction, source sourceRange) bytecodeIRInstruction {
-	return bytecodeIRInstruction{
-		op:       ins.op,
-		operands: classifyInstructionOperands(ins),
-		source:   source,
+	return mustLowerInstructionToBytecodeIR(ins, source)
+}
+
+func mustLowerInstructionToBytecodeIR(ins instruction, source sourceRange) bytecodeIRInstruction {
+	ir, err := lowerInstructionToBytecodeIRValues(ins, source)
+	if err != nil {
+		panic(err)
 	}
+	return ir
+}
+
+func lowerInstructionToBytecodeIRChecked(ins instruction, source sourceRange) (bytecodeIRInstruction, error) {
+	if _, ok := opcodeMetadata(ins.op); !ok {
+		return bytecodeIRInstruction{}, fmt.Errorf("invalid opcode %d", ins.op)
+	}
+	return lowerInstructionToBytecodeIRValues(ins, source)
+}
+
+func lowerInstructionToBytecodeIRValues(ins instruction, source sourceRange) (bytecodeIRInstruction, error) {
+	a, err := int32Checked(ins.a, "A")
+	if err != nil {
+		return bytecodeIRInstruction{}, err
+	}
+	b, err := int32Checked(ins.b, "B")
+	if err != nil {
+		return bytecodeIRInstruction{}, err
+	}
+	c, err := int32Checked(ins.c, "C")
+	if err != nil {
+		return bytecodeIRInstruction{}, err
+	}
+	d, err := int32Checked(ins.d, "D")
+	if err != nil {
+		return bytecodeIRInstruction{}, err
+	}
+	start, err := sourceOffsetChecked(source.start, "start")
+	if err != nil {
+		return bytecodeIRInstruction{}, err
+	}
+	end, err := sourceOffsetChecked(source.end, "end")
+	if err != nil {
+		return bytecodeIRInstruction{}, err
+	}
+	return bytecodeIRInstruction{a: a, b: b, c: c, d: d, sourceStart: start, sourceEnd: end, op: ins.op}, nil
+}
+
+func int32Checked(value int, slot string) (int32, error) {
+	if int64(value) < int64(-1<<31) || int64(value) > int64(1<<31-1) {
+		return 0, fmt.Errorf("IR operand %s=%d overflows int32", slot, value)
+	}
+	return int32(value), nil
+}
+
+func sourceOffsetChecked(value int, label string) (uint32, error) {
+	if value < 0 || uint64(value) > uint64(1<<32-1) {
+		return 0, fmt.Errorf("IR source %s=%d outside uint32", label, value)
+	}
+	return uint32(value), nil
 }
 
 func lowerInstructionsToBytecodeIR(code []instruction) []bytecodeIRInstruction {
@@ -1226,270 +1351,6 @@ func lowerInstructionsToBytecodeIR(code []instruction) []bytecodeIRInstruction {
 		ir[i] = lowerInstructionToBytecodeIR(ins, sourceRange{})
 	}
 	return ir
-}
-
-func classifyInstructionOperands(ins instruction) bytecodeOperands {
-	if meta, ok := opcodeMetadata(ins.op); ok {
-		return classifyInstructionOperandsFromMetadata(ins, meta.operands)
-	}
-
-	switch ins.op {
-	case opLoadConst:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandConstant, value: ins.b},
-		}
-	case opLoadGlobal:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandConstant, value: ins.b},
-		}
-	case opSetGlobal:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandConstant, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.b},
-		}
-	case opMove:
-		return registerOperands(ins.a, ins.b)
-	case opNewTable:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandCount, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandCount, value: ins.c},
-		}
-	case opSetField:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandConstant, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.c},
-		}
-	case opSetStringField:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandConstant, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.c},
-		}
-	case opSetStringFieldIndex:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandConstant, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.c},
-			d: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.d},
-		}
-	case opGetStringField:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandConstant, value: ins.c},
-		}
-	case opGetStringFieldIndex:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandConstant, value: ins.c},
-			d: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.d},
-		}
-	case opSetIndex, opGetIndex, opPrepareIter:
-		return registerOperands(ins.a, ins.b, ins.c)
-	case opArrayNext:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.c},
-			d: bytecodeOperand{kind: bytecodeOperandCount, value: ins.d},
-		}
-	case opArrayNextJump2:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.c},
-			d: bytecodeOperand{kind: bytecodeOperandJumpTarget, value: ins.d},
-		}
-	case opClosure:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandPrototype, value: ins.b},
-		}
-	case opGetUpvalue:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandUpvalue, value: ins.b},
-		}
-	case opSetUpvalue:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandUpvalue, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.b},
-		}
-	case opVararg:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandCount, value: ins.b},
-		}
-	case opConcatChain:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandCount, value: ins.c},
-		}
-	case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow, opConcat,
-		opEqual, opNotEqual, opLess, opLessEqual, opGreater, opGreaterEqual:
-		return registerOperands(ins.a, ins.b, ins.c)
-	case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandConstant, value: ins.c},
-		}
-	case opNumericForCheck:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.c},
-			d: bytecodeOperand{kind: bytecodeOperandJumpTarget, value: ins.d},
-		}
-	case opNumericForLoop:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.b},
-			d: bytecodeOperand{kind: bytecodeOperandJumpTarget, value: ins.d},
-		}
-	case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandConstant, value: ins.b},
-			d: bytecodeOperand{kind: bytecodeOperandJumpTarget, value: ins.d},
-		}
-	case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.b},
-			d: bytecodeOperand{kind: bytecodeOperandJumpTarget, value: ins.d},
-		}
-	case opJumpIfTableHasMetatable:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			d: bytecodeOperand{kind: bytecodeOperandJumpTarget, value: ins.d},
-		}
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandCount, value: ins.b},
-			d: bytecodeOperand{kind: bytecodeOperandJumpTarget, value: ins.d},
-		}
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandCount, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.c},
-			d: bytecodeOperand{kind: bytecodeOperandJumpTarget, value: ins.d},
-		}
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandCount, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.c},
-			d: bytecodeOperand{kind: bytecodeOperandJumpTarget, value: ins.d},
-		}
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandCount, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.c},
-			d: bytecodeOperand{kind: bytecodeOperandJumpTarget, value: ins.d},
-		}
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandCount, value: ins.b},
-			d: bytecodeOperand{kind: bytecodeOperandJumpTarget, value: ins.d},
-		}
-	case opFastCall:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandCount, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandCount, value: ins.c},
-			d: bytecodeOperand{kind: bytecodeOperandCount, value: ins.d},
-		}
-	case opNeg, opLen:
-		return registerOperands(ins.a, ins.b)
-	case opCall, opCallOne:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandCount, value: ins.c},
-			d: bytecodeOperand{kind: bytecodeOperandCount, value: ins.d},
-		}
-	case opCallLocalOne:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.c},
-			d: bytecodeOperand{kind: bytecodeOperandCount, value: ins.d},
-		}
-	case opCallUpvalueOne:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandUpvalue, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.c},
-			d: bytecodeOperand{kind: bytecodeOperandCount, value: ins.d},
-		}
-	case opCallMethodOne:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandConstant, value: ins.c},
-			d: bytecodeOperand{kind: bytecodeOperandCount, value: ins.d},
-		}
-	case opJumpIfFalse:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandJumpTarget, value: ins.b},
-		}
-	case opJump:
-		return bytecodeOperands{
-			b: bytecodeOperand{kind: bytecodeOperandJumpTarget, value: ins.b},
-		}
-	case opReturnOne:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-		}
-	case opReturn:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandRegister, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandCount, value: ins.b},
-		}
-	default:
-		return bytecodeOperands{
-			a: bytecodeOperand{kind: bytecodeOperandCount, value: ins.a},
-			b: bytecodeOperand{kind: bytecodeOperandCount, value: ins.b},
-			c: bytecodeOperand{kind: bytecodeOperandCount, value: ins.c},
-			d: bytecodeOperand{kind: bytecodeOperandCount, value: ins.d},
-		}
-	}
-}
-
-func classifyInstructionOperandsFromMetadata(ins instruction, shape opcodeOperandShape) bytecodeOperands {
-	return bytecodeOperands{
-		a: bytecodeOperandFromMetadata(shape.a, ins.a),
-		b: bytecodeOperandFromMetadata(shape.b, ins.b),
-		c: bytecodeOperandFromMetadata(shape.c, ins.c),
-		d: bytecodeOperandFromMetadata(shape.d, metadataDOperandValue(ins)),
-	}
-}
-
-func bytecodeOperandFromMetadata(kind bytecodeOperandKind, value int) bytecodeOperand {
-	if kind == bytecodeOperandUnused {
-		return bytecodeOperand{}
-	}
-	return bytecodeOperand{kind: kind, value: value}
-}
-
-func metadataDOperandValue(ins instruction) int {
-	return ins.d
-}
-
-func registerOperands(values ...int) bytecodeOperands {
-	var operands bytecodeOperands
-	slots := []*bytecodeOperand{&operands.a, &operands.b, &operands.c, &operands.d}
-	for i, value := range values {
-		*slots[i] = bytecodeOperand{kind: bytecodeOperandRegister, value: value}
-	}
-	return operands
 }
 
 type assembledBytecodeIR struct {
@@ -1543,7 +1404,7 @@ func assembleBytecodeIRResult(ir []bytecodeIRInstruction) assembledBytecodeIR {
 		}
 		ins = remapAssembledBytecodeIRJumpTargets(ins, oldToNew)
 		assembled.code = append(assembled.code, assembleBytecodeIRInstruction(ins))
-		assembled.sources = append(assembled.sources, ins.source)
+		assembled.sources = append(assembled.sources, ins.sourceSpan())
 	}
 	return assembled
 }
@@ -1551,11 +1412,21 @@ func assembleBytecodeIRResult(ir []bytecodeIRInstruction) assembledBytecodeIR {
 func assembleBytecodeIRInstruction(ins bytecodeIRInstruction) instruction {
 	return instruction{
 		op: ins.op,
-		a:  ins.operands.a.value,
-		b:  ins.operands.b.value,
-		c:  ins.operands.c.value,
-		d:  ins.operands.d.value,
+		a:  int(ins.a),
+		b:  int(ins.b),
+		c:  int(ins.c),
+		d:  int(ins.d),
 	}
+}
+
+func assembleBytecodeIRInstructionChecked(ins bytecodeIRInstruction) (instruction, error) {
+	if _, ok := opcodeMetadata(ins.op); !ok {
+		return instruction{}, fmt.Errorf("invalid IR opcode %d", ins.op)
+	}
+	if _, err := ins.sourceSpanChecked(); err != nil {
+		return instruction{}, err
+	}
+	return assembleBytecodeIRInstruction(ins), nil
 }
 
 func bytecodeIRJumpToNextInstructions(ir []bytecodeIRInstruction) []bool {
@@ -1564,7 +1435,7 @@ func bytecodeIRJumpToNextInstructions(ir []bytecodeIRInstruction) []bool {
 		if ins.op != opJump {
 			continue
 		}
-		if ins.operands.b.kind == bytecodeOperandJumpTarget && ins.operands.b.value == pc+1 {
+		if ins.operandKind(bytecodeIROperandSlotB) == bytecodeOperandJumpTarget && ins.operandValue(bytecodeIROperandSlotB) == pc+1 {
 			drop[pc] = true
 		}
 	}
@@ -1572,14 +1443,15 @@ func bytecodeIRJumpToNextInstructions(ir []bytecodeIRInstruction) []bool {
 }
 
 func remapAssembledBytecodeIRJumpTargets(ins bytecodeIRInstruction, oldToNew []int) bytecodeIRInstruction {
-	remap := func(operand *bytecodeOperand) {
-		if operand.kind != bytecodeOperandJumpTarget || operand.value < 0 || operand.value >= len(oldToNew) {
+	remap := func(slot bytecodeIROperandSlot) {
+		value := ins.operandValue(slot)
+		if ins.operandKind(slot) != bytecodeOperandJumpTarget || value < 0 || value >= len(oldToNew) {
 			return
 		}
-		operand.value = oldToNew[operand.value]
+		ins.setOperandValue(slot, oldToNew[value])
 	}
-	remap(&ins.operands.b)
-	remap(&ins.operands.d)
+	remap(bytecodeIROperandSlotB)
+	remap(bytecodeIROperandSlotD)
 	return ins
 }
 
@@ -1686,11 +1558,9 @@ func bytecodeIRInstructionTransfersControl(ins bytecodeIRInstruction) bool {
 func bytecodeIRJumpTarget(ins bytecodeIRInstruction) (int, bool) {
 	switch opcodeJumpTarget(ins.op) {
 	case opcodeJumpTargetB:
-		target := ins.operands.b
-		return target.value, target.kind == bytecodeOperandJumpTarget
+		return ins.operandValue(bytecodeIROperandSlotB), ins.operandKind(bytecodeIROperandSlotB) == bytecodeOperandJumpTarget
 	case opcodeJumpTargetD:
-		target := ins.operands.d
-		return target.value, target.kind == bytecodeOperandJumpTarget
+		return ins.operandValue(bytecodeIROperandSlotD), ins.operandKind(bytecodeIROperandSlotD) == bytecodeOperandJumpTarget
 	default:
 		return 0, false
 	}

@@ -111,19 +111,37 @@ func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (
 	c.sourceText = source.source.Text
 
 	if err := c.compileStatements(source.program.statements); err != nil {
+		if c.conversionErr != nil {
+			return nil, c.conversionErr
+		}
 		return nil, err
 	}
 	if !statementsHaveReturn(source.program.statements) {
 		c.emit(instruction{op: opReturn})
 	}
+	if c.conversionErr != nil {
+		return nil, c.conversionErr
+	}
 
 	c.optimizeFunction(options.optimizations)
-	draft := c.buildFunctionDraft(nil, 0, false)
+	draft, err := c.buildFunctionDraft(nil, 0, false)
+	if err != nil {
+		return nil, err
+	}
 	return sealFunctionDraft(draft)
 }
 
-func (c *compiler) buildFunctionDraft(upvalues []upvalueDesc, params int, variadic bool) *functionDraft {
+func (c *compiler) buildFunctionDraft(upvalues []upvalueDesc, params int, variadic bool) (*functionDraft, error) {
+	if c == nil {
+		return nil, fmt.Errorf("nil compiler")
+	}
+	if c.conversionErr != nil {
+		return nil, c.conversionErr
+	}
 	c.shrinkCompiledFrameRegisters(params, variadic)
+	if c.conversionErr != nil {
+		return nil, c.conversionErr
+	}
 	assembly := assembleFunctionBytecode(c.sourceLines, c.ir)
 	registers := compactedCompiledRegisterCount(assembly.code, c.prototypeDrafts, c.nextReg, params)
 	draft := newFunctionDraft(c.constants, assembly, c.prototypeDrafts, upvalues, registers, params, variadic)
@@ -135,7 +153,7 @@ func (c *compiler) buildFunctionDraft(upvalues []upvalueDesc, params int, variad
 	if draft.functionName == "" {
 		draft.functionName = "<module>"
 	}
-	return draft
+	return draft, nil
 }
 
 func (c *compiler) shrinkCompiledFrameRegisters(params int, variadic bool) {
@@ -536,14 +554,20 @@ func (c *compiler) compileFunctionDraft(closure closurePlan, selfFunctionSymbol 
 		}
 	}
 	if err := fn.compileStatements(closure.body); err != nil {
+		if fn.conversionErr != nil {
+			return nil, fn.conversionErr
+		}
 		return nil, err
 	}
 	if !statementsHaveReturn(closure.body) {
 		fn.emit(instruction{op: opReturn})
 	}
+	if fn.conversionErr != nil {
+		return nil, fn.conversionErr
+	}
 
 	fn.optimizeFunction(c.options.optimizations)
-	return fn.buildFunctionDraft(fn.upvalueDescs, closure.paramCount(), closure.variadic), nil
+	return fn.buildFunctionDraft(fn.upvalueDescs, closure.paramCount(), closure.variadic)
 }
 
 func (c *compiler) compileTempExpression(expr expression) (int, error) {

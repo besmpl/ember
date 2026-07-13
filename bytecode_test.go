@@ -9570,9 +9570,9 @@ func wantOpcodeControlFlow(op opcode) opcodeControlFlowKind {
 
 func classifiedOpcodeJumpTarget(t *testing.T, op opcode) opcodeJumpTargetSlot {
 	t.Helper()
-	operands := classifyInstructionOperands(instruction{op: op})
-	bJump := operands.b.kind == bytecodeOperandJumpTarget
-	dJump := operands.d.kind == bytecodeOperandJumpTarget
+	operands := classifiedOpcodeOperandShape(op)
+	bJump := operands.b == bytecodeOperandJumpTarget
+	dJump := operands.d == bytecodeOperandJumpTarget
 	if bJump && dJump {
 		t.Fatalf("%s classifies both b and d as jump targets", opcodeName(op))
 	}
@@ -9586,12 +9586,12 @@ func classifiedOpcodeJumpTarget(t *testing.T, op opcode) opcodeJumpTargetSlot {
 }
 
 func classifiedOpcodeOperandShape(op opcode) opcodeOperandShape {
-	operands := classifyInstructionOperands(instruction{op: op})
+	kinds := expectedIRAccessorKinds(op)
 	return opcodeOperandShape{
-		a: operands.a.kind,
-		b: operands.b.kind,
-		c: operands.c.kind,
-		d: operands.d.kind,
+		a: kinds[bytecodeIROperandSlotA],
+		b: kinds[bytecodeIROperandSlotB],
+		c: kinds[bytecodeIROperandSlotC],
+		d: kinds[bytecodeIROperandSlotD],
 	}
 }
 
