@@ -355,11 +355,31 @@ type parserCheckpoint struct {
 
 type parser struct {
 	source     string
+	limits     CompileLimits
+	nesting    uint32
+	maxNesting uint32
 	pos        int
 	mode       sourceMode
 	tokens     []sourceToken
 	stringPool []string
 	tokenIndex int
+}
+
+func (p *parser) enterNesting(kind string) error {
+	if p.limits.MaxNesting != 0 && p.nesting >= p.limits.MaxNesting {
+		return &LimitError{Kind: LimitNesting, Limit: uint64(p.limits.MaxNesting), Used: uint64(p.nesting) + 1}
+	}
+	p.nesting++
+	if p.nesting > p.maxNesting {
+		p.maxNesting = p.nesting
+	}
+	return nil
+}
+
+func (p *parser) leaveNesting() {
+	if p.nesting > 0 {
+		p.nesting--
+	}
 }
 
 func (p *parser) mark() parserCheckpoint {
@@ -372,7 +392,7 @@ func (p *parser) restore(checkpoint parserCheckpoint) {
 }
 
 func (p *parser) parse() (program, error) {
-	lexed, err := lexSourceForCompile(p.source)
+	lexed, err := lexSourceForCompileWithTokenLimit(p.source, p.limits.MaxTokens)
 	if err != nil {
 		return program{}, err
 	}
@@ -390,11 +410,19 @@ func (p *parser) parse() (program, error) {
 		return program{}, p.errorf("unexpected input %q", p.source[p.pos:])
 	}
 	prog := program{statements: statements, mode: p.mode}
-	assignProgramSyntaxIDs(&prog)
+	if err := assignProgramSyntaxIDsWithLimit(&prog, p.limits.MaxSyntaxNodes); err != nil {
+		return program{}, err
+	}
 	return prog, nil
 }
 
 func (p *parser) parseBlock(stopKeywords ...string) ([]statement, error) {
+	if len(stopKeywords) > 0 {
+		if err := p.enterNesting("block"); err != nil {
+			return nil, err
+		}
+		defer p.leaveNesting()
+	}
 	var statements []statement
 	for {
 		p.skipSpace()
@@ -657,6 +685,10 @@ func (p *parser) parseFunctionExpression() (functionExpression, error) {
 }
 
 func (p *parser) parseFunctionBody() (functionExpression, error) {
+	if err := p.enterNesting("function"); err != nil {
+		return functionExpression{}, err
+	}
+	defer p.leaveNesting()
 	typeParams, typePacks, err := p.parseOptionalTypeParameterList()
 	if err != nil {
 		return functionExpression{}, err
@@ -823,6 +855,10 @@ func (p *parser) parseExpressionList() ([]expression, error) {
 }
 
 func (p *parser) parseIfStatement() (ifStatement, error) {
+	if err := p.enterNesting("if"); err != nil {
+		return ifStatement{}, err
+	}
+	defer p.leaveNesting()
 	p.skipSpace()
 	condition, err := p.parseExpression()
 	if err != nil {
@@ -1108,6 +1144,10 @@ func (p *parser) parseOptionalTypeAnnotation() (*typeExpression, error) {
 }
 
 func (p *parser) parseType() (*typeExpression, error) {
+	if err := p.enterNesting("type"); err != nil {
+		return nil, err
+	}
+	defer p.leaveNesting()
 	first, err := p.parseIntersectionType()
 	if err != nil {
 		return nil, err
@@ -1617,6 +1657,10 @@ func (p *parser) parseAssignTarget() (assignTarget, error) {
 }
 
 func (p *parser) parseExpression() (expression, error) {
+	if err := p.enterNesting("expression"); err != nil {
+		return expression{}, err
+	}
+	defer p.leaveNesting()
 	first, err := p.parseAndExpression()
 	if err != nil {
 		return expression{}, err
@@ -1794,6 +1838,10 @@ func (p *parser) parseMultiplicativeExpression() (multiplicativeExpression, erro
 }
 
 func (p *parser) parseTerm() (term, error) {
+	if err := p.enterNesting("term"); err != nil {
+		return term{}, err
+	}
+	defer p.leaveNesting()
 	p.skipSpace()
 	start := p.pos
 	if p.consumeKeyword("not") {
@@ -1929,6 +1977,10 @@ func (p *parser) parseIfExpression() (ifExpression, error) {
 }
 
 func (p *parser) parseIfExpressionBody() (ifExpression, error) {
+	if err := p.enterNesting("if-expression"); err != nil {
+		return ifExpression{}, err
+	}
+	defer p.leaveNesting()
 	p.skipSpace()
 	condition, err := p.parseExpression()
 	if err != nil {
@@ -2107,6 +2159,10 @@ func (p *parser) parseOptionalCallTypeArguments() ([]*typeExpression, error) {
 }
 
 func (p *parser) parseTable() (tableExpression, error) {
+	if err := p.enterNesting("table"); err != nil {
+		return tableExpression{}, err
+	}
+	defer p.leaveNesting()
 	if !p.consumeByte('{') {
 		return tableExpression{}, p.errorf("expected table")
 	}

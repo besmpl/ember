@@ -1,5 +1,23 @@
 package ember
 
+// CompileLimits bounds source parsing and syntax construction. Zero means
+// unlimited for backward compatibility.
+type CompileLimits struct {
+	// MaxSourceBytes bounds the source length before lexing.
+	MaxSourceBytes uint64
+	// MaxTokens bounds lexer output.
+	MaxTokens uint64
+	// MaxNesting bounds recursive parser entry depth.
+	MaxNesting uint32
+	// MaxSyntaxNodes bounds syntax IDs assigned to the parsed program.
+	MaxSyntaxNodes uint64
+}
+
+// CompileOptions configures one source compilation.
+type CompileOptions struct {
+	Limits CompileLimits
+}
+
 // Compile compiles a tiny supported Luau source category into Ember bytecode.
 //
 // This seed compiler currently accepts scalar literals, array, named-field, and
@@ -17,7 +35,12 @@ package ember
 // or, if/then/elseif/else expressions, prefixed by not, unary -, or unary #, or
 // grouped with parentheses.
 func Compile(source string) (*Proto, error) {
-	artifact, err := parseSource(Source{Text: source})
+	return CompileWithOptions(source, CompileOptions{})
+}
+
+// CompileWithOptions compiles source with explicit parser and source limits.
+func CompileWithOptions(source string, options CompileOptions) (*Proto, error) {
+	artifact, err := parseSourceWithLimits(Source{Text: source}, options.Limits)
 	if err != nil {
 		return nil, err
 	}

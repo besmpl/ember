@@ -46,6 +46,7 @@ type lexResult struct {
 
 type lexerOptions struct {
 	retainComments bool
+	maxTokens      uint64
 }
 
 func (t sourceToken) startOffset() int {
@@ -110,6 +111,10 @@ func lexSourceForCompile(source string) (lexResult, error) {
 	return lexSourceWithOptions(source, lexerOptions{})
 }
 
+func lexSourceForCompileWithTokenLimit(source string, maxTokens uint64) (lexResult, error) {
+	return lexSourceWithOptions(source, lexerOptions{maxTokens: maxTokens})
+}
+
 func lexSourceWithOptions(source string, options lexerOptions) (lexResult, error) {
 	if err := validateSourceByteLength(uint64(len(source))); err != nil {
 		return lexResult{}, err
@@ -150,6 +155,9 @@ func lexSourceWithOptions(source string, options lexerOptions) (lexResult, error
 		token, err := l.nextToken()
 		if err != nil {
 			return lexResult{}, err
+		}
+		if options.maxTokens != 0 && uint64(len(tokens)) >= options.maxTokens {
+			return lexResult{}, &LimitError{Kind: LimitTokens, Limit: options.maxTokens, Used: uint64(len(tokens)) + 1}
 		}
 		tokens = append(tokens, token)
 	}

@@ -11,12 +11,21 @@ type LimitKind string
 const (
 	// LimitInstructions identifies the instruction execution limit.
 	LimitInstructions LimitKind = "instructions"
+	// LimitSourceBytes identifies the source byte limit during compilation.
+	LimitSourceBytes LimitKind = "source-bytes"
+	// LimitTokens identifies the lexer token limit during compilation.
+	LimitTokens LimitKind = "tokens"
+	// LimitNesting identifies the parser nesting limit during compilation.
+	LimitNesting LimitKind = "nesting"
+	// LimitSyntaxNodes identifies the syntax node limit during compilation.
+	LimitSyntaxNodes LimitKind = "syntax-nodes"
 )
 
-// ErrLimitExceeded reports that an execution resource limit was exhausted.
+// ErrLimitExceeded reports that a configured execution or compilation
+// resource limit was exhausted.
 var ErrLimitExceeded = errors.New("ember: execution limit exceeded")
 
-// LimitError describes an exhausted execution limit.
+// LimitError describes an exhausted execution or compilation limit.
 type LimitError struct {
 	Kind  LimitKind
 	Limit uint64

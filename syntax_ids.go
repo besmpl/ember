@@ -5,35 +5,57 @@ type syntaxID int
 type syntaxIDAssigner struct {
 	nextNode     syntaxID
 	nextFunction int
+	limit        uint64
+	err          error
 }
 
 func assignProgramSyntaxIDs(prog *program) {
+	_ = assignProgramSyntaxIDsWithLimit(prog, 0)
+}
+
+func assignProgramSyntaxIDsWithLimit(prog *program, limit uint64) error {
 	if prog == nil {
-		return
+		return nil
 	}
-	a := syntaxIDAssigner{}
+	a := syntaxIDAssigner{limit: limit}
 	prog.id = a.node()
 	a.statements(prog.statements)
 	prog.nodeCount = int(a.nextNode)
+	return a.err
 }
 
 func (a *syntaxIDAssigner) node() syntaxID {
+	if a.err != nil {
+		return a.nextNode
+	}
 	a.nextNode++
+	if a.limit != 0 && uint64(a.nextNode) > a.limit && a.err == nil {
+		a.err = &LimitError{Kind: LimitSyntaxNodes, Limit: a.limit, Used: uint64(a.nextNode)}
+	}
 	return a.nextNode
 }
 
 func (a *syntaxIDAssigner) function() int {
+	if a.err != nil {
+		return 0
+	}
 	a.nextFunction++
 	return a.nextFunction
 }
 
 func (a *syntaxIDAssigner) names(names []string) syntaxID {
+	if a.err != nil {
+		return 0
+	}
 	if len(names) == 0 {
 		return 0
 	}
 	first := a.node()
 	for range names[1:] {
 		a.node()
+		if a.err != nil {
+			return 0
+		}
 	}
 	return first
 }
@@ -42,12 +64,21 @@ func syntaxNameID(first syntaxID, index int) syntaxID { return first + syntaxID(
 
 func (a *syntaxIDAssigner) statements(statements []statement) {
 	for i := range statements {
+		if a.err != nil {
+			return
+		}
 		a.statement(&statements[i])
 	}
 }
 
 func (a *syntaxIDAssigner) statement(stmt *statement) {
+	if a.err != nil {
+		return
+	}
 	stmt.id = a.node()
+	if a.err != nil {
+		return
+	}
 	switch {
 	case stmt.local != nil:
 		stmt.local.nameID = a.names(stmt.local.names)
@@ -117,6 +148,9 @@ func (a *syntaxIDAssigner) statement(stmt *statement) {
 
 func (a *syntaxIDAssigner) expressions(expressions []expression) {
 	for i := range expressions {
+		if a.err != nil {
+			return
+		}
 		a.expression(&expressions[i])
 	}
 }
@@ -126,6 +160,9 @@ func (a *syntaxIDAssigner) expression(expr *expression) {
 		return
 	}
 	expr.id = a.node()
+	if a.err != nil {
+		return
+	}
 	for i := range expr.terms {
 		for j := range expr.terms[i].terms {
 			comparison := &expr.terms[i].terms[j]
@@ -138,6 +175,9 @@ func (a *syntaxIDAssigner) expression(expr *expression) {
 }
 
 func (a *syntaxIDAssigner) concat(expr *concatExpression) {
+	if a.err != nil {
+		return
+	}
 	a.additive(&expr.first)
 	for i := range expr.rest {
 		a.additive(&expr.rest[i])
@@ -145,6 +185,9 @@ func (a *syntaxIDAssigner) concat(expr *concatExpression) {
 }
 
 func (a *syntaxIDAssigner) additive(expr *additiveExpression) {
+	if a.err != nil {
+		return
+	}
 	a.multiplicative(&expr.first)
 	for i := range expr.rest {
 		a.multiplicative(&expr.rest[i].value)
@@ -152,6 +195,9 @@ func (a *syntaxIDAssigner) additive(expr *additiveExpression) {
 }
 
 func (a *syntaxIDAssigner) multiplicative(expr *multiplicativeExpression) {
+	if a.err != nil {
+		return
+	}
 	a.term(&expr.first)
 	for i := range expr.rest {
 		a.term(&expr.rest[i].value)
@@ -163,6 +209,9 @@ func (a *syntaxIDAssigner) term(value *term) {
 		return
 	}
 	value.id = a.node()
+	if a.err != nil {
+		return
+	}
 	if value.power != nil {
 		a.term(&value.power.base)
 		a.term(&value.power.exponent)
@@ -210,7 +259,13 @@ func (a *syntaxIDAssigner) term(value *term) {
 }
 
 func (a *syntaxIDAssigner) assignTarget(target *assignTarget) {
+	if a.err != nil {
+		return
+	}
 	target.id = a.node()
+	if a.err != nil {
+		return
+	}
 	for i := range target.selectors {
 		if target.selectors[i].index != nil {
 			a.expression(target.selectors[i].index)
@@ -220,6 +275,9 @@ func (a *syntaxIDAssigner) assignTarget(target *assignTarget) {
 
 func (a *syntaxIDAssigner) types(values []*typeExpression) {
 	for _, value := range values {
+		if a.err != nil {
+			return
+		}
 		a.typeExpression(value)
 	}
 }
@@ -229,6 +287,9 @@ func (a *syntaxIDAssigner) typeExpression(value *typeExpression) {
 		return
 	}
 	value.id = a.node()
+	if a.err != nil {
+		return
+	}
 	value.typeParamID, value.typePackID = a.names(value.typeParams), a.names(value.typePacks)
 	a.types(value.typeArgs)
 	a.types(value.types)
