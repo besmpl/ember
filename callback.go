@@ -47,6 +47,7 @@ func CaptureCallback(ctx context.Context, value Value) (Callback, error) {
 	if err != nil {
 		return Callback{}, fmt.Errorf("callback: retain values: %w", err)
 	}
+	call.controller = nil
 	return Callback{
 		call:  call,
 		value: value,
@@ -93,8 +94,13 @@ func (cb Callback) Call(ctx context.Context, args ...Value) ([]Value, error) {
 
 	call := cb.call
 	call.ctx = ctx
+	controller, err := newExecutionController(ctx, cb.call.runtime.limits)
+	if err != nil {
+		return nil, fmt.Errorf("callback: create execution controller: %w", err)
+	}
+	call.controller = controller
 	callCtx := contextWithRuntimeCallContext(ctx, call)
-	return callValueWithContextBudget(callCtx, cb.value, call.envWithRequire(), args, call.maxInstructions)
+	return callValueWithContextController(callCtx, cb.value, call.envWithRequire(), args, controller)
 }
 
 // Close releases the callback's collector roots. Callback copies share the

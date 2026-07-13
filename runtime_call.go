@@ -6,23 +6,23 @@ import (
 )
 
 type runtimeCallContext struct {
-	runtime         *Runtime
-	ctx             context.Context
-	from            moduleKey
-	globals         map[string]Value
-	maxInstructions int
+	runtime    *Runtime
+	ctx        context.Context
+	from       moduleKey
+	globals    map[string]Value
+	controller *executionController
 }
 
-func (r *Runtime) newRuntimeCallContext(ctx context.Context, from moduleKey, globals map[string]Value, maxInstructions int) runtimeCallContext {
+func (r *Runtime) newRuntimeCallContext(ctx context.Context, from moduleKey, globals map[string]Value, controller *executionController) runtimeCallContext {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	return runtimeCallContext{
-		runtime:         r,
-		ctx:             ctx,
-		from:            from,
-		globals:         globals,
-		maxInstructions: maxInstructions,
+		runtime:    r,
+		ctx:        ctx,
+		from:       from,
+		globals:    globals,
+		controller: controller,
 	}
 }
 
@@ -59,7 +59,7 @@ func (call runtimeCallContext) runModule(key moduleKey) ([]Value, error) {
 	if call.runtime == nil {
 		return nil, fmt.Errorf("module runtime: nil runtime")
 	}
-	return call.runtime.runModuleWithContextGlobalsBudget(call.ctx, key, call.globals, call.maxInstructions)
+	return call.runtime.runModuleWithContextGlobalsController(call.ctx, key, call.globals, call.controller)
 }
 
 func firstRuntimeResult(results []Value) Value {

@@ -125,12 +125,13 @@ testable seam.
 - `CaptureCallback(ctx context.Context, value Value) (Callback, error)` captures
   a script function passed to a `ContextHostFuncValue` while Ember is executing
   a runtime call. The captured callback keeps the owning runtime, module
-  `require` context, host globals, and instruction budget.
+  `require` context, and host globals, but not the active invocation budget.
 - `Callback.Call(ctx context.Context, args ...Value) ([]Value, error)` invokes a
   captured script callback later. The call context controls cancellation and is
-  visible to context-aware host callbacks invoked by the script. A callback
-  shares mutable state with its owning runtime, so hosts should serialize calls
-  with other work on that runtime.
+  visible to context-aware host callbacks invoked by the script. Each call gets
+  a fresh budget from the runtime's configured limits. A callback shares mutable
+  state with its owning runtime, so hosts should serialize calls with other work
+  on that runtime.
 - Seeded base globals are `type`, which returns Luau-style kind names for the
   current value model, and `math`, which currently provides `abs`, `floor`,
   `min`, `max`, and `pi`, plus `table`, which currently provides `pack`,

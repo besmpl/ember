@@ -14,7 +14,7 @@ func TestOwnedCoroutineInheritsOwnerWithoutKeepingItActive(t *testing.T) {
 		t.Fatalf("Compile returned error: %v", err)
 	}
 
-	results, err := executeProto(context.Background(), proto, runtimeGlobalsWithOwner(nil, owner), executeOptions{maxInstructions: -1})
+	results, err := executeProto(context.Background(), proto, runtimeGlobalsWithOwner(nil, owner), executeOptions{controller: nil})
 	if err != nil {
 		t.Fatalf("executeProto returned error: %v", err)
 	}
@@ -60,7 +60,7 @@ return ok1, first, ok2, second, coroutine.status(co)
 		t.Fatalf("Compile returned error: %v", err)
 	}
 
-	results, err := executeProto(context.Background(), proto, globals, executeOptions{maxInstructions: -1})
+	results, err := executeProto(context.Background(), proto, globals, executeOptions{controller: nil})
 	if err != nil {
 		t.Fatalf("executeProto returned error: %v", err)
 	}
@@ -109,7 +109,7 @@ return ok, message, coroutine.status(co)
 		t.Fatalf("Compile returned error: %v", err)
 	}
 
-	results, err := executeProto(context.Background(), proto, globals, executeOptions{maxInstructions: -1})
+	results, err := executeProto(context.Background(), proto, globals, executeOptions{controller: nil})
 	if err != nil {
 		t.Fatalf("executeProto returned error: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestOwnedCoroutineRejectsCrossOwnerAndUnownedResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	results, err := executeProto(context.Background(), proto, runtimeGlobalsWithOwner(nil, ownerA), executeOptions{maxInstructions: -1})
+	results, err := executeProto(context.Background(), proto, runtimeGlobalsWithOwner(nil, ownerA), executeOptions{controller: nil})
 	if err != nil {
 		t.Fatalf("executeProto returned error: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestSuspendedOwnedCoroutineDoesNotBlockOwnerClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	results, err := executeProto(context.Background(), proto, runtimeGlobalsWithOwner(nil, owner), executeOptions{maxInstructions: -1})
+	results, err := executeProto(context.Background(), proto, runtimeGlobalsWithOwner(nil, owner), executeOptions{controller: nil})
 	if err != nil {
 		t.Fatalf("executeProto returned error: %v", err)
 	}

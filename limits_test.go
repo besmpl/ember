@@ -72,9 +72,6 @@ func TestRuntimeOptionsNormalizeLimits(t *testing.T) {
 			if runtime.limits.MaxInstructions != tt.want {
 				t.Fatalf("runtime limits = %#v, want max instructions %d", runtime.limits, tt.want)
 			}
-			if runtime.maxInstructions != int(tt.want) {
-				t.Fatalf("legacy runtime budget = %d, want %d", runtime.maxInstructions, tt.want)
-			}
 		})
 	}
 }
@@ -147,5 +144,16 @@ func limitsTestProgram(t *testing.T) *Program {
 	return &Program{
 		entrypoints: []programEntrypoint{{name: "main", key: key}},
 		protos:      map[moduleKey]*Proto{key: proto},
+	}
+}
+
+func testExecutionController(t testing.TB, remaining int64) *executionController {
+	t.Helper()
+	if remaining < 0 {
+		return nil
+	}
+	return &executionController{
+		limits:    ExecutionLimits{MaxInstructions: uint64(remaining)},
+		remaining: remaining,
 	}
 }

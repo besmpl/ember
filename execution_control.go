@@ -21,18 +21,30 @@ func newExecutionController(ctx context.Context, limits ExecutionLimits) (*execu
 	if err != nil {
 		return nil, err
 	}
-	remaining := int64(-1)
-	if normalized.MaxInstructions != 0 {
-		if normalized.MaxInstructions > maxInt64Uint {
-			return nil, fmt.Errorf("execution controller: max instructions %d exceeds int64", normalized.MaxInstructions)
-		}
-		remaining = int64(normalized.MaxInstructions)
+	remaining, err := executionControllerRemaining(normalized)
+	if err != nil {
+		return nil, err
 	}
 	return &executionController{
 		ctx:       ctx,
 		limits:    normalized,
 		remaining: remaining,
 	}, nil
+}
+
+func validateExecutionLimits(limits ExecutionLimits) error {
+	_, err := executionControllerRemaining(limits)
+	return err
+}
+
+func executionControllerRemaining(limits ExecutionLimits) (int64, error) {
+	if limits.MaxInstructions == 0 {
+		return -1, nil
+	}
+	if limits.MaxInstructions > maxInt64Uint {
+		return 0, fmt.Errorf("execution controller: max instructions %d exceeds int64", limits.MaxInstructions)
+	}
+	return int64(limits.MaxInstructions), nil
 }
 
 func (controller *executionController) checkContext() error {

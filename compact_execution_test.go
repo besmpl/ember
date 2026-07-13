@@ -183,7 +183,7 @@ func TestCompactCallProgramFallsBackBeforeWrongTypeEffects(t *testing.T) {
 	if wantErr == nil {
 		t.Fatal("established VM accepted wrong-type arithmetic")
 	}
-	_, gotErr := executeProto(context.Background(), proto, nil, executeOptions{args: args, maxInstructions: -1})
+	_, gotErr := executeProto(context.Background(), proto, nil, executeOptions{args: args, controller: nil})
 	if gotErr == nil || gotErr.Error() != wantErr.Error() {
 		t.Fatalf("fallback error = %v, want %v", gotErr, wantErr)
 	}

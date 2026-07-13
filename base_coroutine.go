@@ -111,12 +111,9 @@ func baseCoroutineResume(globals *globalEnv, args []Value) ([]Value, error) {
 		defer restoreParent()
 	}
 	parentThread := activeThread(globals)
-	if parentThread != nil && parentThread.instructionBudget >= 0 {
+	if parentThread != nil {
 		coroutine.thread.ctx = parentThread.ctx
-		coroutine.thread.instructionBudget = parentThread.instructionBudget
-		defer func() {
-			parentThread.instructionBudget = coroutine.thread.instructionBudget
-		}()
+		coroutine.thread.controller = parentThread.controller
 	}
 	results, err := resumeCoroutine(coroutine, globals, args[1:])
 	if yield, ok := err.(vmYieldRequest); ok {
@@ -184,6 +181,7 @@ func (coroutine *vmCoroutine) disposeFrames() {
 	coroutine.thread.globals = nil
 	coroutine.thread.baseGlobals = globalEnv{}
 	coroutine.thread.ctx = context.Background()
+	coroutine.thread.controller = nil
 	coroutine.thread.coroutine = nil
 	coroutine.thread.stringIntern = nil
 	coroutine.thread.stringConcatIntern = nil

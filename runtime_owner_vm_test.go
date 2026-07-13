@@ -31,7 +31,7 @@ func TestExecuteProtoBindsRuntimeOwnerThreadAndReleasesIt(t *testing.T) {
 		t.Fatalf("Compile returned error: %v", err)
 	}
 
-	results, err := executeProto(context.Background(), proto, globals, executeOptions{maxInstructions: -1})
+	results, err := executeProto(context.Background(), proto, globals, executeOptions{controller: nil})
 	if err != nil {
 		t.Fatalf("executeProto returned error: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestExecuteProtoReleasesRuntimeOwnerThreadOnError(t *testing.T) {
 		t.Fatalf("Compile returned error: %v", err)
 	}
 
-	if _, err := executeProto(context.Background(), proto, globals, executeOptions{maxInstructions: -1}); err == nil {
+	if _, err := executeProto(context.Background(), proto, globals, executeOptions{controller: nil}); err == nil {
 		t.Fatal("executeProto succeeded, want host failure")
 	}
 	if got := owner.threadCount(); got != 0 {
@@ -202,7 +202,7 @@ func TestNestedScriptCallsReuseRuntimeOwnerThread(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	results, err := executeProto(context.Background(), proto, globals, executeOptions{maxInstructions: -1})
+	results, err := executeProto(context.Background(), proto, globals, executeOptions{controller: nil})
 	if err != nil {
 		t.Fatalf("executeProto returned error: %v", err)
 	}

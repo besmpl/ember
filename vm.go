@@ -20,7 +20,7 @@ func Run(proto *Proto) ([]Value, error) {
 	}
 
 	return executeProto(context.Background(), proto, nil, executeOptions{
-		maxInstructions: -1,
+		controller: nil,
 	})
 }
 
@@ -40,16 +40,16 @@ func RunWithGlobals(proto *Proto, globals map[string]Value) ([]Value, error) {
 		env = runtimeGlobals(globals)
 	}
 	return executeProto(context.Background(), proto, env, executeOptions{
-		maxInstructions: -1,
+		controller: nil,
 	})
 }
 
 type executeOptions struct {
-	args            []Value
-	upvalues        []*cell
-	upvalueValues   []Value
-	upvalueValueOK  []bool
-	maxInstructions int
+	args           []Value
+	upvalues       []*cell
+	upvalueValues  []Value
+	upvalueValueOK []bool
+	controller     *executionController
 }
 
 func executeProto(ctx context.Context, proto *Proto, globals *globalEnv, options executeOptions) ([]Value, error) {
@@ -59,7 +59,7 @@ func executeProto(ctx context.Context, proto *Proto, globals *globalEnv, options
 	// corresponding slot ABI slice is proven.
 	if globals == nil && len(options.upvalues) == 0 &&
 		len(options.upvalueValues) == 0 && len(options.upvalueValueOK) == 0 &&
-		options.maxInstructions < 0 {
+		(options.controller == nil || options.controller.remaining < 0) {
 		if values, handled, err := runSlotExecution(proto, options.args); handled || err != nil {
 			return values, err
 		}
@@ -69,7 +69,7 @@ func executeProto(ctx context.Context, proto *Proto, globals *globalEnv, options
 	}
 	thread := acquireVMThread(ctx, globals)
 	defer releaseVMThread(thread)
-	thread.instructionBudget = options.maxInstructions
+	thread.controller = options.controller
 	return thread.runWithUpvalues(proto, options.args, options.upvalues, options.upvalueValues, options.upvalueValueOK)
 }
 
@@ -79,7 +79,7 @@ func executeProtoWithOwner(ctx context.Context, proto *Proto, globals *globalEnv
 	// and the context cannot be cancelled. The owner activity counter keeps
 	// close from racing this VM-thread-free path; the slot runner itself keeps
 	// using its pooled ephemeral heap until collector/root integration lands.
-	if proto != nil && (proto.slotExecutionEligible || proto.compact != nil) && globals.thread == nil && options.maxInstructions < 0 &&
+	if proto != nil && (proto.slotExecutionEligible || proto.compact != nil) && globals.thread == nil && (options.controller == nil || options.controller.remaining < 0) &&
 		len(options.upvalues) == 0 && len(options.upvalueValues) == 0 &&
 		len(options.upvalueValueOK) == 0 &&
 		(ctx == nil || (ctx.Done() == nil && ctx.Err() == nil)) {
@@ -96,7 +96,7 @@ func executeProtoWithOwner(ctx context.Context, proto *Proto, globals *globalEnv
 		return nil, err
 	}
 	defer releaseVMThread(thread)
-	thread.instructionBudget = options.maxInstructions
+	thread.controller = options.controller
 	return thread.runWithUpvalues(proto, options.args, options.upvalues, options.upvalueValues, options.upvalueValueOK)
 }
 
@@ -151,7 +151,7 @@ type vmThread struct {
 	protectedRecoveryLookups uint64
 	protectedRecoveryScans   uint64
 	protectedRecoveryErrors  uint64
-	instructionBudget        int
+	controller               *executionController
 	coroutine                *vmCoroutine
 	nonYieldableDepth        int
 	debugHook                vmDebugHook
@@ -534,7 +534,7 @@ func runWithDirectFrameMechanismCounters(proto *Proto, globals map[string]Value)
 	}
 
 	thread := newVMThreadWithContext(context.Background(), runtimeGlobals(globals))
-	thread.instructionBudget = -1
+	thread.controller = nil
 	thread.directFrameInstrumented = true
 	thread.directFrameOpcodeCounts = &snapshot.opcodeCounts
 	thread.directFramePICCounts = &snapshot.picCounts
@@ -837,7 +837,7 @@ type vmSuspendedFrames struct {
 	openUpvalues          []*cell
 	stack                 []Value
 	nearestProtectedFrame int
-	instructionBudget     int
+	controller            *executionController
 	coroutine             *vmCoroutine
 	nonYieldableDepth     int
 	debugHook             vmDebugHook
@@ -1242,7 +1242,7 @@ func newVMThreadWithContext(ctx context.Context, globals *globalEnv) vmThread {
 		globals:               globals,
 		stackOwner:            &vmStackOwner{},
 		nearestProtectedFrame: noProtectedFrame,
-		instructionBudget:     -1,
+		controller:            nil,
 	}
 	if globals != nil {
 		thread.owner = globals.owner
@@ -1323,7 +1323,7 @@ func (thread *vmThread) resetForRun(ctx context.Context, globals *globalEnv) {
 	thread.protectedRecoveryLookups = 0
 	thread.protectedRecoveryScans = 0
 	thread.protectedRecoveryErrors = 0
-	thread.instructionBudget = -1
+	thread.controller = nil
 	thread.coroutine = nil
 	thread.nonYieldableDepth = 0
 	thread.debugHook = nil
@@ -1373,7 +1373,7 @@ func (thread *vmThread) resetForPool() {
 	thread.ctx = context.Background()
 	thread.globals = nil
 	thread.baseGlobals = globalEnv{}
-	thread.instructionBudget = -1
+	thread.controller = nil
 	thread.coroutine = nil
 	thread.nonYieldableDepth = 0
 	thread.debugHook = nil
@@ -1473,7 +1473,7 @@ func (thread *vmThread) inheritRuntimeState(parent *vmThread) {
 		return
 	}
 	thread.ctx = parent.ctx
-	thread.instructionBudget = parent.instructionBudget
+	thread.controller = parent.controller
 	thread.owner = parent.owner
 	thread.inheritDebugConfig(parent)
 }
@@ -1737,7 +1737,7 @@ func (thread *vmThread) suspendFrames() vmSuspendedFrames {
 		openUpvalues:          thread.openUpvalues,
 		stack:                 thread.stack,
 		nearestProtectedFrame: thread.nearestProtectedFrame,
-		instructionBudget:     thread.instructionBudget,
+		controller:            thread.controller,
 		coroutine:             thread.coroutine,
 		nonYieldableDepth:     thread.nonYieldableDepth,
 		debugHook:             thread.debugHook,
@@ -1777,7 +1777,7 @@ func (thread *vmThread) resumeFrames(suspended vmSuspendedFrames) {
 	}
 	thread.nearestProtectedFrame = suspended.nearestProtectedFrame
 	thread.rebindFrameWindows()
-	thread.instructionBudget = suspended.instructionBudget
+	thread.controller = suspended.controller
 	thread.coroutine = suspended.coroutine
 	thread.nonYieldableDepth = suspended.nonYieldableDepth
 	thread.debugHook = suspended.debugHook
@@ -2308,7 +2308,7 @@ func (thread *vmThread) newBorrowedClosureCallFrame(closure *closure, caller *vm
 		return nil, false
 	}
 	proto := closure.proto
-	if proto.variadic || thread.debugHook != nil || thread.instructionBudget >= 0 ||
+	if proto.variadic || thread.debugHook != nil || (thread.controller != nil && thread.controller.remaining >= 0) ||
 		thread.coroutine != nil || thread.nonYieldableDepth != 0 ||
 		thread.nearestProtectedFrame != noProtectedFrame ||
 		caller.hasPendingCall || caller.openResultStart >= 0 || len(proto.capturedLocals) != 0 {
@@ -2457,7 +2457,7 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 	}
 	proto := closure.proto
 	if frame.varargCount != 0 ||
-		thread.debugHook != nil || thread.instructionBudget >= 0 || thread.coroutine != nil ||
+		thread.debugHook != nil || (thread.controller != nil && thread.controller.remaining >= 0) || thread.coroutine != nil ||
 		thread.nonYieldableDepth != 0 || thread.nearestProtectedFrame != noProtectedFrame ||
 		frame.hasPendingCall || frame.openResultStart >= 0 {
 		return vmFrameRecord{}, false
@@ -2624,7 +2624,7 @@ func (thread *vmThread) maybeEnterRecordOnlyOpenArgumentCall(
 	// record does not currently encode. They stay on the established cold
 	// materialized path until that ABI is widened.
 	if proto.variadic || frame.varargCount != 0 ||
-		thread.debugHook != nil || thread.instructionBudget >= 0 || thread.coroutine != nil ||
+		thread.debugHook != nil || (thread.controller != nil && thread.controller.remaining >= 0) || thread.coroutine != nil ||
 		thread.nonYieldableDepth != 0 || thread.nearestProtectedFrame != noProtectedFrame ||
 		frame.hasPendingCall || frame.openResultStart < 0 || len(proto.capturedLocals) != 0 {
 		return vmFrameRecord{}, false
@@ -3870,7 +3870,7 @@ func (frame *vmFrame) applyInlineResultDestination(destination vmResultDestinati
 }
 
 func (thread *vmThread) runFrame(frame *vmFrame) (vmFrameResult, error) {
-	instrumented := thread.directFrameInstrumented || thread.debugHook != nil || thread.instructionBudget >= 0
+	instrumented := thread.directFrameInstrumented || thread.debugHook != nil || (thread.controller != nil && thread.controller.remaining >= 0)
 	for {
 		var exit directFrameSideExit
 		if instrumented {
@@ -5659,7 +5659,7 @@ reload:
 	picCounts = thread.directFramePICCounts
 	runLineHook = thread.debugHook != nil && thread.debugLineHook
 	runCountHook = thread.debugCountInterval > 0 && thread.debugHook != nil
-	runInstructionBudget = thread.instructionBudget >= 0
+	runInstructionBudget = thread.controller != nil && thread.controller.remaining >= 0
 
 	for uint(pc) < uint(len(words)) {
 		if runInstructionBudget || runLineHook || runCountHook {
@@ -9363,14 +9363,10 @@ reload:
 }
 
 func (thread *vmThread) consumeInstruction() bool {
-	if thread.instructionBudget < 0 {
+	if thread.controller == nil || thread.controller.remaining < 0 {
 		return true
 	}
-	if thread.instructionBudget == 0 {
-		return false
-	}
-	thread.instructionBudget--
-	return true
+	return thread.controller.chargeInstructions(1) == nil
 }
 
 func (thread *vmThread) runDebugCountHook(frame *vmFrame) error {
@@ -9927,10 +9923,10 @@ func callValue(fn Value, globals *globalEnv, args []Value) ([]Value, error) {
 }
 
 func callValueWithContext(ctx context.Context, fn Value, globals *globalEnv, args []Value) ([]Value, error) {
-	return callValueWithContextBudget(ctx, fn, globals, args, -1)
+	return callValueWithContextController(ctx, fn, globals, args, nil)
 }
 
-func callValueWithContextBudget(ctx context.Context, fn Value, globals *globalEnv, args []Value, maxInstructions int) ([]Value, error) {
+func callValueWithContextController(ctx context.Context, fn Value, globals *globalEnv, args []Value, controller *executionController) ([]Value, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -9939,11 +9935,11 @@ func callValueWithContextBudget(ctx context.Context, fn Value, globals *globalEn
 	}
 	if closure, ok := fn.scriptFunction(); ok {
 		return executeProto(ctx, closure.proto, globals, executeOptions{
-			args:            args,
-			upvalues:        closure.upvalues,
-			upvalueValues:   closure.upvalueValues,
-			upvalueValueOK:  closure.upvalueValueOK,
-			maxInstructions: maxInstructions,
+			args:           args,
+			upvalues:       closure.upvalues,
+			upvalueValues:  closure.upvalueValues,
+			upvalueValueOK: closure.upvalueValueOK,
+			controller:     controller,
 		})
 	}
 	return callValue(fn, globals, args)
@@ -10301,11 +10297,11 @@ func callValueSeen(fn Value, globals *globalEnv, args []Value, seen map[*Table]b
 			return globals.thread.runScriptWithUpvalues(closure.proto, args, closure.upvalues, closure.upvalueValues, closure.upvalueValueOK)
 		}
 		return executeProto(context.Background(), closure.proto, globals, executeOptions{
-			args:            args,
-			upvalues:        closure.upvalues,
-			upvalueValues:   closure.upvalueValues,
-			upvalueValueOK:  closure.upvalueValueOK,
-			maxInstructions: -1,
+			args:           args,
+			upvalues:       closure.upvalues,
+			upvalueValues:  closure.upvalueValues,
+			upvalueValueOK: closure.upvalueValueOK,
+			controller:     nil,
 		})
 	}
 

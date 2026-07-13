@@ -2749,7 +2749,7 @@ func TestVMFrameReturnsHostInterruptWhenInstructionBudgetExpires(t *testing.T) {
 		false,
 	)
 	thread := newVMThread(runtimeGlobals(nil))
-	thread.instructionBudget = 1
+	thread.controller = testExecutionController(t, 1)
 	result, err := thread.runFrame(newVMFrame(proto, nil, nil))
 	if err != nil {
 		t.Fatalf("runFrame returned error: %v", err)
@@ -2777,7 +2777,7 @@ return total
 	var counts directFrameOpcodeCounts
 	var pic directFramePICCounts
 	thread := newVMThread(runtimeGlobals(nil))
-	thread.instructionBudget = 7
+	thread.controller = testExecutionController(t, 7)
 	thread.directFrameInstrumented = true
 	thread.directFrameOpcodeCounts = &counts
 	thread.directFramePICCounts = &pic
@@ -2811,7 +2811,7 @@ func TestVMThreadReturnsErrorWhenInstructionBudgetExpires(t *testing.T) {
 		false,
 	)
 	thread := newVMThread(runtimeGlobals(nil))
-	thread.instructionBudget = 1
+	thread.controller = testExecutionController(t, 1)
 
 	_, err := thread.run(proto, nil, nil)
 	if err == nil {
@@ -4952,7 +4952,7 @@ func TestRunDirectFrameHandlesDebugAndBudgetWithoutWholeFrameDemotion(t *testing
 	budgetThread.directFrameInstrumented = true
 	budgetThread.directFrameOpcodeCounts = &budgetOpcodes
 	budgetThread.directFramePICCounts = &budgetCounts
-	budgetThread.instructionBudget = 10
+	budgetThread.controller = testExecutionController(t, 10)
 	if _, err := budgetThread.run(proto, nil, nil); err != nil {
 		t.Fatalf("budget thread.run returned error: %v", err)
 	}

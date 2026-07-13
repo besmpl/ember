@@ -26,8 +26,8 @@ func TestOwnerSlotExecutionReferenceArgumentsStayEphemeral(t *testing.T) {
 	}
 	for index, value := range values {
 		got, err := executeProto(context.Background(), proto, globals, executeOptions{
-			args:            []Value{value},
-			maxInstructions: -1,
+			args:       []Value{value},
+			controller: nil,
 		})
 		if err != nil || len(got) != 1 {
 			t.Fatalf("argument %d result = (%#v, %v), want one value", index, got, err)
@@ -45,8 +45,8 @@ func TestOwnerSlotExecutionReferenceArgumentsStayEphemeral(t *testing.T) {
 	for index := 0; index < 100; index++ {
 		value := stringValueFromBox(newStringBox(fmt.Sprintf("transient-%d", index)))
 		if _, err := executeProto(context.Background(), proto, globals, executeOptions{
-			args:            []Value{value},
-			maxInstructions: -1,
+			args:       []Value{value},
+			controller: nil,
 		}); err != nil {
 			t.Fatalf("transient argument %d: %v", index, err)
 		}
@@ -63,7 +63,7 @@ func TestOwnerSlotExecutionReferenceConstantStaysEphemeral(t *testing.T) {
 	}
 	var first *stringBox
 	for run := 0; run < 10; run++ {
-		values, runErr := executeProto(context.Background(), proto, globals, executeOptions{maxInstructions: -1})
+		values, runErr := executeProto(context.Background(), proto, globals, executeOptions{controller: nil})
 		if runErr != nil || len(values) != 1 {
 			t.Fatalf("owner slot run %d = (%#v, %v), want one result", run, values, runErr)
 		}
@@ -91,14 +91,14 @@ func TestOwnerSlotExecutionGuardsLifecycleAndCancellation(t *testing.T) {
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	if values, err := executeProto(cancelled, proto, globals, executeOptions{
-		args:            []Value{NumberValue(7)},
-		maxInstructions: -1,
+		args:       []Value{NumberValue(7)},
+		controller: nil,
 	}); err != nil || !reflect.DeepEqual(values, []Value{NumberValue(7)}) {
 		t.Fatalf("cancelled owner execution = (%#v, %v), want established VM result [7]", values, err)
 	}
 	if values, err := executeProto(context.Background(), proto, globals, executeOptions{
-		args:            []Value{NumberValue(7)},
-		maxInstructions: 0,
+		args:       []Value{NumberValue(7)},
+		controller: testExecutionController(t, 0),
 	}); values != nil || err == nil {
 		t.Fatalf("budgeted owner execution = (%#v, %v), want budget error", values, err)
 	}
@@ -107,8 +107,8 @@ func TestOwnerSlotExecutionGuardsLifecycleAndCancellation(t *testing.T) {
 		t.Fatalf("close after slot run: %v", err)
 	}
 	if _, err := executeProto(context.Background(), proto, globals, executeOptions{
-		args:            []Value{NumberValue(7)},
-		maxInstructions: -1,
+		args:       []Value{NumberValue(7)},
+		controller: nil,
 	}); !errors.Is(err, errRuntimeOwnerClosed) {
 		t.Fatalf("execution after close = %v, want %v", err, errRuntimeOwnerClosed)
 	}
@@ -123,7 +123,7 @@ func TestOwnerSlotExecutionFallbackMatchesEstablishedVM(t *testing.T) {
 		nil, nil, 2, 2, false,
 	)
 	args := []Value{StringValue("not a number"), NumberValue(2)}
-	got, gotErr := executeProto(context.Background(), proto, globals, executeOptions{args: args, maxInstructions: -1})
+	got, gotErr := executeProto(context.Background(), proto, globals, executeOptions{args: args, controller: nil})
 	want, wantErr := runWithSlotExecutionDisabledArgs(proto, args)
 	if got != nil || want != nil || gotErr == nil || wantErr == nil || gotErr.Error() != wantErr.Error() {
 		t.Fatalf("owner fallback = (%#v, %v), established = (%#v, %v)", got, gotErr, want, wantErr)
@@ -147,7 +147,7 @@ func TestOwnerSlotExecutionConcurrentRuns(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range iterations {
-				values, runErr := executeProto(context.Background(), proto, globals, executeOptions{maxInstructions: -1})
+				values, runErr := executeProto(context.Background(), proto, globals, executeOptions{controller: nil})
 				if runErr != nil || len(values) != 1 {
 					errs <- fmt.Errorf("result = %#v, err = %v", values, runErr)
 					return
@@ -172,7 +172,7 @@ func TestOwnerSlotExecutionAllocationBudget(t *testing.T) {
 	proto := newProto(nil, []instruction{{op: opReturnOne, a: 0}}, nil, nil, 1, 1, false)
 	for _, args := range [][]Value{{NumberValue(7)}, {StringValue("owner-slot-allocation")}} {
 		allocs := testing.AllocsPerRun(100, func() {
-			values, err := executeProto(context.Background(), proto, globals, executeOptions{args: args, maxInstructions: -1})
+			values, err := executeProto(context.Background(), proto, globals, executeOptions{args: args, controller: nil})
 			if err != nil || len(values) != 1 || values[0] != args[0] {
 				t.Fatalf("allocation run = (%#v, %v), want %#v", values, err, args)
 			}
@@ -248,14 +248,14 @@ func BenchmarkRunOwnerEstablishedStringReference(b *testing.B) {
 func benchmarkOwnerProto(b *testing.B, globals *globalEnv, proto *Proto, args []Value) {
 	b.Helper()
 	for range 100 {
-		if _, err := executeProto(context.Background(), proto, globals, executeOptions{args: args, maxInstructions: -1}); err != nil {
+		if _, err := executeProto(context.Background(), proto, globals, executeOptions{args: args, controller: nil}); err != nil {
 			b.Fatal(err)
 		}
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		values, err := executeProto(context.Background(), proto, globals, executeOptions{args: args, maxInstructions: -1})
+		values, err := executeProto(context.Background(), proto, globals, executeOptions{args: args, controller: nil})
 		if err != nil || len(values) != 1 {
 			b.Fatalf("owner run = (%#v, %v), want one result", values, err)
 		}

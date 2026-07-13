@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-func (r *Runtime) runModuleWithContextGlobalsBudget(ctx context.Context, key moduleKey, globals map[string]Value, maxInstructions int) ([]Value, error) {
+func (r *Runtime) runModuleWithContextGlobalsController(ctx context.Context, key moduleKey, globals map[string]Value, controller *executionController) ([]Value, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -31,11 +31,11 @@ func (r *Runtime) runModuleWithContextGlobalsBudget(ctx context.Context, key mod
 		r.stack = r.stack[:len(r.stack)-1]
 	}()
 
-	call := r.newRuntimeCallContext(ctx, key, globals, maxInstructions)
+	call := r.newRuntimeCallContext(ctx, key, globals, controller)
 	callCtx := contextWithRuntimeCallContext(ctx, call)
 
 	results, err := executeProto(callCtx, proto, call.envWithRequire(), executeOptions{
-		maxInstructions: maxInstructions,
+		controller: controller,
 	})
 	if err != nil {
 		return nil, err

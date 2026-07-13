@@ -294,7 +294,7 @@ func TestSlotExecutionTagCollidingNaNFallsBackBeforeResult(t *testing.T) {
 func runWithSlotExecutionDisabled(proto *Proto) ([]Value, error) {
 	thread := acquireVMThread(context.Background(), nil)
 	defer releaseVMThread(thread)
-	thread.instructionBudget = -1
+	thread.controller = nil
 	return thread.runWithUpvalues(proto, nil, nil, nil, nil)
 }
 
@@ -765,7 +765,7 @@ func TestSlotExecutionPoolDropsGenerationExhaustedHeap(t *testing.T) {
 func runWithSlotExecutionDisabledArgs(proto *Proto, args []Value) ([]Value, error) {
 	thread := acquireVMThread(context.Background(), nil)
 	defer releaseVMThread(thread)
-	thread.instructionBudget = -1
+	thread.controller = nil
 	return thread.runWithUpvalues(proto, args, nil, nil, nil)
 }
 
@@ -889,8 +889,8 @@ func TestExecuteProtoImportsFixedParametersIntoSlotExecution(t *testing.T) {
 		nil, nil, 2, 2, false,
 	)
 	values, err := executeProto(context.Background(), proto, nil, executeOptions{
-		args:            []Value{NumberValue(4), NumberValue(5)},
-		maxInstructions: -1,
+		args:       []Value{NumberValue(4), NumberValue(5)},
+		controller: nil,
 	})
 	if err != nil || !reflect.DeepEqual(values, []Value{NumberValue(9)}) {
 		t.Fatalf("executeProto fixed parameters = (%#v, %v), want [9]", values, err)
@@ -904,8 +904,8 @@ func TestExecuteProtoFixedParametersRespectInstructionBudget(t *testing.T) {
 		nil, nil, 1, 1, false,
 	)
 	values, err := executeProto(context.Background(), proto, nil, executeOptions{
-		args:            []Value{NumberValue(7)},
-		maxInstructions: 0,
+		args:       []Value{NumberValue(7)},
+		controller: testExecutionController(t, 0),
 	})
 	if values != nil || err == nil || !strings.Contains(err.Error(), "instruction budget exhausted") {
 		t.Fatalf("budgeted executeProto = (%#v, %v), want instruction budget error", values, err)

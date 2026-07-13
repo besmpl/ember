@@ -128,17 +128,16 @@ type HostCall struct {
 // captured Callback calls must not overlap. Close may run concurrently; it
 // reports an active runtime without tearing down the in-flight call.
 type Runtime struct {
-	closeMu         sync.Mutex
-	owner           *runtimeOwner
-	program         *Program
-	host            RuntimeHost
-	entrypoints     map[moduleKey]Value
-	loaded          map[moduleKey]Value
-	active          map[moduleKey]bool
-	limits          ExecutionLimits
-	stack           []moduleKey
-	maxInstructions int
-	closed          bool
+	closeMu     sync.Mutex
+	owner       *runtimeOwner
+	program     *Program
+	host        RuntimeHost
+	entrypoints map[moduleKey]Value
+	loaded      map[moduleKey]Value
+	active      map[moduleKey]bool
+	limits      ExecutionLimits
+	stack       []moduleKey
+	closed      bool
 }
 
 // HookReport describes one RunHook call.
@@ -227,19 +226,17 @@ func (p *Program) NewRuntime(options RuntimeOptions) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	maxInstructions, err := runtimeInstructionBudget(limits.MaxInstructions)
-	if err != nil {
+	if err := validateExecutionLimits(limits); err != nil {
 		return nil, err
 	}
 	return &Runtime{
-		owner:           newRuntimeOwner(),
-		program:         p,
-		host:            options.Host,
-		entrypoints:     make(map[moduleKey]Value),
-		loaded:          make(map[moduleKey]Value),
-		active:          make(map[moduleKey]bool),
-		limits:          limits,
-		maxInstructions: maxInstructions,
+		owner:       newRuntimeOwner(),
+		program:     p,
+		host:        options.Host,
+		entrypoints: make(map[moduleKey]Value),
+		loaded:      make(map[moduleKey]Value),
+		active:      make(map[moduleKey]bool),
+		limits:      limits,
 	}, nil
 }
 
@@ -269,6 +266,10 @@ func (r *Runtime) RunHook(ctx context.Context, hook string, args ...Value) (Hook
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
+	controller, err := newExecutionController(ctx, r.limits)
+	if err != nil {
+		return report, fmt.Errorf("runtime: create execution controller: %w", err)
+	}
 
 	for _, entrypoint := range r.program.entrypoints {
 		call := HookCallReport{
@@ -283,7 +284,7 @@ func (r *Runtime) RunHook(ctx context.Context, hook string, args ...Value) (Hook
 		if err != nil {
 			return report, fmt.Errorf("runtime: host globals for %s load: %w", entrypoint.name, err)
 		}
-		export, loaded, err := r.loadEntrypoint(ctx, entrypoint, loadGlobals)
+		export, loaded, err := r.loadEntrypoint(ctx, entrypoint, loadGlobals, controller)
 		if err != nil {
 			return report, fmt.Errorf("runtime: load entrypoint %s: %w", entrypoint.name, err)
 		}
@@ -319,9 +320,9 @@ func (r *Runtime) RunHook(ctx context.Context, hook string, args ...Value) (Hook
 		if !callableValue(hookValue) {
 			return report, fmt.Errorf("runtime: hook %s.%s is %s, want function", entrypoint.name, hook, hookValue.Kind())
 		}
-		callContext := r.newRuntimeCallContext(ctx, entrypoint.key, hookGlobals, r.maxInstructions)
+		callContext := r.newRuntimeCallContext(ctx, entrypoint.key, hookGlobals, controller)
 		callCtx := contextWithRuntimeCallContext(ctx, callContext)
-		if _, err := callValueWithContextBudget(callCtx, hookValue, callContext.envWithRequire(), args, r.maxInstructions); err != nil {
+		if _, err := callValueWithContextController(callCtx, hookValue, callContext.envWithRequire(), args, controller); err != nil {
 			return report, fmt.Errorf("runtime: call hook %s.%s: %w", entrypoint.name, hook, err)
 		}
 		call.Called = true
@@ -403,14 +404,14 @@ func (r *Runtime) collect() (runtimeHeapStats, error) {
 	})
 }
 
-func (r *Runtime) loadEntrypoint(ctx context.Context, entrypoint programEntrypoint, globals map[string]Value) (Value, bool, error) {
+func (r *Runtime) loadEntrypoint(ctx context.Context, entrypoint programEntrypoint, globals map[string]Value, controller *executionController) (Value, bool, error) {
 	if value, ok := r.entrypoints[entrypoint.key]; ok {
 		return value, false, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return NilValue(), false, err
 	}
-	results, err := r.runModuleWithContextGlobalsBudget(ctx, entrypoint.key, globals, r.maxInstructions)
+	results, err := r.runModuleWithContextGlobalsController(ctx, entrypoint.key, globals, controller)
 	if err != nil {
 		return NilValue(), false, err
 	}
@@ -439,17 +440,6 @@ func copyGlobals(globals map[string]Value) map[string]Value {
 		copied[name] = value
 	}
 	return copied
-}
-
-func runtimeInstructionBudget(max uint64) (int, error) {
-	if max == 0 {
-		return -1, nil
-	}
-	maxInt := int(^uint(0) >> 1)
-	if max > uint64(maxInt) {
-		return 0, fmt.Errorf("runtime: max instructions %d exceeds platform int", max)
-	}
-	return int(max), nil
 }
 
 func programParallelism(value int) (int, error) {

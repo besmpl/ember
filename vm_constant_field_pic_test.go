@@ -114,7 +114,7 @@ return total
 	thread.directFramePICCounts = &counts
 	thread.debugLineHook = true
 	thread.debugHook = func(_ *globalEnv, _ vmDebugEvent) error { return nil }
-	thread.instructionBudget = 10_000
+	thread.controller = testExecutionController(t, 10_000)
 	results, err := thread.run(proto, nil, nil)
 	if err != nil {
 		t.Fatalf("debug/budget run returned error: %v", err)

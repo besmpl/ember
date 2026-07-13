@@ -22,8 +22,8 @@ func TestOwnerSlotExecutionReusesOwnerHeapWithoutLiveRetention(t *testing.T) {
 	}
 	for index, value := range values {
 		results, err := executeProto(context.Background(), proto, globals, executeOptions{
-			args:            []Value{value},
-			maxInstructions: -1,
+			args:       []Value{value},
+			controller: nil,
 		})
 		if err != nil || len(results) != 1 {
 			t.Fatalf("value %d result = (%#v, %v)", index, results, err)
@@ -51,8 +51,8 @@ func TestOwnerSlotExecutionReusesOwnerHeapWithoutLiveRetention(t *testing.T) {
 	for index := 0; index < 1000; index++ {
 		value := stringValueFromBox(newStringBox(fmt.Sprintf("unique-%d", index)))
 		if _, err := executeProto(context.Background(), proto, globals, executeOptions{
-			args:            []Value{value},
-			maxInstructions: -1,
+			args:       []Value{value},
+			controller: nil,
 		}); err != nil {
 			t.Fatalf("unique run %d: %v", index, err)
 		}
@@ -81,8 +81,8 @@ func TestOwnerSlotExecutionPreservesExistingRootsAndPins(t *testing.T) {
 		t.Fatalf("pin table: %v", err)
 	}
 	if _, err := executeProto(context.Background(), proto, globals, executeOptions{
-		args:            []Value{TableValue(table)},
-		maxInstructions: -1,
+		args:       []Value{TableValue(table)},
+		controller: nil,
 	}); err != nil {
 		t.Fatalf("execute rooted table: %v", err)
 	}
@@ -112,8 +112,8 @@ func TestOwnerSlotExecutionPreservesExistingRootsAndPins(t *testing.T) {
 		t.Fatalf("root userdata: %v", err)
 	}
 	if _, err := executeProto(context.Background(), proto, globals, executeOptions{
-		args:            []Value{UserDataValue(userdata)},
-		maxInstructions: -1,
+		args:       []Value{UserDataValue(userdata)},
+		controller: nil,
 	}); err != nil {
 		t.Fatalf("execute rooted userdata: %v", err)
 	}
@@ -131,8 +131,8 @@ func TestOwnerSlotExecutionReturnedValueSurvivesHandleReuse(t *testing.T) {
 	proto := newProto(nil, []instruction{{op: opReturnOne, a: 0}}, nil, nil, 1, 1, false)
 	first := StringValue("first")
 	results, err := executeProto(context.Background(), proto, globals, executeOptions{
-		args:            []Value{first},
-		maxInstructions: -1,
+		args:       []Value{first},
+		controller: nil,
 	})
 	if err != nil || len(results) != 1 {
 		t.Fatalf("first run = (%#v, %v)", results, err)
@@ -143,8 +143,8 @@ func TestOwnerSlotExecutionReturnedValueSurvivesHandleReuse(t *testing.T) {
 		t.Fatalf("pack stale handle: %v", err)
 	}
 	if _, err := executeProto(context.Background(), proto, globals, executeOptions{
-		args:            []Value{StringValue("second")},
-		maxInstructions: -1,
+		args:       []Value{StringValue("second")},
+		controller: nil,
 	}); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
@@ -171,8 +171,8 @@ func TestOwnerSlotExecutionSerializesHeapWithPins(t *testing.T) {
 			for iteration := 0; iteration < iterations; iteration++ {
 				value := StringValue(fmt.Sprintf("worker-%d-%d", worker, iteration))
 				if _, err := executeProto(context.Background(), proto, globals, executeOptions{
-					args:            []Value{value},
-					maxInstructions: -1,
+					args:       []Value{value},
+					controller: nil,
 				}); err != nil {
 					errors <- err
 					return
