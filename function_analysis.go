@@ -1,9 +1,18 @@
 package ember
 
 type functionIR struct {
-	instructions []bytecodeIRInstruction
-	revision     uint64
-	analysis     *functionAnalysis
+	instructions  []bytecodeIRInstruction
+	revision      uint64
+	analysis      *functionAnalysis
+	features      bytecodeIRFeatures
+	featuresValid bool
+}
+
+type bytecodeIRFeatures struct {
+	hasMove        bool
+	hasControlFlow bool
+	hasBackedge    bool
+	hasCall        bool
 }
 
 type functionAnalysis struct {
@@ -31,8 +40,53 @@ func (function *functionIR) replace(ir []bytecodeIRInstruction) {
 	if !equalBytecodeIR(function.instructions, ir) {
 		function.revision++
 		function.analysis = nil
+		function.featuresValid = false
 	}
 	function.instructions = ir
+}
+
+func (function *functionIR) currentFeatures() bytecodeIRFeatures {
+	if function == nil {
+		return bytecodeIRFeatures{}
+	}
+	if !function.featuresValid {
+		features := bytecodeIRFeatures{}
+		for pc, instruction := range function.instructions {
+			if instruction.op == opMove {
+				features.hasMove = true
+			}
+			meta, known := opcodeMetadata(instruction.op)
+			if known && meta.effects.invokesScriptOrHostCode {
+				features.hasCall = true
+			}
+			if known {
+				switch meta.controlFlow {
+				case opcodeControlJump, opcodeControlBranch:
+					features.hasControlFlow = true
+				case opcodeControlReturn:
+					// A return followed by another instruction still needs the
+					// control-flow cleanup pass to remove unreachable code.
+					if pc+1 < len(function.instructions) {
+						features.hasControlFlow = true
+					}
+				}
+				var target int
+				hasTarget := false
+				switch meta.jumpTarget {
+				case opcodeJumpTargetB:
+					target, hasTarget = instruction.operands.b.value, instruction.operands.b.kind == bytecodeOperandJumpTarget
+				case opcodeJumpTargetD:
+					target, hasTarget = instruction.operands.d.value, instruction.operands.d.kind == bytecodeOperandJumpTarget
+				}
+				if hasTarget && target >= 0 && target <= pc && target < len(function.instructions) {
+					features.hasBackedge = true
+				}
+			}
+		}
+		function.features = features
+		function.featuresValid = true
+	}
+	return function.features
 }
 
 func (function *functionIR) currentAnalysis() *functionAnalysis {

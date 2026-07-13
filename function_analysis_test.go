@@ -42,6 +42,97 @@ func TestFunctionIRCachesAnalysisUntilInstructionsChange(t *testing.T) {
 	}
 }
 
+func TestFunctionIRCachesBytecodeFeaturesUntilInstructionsChange(t *testing.T) {
+	ir := []bytecodeIRInstruction{
+		lowerInstructionToBytecodeIR(instruction{op: opLoadConst, a: 0, b: 0}, sourceRange{}),
+		lowerInstructionToBytecodeIR(instruction{op: opReturnOne, a: 0}, sourceRange{}),
+	}
+	function := newFunctionIR(ir)
+	first := function.currentFeatures()
+	if first.hasMove || first.hasControlFlow || first.hasBackedge || first.hasCall {
+		t.Fatalf("return-only features = %#v, want all false", first)
+	}
+	if !function.featuresValid {
+		t.Fatal("initial bytecode features were not marked valid")
+	}
+	function.replace(append([]bytecodeIRInstruction(nil), ir...))
+	if !function.featuresValid {
+		t.Fatal("identical replacement invalidated bytecode features")
+	}
+	changed := append([]bytecodeIRInstruction(nil), ir...)
+	changed[0] = lowerInstructionToBytecodeIR(instruction{op: opMove, a: 1, b: 0}, sourceRange{})
+	function.replace(changed)
+	if function.featuresValid {
+		t.Fatal("changed replacement retained stale bytecode features")
+	}
+	updated := function.currentFeatures()
+	if !updated.hasMove || updated.hasControlFlow || updated.hasBackedge || updated.hasCall {
+		t.Fatalf("changed features = %#v, want move only", updated)
+	}
+}
+
+func TestOptimizerPlanGatesOpcodeFamilies(t *testing.T) {
+	toIR := func(code ...instruction) []bytecodeIRInstruction {
+		ir := make([]bytecodeIRInstruction, len(code))
+		for index, instruction := range code {
+			ir[index] = lowerInstructionToBytecodeIR(instruction, sourceRange{})
+		}
+		return ir
+	}
+	if plan := optimizerPlanForIR(toIR(instruction{op: opReturnOne, a: 0})); plan.runControlFlow || plan.runMoves || plan.runLoop {
+		t.Fatalf("return-only optimizer plan = %#v, want no optional passes", plan)
+	}
+	returnWithDeadTail := optimizerPlanForIR(toIR(
+		instruction{op: opReturnOne, a: 0},
+		instruction{op: opLoadConst, a: 0, b: 0},
+	))
+	if !returnWithDeadTail.runControlFlow || returnWithDeadTail.runMoves || returnWithDeadTail.runLoop {
+		t.Fatalf("return-with-tail optimizer plan = %#v, want control-flow only", returnWithDeadTail)
+	}
+	branch := optimizerPlanForIR(toIR(
+		instruction{op: opJumpIfFalse, a: 0, b: 2},
+		instruction{op: opReturnOne, a: 0},
+		instruction{op: opReturnOne, a: 0},
+	))
+	if !branch.runControlFlow || branch.runMoves || branch.runLoop {
+		t.Fatalf("branch optimizer plan = %#v, want control-flow only", branch)
+	}
+	backedge := optimizerPlanForIR(toIR(
+		instruction{op: opJump, b: 0},
+		instruction{op: opReturnOne, a: 0},
+	))
+	if !backedge.runControlFlow || !backedge.runLoop {
+		t.Fatalf("backedge optimizer plan = %#v, want control-flow and loop work", backedge)
+	}
+	moves := optimizerPlanForIR(toIR(
+		instruction{op: opMove, a: 1, b: 0},
+		instruction{op: opReturnOne, a: 1},
+	))
+	if !moves.runMoves || moves.runControlFlow || moves.runLoop {
+		t.Fatalf("move optimizer plan = %#v, want move work only", moves)
+	}
+	for _, op := range []opcode{opCall, opCallOne, opCallLocalOne, opCallUpvalueOne} {
+		features := newFunctionIR(toIR(instruction{op: op})).currentFeatures()
+		if !features.hasCall {
+			t.Fatalf("call opcode %v did not set hasCall", op)
+		}
+	}
+	for raw := 0; raw < int(opcodeLimit); raw++ {
+		op := opcode(raw)
+		features := newFunctionIR(toIR(instruction{op: op})).currentFeatures()
+		if opcodeMayCall(op) != features.hasCall {
+			t.Fatalf("opcode %d call feature = %t, opcodeMayCall = %t", raw, features.hasCall, opcodeMayCall(op))
+		}
+	}
+	for _, target := range []int{-1, 2} {
+		ir := toIR(instruction{op: opJump, b: target}, instruction{op: opReturnOne, a: 0})
+		features := newFunctionIR(ir).currentFeatures()
+		if !features.hasControlFlow || features.hasBackedge {
+			t.Fatalf("malformed jump target %d features = %#v, want control-flow only", target, features)
+		}
+	}
+}
+
 func TestFunctionAnalysisOwnsCFGDataflowAndEffects(t *testing.T) {
 	ir := []bytecodeIRInstruction{
 		lowerInstructionToBytecodeIR(instruction{op: opJumpIfFalse, a: 0, b: 2}, sourceRange{}),

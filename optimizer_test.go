@@ -516,6 +516,131 @@ func assertOptimizedRunErrorMatchesDisabledHIR(t *testing.T, source string) {
 	}
 }
 
+func TestOptimizerCompilerRunParityAgainstDisabledPipeline(t *testing.T) {
+	for _, source := range []string{
+		`return 1 + 2 * 3`,
+		`local total = 0
+for i = 1, 3 do
+ total = total + i
+end
+return total`,
+		`local function add(a, b)
+ return a + b
+end
+return add(2, 3)`,
+		`local value = false
+if value then
+ return 1
+end
+return 2`,
+	} {
+		t.Run(strings.ReplaceAll(source, "\n", "/"), func(t *testing.T) {
+			optimized, err := Compile(source)
+			if err != nil {
+				t.Fatalf("optimized Compile returned error: %v", err)
+			}
+			artifact := parseSourceForOptimizationTest(t, source)
+			disabled, err := compileProgramWithOptions(artifact, compilerOptions{
+				optimizations: optimizationOptions{disableAll: true},
+			})
+			if err != nil {
+				t.Fatalf("disabled Compile returned error: %v", err)
+			}
+			optimizedDisassembly := disassembleProto(optimized)
+			disabledDisassembly := disassembleProto(disabled)
+			if len(optimizedDisassembly) == 0 || len(disabledDisassembly) == 0 {
+				t.Fatalf("missing disassembly: optimized=%#v disabled=%#v", optimizedDisassembly, disabledDisassembly)
+			}
+			optimizedValues, optimizedErr := Run(optimized)
+			disabledValues, disabledErr := Run(disabled)
+			if !equalTestErrors(optimizedErr, disabledErr) {
+				t.Fatalf("optimized Run error is %v, disabled Run error is %v", optimizedErr, disabledErr)
+			}
+			if optimizedErr != nil {
+				t.Fatalf("Run returned error: %v", optimizedErr)
+			}
+			if !reflect.DeepEqual(optimizedValues, disabledValues) {
+				t.Fatalf("optimized Run values = %#v, disabled Run values = %#v\noptimized disassembly: %#v\ndisabled disassembly: %#v", optimizedValues, disabledValues, optimizedDisassembly, disabledDisassembly)
+			}
+		})
+	}
+}
+
+func TestGatedOptimizerMatchesLegacyPipelineCorpus(t *testing.T) {
+	fixtures, err := prepareCompilerStageFixtures()
+	if err != nil {
+		t.Fatalf("prepareCompilerStageFixtures returned error: %v", err)
+	}
+	for _, fixture := range fixtures {
+		t.Run(fixture.name, func(t *testing.T) {
+			optimized := optimizeCompilerStageIR(fixture.emission)
+			legacy := legacyOptimizeCompilerStageIR(fixture.emission)
+			if !reflect.DeepEqual(optimized.ir, legacy.ir) {
+				t.Fatalf("gated IR differs from legacy pipeline:\ngated=%#v\nlegacy=%#v", optimized.ir, legacy.ir)
+			}
+			if !reflect.DeepEqual(optimized.constants, legacy.constants) {
+				t.Fatalf("gated constants = %#v, legacy constants = %#v", optimized.constants, legacy.constants)
+			}
+			gatedProto, err := assembleAndSealCompilerStage(fixture.emission, optimized)
+			if err != nil {
+				t.Fatalf("assemble gated stage: %v", err)
+			}
+			legacyProto, err := assembleAndSealCompilerStage(fixture.emission, legacy)
+			if err != nil {
+				t.Fatalf("assemble legacy stage: %v", err)
+			}
+			if gatedDisassembly, legacyDisassembly := disassembleProto(gatedProto), disassembleProto(legacyProto); !reflect.DeepEqual(gatedDisassembly, legacyDisassembly) {
+				t.Fatalf("gated disassembly = %#v, legacy disassembly = %#v", gatedDisassembly, legacyDisassembly)
+			}
+		})
+	}
+}
+
+func legacyOptimizeCompilerStageIR(emission compilerStageEmission) compilerStageOptimization {
+	constantPool := bytecodeBuilder{}
+	constantPool.resetConstants(append([]Value(nil), emission.constants...))
+	optimized := legacyOptimizeBytecodeIRWithFacts(
+		cloneCompilerStageIR(emission.ir),
+		bytecodeIROptimizationFacts{
+			constants:         constantPool.constants,
+			capturedRegisters: functionDraftCapturedRegisters(emission.children),
+			constantPool:      &constantPool,
+		},
+		defaultCompilerOptions().optimizations,
+	)
+	return compilerStageOptimization{ir: optimized, constants: append([]Value(nil), constantPool.constants...)}
+}
+
+func legacyOptimizeBytecodeIRWithFacts(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts, options optimizationOptions) []bytecodeIRInstruction {
+	if !options.enabled(optimizationBytecodePeephole) {
+		return append([]bytecodeIRInstruction(nil), ir...)
+	}
+	function := newFunctionIR(append([]bytecodeIRInstruction(nil), ir...))
+	function.replace(applyBytecodeIRRemovalSet(
+		function.instructions,
+		bytecodeIRPeepholeRemovalSet(function.instructions, assembleBytecodeIRRaw(function.instructions), function.currentAnalysis()),
+	))
+	function.replace(simplifyBytecodeIRControlFlow(function.instructions, bytecodeIROptimizationFacts{}))
+	function.replace(propagateBytecodeIRScalarConstants(function.instructions, facts))
+	function.replace(propagateBytecodeIRSingleUseMoves(function.instructions, function.currentAnalysis()))
+	function.replace(coalesceBytecodeIRMoveProducers(function.instructions, facts.capturedRegisters, function.currentAnalysis()))
+	function.replace(hoistBytecodeIRLoopInvariantHeaderLoads(function.instructions))
+	function.replace(applyBytecodeIRRemovalSet(
+		function.instructions,
+		bytecodeIRDeadCodeRemovalSet(function.instructions, facts, function.currentAnalysis()),
+	))
+	function.replace(simplifyBytecodeIRControlFlow(function.instructions, bytecodeIROptimizationFacts{}))
+	if facts.constantPool != nil {
+		constants := facts.scalarConstants()
+		compactedIR, compactedConstants := compactBytecodeIRConstants(function.instructions, constants)
+		function.replace(compactedIR)
+		if len(compactedConstants) != len(constants) {
+			facts.constantPool.resetConstants(compactedConstants)
+		}
+	}
+	return function.instructions
+}
+
 func TestInstructionSuccessorsIncludeGeneralModuloBranch(t *testing.T) {
 	code := []instruction{
 		{op: opModK, a: 0, b: 0, c: 1},

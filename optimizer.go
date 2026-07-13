@@ -43,25 +43,59 @@ type bytecodeIROptimizationFacts struct {
 	constantPool      *bytecodeBuilder
 }
 
+type bytecodeIROptimizerPlan struct {
+	runControlFlow bool
+	runMoves       bool
+	runLoop        bool
+}
+
+func optimizerPlanForIR(ir []bytecodeIRInstruction) bytecodeIROptimizerPlan {
+	return optimizerPlanForFunction(newFunctionIR(ir))
+}
+
+func optimizerPlanForFunction(function *functionIR) bytecodeIROptimizerPlan {
+	features := function.currentFeatures()
+	return bytecodeIROptimizerPlan{
+		runControlFlow: features.hasControlFlow,
+		runMoves:       features.hasMove,
+		runLoop:        features.hasBackedge,
+	}
+}
+
 func optimizeBytecodeIRWithFacts(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts, options optimizationOptions) []bytecodeIRInstruction {
 	if !options.enabled(optimizationBytecodePeephole) {
 		return append([]bytecodeIRInstruction(nil), ir...)
 	}
 	function := newFunctionIR(append([]bytecodeIRInstruction(nil), ir...))
-	function.replace(applyBytecodeIRRemovalSet(
-		function.instructions,
-		bytecodeIRPeepholeRemovalSet(function.instructions, assembleBytecodeIRRaw(function.instructions), function.currentAnalysis()),
-	))
-	function.replace(simplifyBytecodeIRControlFlow(function.instructions, bytecodeIROptimizationFacts{}))
+	// The optional passes only remove or rewrite their corresponding opcode
+	// families; they do not introduce a family that was absent at the start of
+	// this pipeline. Keep one stage-local plan instead of rescanning the IR
+	// before every pass.
+	plan := optimizerPlanForFunction(function)
+	if plan.runMoves {
+		function.replace(applyBytecodeIRRemovalSet(
+			function.instructions,
+			bytecodeIRPeepholeRemovalSet(function.instructions, assembleBytecodeIRRaw(function.instructions), function.currentAnalysis()),
+		))
+	}
+	if plan.runControlFlow {
+		function.replace(simplifyBytecodeIRControlFlow(function.instructions, bytecodeIROptimizationFacts{}))
+	}
 	function.replace(propagateBytecodeIRScalarConstants(function.instructions, facts))
-	function.replace(propagateBytecodeIRSingleUseMoves(function.instructions, function.currentAnalysis()))
-	function.replace(coalesceBytecodeIRMoveProducers(function.instructions, facts.capturedRegisters, function.currentAnalysis()))
-	function.replace(hoistBytecodeIRLoopInvariantHeaderLoads(function.instructions))
+	if plan.runMoves {
+		function.replace(propagateBytecodeIRSingleUseMoves(function.instructions, function.currentAnalysis()))
+		function.replace(coalesceBytecodeIRMoveProducers(function.instructions, facts.capturedRegisters, function.currentAnalysis()))
+	}
+	if plan.runLoop {
+		function.replace(hoistBytecodeIRLoopInvariantHeaderLoads(function.instructions))
+	}
 	function.replace(applyBytecodeIRRemovalSet(
 		function.instructions,
 		bytecodeIRDeadCodeRemovalSet(function.instructions, facts, function.currentAnalysis()),
 	))
-	function.replace(simplifyBytecodeIRControlFlow(function.instructions, bytecodeIROptimizationFacts{}))
+	if plan.runControlFlow {
+		function.replace(simplifyBytecodeIRControlFlow(function.instructions, bytecodeIROptimizationFacts{}))
+	}
 	if facts.constantPool != nil {
 		constants := facts.scalarConstants()
 		compactedIR, compactedConstants := compactBytecodeIRConstants(function.instructions, constants)
