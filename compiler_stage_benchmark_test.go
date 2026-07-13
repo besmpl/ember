@@ -372,7 +372,12 @@ func compilerStageSource(size int) string {
 }
 
 func emitCompilerStage(artifact sourceArtifact) (compilerStageEmission, error) {
+	return emitCompilerStageWithCapacity(artifact, estimatedIRCapacity(artifact.program.nodeCount, len(artifact.program.statements)))
+}
+
+func emitCompilerStageWithCapacity(artifact sourceArtifact, capacity int) (compilerStageEmission, error) {
 	c := compiler{
+		bytecodeBuilder:    bytecodeBuilder{ir: make([]bytecodeIRInstruction, 0, capacity)},
 		bind:               artifact.bind,
 		sourceLines:        newSourceLineMap(artifact.source.Text),
 		symbolRegisters:    newDenseSymbolSlots(len(artifact.bind.symbols)),

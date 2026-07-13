@@ -27,6 +27,33 @@ type compiler struct {
 	functionName       string
 }
 
+// Keep the largest one-shot backing allocation below roughly 1.5 MiB on the
+// current IR representation. Larger functions continue to grow incrementally.
+const maxEstimatedIRCapacity = 1 << 14
+
+// estimatedIRCapacity returns a bounded, overflow-safe hint for a function's
+// IR backing storage. Syntax nodes are a useful root estimate; child emitters
+// can fall back to their statement count when no cheap node count is exposed.
+func estimatedIRCapacity(nodeCount, statementCount int) int {
+	if nodeCount <= 0 && statementCount <= 0 {
+		return 0
+	}
+	estimate := statementCount
+	if nodeCount > 0 {
+		nodeEstimate := nodeCount / 4
+		if nodeCount%4 != 0 {
+			nodeEstimate++
+		}
+		if nodeEstimate > estimate {
+			estimate = nodeEstimate
+		}
+	}
+	if estimate < 0 || estimate > maxEstimatedIRCapacity {
+		return maxEstimatedIRCapacity
+	}
+	return estimate
+}
+
 type variableKind int
 
 const (
@@ -72,6 +99,7 @@ func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (
 		sourceName = strings.Clone(sourceName)
 	}
 	c := compiler{
+		bytecodeBuilder:    bytecodeBuilder{ir: make([]bytecodeIRInstruction, 0, estimatedIRCapacity(source.program.nodeCount, len(source.program.statements)))},
 		bind:               source.bind,
 		sourceLines:        newSourceLineMap(source.source.Text),
 		symbolRegisters:    newDenseSymbolSlots(len(source.bind.symbols)),
@@ -489,6 +517,7 @@ func (c *compiler) compileFunctionDeclaration(stmt functionDeclarationStatement)
 
 func (c *compiler) compileFunctionDraft(closure closurePlan, selfFunctionSymbol int) (*functionDraft, error) {
 	fn := compiler{
+		bytecodeBuilder:    bytecodeBuilder{ir: make([]bytecodeIRInstruction, 0, estimatedIRCapacity(0, len(closure.body)))},
 		bind:               c.bind,
 		sourceLines:        c.sourceLines,
 		symbolRegisters:    newDenseSymbolSlots(len(c.bind.symbols)),
