@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"sync/atomic"
 	"unsafe"
@@ -1641,7 +1642,17 @@ func (t *Table) ensureIterationJournal() {
 	if t == nil || t.iteration != nil {
 		return
 	}
-	journal := &tableIterationJournal{}
+	activeCount := 0
+	for _, value := range t.array {
+		if !value.IsNil() {
+			activeCount++
+		}
+	}
+	activeCount += t.activeInlineStringFieldCount()
+	if fields := t.hashFields(); fields != nil {
+		activeCount += fields.count
+	}
+	journal := &tableIterationJournal{keys: make([]tableIterationKey, 0, activeCount)}
 	for index, value := range t.array {
 		if !value.IsNil() {
 			journal.keys = append(journal.keys, tableIterationKey{
@@ -1662,6 +1673,11 @@ func (t *Table) ensureIterationJournal() {
 		fields.forEach(func(key tableKey, value Value) {
 			journal.keys = append(journal.keys, tableIterationKey{key: key, present: true})
 		})
+	}
+	if len(journal.keys) > 32 {
+		t.iteration = journal
+		t.buildIterationIndex()
+		return
 	}
 	t.iteration = journal
 }
@@ -1720,7 +1736,27 @@ func (t *Table) markIterationKeyPresent(key tableKey) {
 	if t.iteration.index != nil {
 		t.iteration.index[key] = len(t.iteration.keys)
 	}
+	t.reserveIterationKeyCapacity()
 	t.iteration.keys = append(t.iteration.keys, tableIterationKey{key: key, present: true})
+}
+
+func (t *Table) reserveIterationKeyCapacity() {
+	if t == nil || t.iteration == nil || t.hashFieldCount() == 0 || len(t.iteration.keys) < cap(t.iteration.keys) {
+		return
+	}
+	fields := t.hashFields()
+	if fields == nil || len(fields.entries) == 0 {
+		return
+	}
+	// Hash growth occurs at a 75% live-entry load. Reserve the remaining
+	// headroom in this hash table so subsequent known inserts do not grow the
+	// journal one entry at a time.
+	nextGrowth := len(fields.entries) - len(fields.entries)/4
+	reserve := nextGrowth - fields.count
+	if reserve < 1 {
+		reserve = 1
+	}
+	t.iteration.keys = slices.Grow(t.iteration.keys, reserve)
 }
 
 func (t *Table) markIterationKeyDeleted(key tableKey) {
@@ -1757,7 +1793,15 @@ func (t *Table) iterationKeyIndex(key tableKey) (int, bool) {
 	if len(t.iteration.keys) > 32 {
 		t.buildIterationIndex()
 		index, ok := t.iteration.index[key]
-		return index, ok
+		if ok {
+			return index, true
+		}
+		for index, entry := range t.iteration.keys {
+			if tableKeysEqual(entry.key, key) {
+				return index, true
+			}
+		}
+		return 0, false
 	}
 	for i, entry := range t.iteration.keys {
 		if tableKeysEqual(entry.key, key) {
