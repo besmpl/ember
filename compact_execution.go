@@ -1,21 +1,24 @@
 package ember
 
-import "math"
+import (
+	"fmt"
+	"math"
+)
 
 // compactProgram is an immutable, compiler-built description of a pure
 // numeric call graph. Canonical wordcode remains the executable source of
 // truth; this sidecar only resolves direct call targets and their fixed ABI.
 type compactProgram struct {
-	functions []compactFunction
-	calls     []compactCallSite
-	entry     uint16
+	functions  []compactFunction
+	calls      []compactCallSite
+	callByWord []uint32
+	entry      uint16
 }
 
 type compactFunction struct {
-	proto     *Proto
-	callStart uint32
-	callCount uint16
-	_         uint16
+	proto           *Proto
+	callLookupStart uint32
+	wordCount       uint32
 }
 
 type compactCallSite struct {
@@ -76,34 +79,87 @@ func buildCompactCallProgram(root *Proto) *compactProgram {
 		return nil
 	}
 
-	totalCalls := 0
 	for index := range builder.functions {
 		if !builder.analyzeFunction(index) {
 			return nil
 		}
-		totalCalls += len(builder.functions[index].calls)
 	}
-	if totalCalls == 0 || len(builder.functions) > math.MaxUint16 {
+	program, err := builder.buildCompactProgram()
+	if err != nil {
 		return nil
 	}
+	return program
+}
 
+func (builder *compactProgramBuilder) buildCompactProgram() (*compactProgram, error) {
+	if builder == nil {
+		return nil, fmt.Errorf("compact call program has nil builder")
+	}
+	if len(builder.functions) == 0 || len(builder.functions) > math.MaxUint16 {
+		return nil, fmt.Errorf("compact call program has invalid function count %d", len(builder.functions))
+	}
+	totalCalls := uint64(0)
+	for _, function := range builder.functions {
+		calls := uint64(len(function.calls))
+		if calls > uint64(math.MaxUint32)-totalCalls {
+			return nil, fmt.Errorf("compact call count overflows uint32")
+		}
+		totalCalls += calls
+	}
+	if totalCalls == 0 {
+		return nil, fmt.Errorf("compact call program has no call sites")
+	}
+	if totalCalls > uint64(^uint(0)>>1) {
+		return nil, fmt.Errorf("compact call count cannot be allocated")
+	}
 	program := &compactProgram{
 		functions: make([]compactFunction, len(builder.functions)),
-		calls:     make([]compactCallSite, 0, totalCalls),
+		calls:     make([]compactCallSite, 0, int(totalCalls)),
 	}
+	totalWords := uint64(0)
 	for index := range builder.functions {
 		function := &builder.functions[index]
-		if len(program.calls) > math.MaxUint32 || len(function.calls) > math.MaxUint16 {
-			return nil
+		if function.proto == nil {
+			return nil, fmt.Errorf("compact function %d has nil prototype", index)
+		}
+		wordCount := uint64(len(function.proto.words))
+		if wordCount > uint64(math.MaxUint32) || wordCount > uint64(^uint(0)>>1) || totalWords > uint64(math.MaxUint32)-wordCount {
+			return nil, fmt.Errorf("compact physical word count overflows uint32")
+		}
+		if uint64(len(program.calls)) > uint64(math.MaxUint32)-uint64(len(function.calls)) {
+			return nil, fmt.Errorf("compact function %d call range overflows", index)
 		}
 		program.functions[index] = compactFunction{
-			proto:     function.proto,
-			callStart: uint32(len(program.calls)),
-			callCount: uint16(len(function.calls)),
+			proto:           function.proto,
+			callLookupStart: uint32(totalWords),
+			wordCount:       uint32(wordCount),
 		}
 		program.calls = append(program.calls, function.calls...)
+		totalWords += wordCount
 	}
-	return program
+	if totalWords > uint64(^uint(0)>>1) {
+		return nil, fmt.Errorf("compact physical word count cannot be allocated")
+	}
+	program.callByWord = make([]uint32, int(totalWords))
+	globalCallIndex := uint64(0)
+	for functionIndex, function := range builder.functions {
+		compactFunction := program.functions[functionIndex]
+		for callIndex, site := range function.calls {
+			if uint64(site.wordPC) >= uint64(compactFunction.wordCount) {
+				return nil, fmt.Errorf("compact call site %d in function %d has word pc %d outside word count %d", callIndex, functionIndex, site.wordPC, compactFunction.wordCount)
+			}
+			if globalCallIndex >= uint64(math.MaxUint32) {
+				return nil, fmt.Errorf("compact global call index overflows uint32")
+			}
+			lookupIndex := uint64(compactFunction.callLookupStart) + uint64(site.wordPC)
+			if lookupIndex >= uint64(len(program.callByWord)) || program.callByWord[lookupIndex] != 0 {
+				return nil, fmt.Errorf("duplicate or invalid compact call word pc %d in function %d", site.wordPC, functionIndex)
+			}
+			program.callByWord[lookupIndex] = uint32(globalCallIndex) + 1
+			globalCallIndex++
+		}
+	}
+	return program, nil
 }
 
 // compactGraphCaptureEligible rejects ordinary captures before the builder
@@ -579,22 +635,18 @@ func (program *compactProgram) callSite(functionID uint16, pc int) (compactCallS
 		return compactCallSite{}, false
 	}
 	function := program.functions[functionID]
-	start := int(function.callStart)
-	end := start + int(function.callCount)
-	if start < 0 || end > len(program.calls) {
+	if pc >= int(function.wordCount) {
 		return compactCallSite{}, false
 	}
-	wordPC := uint32(pc)
-	for index := start; index < end; index++ {
-		site := program.calls[index]
-		if site.wordPC == wordPC {
-			return site, true
-		}
-		if site.wordPC > wordPC {
-			break
-		}
+	lookupIndex := int(function.callLookupStart) + pc
+	if lookupIndex >= len(program.callByWord) {
+		return compactCallSite{}, false
 	}
-	return compactCallSite{}, false
+	callIndex := program.callByWord[lookupIndex]
+	if callIndex == 0 {
+		return compactCallSite{}, false
+	}
+	return program.calls[callIndex-1], true
 }
 
 func runCompactCallProgram(proto *Proto, args []Value, state *slotExecutionState) ([]Value, bool, error) {

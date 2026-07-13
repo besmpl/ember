@@ -47,6 +47,154 @@ return add(add(1, 2), add(3, 4))
 	}
 }
 
+func TestCompactCallSiteDenseMapping(t *testing.T) {
+	proto, err := Compile(`
+local function add(left, right)
+	return left + right
+end
+return add(add(1, 2), add(3, 4))
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	program := proto.compact
+	if program == nil {
+		t.Fatal("expected compact program")
+	}
+	for functionID, function := range program.functions {
+		code, err := protoDecodedInstructions(function.proto)
+		if err != nil {
+			t.Fatal(err)
+		}
+		boundaries, err := wordcodeBoundaries(code)
+		if err != nil {
+			t.Fatal(err)
+		}
+		primary := make(map[int]opcode, len(code))
+		for index, ins := range code {
+			primary[boundaries[index]] = ins.op
+		}
+		for pc := 0; pc < len(function.proto.words); pc++ {
+			got, ok := program.callSite(uint16(functionID), pc)
+			op, isPrimary := primary[pc]
+			call := op == opCall || op == opCallOne || op == opCallLocalOne || op == opCallUpvalueOne
+			if !call {
+				if ok {
+					t.Fatalf("function %d physical word %d (%v, primary=%t) unexpectedly mapped to %#v", functionID, pc, op, isPrimary, got)
+				}
+				continue
+			}
+			if !ok {
+				t.Fatalf("function %d call opcode at physical word %d did not map", functionID, pc)
+			}
+			lookup := uint64(function.callLookupStart) + uint64(pc)
+			entry := program.callByWord[lookup]
+			if entry == 0 || !reflect.DeepEqual(got, program.calls[entry-1]) || got.wordPC != uint32(pc) {
+				t.Fatalf("function %d call mapping at word %d = %#v, dense entry %d", functionID, pc, got, entry)
+			}
+		}
+	}
+}
+
+func TestCompactCallSiteRejectsInvalidAndDuplicateBuilderSites(t *testing.T) {
+	var nilBuilder *compactProgramBuilder
+	if _, err := nilBuilder.buildCompactProgram(); err == nil {
+		t.Fatal("nil compact program builder was accepted")
+	}
+
+	proto := &Proto{words: make([]uint32, 2)}
+	duplicate := &compactProgramBuilder{functions: []compactBuildFunction{{
+		proto: proto,
+		calls: []compactCallSite{{wordPC: 0}, {wordPC: 0}},
+	}}}
+	if _, err := duplicate.buildCompactProgram(); err == nil {
+		t.Fatal("duplicate compact call sites were accepted")
+	}
+	invalid := &compactProgramBuilder{functions: []compactBuildFunction{{
+		proto: proto,
+		calls: []compactCallSite{{wordPC: 2}},
+	}}}
+	if _, err := invalid.buildCompactProgram(); err == nil {
+		t.Fatal("out-of-bounds compact call site was accepted")
+	}
+
+	program := &compactProgram{
+		functions:  []compactFunction{{wordCount: 2}},
+		calls:      []compactCallSite{{wordPC: 1}},
+		callByWord: []uint32{0, 1},
+	}
+	for _, test := range []struct {
+		function uint16
+		pc       int
+	}{
+		{function: 1, pc: 0},
+		{function: 0, pc: -1},
+		{function: 0, pc: 2},
+	} {
+		if _, ok := program.callSite(test.function, test.pc); ok {
+			t.Fatalf("invalid call lookup (%d, %d) unexpectedly succeeded", test.function, test.pc)
+		}
+	}
+	if _, ok := program.callSite(0, 1); !ok {
+		t.Fatal("valid dense call lookup failed")
+	}
+}
+
+func TestCompactCallSiteMapsEveryAdmittedCallOpcode(t *testing.T) {
+	admitted := []opcode{opCall, opCallOne, opCallLocalOne, opCallUpvalueOne}
+	program := &compactProgram{
+		functions:  []compactFunction{{wordCount: uint32(len(admitted))}},
+		calls:      make([]compactCallSite, len(admitted)),
+		callByWord: make([]uint32, len(admitted)),
+	}
+	for index, op := range admitted {
+		program.calls[index] = compactCallSite{wordPC: uint32(index), target: uint16(index + 1), result: uint8(index)}
+		program.callByWord[index] = uint32(index + 1)
+		got, ok := program.callSite(0, index)
+		if !ok || got != program.calls[index] || got.wordPC != uint32(index) {
+			t.Fatalf("opcode %v at physical word %d mapped to %#v, want %#v", op, index, got, program.calls[index])
+		}
+	}
+	if len(admitted) != 4 {
+		t.Fatalf("admitted compact call opcode coverage = %d, want 4", len(admitted))
+	}
+}
+
+func TestCompactCallSiteRejectsAUXWord(t *testing.T) {
+	program := &compactProgram{
+		functions:  []compactFunction{{wordCount: 2}},
+		calls:      []compactCallSite{{wordPC: 0}},
+		callByWord: []uint32{1, 0},
+	}
+	if _, ok := program.callSite(0, 1); ok {
+		t.Fatal("AUX physical word unexpectedly resolved to a call site")
+	}
+}
+
+func TestCompactCallSiteDenseStorageSize(t *testing.T) {
+	proto, err := Compile(`
+local function f(n)
+	if n == 0 then return 0 end
+	return n + f(n - 1)
+end
+return f(8)
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proto.compact == nil {
+		t.Fatal("recursive program did not receive a compact call graph")
+	}
+	wordCount := 0
+	for _, function := range proto.compact.functions {
+		wordCount += int(function.wordCount)
+	}
+	if len(proto.compact.callByWord) != wordCount {
+		t.Fatalf("dense lookup words = %d, want %d", len(proto.compact.callByWord), wordCount)
+	}
+	t.Logf("dense call lookup overhead: %d bytes (%d physical words * 4 bytes)", len(proto.compact.callByWord)*4, len(proto.compact.callByWord))
+}
+
 func TestCompactCallProgramRunsDirectSelfRecursion(t *testing.T) {
 	proto, err := Compile(`
 local function sum(n)
@@ -283,6 +431,50 @@ return sum(12)
 				if len(values) != 1 || values[0] != NumberValue(78) {
 					errors <- fmt.Errorf("concurrent compact call returned %#v, want [78]", values)
 					return
+				}
+			}
+		}()
+	}
+	wait.Wait()
+	close(errors)
+	for err := range errors {
+		t.Fatal(err)
+	}
+}
+
+func TestCompactCallSiteSupportsConcurrentReads(t *testing.T) {
+	proto, err := Compile(`
+local function sum(n)
+	if n == 0 then return 0 end
+	return n + sum(n - 1)
+end
+return sum(12)
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	program := proto.compact
+	if program == nil {
+		t.Fatal("recursive program did not receive a compact call graph")
+	}
+	const workers = 16
+	const reads = 1000
+	var wait sync.WaitGroup
+	errors := make(chan error, workers)
+	for range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for read := 0; read < reads; read++ {
+				for functionID, function := range program.functions {
+					for pc := 0; pc < int(function.wordCount); pc++ {
+						got, ok := program.callSite(uint16(functionID), pc)
+						entry := program.callByWord[uint64(function.callLookupStart)+uint64(pc)]
+						if entry == 0 && ok || entry != 0 && (!ok || got != program.calls[entry-1]) {
+							errors <- fmt.Errorf("concurrent lookup mismatch for function %d pc %d", functionID, pc)
+							return
+						}
+					}
 				}
 			}
 		}()
