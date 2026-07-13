@@ -323,10 +323,6 @@ func buildCheckArtifactWithEnv(artifact sourceArtifact, env typeEnv, summaries m
 	}, nil
 }
 
-func analyzeProgramWithMode(source Source, prog program, bind bindResult, mode SourceMode, env typeEnv, summaries moduleSummaryEnv) []Diagnostic {
-	return analyzeSyntaxTreeWithMode(source, newSyntaxTree(prog), bind, mode, env, summaries)
-}
-
 func analyzeSyntaxTreeWithMode(source Source, tree syntaxTree, bind bindResult, mode SourceMode, env typeEnv, summaries moduleSummaryEnv) []Diagnostic {
 	if !policyForMode(mode).analyzesTypes() {
 		return nil

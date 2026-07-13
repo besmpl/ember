@@ -10,15 +10,10 @@ type syntaxTree struct {
 	arena *syntaxArena
 }
 
-func newSyntaxTree(root program) syntaxTree {
-	return syntaxTree{root: root}
-}
-
 func newSyntaxTreeWithArena(root program, arena *syntaxArena) syntaxTree {
 	return syntaxTree{root: root, arena: arena}
 }
 
-func (tree syntaxTree) statements() []statement { return tree.root.statements }
 func (tree syntaxTree) statementIDs() ([]statementID, bool) {
 	if tree.arena == nil {
 		return nil, false
@@ -203,31 +198,7 @@ func (tree syntaxTree) selectorSpan(span nodeSpan) ([]arenaSelector, bool) {
 	}
 	return tree.arena.selectorIDs(span)
 }
-func (tree syntaxTree) mode() sourceMode { return tree.root.mode }
-func (tree syntaxTree) nodeCount() int   { return tree.root.nodeCount }
-func (tree syntaxTree) id() syntaxID     { return tree.root.id }
 
-func (tree syntaxTree) statement(index int) *statement {
-	if index < 0 || index >= len(tree.root.statements) {
-		return nil
-	}
-	return &tree.root.statements[index]
-}
-
-func (tree syntaxTree) statementID(stmt *statement) syntaxID {
-	if stmt == nil {
-		return 0
-	}
-	if stmt.arenaID != 0 {
-		if node, ok := tree.statementNode(stmt.arenaID); ok {
-			return node.id
-		}
-	}
-	return stmt.id
-}
-
-// Arena accessors form the checked facade used by ID-based parser consumers.
-// A zero ID, a nil arena, or a malformed child span always resolves as absent.
 func (tree syntaxTree) arenaExpression(id expressionID) (arenaExpression, bool) {
 	if tree.arena == nil {
 		return arenaExpression{}, false
@@ -300,6 +271,9 @@ func (tree syntaxTree) arenaMultiplicativeRest(span nodeSpan) ([]arenaMultiplica
 	}
 	return tree.arena.multiplicativeParts(span)
 }
+func (tree syntaxTree) mode() sourceMode { return tree.root.mode }
+func (tree syntaxTree) nodeCount() int   { return tree.root.nodeCount }
+func (tree syntaxTree) id() syntaxID     { return tree.root.id }
 
 type syntaxStatementKind uint8
 
@@ -321,560 +295,6 @@ const (
 	syntaxStatementContinue
 	syntaxStatementReturn
 )
-
-func (tree syntaxTree) statementKind(stmt *statement) syntaxStatementKind {
-	if stmt == nil {
-		return syntaxStatementUnknown
-	}
-	if stmt.arenaID != 0 {
-		return tree.statementKindID(stmt.arenaID)
-	}
-	switch {
-	case stmt.local != nil:
-		return syntaxStatementLocal
-	case stmt.localFunc != nil:
-		return syntaxStatementLocalFunction
-	case stmt.funcDecl != nil:
-		return syntaxStatementFunctionDeclaration
-	case stmt.assign != nil:
-		return syntaxStatementAssign
-	case stmt.call != 0:
-		return syntaxStatementCall
-	case stmt.ifStmt != nil:
-		return syntaxStatementIf
-	case stmt.while != nil:
-		return syntaxStatementWhile
-	case stmt.forLoop != nil:
-		return syntaxStatementFor
-	case stmt.genericFor != nil:
-		return syntaxStatementGenericFor
-	case stmt.repeat != nil:
-		return syntaxStatementRepeat
-	case stmt.block != nil:
-		return syntaxStatementBlock
-	case stmt.typeAlias != nil:
-		return syntaxStatementTypeAlias
-	case stmt.breaking:
-		return syntaxStatementBreak
-	case stmt.continues:
-		return syntaxStatementContinue
-	case stmt.ret != nil:
-		return syntaxStatementReturn
-	default:
-		return syntaxStatementUnknown
-	}
-}
-
-// Statement payload accessors preserve nil when the payload is absent.
-func (tree syntaxTree) local(stmt *statement) *localStatement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.local
-}
-func (tree syntaxTree) localFunction(stmt *statement) *localFunctionStatement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.localFunc
-}
-func (tree syntaxTree) functionDeclaration(stmt *statement) *functionDeclarationStatement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.funcDecl
-}
-func (tree syntaxTree) assignment(stmt *statement) *assignStatement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.assign
-}
-func (tree syntaxTree) call(stmt *statement) termID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.call
-}
-func (tree syntaxTree) ifStatement(stmt *statement) *ifStatement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.ifStmt
-}
-func (tree syntaxTree) whileStatement(stmt *statement) *whileStatement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.while
-}
-func (tree syntaxTree) forStatement(stmt *statement) *forStatement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.forLoop
-}
-func (tree syntaxTree) genericForStatement(stmt *statement) *genericForStatement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.genericFor
-}
-func (tree syntaxTree) repeatStatement(stmt *statement) *repeatStatement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.repeat
-}
-func (tree syntaxTree) blockStatement(stmt *statement) *blockStatement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.block
-}
-func (tree syntaxTree) typeAliasStatement(stmt *statement) *typeAliasStatement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.typeAlias
-}
-func (tree syntaxTree) returnStatement(stmt *statement) *returnStatement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.ret
-}
-
-// Statement metadata and children. These methods intentionally return the
-// parser's existing slices and pointers so callers do not allocate or copy.
-func (tree syntaxTree) localNames(stmt *localStatement) []string {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.names
-}
-func (tree syntaxTree) localNameID(stmt *localStatement) syntaxID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.nameID
-}
-func (tree syntaxTree) localNameRanges(stmt *localStatement) []sourceRange {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.nameRanges
-}
-func (tree syntaxTree) localAnnotations(stmt *localStatement) []typeID {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.annotations
-}
-func (tree syntaxTree) localValues(stmt *localStatement) []expressionID {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.values
-}
-func (tree syntaxTree) localFunctionID(stmt *localFunctionStatement) int {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.functionID
-}
-func (tree syntaxTree) localFunctionName(stmt *localFunctionStatement) string {
-	if stmt == nil {
-		return ""
-	}
-	return stmt.name
-}
-func (tree syntaxTree) localFunctionNameID(stmt *localFunctionStatement) syntaxID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.nameID
-}
-func (tree syntaxTree) localFunctionTypeParams(stmt *localFunctionStatement) []string {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.typeParams
-}
-func (tree syntaxTree) localFunctionTypeParamID(stmt *localFunctionStatement) syntaxID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.typeParamID
-}
-func (tree syntaxTree) localFunctionTypePacks(stmt *localFunctionStatement) []string {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.typePacks
-}
-func (tree syntaxTree) localFunctionTypePackID(stmt *localFunctionStatement) syntaxID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.typePackID
-}
-func (tree syntaxTree) localFunctionParams(stmt *localFunctionStatement) []string {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.params
-}
-func (tree syntaxTree) localFunctionParamID(stmt *localFunctionStatement) syntaxID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.paramID
-}
-func (tree syntaxTree) localFunctionParamAnnotations(stmt *localFunctionStatement) []typeID {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.paramAnnotations
-}
-func (tree syntaxTree) localFunctionVariadic(stmt *localFunctionStatement) bool {
-	return stmt != nil && stmt.variadic
-}
-func (tree syntaxTree) localFunctionVariadicAnnotation(stmt *localFunctionStatement) typeID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.variadicAnnotation
-}
-func (tree syntaxTree) localFunctionReturnAnnotation(stmt *localFunctionStatement) typeID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.returnAnnotation
-}
-func (tree syntaxTree) localFunctionStatements(stmt *localFunctionStatement) []statement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.statements
-}
-func (tree syntaxTree) functionDeclarationID(stmt *functionDeclarationStatement) int {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.functionID
-}
-func (tree syntaxTree) functionDeclarationTarget(stmt *functionDeclarationStatement) *assignTarget {
-	if stmt == nil {
-		return nil
-	}
-	return &stmt.target
-}
-func (tree syntaxTree) functionDeclarationTypeParams(stmt *functionDeclarationStatement) []string {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.typeParams
-}
-func (tree syntaxTree) functionDeclarationTypeParamID(stmt *functionDeclarationStatement) syntaxID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.typeParamID
-}
-func (tree syntaxTree) functionDeclarationTypePacks(stmt *functionDeclarationStatement) []string {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.typePacks
-}
-func (tree syntaxTree) functionDeclarationTypePackID(stmt *functionDeclarationStatement) syntaxID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.typePackID
-}
-func (tree syntaxTree) functionDeclarationParams(stmt *functionDeclarationStatement) []string {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.params
-}
-func (tree syntaxTree) functionDeclarationParamID(stmt *functionDeclarationStatement) syntaxID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.paramID
-}
-func (tree syntaxTree) functionDeclarationSelfID(stmt *functionDeclarationStatement) syntaxID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.selfID
-}
-func (tree syntaxTree) functionDeclarationParamAnnotations(stmt *functionDeclarationStatement) []typeID {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.paramAnnotations
-}
-func (tree syntaxTree) functionDeclarationVariadic(stmt *functionDeclarationStatement) bool {
-	return stmt != nil && stmt.variadic
-}
-func (tree syntaxTree) functionDeclarationVariadicAnnotation(stmt *functionDeclarationStatement) typeID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.variadicAnnotation
-}
-func (tree syntaxTree) functionDeclarationReturnAnnotation(stmt *functionDeclarationStatement) typeID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.returnAnnotation
-}
-func (tree syntaxTree) functionDeclarationStatements(stmt *functionDeclarationStatement) []statement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.statements
-}
-func (tree syntaxTree) functionDeclarationMethod(stmt *functionDeclarationStatement) bool {
-	return stmt != nil && stmt.method
-}
-
-func (tree syntaxTree) assignmentTargets(stmt *assignStatement) []assignTarget {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.targets
-}
-func (tree syntaxTree) assignmentValues(stmt *assignStatement) []expressionID {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.values
-}
-func (tree syntaxTree) assignTargetID(target *assignTarget) syntaxID {
-	if target == nil {
-		return 0
-	}
-	return target.id
-}
-func (tree syntaxTree) assignTargetName(target *assignTarget) string {
-	if target == nil {
-		return ""
-	}
-	return target.name
-}
-func (tree syntaxTree) assignTargetSelectors(target *assignTarget) []selector {
-	if target == nil {
-		return nil
-	}
-	return target.selectors
-}
-func (tree syntaxTree) assignTargetRange(target *assignTarget) (int, int) {
-	if target == nil {
-		return 0, 0
-	}
-	return target.start, target.end
-}
-func (tree syntaxTree) selectorField(value *selector) string {
-	if value == nil {
-		return ""
-	}
-	return value.field
-}
-func (tree syntaxTree) selectorIndex(value *selector) expressionID {
-	if value == nil {
-		return 0
-	}
-	return value.index
-}
-
-func (tree syntaxTree) typeAliasID(stmt *typeAliasStatement) syntaxID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.id
-}
-func (tree syntaxTree) typeAliasExported(stmt *typeAliasStatement) bool {
-	return stmt != nil && stmt.exported
-}
-func (tree syntaxTree) typeAliasName(stmt *typeAliasStatement) string {
-	if stmt == nil {
-		return ""
-	}
-	return stmt.name
-}
-func (tree syntaxTree) typeAliasNameID(stmt *typeAliasStatement) syntaxID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.nameID
-}
-func (tree syntaxTree) typeAliasTypeParams(stmt *typeAliasStatement) []string {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.typeParams
-}
-func (tree syntaxTree) typeAliasTypeParamID(stmt *typeAliasStatement) syntaxID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.typeParamID
-}
-func (tree syntaxTree) typeAliasTypePacks(stmt *typeAliasStatement) []string {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.typePacks
-}
-func (tree syntaxTree) typeAliasTypePackID(stmt *typeAliasStatement) syntaxID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.typePackID
-}
-func (tree syntaxTree) typeAliasValue(stmt *typeAliasStatement) typeID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.value
-}
-func (tree syntaxTree) typeAliasRange(stmt *typeAliasStatement) (int, int) {
-	if stmt == nil {
-		return 0, 0
-	}
-	return stmt.start, stmt.end
-}
-func (tree syntaxTree) typeAliasNameRange(stmt *typeAliasStatement) (int, int) {
-	if stmt == nil {
-		return 0, 0
-	}
-	return stmt.nameStart, stmt.nameEnd
-}
-func (tree syntaxTree) ifCondition(stmt *ifStatement) expressionID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.condition
-}
-func (tree syntaxTree) ifThenStatements(stmt *ifStatement) []statement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.thenStatements
-}
-func (tree syntaxTree) ifElseStatements(stmt *ifStatement) []statement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.elseStatements
-}
-func (tree syntaxTree) whileCondition(stmt *whileStatement) expressionID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.condition
-}
-func (tree syntaxTree) whileStatements(stmt *whileStatement) []statement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.statements
-}
-func (tree syntaxTree) numericForName(stmt *forStatement) string {
-	if stmt == nil {
-		return ""
-	}
-	return stmt.name
-}
-func (tree syntaxTree) numericForNameID(stmt *forStatement) syntaxID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.nameID
-}
-func (tree syntaxTree) numericForStart(stmt *forStatement) expressionID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.start
-}
-func (tree syntaxTree) numericForLimit(stmt *forStatement) expressionID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.limit
-}
-func (tree syntaxTree) numericForStep(stmt *forStatement) expressionID {
-	if stmt == nil || stmt.step == 0 {
-		return 0
-	}
-	return stmt.step
-}
-func (tree syntaxTree) numericForStatements(stmt *forStatement) []statement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.statements
-}
-func (tree syntaxTree) genericForNames(stmt *genericForStatement) []string {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.names
-}
-func (tree syntaxTree) genericForNameID(stmt *genericForStatement) syntaxID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.nameID
-}
-func (tree syntaxTree) genericForValues(stmt *genericForStatement) []expressionID {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.values
-}
-func (tree syntaxTree) genericForStatements(stmt *genericForStatement) []statement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.statements
-}
-func (tree syntaxTree) repeatStatements(stmt *repeatStatement) []statement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.statements
-}
-func (tree syntaxTree) repeatCondition(stmt *repeatStatement) expressionID {
-	if stmt == nil {
-		return 0
-	}
-	return stmt.condition
-}
-func (tree syntaxTree) blockStatements(stmt *blockStatement) []statement {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.statements
-}
-func (tree syntaxTree) returnValues(stmt *returnStatement) []expressionID {
-	if stmt == nil {
-		return nil
-	}
-	return stmt.values
-}
-func (tree syntaxTree) returnRange(stmt *returnStatement) (int, int) {
-	if stmt == nil {
-		return 0, 0
-	}
-	return stmt.start, stmt.end
-}
 
 func (tree syntaxTree) expressionTerms(id expressionID) ([]andExpressionID, bool) {
 	node, ok := tree.arenaExpression(id)
@@ -1090,7 +510,7 @@ func (tree syntaxTree) termSelectors(id termID) ([]arenaSelector, bool) {
 	return tree.arena.selectorIDs(node.selectors)
 }
 func (tree syntaxTree) termSelectorField(value arenaSelector) string {
-	if value.field == 0 || tree.arena == nil || int(value.field) > len(tree.arena.strings) {
+	if value.field == 0 || tree.arena == nil || uint64(value.field) > uint64(len(tree.arena.strings)) {
 		return ""
 	}
 	return tree.arena.strings[value.field-1]
@@ -1114,7 +534,7 @@ func (tree syntaxTree) termLiteral(id termID) (Value, bool) {
 	case termKindBool:
 		return BoolValue(node.payload != 0), true
 	case termKindString:
-		if node.payload == 0 || int(node.payload) > len(tree.arena.strings) {
+		if node.payload == 0 || node.payload > uint64(len(tree.arena.strings)) {
 			return Value{}, false
 		}
 		if literal, ok := tree.arena.stringLiterals[stringID(node.payload)]; ok {
@@ -1139,7 +559,7 @@ func (tree syntaxTree) termChild(id termID) (termID, bool) {
 }
 func (tree syntaxTree) termName(id termID) string {
 	node, ok := tree.arenaTerm(id)
-	if !ok || node.kind != termKindName || node.payload == 0 || int(node.payload) > len(tree.arena.strings) {
+	if !ok || node.kind != termKindName || node.payload == 0 || node.payload > uint64(len(tree.arena.strings)) {
 		return ""
 	}
 	return tree.arena.strings[node.payload-1]
@@ -1227,7 +647,7 @@ func (tree syntaxTree) tableFields(id arenaTableID) ([]arenaTableField, bool) {
 	return tree.arena.tableFieldsIDs(node.fields)
 }
 func (tree syntaxTree) tableFieldName(field arenaTableField) string {
-	if field.name == 0 || int(field.name) > len(tree.arena.strings) {
+	if field.name == 0 || tree.arena == nil || uint64(field.name) > uint64(len(tree.arena.strings)) {
 		return ""
 	}
 	return tree.arena.strings[field.name-1]
@@ -1319,46 +739,12 @@ func (tree syntaxTree) functionExpressionFunctionID(value arenaFunctionID) int {
 	}
 	return node.functionID
 }
-func (tree syntaxTree) functionExpressionTypeParams(value arenaFunctionID) []string {
-	node, ok := tree.arena.function(value)
-	if !ok {
-		return nil
-	}
-	ids, ok := tree.arena.statements.spanStrings(node.typeParams)
-	if !ok {
-		return nil
-	}
-	values := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if name, ok := tree.stringValue(id); ok {
-			values = append(values, name)
-		}
-	}
-	return values
-}
 func (tree syntaxTree) functionExpressionTypeParamID(value arenaFunctionID) syntaxID {
 	node, ok := tree.arena.function(value)
 	if !ok {
 		return 0
 	}
 	return node.typeParamID
-}
-func (tree syntaxTree) functionExpressionTypePacks(value arenaFunctionID) []string {
-	node, ok := tree.arena.function(value)
-	if !ok {
-		return nil
-	}
-	ids, ok := tree.arena.statements.spanStrings(node.typePacks)
-	if !ok {
-		return nil
-	}
-	values := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if name, ok := tree.stringValue(id); ok {
-			values = append(values, name)
-		}
-	}
-	return values
 }
 func (tree syntaxTree) functionExpressionTypePackID(value arenaFunctionID) syntaxID {
 	node, ok := tree.arena.function(value)
@@ -1367,40 +753,12 @@ func (tree syntaxTree) functionExpressionTypePackID(value arenaFunctionID) synta
 	}
 	return node.typePackID
 }
-func (tree syntaxTree) functionExpressionParams(value arenaFunctionID) []string {
-	node, ok := tree.arena.function(value)
-	if !ok {
-		return nil
-	}
-	ids, ok := tree.arena.statements.spanStrings(node.params)
-	if !ok {
-		return nil
-	}
-	values := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if name, ok := tree.stringValue(id); ok {
-			values = append(values, name)
-		}
-	}
-	return values
-}
 func (tree syntaxTree) functionExpressionParamID(value arenaFunctionID) syntaxID {
 	node, ok := tree.arena.function(value)
 	if !ok {
 		return 0
 	}
 	return node.paramID
-}
-func (tree syntaxTree) functionExpressionParamAnnotations(value arenaFunctionID) []typeID {
-	node, ok := tree.arena.function(value)
-	if !ok {
-		return nil
-	}
-	ids, ok := tree.statementTypes(node.paramAnnotations)
-	if !ok {
-		return nil
-	}
-	return ids
 }
 func (tree syntaxTree) functionExpressionVariadic(value arenaFunctionID) bool {
 	node, ok := tree.arena.function(value)
@@ -1420,26 +778,6 @@ func (tree syntaxTree) functionExpressionReturnAnnotation(value arenaFunctionID)
 	}
 	return node.returnAnnotation
 }
-func (tree syntaxTree) functionExpressionStatements(value arenaFunctionID) []statement {
-	node, ok := tree.arena.function(value)
-	if !ok {
-		return nil
-	}
-	ids, ok := tree.arena.statements.spanStatements(node.statements)
-	if !ok {
-		return nil
-	}
-	values := make([]statement, 0, len(ids))
-	for _, id := range ids {
-		if int(id) <= 0 || int(id) > len(tree.arena.statements.statements) {
-			continue
-		}
-		// The legacy parser body remains available through the root only; typed
-		// consumers should use statementIDs/statementNode instead.
-	}
-	return values
-}
-
 func (tree syntaxTree) functionExpressionTypeParamIDs(value arenaFunctionID) (nodeSpan, bool) {
 	node, ok := tree.arena.function(value)
 	if !ok {
@@ -1530,17 +868,6 @@ func (tree syntaxTree) typeNameIDs(value typeID) ([]stringID, bool) {
 	return ids, true
 }
 
-// typeName is a compatibility adapter for tests. Live consumers should use
-// typeNameIDs and stringValue so reading syntax does not allocate. E8 removes
-// this adapter after the remaining parser-facing tests are ID-native.
-func (tree syntaxTree) typeName(value typeID) []string {
-	ids, ok := tree.typeNameIDs(value)
-	if !ok {
-		return nil
-	}
-	return tree.strings(ids)
-}
-
 func (tree syntaxTree) typeTypeParamIDs(value typeID) ([]stringID, bool) {
 	fn, ok := tree.typeFunctionNode(value)
 	if !ok {
@@ -1551,15 +878,6 @@ func (tree syntaxTree) typeTypeParamIDs(value typeID) ([]stringID, bool) {
 		return nil, false
 	}
 	return ids, true
-}
-
-// typeTypeParams is an E8-delete compatibility adapter for tests.
-func (tree syntaxTree) typeTypeParams(value typeID) []string {
-	ids, ok := tree.typeTypeParamIDs(value)
-	if !ok {
-		return nil
-	}
-	return tree.strings(ids)
 }
 
 func (tree syntaxTree) typeParamID(value typeID) syntaxID {
@@ -1577,15 +895,6 @@ func (tree syntaxTree) typePackIDs(value typeID) ([]stringID, bool) {
 		return nil, false
 	}
 	return ids, true
-}
-
-// typePacks is an E8-delete compatibility adapter for tests.
-func (tree syntaxTree) typePacks(value typeID) []string {
-	ids, ok := tree.typePackIDs(value)
-	if !ok {
-		return nil
-	}
-	return tree.strings(ids)
 }
 
 func (tree syntaxTree) typePackID(value typeID) syntaxID {
@@ -1619,34 +928,6 @@ func (tree syntaxTree) typeSingletonStringID(value typeID) (stringID, bool) {
 	id := stringID(payload)
 	_, ok = tree.stringValue(id)
 	return id, ok
-}
-
-// typeLiteral reconstructs a Value only for compatibility callers. Semantic
-// consumers should use typeSingletonScalar/typeSingletonStringID directly. E8
-// removes this adapter after legacy parser tests no longer need it.
-func (tree syntaxTree) typeLiteral(value typeID) (Value, bool) {
-	kind, payload, ok := tree.typeSingletonScalar(value)
-	if !ok {
-		return Value{}, false
-	}
-	switch kind {
-	case BoolKind:
-		return BoolValue(payload != 0), true
-	case NumberKind:
-		return NumberValue(math.Float64frombits(payload)), true
-	case StringKind:
-		id, ok := tree.typeSingletonStringID(value)
-		if !ok {
-			return Value{}, false
-		}
-		text, ok := tree.stringValue(id)
-		if !ok {
-			return Value{}, false
-		}
-		return StringValue(text), true
-	default:
-		return Value{}, false
-	}
 }
 
 func (tree syntaxTree) typeRange(value typeID) (int, int) {
@@ -1777,18 +1058,6 @@ func (tree syntaxTree) typeParamName(value arenaTypeParam) string {
 }
 func (tree syntaxTree) typeParamValue(value arenaTypeParam) typeID  { return value.value }
 func (tree syntaxTree) typeParamVariadic(value arenaTypeParam) bool { return value.variadic }
-
-func (tree syntaxTree) strings(ids []stringID) []string {
-	values := make([]string, 0, len(ids))
-	for _, id := range ids {
-		value, ok := tree.stringValue(id)
-		if !ok {
-			return nil
-		}
-		values = append(values, value)
-	}
-	return values
-}
 
 func (tree syntaxTree) validTypeID(value typeID) bool {
 	_, ok := tree.typeNode(value)

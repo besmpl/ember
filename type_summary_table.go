@@ -9,10 +9,10 @@ func tableSummaryProperty(summary TypeSummary, name string) (TypeSummary, bool) 
 	return TypeSummary{}, false
 }
 
-func tableSummaryPath(tree syntaxTree, summary TypeSummary, selectors []selector) (TypeSummary, bool) {
+func tableSummaryPath(tree syntaxTree, summary TypeSummary, selectors []arenaSelector) (TypeSummary, bool) {
 	current := summary
 	for i := range selectors {
-		field := tree.selectorField(&selectors[i])
+		field := tree.termSelectorField(selectors[i])
 		if field == "" || current.Kind != TypeSummaryTable {
 			return TypeSummary{}, false
 		}
@@ -54,11 +54,11 @@ func setTableSummaryProperty(summary *TypeSummary, name string, value TypeSummar
 	})
 }
 
-func setTableSummaryPath(tree syntaxTree, summary *TypeSummary, selectors []selector, value TypeSummary) bool {
+func setTableSummaryPath(tree syntaxTree, summary *TypeSummary, selectors []arenaSelector, value TypeSummary) bool {
 	if len(selectors) == 0 {
 		return false
 	}
-	field := tree.selectorField(&selectors[0])
+	field := tree.termSelectorField(selectors[0])
 	if field == "" {
 		return false
 	}

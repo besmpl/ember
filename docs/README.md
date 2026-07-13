@@ -24,6 +24,8 @@ and retire or delete it when the slice lands or is abandoned.
 - `principles.md`: decision rules for a Go-native Luau-compatible runtime.
 - `design.md`: runtime model and early boundaries.
 - `compatibility.md`: how Ember claims and proves Luau compatibility.
+- `compiler.md`: arena representation, layout checks, and compiler allocation
+  gates.
 - `public-surface.md`: initial import and API surface rules.
 - `hearth-integration.md`: host boundary notes for Hearth.
 - `golang-rules.md`: Go coding rules for this repository.

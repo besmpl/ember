@@ -34,7 +34,7 @@ func TestSyntaxTypeArenaRejectsMalformedIDsAndSpans(t *testing.T) {
 }
 
 func TestSyntaxTreeTypeFacadeRejectsMalformedPayloads(t *testing.T) {
-	arena := newSyntaxArena(4)
+	arena := newSyntaxArena(4, 0)
 	arena.types.named = append(arena.types.named, arenaNamedType{})
 	badName, _ := arena.types.append(arenaType{kind: typeKindName, payload: math.MaxUint32})
 	wrappedName, _ := arena.types.append(arenaType{kind: typeKindName, payload: uint64(math.MaxUint32) + 2})
@@ -67,7 +67,7 @@ func TestSyntaxTreeTypeFacadeRejectsMalformedPayloads(t *testing.T) {
 }
 
 func TestSyntaxTreeStatementTypeViewRejectsMalformedIDs(t *testing.T) {
-	arena := newSyntaxArena(4)
+	arena := newSyntaxArena(4, 0)
 	valid, _ := arena.types.append(arenaType{kind: typeKindName})
 	arena.statements.typeIDs = append(arena.statements.typeIDs, valid, 0, typeID(math.MaxUint32))
 	tree := syntaxTree{arena: arena}
@@ -81,7 +81,7 @@ func TestSyntaxTreeStatementTypeViewRejectsMalformedIDs(t *testing.T) {
 }
 
 func TestSyntaxTypeArenaStoresSingletonScalarsInline(t *testing.T) {
-	arena := newSyntaxArena(4)
+	arena := newSyntaxArena(4, 0)
 	number, _ := arena.types.append(arenaType{
 		kind:       typeKindSingleton,
 		scalarKind: NumberKind,
@@ -93,9 +93,7 @@ func TestSyntaxTypeArenaStoresSingletonScalarsInline(t *testing.T) {
 	if !ok || kind != NumberKind || payload != math.Float64bits(42.5) {
 		t.Fatalf("singleton scalar is (%d, %x, %v), want inline number", kind, payload, ok)
 	}
-	value, ok := tree.typeLiteral(number)
-	got, numberOK := value.Number()
-	if !ok || value.Kind() != NumberKind || !numberOK || got != 42.5 {
-		t.Fatalf("compatibility Value is %#v, %v; want 42.5", value, ok)
+	if got := math.Float64frombits(payload); got != 42.5 {
+		t.Fatalf("singleton payload decodes to %g, want 42.5", got)
 	}
 }

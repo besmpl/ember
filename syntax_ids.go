@@ -10,20 +10,6 @@ type syntaxIDAssigner struct {
 	tree         syntaxTree
 }
 
-func assignProgramSyntaxIDs(prog *program) {
-	_ = assignProgramSyntaxIDsWithLimit(prog, 0)
-}
-
-func assignProgramSyntaxIDsWithLimit(prog *program, limit uint64) error {
-	if prog == nil {
-		return nil
-	}
-	tree := newSyntaxTree(*prog)
-	err := assignSyntaxTreeIDsWithLimit(&tree, limit)
-	*prog = tree.root
-	return err
-}
-
 // assignSyntaxTreeIDsWithLimit assigns IDs through the syntaxTree root seam.
 // Arena nodes are read by value and written back after their IDs are assigned.
 func assignSyntaxTreeIDs(tree *syntaxTree) {
@@ -36,11 +22,7 @@ func assignSyntaxTreeIDsWithLimit(tree *syntaxTree, limit uint64) error {
 	}
 	a := syntaxIDAssigner{limit: limit, tree: *tree}
 	tree.root.id = a.node()
-	if ids, ok := tree.statementIDs(); ok && len(ids) > 0 {
-		a.arenaStatements(tree.root.statementSpan)
-	} else {
-		a.statements(tree.statements())
-	}
+	a.arenaStatements(tree.root.statementSpan)
 	tree.root.nodeCount = int(a.nextNode)
 	return a.err
 }
@@ -62,23 +44,6 @@ func (a *syntaxIDAssigner) function() int {
 	}
 	a.nextFunction++
 	return a.nextFunction
-}
-
-func (a *syntaxIDAssigner) names(names []string) syntaxID {
-	if a.err != nil {
-		return 0
-	}
-	if len(names) == 0 {
-		return 0
-	}
-	first := a.node()
-	for range names[1:] {
-		a.node()
-		if a.err != nil {
-			return 0
-		}
-	}
-	return first
 }
 
 func (a *syntaxIDAssigner) arenaNames(span nodeSpan) syntaxID {
@@ -301,97 +266,6 @@ func (a *syntaxIDAssigner) arenaExpressions(span nodeSpan) {
 
 func syntaxNameID(first syntaxID, index int) syntaxID { return first + syntaxID(index) }
 
-func (a *syntaxIDAssigner) statements(statements []statement) {
-	for i := range statements {
-		if a.err != nil {
-			return
-		}
-		a.statement(&statements[i])
-	}
-}
-
-func (a *syntaxIDAssigner) statement(stmt *statement) {
-	if a.err != nil {
-		return
-	}
-	stmt.id = a.node()
-	if a.err != nil {
-		return
-	}
-	switch a.tree.statementKind(stmt) {
-	case syntaxStatementLocal:
-		local := a.tree.local(stmt)
-		local.nameID = a.names(a.tree.localNames(local))
-		a.types(a.tree.localAnnotations(local))
-		a.expressions(a.tree.localValues(local))
-	case syntaxStatementLocalFunction:
-		fn := a.tree.localFunction(stmt)
-		fn.id, fn.nameID, fn.functionID = a.node(), a.node(), a.function()
-		fn.typeParamID, fn.typePackID, fn.paramID = a.names(a.tree.localFunctionTypeParams(fn)), a.names(a.tree.localFunctionTypePacks(fn)), a.names(a.tree.localFunctionParams(fn))
-		a.types(a.tree.localFunctionParamAnnotations(fn))
-		a.typeExpression(a.tree.localFunctionVariadicAnnotation(fn))
-		a.typeExpression(a.tree.localFunctionReturnAnnotation(fn))
-		a.statements(a.tree.localFunctionStatements(fn))
-	case syntaxStatementFunctionDeclaration:
-		fn := a.tree.functionDeclaration(stmt)
-		fn.id, fn.functionID = a.node(), a.function()
-		a.assignTarget(a.tree.functionDeclarationTarget(fn))
-		fn.typeParamID, fn.typePackID = a.names(a.tree.functionDeclarationTypeParams(fn)), a.names(a.tree.functionDeclarationTypePacks(fn))
-		if a.tree.functionDeclarationMethod(fn) {
-			fn.selfID = a.node()
-		}
-		fn.paramID = a.names(a.tree.functionDeclarationParams(fn))
-		a.types(a.tree.functionDeclarationParamAnnotations(fn))
-		a.typeExpression(a.tree.functionDeclarationVariadicAnnotation(fn))
-		a.typeExpression(a.tree.functionDeclarationReturnAnnotation(fn))
-		a.statements(a.tree.functionDeclarationStatements(fn))
-	case syntaxStatementAssign:
-		assign := a.tree.assignment(stmt)
-		for i := range a.tree.assignmentTargets(assign) {
-			a.assignTarget(&a.tree.assignmentTargets(assign)[i])
-		}
-		a.expressions(a.tree.assignmentValues(assign))
-	case syntaxStatementCall:
-		a.term(a.tree.call(stmt))
-	case syntaxStatementIf:
-		ifStmt := a.tree.ifStatement(stmt)
-		a.expression(a.tree.ifCondition(ifStmt))
-		a.statements(a.tree.ifThenStatements(ifStmt))
-		a.statements(a.tree.ifElseStatements(ifStmt))
-	case syntaxStatementWhile:
-		whileStmt := a.tree.whileStatement(stmt)
-		a.expression(a.tree.whileCondition(whileStmt))
-		a.statements(a.tree.whileStatements(whileStmt))
-	case syntaxStatementFor:
-		forStmt := a.tree.forStatement(stmt)
-		forStmt.nameID = a.node()
-		a.expression(a.tree.numericForStart(forStmt))
-		a.expression(a.tree.numericForLimit(forStmt))
-		if step := a.tree.numericForStep(forStmt); step != 0 {
-			a.expression(step)
-		}
-		a.statements(a.tree.numericForStatements(forStmt))
-	case syntaxStatementGenericFor:
-		forStmt := a.tree.genericForStatement(stmt)
-		forStmt.nameID = a.names(a.tree.genericForNames(forStmt))
-		a.expressions(a.tree.genericForValues(forStmt))
-		a.statements(a.tree.genericForStatements(forStmt))
-	case syntaxStatementRepeat:
-		repeat := a.tree.repeatStatement(stmt)
-		a.statements(a.tree.repeatStatements(repeat))
-		a.expression(a.tree.repeatCondition(repeat))
-	case syntaxStatementBlock:
-		a.statements(a.tree.blockStatements(a.tree.blockStatement(stmt)))
-	case syntaxStatementReturn:
-		a.expressions(a.tree.returnValues(a.tree.returnStatement(stmt)))
-	case syntaxStatementTypeAlias:
-		alias := a.tree.typeAliasStatement(stmt)
-		alias.id, alias.nameID = a.node(), a.node()
-		alias.typeParamID, alias.typePackID = a.names(a.tree.typeAliasTypeParams(alias)), a.names(a.tree.typeAliasTypePacks(alias))
-		a.typeExpression(a.tree.typeAliasValue(alias))
-	}
-}
-
 func (a *syntaxIDAssigner) expressions(values []expressionID) {
 	for _, value := range values {
 		a.expression(value)
@@ -543,21 +417,6 @@ func (a *syntaxIDAssigner) term(id termID) {
 	selectors, _ := a.tree.arena.selectorIDs(node.selectors)
 	for _, selector := range selectors {
 		a.expression(selector.index)
-	}
-}
-
-func (a *syntaxIDAssigner) assignTarget(target *assignTarget) {
-	if a.err != nil {
-		return
-	}
-	target.id = a.node()
-	if a.err != nil {
-		return
-	}
-	for i := range a.tree.assignTargetSelectors(target) {
-		if index := a.tree.selectorIndex(&a.tree.assignTargetSelectors(target)[i]); index != 0 {
-			a.expression(index)
-		}
 	}
 }
 

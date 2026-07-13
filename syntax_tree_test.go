@@ -1,6 +1,9 @@
 package ember
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestSyntaxTreeFacadePreservesRootAndPayloadIdentity(t *testing.T) {
 	artifact, err := parseSource(Source{Text: "local value = 1\nreturn value\n"})
@@ -40,7 +43,7 @@ func TestSyntaxTreeFacadePreservesRootAndPayloadIdentity(t *testing.T) {
 }
 
 func TestSyntaxTreeFacadePreservesNilAndEmptyChildren(t *testing.T) {
-	tree := newSyntaxTree(program{})
+	tree := syntaxTree{}
 	if ids, ok := tree.statementIDs(); ok && ids != nil {
 		t.Fatal("nil root statements became non-nil typed IDs")
 	}
@@ -59,5 +62,30 @@ func TestSyntaxTreeFacadePreservesNilAndEmptyChildren(t *testing.T) {
 	}
 	if got, ok := tree.expressionTerms(1); !ok || got == nil || len(got) != 0 {
 		t.Fatalf("empty expression terms=%#v, want non-nil empty slice", got)
+	}
+}
+
+func TestSyntaxTreeFacadeRejectsMalformedStringIDs(t *testing.T) {
+	tree := syntaxTree{arena: &syntaxArena{
+		strings: []string{"ok"},
+		terms: []arenaTerm{
+			{kind: termKindName, payload: math.MaxUint64},
+			{kind: termKindString, payload: math.MaxUint64},
+		},
+	}}
+	if got := tree.termName(1); got != "" {
+		t.Fatalf("malformed name payload resolved as %q", got)
+	}
+	if got, ok := tree.termLiteral(2); ok {
+		t.Fatalf("malformed string payload resolved as %#v", got)
+	}
+	if got := tree.termSelectorField(arenaSelector{field: stringID(math.MaxUint32)}); got != "" {
+		t.Fatalf("malformed selector field resolved as %q", got)
+	}
+	if got := tree.tableFieldName(arenaTableField{name: stringID(math.MaxUint32)}); got != "" {
+		t.Fatalf("malformed table field resolved as %q", got)
+	}
+	if got := (syntaxTree{}).tableFieldName(arenaTableField{name: 1}); got != "" {
+		t.Fatalf("nil arena table field resolved as %q", got)
 	}
 }

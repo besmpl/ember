@@ -117,9 +117,10 @@ type arenaAssignTarget struct {
 
 // statementArena keeps node and payload storage separate from expression
 // storage. Child lists are contiguous spans into typed sidecars, so parsing a
-// one-statement assignment does not allocate a temporary []statement or
-// []expressionID.
+// one-statement assignment does not allocate a temporary statement graph or
+// expression slice.
 type statementArena struct {
+	budget        *syntaxNodeBudget
 	statements    []arenaStatement
 	statementIDs  []statementID
 	assignTargets []arenaAssignTarget
@@ -145,11 +146,17 @@ type statementArena struct {
 }
 
 func (a *statementArena) appendStatement(node arenaStatement) statementID {
+	if a == nil || !a.budget.reserve() {
+		return 0
+	}
 	a.statements = append(a.statements, node)
 	return statementID(len(a.statements))
 }
 
 func (a *statementArena) appendAssignTarget(node arenaAssignTarget) assignTargetID {
+	if a == nil || !a.budget.reserve() {
+		return 0
+	}
 	a.assignTargets = append(a.assignTargets, node)
 	return assignTargetID(len(a.assignTargets))
 }

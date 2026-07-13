@@ -534,6 +534,38 @@ func (a *analysisState) bindLocals(names []string, nameID syntaxID, types []simp
 	}
 }
 
+func (a *analysisState) bindLocalIDs(ids []stringID, nameID syntaxID, types []simpleType) func() {
+	previous := make(map[string]simpleType, len(ids))
+	hadPrevious := make(map[string]bool, len(ids))
+	for i, id := range ids {
+		name, ok := a.tree.stringValue(id)
+		if !ok {
+			continue
+		}
+		previous[name], hadPrevious[name] = a.currentScope()[name]
+		if i < len(types) {
+			typ := types[i]
+			a.currentScope()[name] = typ
+			if symbol, ok := a.claimSymbol(syntaxNameID(nameID, i), symbolParameter); ok {
+				a.symbolTypes[symbol.id] = typ
+			}
+		}
+	}
+	return func() {
+		for _, id := range ids {
+			name, ok := a.tree.stringValue(id)
+			if !ok {
+				continue
+			}
+			if hadPrevious[name] {
+				a.currentScope()[name] = previous[name]
+			} else {
+				delete(a.currentScope(), name)
+			}
+		}
+	}
+}
+
 func (a *analysisState) analyzeLocalStatement(stmt arenaLocalStatement) {
 	names := consumerStatementStrings(a.tree, stmt.names)
 	annotations := consumerStatementTypes(a.tree, stmt.annotations)
@@ -886,7 +918,7 @@ func (a *analysisState) analyzeAnnotatedFunctionExpression(annotation typeID, va
 	if !ok || !functionOK {
 		return
 	}
-	restore := a.bindLocals(a.tree.functionExpressionParams(function), a.tree.functionExpressionParamID(function), functionExpressionParamTypes(a.tree, function, fact))
+	restore := a.bindLocalIDs(functionExpressionParamNameIDs(a.tree, function), a.tree.functionExpressionParamID(function), functionExpressionParamTypes(a.tree, function, fact))
 	span, _ := a.tree.functionExpressionStatementIDs(function)
 	body, _ := a.tree.statementChildren(span)
 	a.analyzeFunctionBodyWithReturn(fact.returnType, fact.returnTable, fact.returnSpan, fact.returnPack, body)
@@ -898,10 +930,10 @@ func (a *analysisState) analyzeFunctionExpressionAnnotations(value expressionID)
 	if !ok || !functionExpressionHasAnnotations(a.tree, function) {
 		return
 	}
-	a.checkFunctionParameterTypeNames(a.tree.functionExpressionParamAnnotations(function), a.tree.functionExpressionVariadicAnnotation(function))
+	a.checkFunctionParameterTypeNames(functionExpressionParamAnnotations(a.tree, function), a.tree.functionExpressionVariadicAnnotation(function))
 	a.checkUnknownTypeNames(a.tree.functionExpressionReturnAnnotation(function))
 	fact := a.functionFactFromFunctionExpression(function)
-	restore := a.bindLocals(a.tree.functionExpressionParams(function), a.tree.functionExpressionParamID(function), functionExpressionParamTypes(a.tree, function, fact))
+	restore := a.bindLocalIDs(functionExpressionParamNameIDs(a.tree, function), a.tree.functionExpressionParamID(function), functionExpressionParamTypes(a.tree, function, fact))
 	span, _ := a.tree.functionExpressionStatementIDs(function)
 	body, _ := a.tree.statementChildren(span)
 	a.analyzeFunctionBodyWithReturn(fact.returnType, fact.returnTable, fact.returnSpan, fact.returnPack, body)
@@ -929,7 +961,7 @@ func functionExpressionHasAnnotations(tree syntaxTree, function arenaFunctionID)
 	if tree.functionExpressionReturnAnnotation(function) != 0 || tree.functionExpressionVariadicAnnotation(function) != 0 {
 		return true
 	}
-	for _, annotation := range tree.functionExpressionParamAnnotations(function) {
+	for _, annotation := range functionExpressionParamAnnotations(tree, function) {
 		if annotation != 0 {
 			return true
 		}
@@ -939,11 +971,13 @@ func functionExpressionHasAnnotations(tree syntaxTree, function arenaFunctionID)
 
 func (a *analysisState) functionFactFromFunctionExpression(function arenaFunctionID) functionFact {
 	returnAnnotation := a.tree.functionExpressionReturnAnnotation(function)
-	paramAnnotations := a.tree.functionExpressionParamAnnotations(function)
-	typeParams := a.tree.functionExpressionTypeParams(function)
+	paramAnnotations := functionExpressionParamAnnotations(a.tree, function)
+	typeParamSpan, _ := a.tree.functionExpressionTypeParamIDs(function)
+	typeParamIDs, _ := a.tree.statementStrings(typeParamSpan)
+	typeParams := syntaxStrings(a.tree, typeParamIDs)
 	returnPack := a.returnPackFromAnnotation(returnAnnotation)
 	return functionFact{
-		typeParams:      append([]string(nil), typeParams...),
+		typeParams:      typeParams,
 		params:          a.simpleTypesFromAnnotations(paramAnnotations),
 		paramGenerics:   genericAnnotationNames(a.tree, paramAnnotations, typeParams),
 		variadic:        a.simpleTypeFromAnnotation(a.tree.functionExpressionVariadicAnnotation(function)),
@@ -957,7 +991,7 @@ func (a *analysisState) functionFactFromFunctionExpression(function arenaFunctio
 }
 
 func functionExpressionParamTypes(tree syntaxTree, function arenaFunctionID, fact functionFact) []simpleType {
-	params := tree.functionExpressionParams(function)
+	params := functionExpressionParamNameIDs(tree, function)
 	types := make([]simpleType, len(params))
 	for i := range params {
 		if i < len(fact.params) {
@@ -967,6 +1001,24 @@ func functionExpressionParamTypes(tree syntaxTree, function arenaFunctionID, fac
 		types[i] = fact.variadic
 	}
 	return types
+}
+
+func functionExpressionParamNameIDs(tree syntaxTree, function arenaFunctionID) []stringID {
+	span, ok := tree.functionExpressionParamIDs(function)
+	if !ok {
+		return nil
+	}
+	ids, _ := tree.statementStrings(span)
+	return ids
+}
+
+func functionExpressionParamAnnotations(tree syntaxTree, function arenaFunctionID) []typeID {
+	span, ok := tree.functionExpressionParamAnnotationIDs(function)
+	if !ok {
+		return nil
+	}
+	ids, _ := tree.statementTypes(span)
+	return ids
 }
 
 func (a *analysisState) returnPackFromAnnotation(annotation typeID) returnPackFact {

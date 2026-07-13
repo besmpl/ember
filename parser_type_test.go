@@ -42,9 +42,13 @@ func statementTypeExpressions(t *testing.T, tree syntaxTree, span nodeSpan) []ty
 
 func requireTypeName(t *testing.T, tree syntaxTree, value typeID, want string) {
 	t.Helper()
-	got := tree.typeName(value)
-	if len(got) != 1 || got[0] != want {
-		t.Fatalf("type name is %#v, want %q", got, want)
+	ids, ok := tree.typeNameIDs(value)
+	if !ok || len(ids) != 1 {
+		t.Fatalf("type name IDs are %#v, want one name", ids)
+	}
+	got, ok := tree.stringValue(ids[0])
+	if !ok || got != want {
+		t.Fatalf("type name is %q, want %q", got, want)
 	}
 }
 
@@ -505,14 +509,40 @@ func TestTypeSyntaxIDsFollowDepthFirstArenaOrder(t *testing.T) {
 	}
 }
 
-func TestTypeArenaChargesSyntaxLimitBeforeAppending(t *testing.T) {
-	p := parser{
-		source: `type T = A | B | C | D`,
-		limits: CompileLimits{MaxSyntaxNodes: 3},
+func TestSyntaxNodeBudgetMatchesAssignedIDs(t *testing.T) {
+	fixtures := []string{
+		"return 1 + 2",
+		"local x, y: number = 1, 2\nreturn x + y",
+		"type T = {x: number}\nlocal function f(a: number): number return a end\nreturn f(1)",
+		"if true then local x = 1 else local y = 2 end",
+		"for i = 1, 3 do continue end\nfor key, value in pairs({}) do break end",
+		"function object:method(value) return value end\nreturn function(value) return value end",
+		"while false do break end\nrepeat do local value = 1 end until true",
+		"foo()\nvalue:add(2)",
 	}
-	_, err := p.parse()
-	assertCompileLimitKind(t, err, LimitSyntaxNodes)
-	if got := len(p.arena.types.nodes); got != 3 {
-		t.Fatalf("type arena contains %d nodes after limit crossing, want 3", got)
+	for _, source := range fixtures {
+		base := parser{source: source}
+		tree, err := base.parse()
+		if err != nil {
+			t.Fatalf("%q: parse returned error: %v", source, err)
+		}
+		used := base.arena.budget.used
+		if used != uint64(tree.nodeCount()) {
+			t.Fatalf("%q: allocation budget used %d, assigned node count %d", source, used, tree.nodeCount())
+		}
+
+		within := parser{source: source, limits: CompileLimits{MaxSyntaxNodes: used}}
+		if _, err := within.parse(); err != nil {
+			t.Fatalf("%q: exact syntax limit rejected source: %v", source, err)
+		}
+		under := parser{source: source, limits: CompileLimits{MaxSyntaxNodes: used - 1}}
+		if _, err := under.parse(); err == nil {
+			t.Fatalf("%q: limit below exact node count succeeded", source)
+		} else {
+			limit, ok := err.(*LimitError)
+			if !ok || limit.Kind != LimitSyntaxNodes || limit.Used != used {
+				t.Fatalf("%q: limit error = %v, want syntax nodes used=%d", source, err, used)
+			}
+		}
 	}
 }

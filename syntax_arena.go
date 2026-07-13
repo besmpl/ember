@@ -26,6 +26,30 @@ type nodeSpan struct {
 	count uint32
 }
 
+// syntaxNodeBudget is shared by every arena family.  The parser reserves a
+// syntax node before growing the corresponding arena; this keeps limits
+// deterministic and prevents a failed parse from allocating past its bound.
+type syntaxNodeBudget struct {
+	limit uint64
+	used  uint64
+	err   error
+}
+
+func (b *syntaxNodeBudget) reserve() bool {
+	if b == nil {
+		return true
+	}
+	if b.err != nil {
+		return false
+	}
+	b.used++
+	if b.limit != 0 && b.used > b.limit {
+		b.err = &LimitError{Kind: LimitSyntaxNodes, Limit: b.limit, Used: b.used}
+		return false
+	}
+	return true
+}
+
 func arenaNode[T any, ID ~uint32](nodes []T, id ID) (T, bool) {
 	var zero T
 	if id == 0 || uint64(id) > uint64(len(nodes)) {
@@ -188,6 +212,7 @@ type arenaPower struct {
 // attached to syntaxTree (never to program) so copies of the parser's program
 // value cannot accidentally lose the storage owner.
 type syntaxArena struct {
+	budget             syntaxNodeBudget
 	expressions        []arenaExpression
 	andExpressions     []arenaAndExpression
 	comparisons        []arenaComparisonExpression
@@ -217,9 +242,14 @@ type syntaxArena struct {
 	types          syntaxTypeArena
 }
 
-func newSyntaxArena(tokenCount int) *syntaxArena {
+func newSyntaxArena(tokenCount int, maxNodes uint64) *syntaxArena {
 	if tokenCount <= 0 {
 		return &syntaxArena{}
+	}
+	if maxNodes != 0 && uint64(tokenCount) > maxNodes {
+		if maxNodes < uint64(^uint(0)>>1) {
+			tokenCount = int(maxNodes)
+		}
 	}
 	baseNodes := tokenCount/5 + 1
 	termNodes := tokenCount*2/5 + 1
@@ -311,6 +341,9 @@ type arenaTableField struct {
 // The append methods are the parser-facing arena API. They assign index+1 IDs
 // and never reserve a sentinel node, keeping zero available for "none".
 func (a *syntaxArena) appendExpression(node arenaExpression) expressionID {
+	if a == nil || !a.budget.reserve() {
+		return 0
+	}
 	a.expressions = append(a.expressions, node)
 	return expressionID(len(a.expressions))
 }
@@ -335,6 +368,9 @@ func (a *syntaxArena) appendMultiplicative(node arenaMultiplicativeExpression) m
 	return multiplicativeExpressionID(len(a.multiplicatives))
 }
 func (a *syntaxArena) appendTerm(node arenaTerm) termID {
+	if a == nil || !a.budget.reserve() {
+		return 0
+	}
 	a.terms = append(a.terms, node)
 	return termID(len(a.terms))
 }
@@ -347,6 +383,9 @@ func (a *syntaxArena) appendCall(node arenaCall) arenaCallID {
 	return arenaCallID(len(a.calls))
 }
 func (a *syntaxArena) appendFunction(node arenaFunction) arenaFunctionID {
+	if a == nil || !a.budget.reserve() {
+		return 0
+	}
 	a.functions = append(a.functions, node)
 	return arenaFunctionID(len(a.functions))
 }
