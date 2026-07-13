@@ -4261,20 +4261,20 @@ func directFrameRawStringField(table *Table, key string) (Value, bool) {
 	if table == nil {
 		return NilValue(), false
 	}
+	if table.hasStringOverflow() {
+		if fields := table.hashFields(); fields != nil {
+			if value, ok := fields.get(tableKey{kind: StringKind, str: key, strHash: hashString(key)}); ok {
+				return value, true
+			}
+		}
+	}
 	for i := range table.stringFields {
 		field := &table.stringFields[i]
 		if !field.value.IsNil() && field.key == key {
 			return field.value, true
 		}
 	}
-	if !table.hasStringOverflow() {
-		return NilValue(), false
-	}
-	fields := table.hashFields()
-	if fields == nil {
-		return NilValue(), false
-	}
-	return fields.get(tableKey{kind: StringKind, str: key, strHash: hashString(key)})
+	return NilValue(), false
 }
 
 func directFrameStringFieldBox(value Value, key string, box *stringBox) (Value, bool, error) {

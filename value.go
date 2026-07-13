@@ -1671,16 +1671,21 @@ func (t *Table) needsJournalForNewStringKey(key string) bool {
 		return true
 	}
 	probe := tableStringProbeFromText(key)
-	for i := range t.stringFields {
-		if !t.stringFields[i].value.IsNil() && probe.matchesBox(t.stringFields[i].box, t.stringFields[i].key) {
-			return false
-		}
-	}
 	if t.hasStringOverflow() {
 		if fields := t.hashFields(); fields != nil && fields.has(tableKey{kind: StringKind, str: key, strHash: probe.hash}) {
 			return false
 		}
+		for i := range t.stringFields {
+			if !t.stringFields[i].value.IsNil() && probe.matchesBox(t.stringFields[i].box, t.stringFields[i].key) {
+				return false
+			}
+		}
 		return true
+	}
+	for i := range t.stringFields {
+		if !t.stringFields[i].value.IsNil() && probe.matchesBox(t.stringFields[i].box, t.stringFields[i].key) {
+			return false
+		}
 	}
 	if t.hashFieldCount() != 0 {
 		return true
@@ -1812,6 +1817,14 @@ func (t *Table) rawStringFieldWithProbe(probe tableStringProbe) (Value, bool) {
 	if t == nil {
 		return NilValue(), false
 	}
+	if t.hasStringOverflow() {
+		if fields := t.hashFields(); fields != nil {
+			key := tableKey{kind: StringKind, str: probe.text, strBox: probe.box, strHash: probe.hash}
+			if value, ok := fields.get(key); ok {
+				return value, true
+			}
+		}
+	}
 	for i := range t.stringFields {
 		field := &t.stringFields[i]
 		if field.value.IsNil() || !probe.matchesBox(field.box, field.key) {
@@ -1819,15 +1832,7 @@ func (t *Table) rawStringFieldWithProbe(probe tableStringProbe) (Value, bool) {
 		}
 		return field.value, true
 	}
-	if !t.hasStringOverflow() {
-		return NilValue(), false
-	}
-	fields := t.hashFields()
-	if fields == nil {
-		return NilValue(), false
-	}
-	key := tableKey{kind: StringKind, str: probe.text, strBox: probe.box, strHash: probe.hash}
-	return fields.get(key)
+	return NilValue(), false
 }
 
 func (t *Table) rawArrayValue(index int) (Value, bool) {
@@ -1867,10 +1872,31 @@ func (t *Table) rawStringFieldSlotWithProbe(probe tableStringProbe) (tableString
 	if t == nil {
 		return tableStringFieldSlot{}, false
 	}
+	overflow := t.hasStringOverflow()
+	if overflow {
+		if fields := t.hashFields(); fields != nil {
+			storedKey := tableKey{kind: StringKind, str: probe.text, strBox: probe.box, strHash: probe.hash}
+			if index, ok := fields.find(storedKey); ok {
+				entry := &fields.entries[index]
+				return tableStringFieldSlot{
+					index:   index,
+					token:   t.stringShapeToken(),
+					key:     entry.key.strBox,
+					keyText: entry.key.str,
+					keyHash: entry.hash,
+				}, true
+			}
+		}
+	}
 	for i := range t.stringFields {
 		field := &t.stringFields[i]
 		if field.value.IsNil() || !probe.matchesBox(field.box, field.key) {
 			continue
+		}
+		if overflow {
+			// The slot token's storage bit follows the table, so it cannot
+			// represent an inline index once the hash sidecar is active.
+			return tableStringFieldSlot{}, false
 		}
 		return tableStringFieldSlot{
 			index:   i,
@@ -1879,19 +1905,6 @@ func (t *Table) rawStringFieldSlotWithProbe(probe tableStringProbe) (tableString
 			keyText: field.key,
 			keyHash: stringBoxHash(field.box, field.key),
 		}, true
-	}
-	if fields := t.hashFields(); t.hasStringOverflow() && fields != nil {
-		storedKey := tableKey{kind: StringKind, str: probe.text, strBox: probe.box, strHash: probe.hash}
-		if index, ok := fields.find(storedKey); ok {
-			entry := &fields.entries[index]
-			return tableStringFieldSlot{
-				index:   index,
-				token:   t.stringShapeToken(),
-				key:     entry.key.strBox,
-				keyText: entry.key.str,
-				keyHash: entry.hash,
-			}, true
-		}
 	}
 	return tableStringFieldSlot{}, false
 }
@@ -2280,14 +2293,25 @@ func (t *Table) cachedIndexFallback() (Value, bool, error) {
 		}
 	}
 	slot, ok := metatable.rawStringFieldSlot("__index")
-	cache.metatable = metatable
-	cache.ready = true
-	cache.slot = slot
-	cache.negative = !ok
 	if !ok {
+		if index, found := metatable.rawStringField("__index"); found {
+			// An inline key remains readable after overflow, but its slot token
+			// cannot represent the table's hash-backed storage bit. Leave this
+			// lookup uncached rather than installing a false negative.
+			*cache = tableMetamethodCache{metatable: metatable}
+			return index, true, nil
+		}
+		cache.metatable = metatable
+		cache.ready = true
+		cache.slot = slot
+		cache.negative = true
 		cache.slot = tableStringFieldSlot{index: -1, keyText: "__index", keyHash: hashString("__index"), token: metatable.stringShapeToken()}
 		return NilValue(), false, nil
 	}
+	cache.metatable = metatable
+	cache.ready = true
+	cache.slot = slot
+	cache.negative = false
 	index, ok := metatable.rawStringFieldAtSlot(slot, "__index")
 	if !ok {
 		cache.negative = true
@@ -2313,14 +2337,24 @@ func (t *Table) cachedNewIndexFallback() (Value, bool, error) {
 		}
 	}
 	slot, ok := metatable.rawStringFieldSlot("__newindex")
-	cache.metatable = metatable
-	cache.ready = true
-	cache.slot = slot
-	cache.negative = !ok
 	if !ok {
+		if newIndex, found := metatable.rawStringField("__newindex"); found {
+			// See cachedIndexFallback: preserve semantics without a false
+			// negative cache when the inline key is uncacheable after overflow.
+			*cache = tableMetamethodCache{metatable: metatable}
+			return newIndex, true, nil
+		}
+		cache.metatable = metatable
+		cache.ready = true
+		cache.slot = slot
+		cache.negative = true
 		cache.slot = tableStringFieldSlot{index: -1, keyText: "__newindex", keyHash: hashString("__newindex"), token: metatable.stringShapeToken()}
 		return NilValue(), false, nil
 	}
+	cache.metatable = metatable
+	cache.ready = true
+	cache.slot = slot
+	cache.negative = false
 	newIndex, ok := metatable.rawStringFieldAtSlot(slot, "__newindex")
 	if !ok {
 		cache.negative = true

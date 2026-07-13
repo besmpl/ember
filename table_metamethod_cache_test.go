@@ -63,6 +63,29 @@ func TestMetamethodCachesStayLiveAcrossUnrelatedValueWritesAndReplacement(t *tes
 	assertCachedMetamethodTable(t, object.cachedIndexFallback, secondIndex, "replacement metatable __index")
 }
 
+func TestMetamethodFallbackFindsInlineKeysAfterOverflow(t *testing.T) {
+	index := NewTable()
+	newIndex := NewTable()
+	metatable := NewTable()
+	metatable.setRawStringField("__index", TableValue(index))
+	metatable.setRawStringField("__newindex", TableValue(newIndex))
+	for field := 0; field < maxInlineStringFields-2; field++ {
+		metatable.setRawStringField("field"+string(rune('a'+field)), NumberValue(float64(field)))
+	}
+	metatable.setRawStringField("overflow", NumberValue(1))
+	if !metatable.hasStringOverflow() {
+		t.Fatal("metatable did not create overflow storage")
+	}
+
+	object := NewTable()
+	object.setMetatable(metatable)
+	assertCachedMetamethodTable(t, object.cachedIndexFallback, index, "overflow inline __index")
+	assertCachedMetamethodTable(t, object.cachedNewIndexFallback, newIndex, "overflow inline __newindex")
+	if object.cold.indexCache.ready || object.cold.newIndexCache.ready {
+		t.Fatal("uncacheable inline metamethod installed a cache record")
+	}
+}
+
 func assertCachedMetamethodTable(t *testing.T, lookup func() (Value, bool, error), want *Table, label string) {
 	t.Helper()
 	value, ok, err := lookup()
