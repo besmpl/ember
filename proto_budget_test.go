@@ -32,6 +32,7 @@ func TestProtoFieldClassificationBudget(t *testing.T) {
 		"slotExecutionEligible":   {},
 		"slotExecutionNumeric":    {},
 		"verifyErr":               {},
+		"debugInfo":               {},
 	}
 	runtimeSideTables := map[string]struct{}{
 		"entryNilRegisters": {},

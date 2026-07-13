@@ -1732,6 +1732,15 @@ type Proto struct {
 	slotExecutionEligible bool
 	slotExecutionNumeric  bool
 	verifyErr             error
+	debugInfo             *protoDebugInfo
+}
+
+// protoDebugInfo is immutable compiler metadata used by runtime diagnostics.
+// Keeping it behind a pointer avoids widening prototypes that do not carry
+// compiler metadata, such as hand-built test fixtures.
+type protoDebugInfo struct {
+	sourceName   string
+	functionName string
 }
 
 func (proto *Proto) globalSlot(slot int, name string) int {

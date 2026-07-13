@@ -54,6 +54,19 @@ func TestCompilerBenchmarkMetricsDeduplicatesStringBackingAliases(t *testing.T) 
 	}
 }
 
+func TestCompilerBenchmarkMetricsCountsPrototypeDebugMetadata(t *testing.T) {
+	proto := &Proto{debugInfo: &protoDebugInfo{
+		sourceName:   "source-name",
+		functionName: "function-name",
+	}}
+
+	metrics := compilerBenchmarkMetrics([]*Proto{proto})
+	want := int64(len(proto.debugInfo.sourceName) + len(proto.debugInfo.functionName))
+	if metrics.RetainedStringBytes != want {
+		t.Fatalf("retained string bytes = %d, want debug metadata bytes %d", metrics.RetainedStringBytes, want)
+	}
+}
+
 func TestPrototypeFallbackWordcodeFootprintUsesRankedCacheSites(t *testing.T) {
 	proto, err := Compile(`
 local prototype = {hp = 20, mana = 5, armor = 2}
@@ -244,6 +257,14 @@ func protoOwnedBenchmarkBytesWithStrings(proto *Proto, strings *compilerBenchmar
 		bytes := compilerBenchmarkStringBytes(box.text, strings)
 		owned += bytes
 		retainedStrings += bytes
+	}
+	if proto.debugInfo != nil {
+		owned += int64(reflect.TypeOf(*proto.debugInfo).Size())
+		for _, text := range []string{proto.debugInfo.sourceName, proto.debugInfo.functionName} {
+			bytes := compilerBenchmarkStringBytes(text, strings)
+			owned += bytes
+			retainedStrings += bytes
+		}
 	}
 	if proto.cacheIndex != nil {
 		indexValue := reflect.ValueOf(proto.cacheIndex).Elem()

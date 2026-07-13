@@ -75,37 +75,56 @@ type closurePlan struct {
 	implicitSelfID syntaxID
 	variadic       bool
 	body           []statement
+	functionName   string
 }
 
 func planFunctionExpression(fn functionExpression) closurePlan {
 	return closurePlan{
-		params:   fn.params,
-		paramID:  fn.paramID,
-		variadic: fn.variadic,
-		body:     fn.statements,
+		params:       fn.params,
+		paramID:      fn.paramID,
+		variadic:     fn.variadic,
+		body:         fn.statements,
+		functionName: "<anonymous>",
 	}
 }
 
 func planLocalFunction(stmt localFunctionStatement) closurePlan {
 	return closurePlan{
-		params:   stmt.params,
-		paramID:  stmt.paramID,
-		variadic: stmt.variadic,
-		body:     stmt.statements,
+		params:       stmt.params,
+		paramID:      stmt.paramID,
+		variadic:     stmt.variadic,
+		body:         stmt.statements,
+		functionName: stmt.name,
 	}
 }
 
 func planFunctionDeclaration(stmt functionDeclarationStatement) closurePlan {
 	plan := closurePlan{
-		params:   stmt.params,
-		paramID:  stmt.paramID,
-		variadic: stmt.variadic,
-		body:     stmt.statements,
+		params:       stmt.params,
+		paramID:      stmt.paramID,
+		variadic:     stmt.variadic,
+		body:         stmt.statements,
+		functionName: functionDeclarationName(stmt.target, stmt.method),
 	}
 	if stmt.method {
 		plan.implicitSelfID = stmt.selfID
 	}
 	return plan
+}
+
+func functionDeclarationName(target assignTarget, method bool) string {
+	name := target.name
+	for index, selector := range target.selectors {
+		if selector.field == "" {
+			continue
+		}
+		separator := "."
+		if method && index == len(target.selectors)-1 {
+			separator = ":"
+		}
+		name += separator + selector.field
+	}
+	return name
 }
 
 func (p closurePlan) paramCount() int {

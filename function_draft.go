@@ -3,13 +3,15 @@ package ember
 import "fmt"
 
 type functionDraft struct {
-	constants []Value
-	assembly  assembledBytecodeIR
-	children  []*functionDraft
-	upvalues  []upvalueDesc
-	registers int
-	params    int
-	variadic  bool
+	constants    []Value
+	assembly     assembledBytecodeIR
+	children     []*functionDraft
+	upvalues     []upvalueDesc
+	registers    int
+	params       int
+	variadic     bool
+	sourceName   string
+	functionName string
 }
 
 func newFunctionDraft(constants []Value, assembly assembledBytecodeIR, children []*functionDraft, upvalues []upvalueDesc, registers int, params int, variadic bool) *functionDraft {
@@ -91,6 +93,10 @@ func sealFunctionDraftNode(draft *functionDraft) (*Proto, error) {
 		registers:  draft.registers,
 		params:     draft.params,
 		variadic:   draft.variadic,
+		debugInfo: &protoDebugInfo{
+			sourceName:   draft.sourceName,
+			functionName: draft.functionName,
+		},
 	}
 	if err := sealFunctionProto(proto, &draft.assembly); err != nil {
 		return nil, fmt.Errorf("invalid finalized prototype: %w", err)

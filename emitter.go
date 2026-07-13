@@ -3,6 +3,7 @@ package ember
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 type compiler struct {
@@ -22,6 +23,8 @@ type compiler struct {
 	freeTemps          []int
 	suppressTagChains  bool
 	options            compilerOptions
+	sourceName         string
+	functionName       string
 }
 
 type variableKind int
@@ -62,12 +65,20 @@ func compileProgram(source sourceArtifact) (*Proto, error) {
 }
 
 func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (*Proto, error) {
+	sourceName := source.source.Name
+	if sourceName == "" {
+		sourceName = "<string>"
+	} else {
+		sourceName = strings.Clone(sourceName)
+	}
 	c := compiler{
 		bind:               source.bind,
 		sourceLines:        newSourceLineMap(source.source.Text),
 		symbolRegisters:    newDenseSymbolSlots(len(source.bind.symbols)),
 		selfFunctionSymbol: -1,
 		options:            options,
+		sourceName:         sourceName,
+		functionName:       "<module>",
 	}
 	c.sourceText = source.source.Text
 
@@ -87,7 +98,16 @@ func (c *compiler) buildFunctionDraft(upvalues []upvalueDesc, params int, variad
 	c.shrinkCompiledFrameRegisters(params, variadic)
 	assembly := assembleFunctionBytecode(c.sourceLines, c.ir)
 	registers := compactedCompiledRegisterCount(assembly.code, c.prototypeDrafts, c.nextReg, params)
-	return newFunctionDraft(c.constants, assembly, c.prototypeDrafts, upvalues, registers, params, variadic)
+	draft := newFunctionDraft(c.constants, assembly, c.prototypeDrafts, upvalues, registers, params, variadic)
+	draft.sourceName = c.sourceName
+	if draft.sourceName == "" {
+		draft.sourceName = "<string>"
+	}
+	draft.functionName = strings.Clone(c.functionName)
+	if draft.functionName == "" {
+		draft.functionName = "<module>"
+	}
+	return draft
 }
 
 func (c *compiler) shrinkCompiledFrameRegisters(params int, variadic bool) {
@@ -478,6 +498,8 @@ func (c *compiler) compileFunctionDraft(closure closurePlan, selfFunctionSymbol 
 		upvaluesByID:       newDenseSymbolSlots(len(c.bind.symbols)),
 		nextReg:            closure.paramCount(),
 		options:            c.options,
+		sourceName:         c.sourceName,
+		functionName:       closure.functionName,
 	}
 	fn.sourceText = c.sourceText
 	for i := 0; i < closure.paramCount(); i++ {

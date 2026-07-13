@@ -33,6 +33,8 @@ type compilerStageEmission struct {
 	variadic           bool
 	selfFunctionSymbol int
 	sourceLines        sourceLineMap
+	sourceName         string
+	functionName       string
 }
 
 type compilerStageMetrics struct {
@@ -376,6 +378,8 @@ func emitCompilerStage(artifact sourceArtifact) (compilerStageEmission, error) {
 		symbolRegisters:    newDenseSymbolSlots(len(artifact.bind.symbols)),
 		selfFunctionSymbol: -1,
 		options:            defaultCompilerOptions(),
+		sourceName:         "<string>",
+		functionName:       "<module>",
 	}
 	c.sourceText = artifact.source.Text
 	if err := c.compileStatements(artifact.program.statements); err != nil {
@@ -394,6 +398,8 @@ func emitCompilerStage(artifact sourceArtifact) (compilerStageEmission, error) {
 		variadic:           c.variadic,
 		selfFunctionSymbol: c.selfFunctionSymbol,
 		sourceLines:        c.sourceLines,
+		sourceName:         c.sourceName,
+		functionName:       c.functionName,
 	}, nil
 }
 
@@ -451,6 +457,8 @@ func assembleAndSealCompilerStage(emission compilerStageEmission, optimized comp
 		emission.params,
 		emission.variadic,
 	)
+	draft.sourceName = emission.sourceName
+	draft.functionName = emission.functionName
 	return sealFunctionDraft(draft)
 }
 
