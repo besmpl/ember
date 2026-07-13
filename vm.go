@@ -765,6 +765,7 @@ type dynamicStringIndexCache struct {
 // without sharing inline caches or reusable closure values.
 type vmFunctionInstance struct {
 	caches           []*dynamicStringIndexCache
+	fieldCaches      []propertyIC
 	canonicalClosure *closure
 }
 
@@ -801,6 +802,13 @@ const (
 	dynamicStringIndexKeyPointer
 	dynamicStringIndexKeyHashBytes
 )
+
+func (instance *vmFunctionInstance) fieldCacheAt(cacheID uint32) *propertyIC {
+	if instance == nil || cacheID >= uint32(len(instance.fieldCaches)) {
+		return nil
+	}
+	return &instance.fieldCaches[cacheID]
+}
 
 func (instance *vmFunctionInstance) cacheAt(cacheID uint32) *dynamicStringIndexCache {
 	if instance == nil || cacheID >= uint32(len(instance.caches)) {
@@ -1254,17 +1262,20 @@ func (thread *vmThread) functionInstance(proto *Proto) *vmFunctionInstance {
 		instance = &vmFunctionInstance{}
 		if proto.cacheSiteCount > 0 {
 			instance.caches = make([]*dynamicStringIndexCache, proto.cacheSiteCount)
+			instance.fieldCaches = make([]propertyIC, proto.cacheSiteCount)
 		}
 		thread.functionInstanceSites += proto.cacheSiteCount
 		thread.functionInstances[proto] = instance
 		return instance
 	}
-	if len(instance.caches) != proto.cacheSiteCount {
+	if len(instance.caches) != proto.cacheSiteCount || len(instance.fieldCaches) != proto.cacheSiteCount {
 		thread.functionInstanceSites += proto.cacheSiteCount - len(instance.caches)
 		if proto.cacheSiteCount > 0 {
 			instance.caches = make([]*dynamicStringIndexCache, proto.cacheSiteCount)
+			instance.fieldCaches = make([]propertyIC, proto.cacheSiteCount)
 		} else {
 			instance.caches = nil
+			instance.fieldCaches = nil
 		}
 	}
 	return instance
@@ -5870,9 +5881,47 @@ reload:
 			if table == nil {
 				return directFrameFail(fmt.Errorf("run: set field target is %s, want table", base.Kind()))
 			}
+			keyValue := constants[b]
+			key := constantKeys[b].str
+			value := registers[c]
+			var fieldCache *propertyIC
+			if valueKind(keyValue) == StringKind && !value.IsNil() {
+				if functionInstance == nil {
+					functionInstance = thread.functionInstance(proto)
+				}
+				fieldCache = functionInstance.fieldCacheAt(cacheID)
+				if fieldCache.writeCounted(table, value, picCounts) ||
+					fieldCache.resolveWriteCounted(table, key, keyValue.stringBox(), value, picCounts) {
+					break
+				}
+				// Overflow and unshapeable layouts retain the existing dynamic
+				// cache. Stable inline properties never allocate its 520-byte body.
+				if table.needsDynamicStringFieldCache() {
+					cache := functionInstance.cacheAt(cacheID)
+					if cache.hasValueKey(table, keyValue) {
+						if cache.writeValueCounted(table, keyValue, value, picCounts) {
+							break
+						}
+					} else {
+						slot, slotOK := table.rawStringFieldSlotBox(keyValue.stringBox())
+						if !slotOK {
+							slot, slotOK = table.rawStringFieldSlot(key)
+						}
+						if slotOK {
+							cache.storeValue(table, keyValue, slot)
+							if cache.writeValueCounted(table, keyValue, value, picCounts) {
+								break
+							}
+							if table.setRawStringFieldAtSlot(slot, key, value) {
+								break
+							}
+						}
+					}
+				}
+			}
 			if table.metatable != nil {
 				picCounts.addSideExit(directFrameSideExitReasonTable)
-				ok, err := directFrameTableSetIsland(thread.globals, table, constants[b], registers[c])
+				ok, err := directFrameTableSetIsland(thread.globals, table, constants[b], value)
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: set field failed: %w", err))
 				}
@@ -5881,37 +5930,10 @@ reload:
 				}
 				break
 			}
-			keyValue := constants[b]
-			key := constantKeys[b].str
-			value := registers[c]
-			if valueKind(keyValue) == StringKind && !value.IsNil() {
-				if functionInstance == nil {
-					functionInstance = thread.functionInstance(proto)
-				}
-				cache := functionInstance.cacheAt(cacheID)
-				if cache.hasValueKey(table, keyValue) {
-					if cache.writeValueCounted(table, keyValue, value, picCounts) {
-						break
-					}
-				} else {
-					slot, slotOK := table.rawStringFieldSlotBox(keyValue.stringBox())
-					if !slotOK {
-						slot, slotOK = table.rawStringFieldSlot(key)
-					}
-					if slotOK {
-						cache.storeValue(table, keyValue, slot)
-						if cache.writeValueCounted(table, keyValue, value, picCounts) {
-							break
-						}
-						if table.setRawStringFieldAtSlot(slot, key, value) {
-							break
-						}
-					}
-				}
-			}
 			// The boxed constant is retained for new keys and for the nil/delete
 			// path; host-facing raw-string adapters remain text-only.
 			table.setRawStringFieldBox(key, keyValue.stringBox(), value)
+			fieldCache.observe(table, key, keyValue.stringBox())
 
 		case opSetStringFieldIndex:
 			cacheID, descriptor, cacheOK := proto.cacheIndex.cacheSiteAt(pc)
@@ -5924,11 +5946,21 @@ reload:
 			if table == nil {
 				return directFrameFail(fmt.Errorf("run: set field target is %s, want table", base.Kind()))
 			}
+			if functionInstance == nil {
+				functionInstance = thread.functionInstance(proto)
+			}
 			firstKey := constantKeys[b].str
 			firstBox := constants[b].stringBox()
-			first, ok := table.rawStringFieldBox(firstBox)
-			if firstBox == nil {
-				first, ok = directFrameRawStringField(table, firstKey)
+			fieldCache := functionInstance.fieldCacheAt(cacheID)
+			first, ok := fieldCache.getCounted(table, picCounts)
+			if !ok {
+				first, ok = fieldCache.resolveCounted(table, firstKey, firstBox, picCounts)
+			}
+			if !ok {
+				first, ok = table.rawStringFieldBox(firstBox)
+				if firstBox == nil {
+					first, ok = directFrameRawStringField(table, firstKey)
+				}
 			}
 			if !ok {
 				if table.metatable != nil {
@@ -5947,9 +5979,6 @@ reload:
 			}
 			key := registers[c]
 			if valueKind(key) == StringKind {
-				if functionInstance == nil {
-					functionInstance = thread.functionInstance(proto)
-				}
 				cache := functionInstance.cacheAt(cacheID)
 				value := registers[d]
 				if cache.writeValueCounted(nextTable, key, value, picCounts) {
@@ -5983,20 +6012,31 @@ reload:
 				if functionInstance == nil {
 					functionInstance = thread.functionInstance(proto)
 				}
-				cache := functionInstance.cacheAt(cacheID)
-				if value, ok := cache.getValueCounted(table, key, picCounts); ok {
+				fieldCache := functionInstance.fieldCacheAt(cacheID)
+				if value, ok := fieldCache.getCounted(table, picCounts); ok {
 					registers[a] = value
 					break
 				}
-				slot, slotOK := table.rawStringFieldSlotBox(key.stringBox())
-				if !slotOK {
-					slot, slotOK = table.rawStringFieldSlot(keyText)
+				if value, ok := fieldCache.resolveCounted(table, keyText, key.stringBox(), picCounts); ok {
+					registers[a] = value
+					break
 				}
-				if slotOK {
-					if value, ok := table.rawStringFieldAtSlot(slot, keyText); ok {
-						cache.storeValue(table, key, slot)
+				if table.needsDynamicStringFieldCache() {
+					cache := functionInstance.cacheAt(cacheID)
+					if value, ok := cache.getValueCounted(table, key, picCounts); ok {
 						registers[a] = value
 						break
+					}
+					slot, slotOK := table.rawStringFieldSlotBox(key.stringBox())
+					if !slotOK {
+						slot, slotOK = table.rawStringFieldSlot(keyText)
+					}
+					if slotOK {
+						if value, ok := table.rawStringFieldAtSlot(slot, keyText); ok {
+							cache.storeValue(table, key, slot)
+							registers[a] = value
+							break
+						}
 					}
 				}
 			} else if value, ok := directFrameRawStringField(table, keyText); ok {
@@ -6030,11 +6070,21 @@ reload:
 			if table == nil {
 				return directFrameFail(fmt.Errorf("run: get field target is %s, want table", base.Kind()))
 			}
+			if functionInstance == nil {
+				functionInstance = thread.functionInstance(proto)
+			}
 			firstKey := constantKeys[c].str
 			firstBox := constants[c].stringBox()
-			first, ok := table.rawStringFieldBox(firstBox)
-			if firstBox == nil {
-				first, ok = directFrameRawStringField(table, firstKey)
+			fieldCache := functionInstance.fieldCacheAt(cacheID)
+			first, ok := fieldCache.getCounted(table, picCounts)
+			if !ok {
+				first, ok = fieldCache.resolveCounted(table, firstKey, firstBox, picCounts)
+			}
+			if !ok {
+				first, ok = table.rawStringFieldBox(firstBox)
+				if firstBox == nil {
+					first, ok = directFrameRawStringField(table, firstKey)
+				}
 			}
 			if !ok {
 				if table.metatable != nil {
@@ -6053,9 +6103,6 @@ reload:
 			}
 			key := registers[d]
 			if valueKind(key) == StringKind {
-				if functionInstance == nil {
-					functionInstance = thread.functionInstance(proto)
-				}
 				cache := functionInstance.cacheAt(cacheID)
 				if value, ok := cache.getValueCounted(nextTable, key, picCounts); ok {
 					registers[a] = value
@@ -7641,8 +7688,43 @@ reload:
 			if table == nil {
 				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field target is %s, want table", base.Kind())))
 			}
+			keyValue := constants[b]
+			key := constantKeys[b].str
+			value := registers[c]
+			var fieldCache *propertyIC
+			if valueKind(keyValue) == StringKind && !value.IsNil() {
+				if functionInstance == nil {
+					functionInstance = thread.functionInstance(proto)
+				}
+				fieldCache = functionInstance.fieldCacheAt(cacheID)
+				if fieldCache.write(table, value) || fieldCache.resolveWrite(table, key, keyValue.stringBox(), value) {
+					break
+				}
+				if table.needsDynamicStringFieldCache() {
+					cache := functionInstance.cacheAt(cacheID)
+					if cache.hasValueKey(table, keyValue) {
+						if cache.writeValue(table, keyValue, value) {
+							break
+						}
+					} else {
+						slot, slotOK := table.rawStringFieldSlotBox(keyValue.stringBox())
+						if !slotOK {
+							slot, slotOK = table.rawStringFieldSlot(key)
+						}
+						if slotOK {
+							cache.storeValue(table, keyValue, slot)
+							if cache.writeValue(table, keyValue, value) {
+								break
+							}
+							if table.setRawStringFieldAtSlot(slot, key, value) {
+								break
+							}
+						}
+					}
+				}
+			}
 			if table.metatable != nil {
-				ok, err := directFrameTableSetIsland(thread.globals, table, constants[b], registers[c])
+				ok, err := directFrameTableSetIsland(thread.globals, table, constants[b], value)
 				if err != nil {
 					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field failed: %w", err)))
 				}
@@ -7651,37 +7733,10 @@ reload:
 				}
 				break
 			}
-			keyValue := constants[b]
-			key := constantKeys[b].str
-			value := registers[c]
-			if valueKind(keyValue) == StringKind && !value.IsNil() {
-				if functionInstance == nil {
-					functionInstance = thread.functionInstance(proto)
-				}
-				cache := functionInstance.cacheAt(cacheID)
-				if cache.hasValueKey(table, keyValue) {
-					if cache.writeValue(table, keyValue, value) {
-						break
-					}
-				} else {
-					slot, slotOK := table.rawStringFieldSlotBox(keyValue.stringBox())
-					if !slotOK {
-						slot, slotOK = table.rawStringFieldSlot(key)
-					}
-					if slotOK {
-						cache.storeValue(table, keyValue, slot)
-						if cache.writeValue(table, keyValue, value) {
-							break
-						}
-						if table.setRawStringFieldAtSlot(slot, key, value) {
-							break
-						}
-					}
-				}
-			}
 			// The boxed constant is retained for new keys and for the nil/delete
 			// path; host-facing raw-string adapters remain text-only.
 			table.setRawStringFieldBox(key, keyValue.stringBox(), value)
+			fieldCache.observe(table, key, keyValue.stringBox())
 
 		case opSetStringFieldIndex:
 			cacheID, descriptor, cacheOK := proto.cacheIndex.cacheSiteAt(pc)
@@ -7696,11 +7751,21 @@ reload:
 			if table == nil {
 				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field target is %s, want table", base.Kind())))
 			}
+			if functionInstance == nil {
+				functionInstance = thread.functionInstance(proto)
+			}
 			firstKey := constantKeys[b].str
 			firstBox := constants[b].stringBox()
-			first, ok := table.rawStringFieldBox(firstBox)
-			if firstBox == nil {
-				first, ok = directFrameRawStringField(table, firstKey)
+			fieldCache := functionInstance.fieldCacheAt(cacheID)
+			first, ok := fieldCache.get(table)
+			if !ok {
+				first, ok = fieldCache.resolve(table, firstKey, firstBox)
+			}
+			if !ok {
+				first, ok = table.rawStringFieldBox(firstBox)
+				if firstBox == nil {
+					first, ok = directFrameRawStringField(table, firstKey)
+				}
 			}
 			if !ok {
 				if table.metatable != nil {
@@ -7717,9 +7782,6 @@ reload:
 			}
 			key := registers[c]
 			if valueKind(key) == StringKind {
-				if functionInstance == nil {
-					functionInstance = thread.functionInstance(proto)
-				}
 				cache := functionInstance.cacheAt(cacheID)
 				value := registers[d]
 				if cache.writeValue(nextTable, key, value) {
@@ -7751,20 +7813,31 @@ reload:
 				if functionInstance == nil {
 					functionInstance = thread.functionInstance(proto)
 				}
-				cache := functionInstance.cacheAt(cacheID)
-				if value, ok := cache.getValue(table, key); ok {
+				fieldCache := functionInstance.fieldCacheAt(cacheID)
+				if value, ok := fieldCache.get(table); ok {
 					registers[a] = value
 					break
 				}
-				slot, slotOK := table.rawStringFieldSlotBox(key.stringBox())
-				if !slotOK {
-					slot, slotOK = table.rawStringFieldSlot(keyText)
+				if value, ok := fieldCache.resolve(table, keyText, key.stringBox()); ok {
+					registers[a] = value
+					break
 				}
-				if slotOK {
-					if value, ok := table.rawStringFieldAtSlot(slot, keyText); ok {
-						cache.storeValue(table, key, slot)
+				if table.needsDynamicStringFieldCache() {
+					cache := functionInstance.cacheAt(cacheID)
+					if value, ok := cache.getValue(table, key); ok {
 						registers[a] = value
 						break
+					}
+					slot, slotOK := table.rawStringFieldSlotBox(key.stringBox())
+					if !slotOK {
+						slot, slotOK = table.rawStringFieldSlot(keyText)
+					}
+					if slotOK {
+						if value, ok := table.rawStringFieldAtSlot(slot, keyText); ok {
+							cache.storeValue(table, key, slot)
+							registers[a] = value
+							break
+						}
 					}
 				}
 			} else if value, ok := directFrameRawStringField(table, keyText); ok {
@@ -7798,11 +7871,21 @@ reload:
 			if table == nil {
 				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: get field target is %s, want table", base.Kind())))
 			}
+			if functionInstance == nil {
+				functionInstance = thread.functionInstance(proto)
+			}
 			firstKey := constantKeys[c].str
 			firstBox := constants[c].stringBox()
-			first, ok := table.rawStringFieldBox(firstBox)
-			if firstBox == nil {
-				first, ok = directFrameRawStringField(table, firstKey)
+			fieldCache := functionInstance.fieldCacheAt(cacheID)
+			first, ok := fieldCache.get(table)
+			if !ok {
+				first, ok = fieldCache.resolve(table, firstKey, firstBox)
+			}
+			if !ok {
+				first, ok = table.rawStringFieldBox(firstBox)
+				if firstBox == nil {
+					first, ok = directFrameRawStringField(table, firstKey)
+				}
 			}
 			if !ok {
 				if table.metatable != nil {
@@ -7819,9 +7902,6 @@ reload:
 			}
 			key := registers[d]
 			if valueKind(key) == StringKind {
-				if functionInstance == nil {
-					functionInstance = thread.functionInstance(proto)
-				}
 				cache := functionInstance.cacheAt(cacheID)
 				if value, ok := cache.getValue(nextTable, key); ok {
 					registers[a] = value

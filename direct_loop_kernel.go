@@ -263,8 +263,43 @@ func runDirectLoopKernel(thread *vmThread, frame *vmFrame, kernel *directLoopKer
 			if table == nil {
 				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field target is %s, want table", base.Kind())))
 			}
+			keyValue := constants[b]
+			key := constantKeys[b].str
+			value := registers[c]
+			var fieldCache *propertyIC
+			if valueKind(keyValue) == StringKind && !value.IsNil() {
+				if functionInstance == nil {
+					functionInstance = thread.functionInstance(proto)
+				}
+				fieldCache = functionInstance.fieldCacheAt(cacheID)
+				if fieldCache.write(table, value) || fieldCache.resolveWrite(table, key, keyValue.stringBox(), value) {
+					break
+				}
+				if table.needsDynamicStringFieldCache() {
+					cache := functionInstance.cacheAt(cacheID)
+					if cache.hasValueKey(table, keyValue) {
+						if cache.writeValue(table, keyValue, value) {
+							break
+						}
+					} else {
+						slot, slotOK := table.rawStringFieldSlotBox(keyValue.stringBox())
+						if !slotOK {
+							slot, slotOK = table.rawStringFieldSlot(key)
+						}
+						if slotOK {
+							cache.storeValue(table, keyValue, slot)
+							if cache.writeValue(table, keyValue, value) {
+								break
+							}
+							if table.setRawStringFieldAtSlot(slot, key, value) {
+								break
+							}
+						}
+					}
+				}
+			}
 			if table.metatable != nil {
-				ok, err := directFrameTableSetIsland(thread.globals, table, constants[b], registers[c])
+				ok, err := directFrameTableSetIsland(thread.globals, table, constants[b], value)
 				if err != nil {
 					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field failed: %w", err)))
 				}
@@ -273,37 +308,10 @@ func runDirectLoopKernel(thread *vmThread, frame *vmFrame, kernel *directLoopKer
 				}
 				break
 			}
-			keyValue := constants[b]
-			key := constantKeys[b].str
-			value := registers[c]
-			if valueKind(keyValue) == StringKind && !value.IsNil() {
-				if functionInstance == nil {
-					functionInstance = thread.functionInstance(proto)
-				}
-				cache := functionInstance.cacheAt(cacheID)
-				if cache.hasValueKey(table, keyValue) {
-					if cache.writeValue(table, keyValue, value) {
-						break
-					}
-				} else {
-					slot, slotOK := table.rawStringFieldSlotBox(keyValue.stringBox())
-					if !slotOK {
-						slot, slotOK = table.rawStringFieldSlot(key)
-					}
-					if slotOK {
-						cache.storeValue(table, keyValue, slot)
-						if cache.writeValue(table, keyValue, value) {
-							break
-						}
-						if table.setRawStringFieldAtSlot(slot, key, value) {
-							break
-						}
-					}
-				}
-			}
 			// The boxed constant is retained for new keys and for the nil/delete
 			// path; host-facing raw-string adapters remain text-only.
 			table.setRawStringFieldBox(key, keyValue.stringBox(), value)
+			fieldCache.observe(table, key, keyValue.stringBox())
 		case opSetStringFieldIndex:
 			cacheID := ins.cacheID
 			base := registers[a]
@@ -311,11 +319,21 @@ func runDirectLoopKernel(thread *vmThread, frame *vmFrame, kernel *directLoopKer
 			if table == nil {
 				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field target is %s, want table", base.Kind())))
 			}
+			if functionInstance == nil {
+				functionInstance = thread.functionInstance(proto)
+			}
 			firstKey := constantKeys[b].str
 			firstBox := constants[b].stringBox()
-			first, ok := table.rawStringFieldBox(firstBox)
-			if firstBox == nil {
-				first, ok = directFrameRawStringField(table, firstKey)
+			fieldCache := functionInstance.fieldCacheAt(cacheID)
+			first, ok := fieldCache.get(table)
+			if !ok {
+				first, ok = fieldCache.resolve(table, firstKey, firstBox)
+			}
+			if !ok {
+				first, ok = table.rawStringFieldBox(firstBox)
+				if firstBox == nil {
+					first, ok = directFrameRawStringField(table, firstKey)
+				}
 			}
 			if !ok {
 				if table.metatable != nil {
@@ -332,9 +350,6 @@ func runDirectLoopKernel(thread *vmThread, frame *vmFrame, kernel *directLoopKer
 			}
 			key := registers[c]
 			if valueKind(key) == StringKind {
-				if functionInstance == nil {
-					functionInstance = thread.functionInstance(proto)
-				}
 				cache := functionInstance.cacheAt(cacheID)
 				value := registers[d]
 				if cache.writeValue(nextTable, key, value) {
@@ -361,20 +376,31 @@ func runDirectLoopKernel(thread *vmThread, frame *vmFrame, kernel *directLoopKer
 				if functionInstance == nil {
 					functionInstance = thread.functionInstance(proto)
 				}
-				cache := functionInstance.cacheAt(cacheID)
-				if value, ok := cache.getValue(table, key); ok {
+				fieldCache := functionInstance.fieldCacheAt(cacheID)
+				if value, ok := fieldCache.get(table); ok {
 					registers[a] = value
 					break
 				}
-				slot, slotOK := table.rawStringFieldSlotBox(key.stringBox())
-				if !slotOK {
-					slot, slotOK = table.rawStringFieldSlot(keyText)
+				if value, ok := fieldCache.resolve(table, keyText, key.stringBox()); ok {
+					registers[a] = value
+					break
 				}
-				if slotOK {
-					if value, ok := table.rawStringFieldAtSlot(slot, keyText); ok {
-						cache.storeValue(table, key, slot)
+				if table.needsDynamicStringFieldCache() {
+					cache := functionInstance.cacheAt(cacheID)
+					if value, ok := cache.getValue(table, key); ok {
 						registers[a] = value
 						break
+					}
+					slot, slotOK := table.rawStringFieldSlotBox(key.stringBox())
+					if !slotOK {
+						slot, slotOK = table.rawStringFieldSlot(keyText)
+					}
+					if slotOK {
+						if value, ok := table.rawStringFieldAtSlot(slot, keyText); ok {
+							cache.storeValue(table, key, slot)
+							registers[a] = value
+							break
+						}
 					}
 				}
 			} else if value, ok := directFrameRawStringField(table, keyText); ok {
@@ -402,11 +428,21 @@ func runDirectLoopKernel(thread *vmThread, frame *vmFrame, kernel *directLoopKer
 			if table == nil {
 				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: get field target is %s, want table", base.Kind())))
 			}
+			if functionInstance == nil {
+				functionInstance = thread.functionInstance(proto)
+			}
 			firstKey := constantKeys[c].str
 			firstBox := constants[c].stringBox()
-			first, ok := table.rawStringFieldBox(firstBox)
-			if firstBox == nil {
-				first, ok = directFrameRawStringField(table, firstKey)
+			fieldCache := functionInstance.fieldCacheAt(cacheID)
+			first, ok := fieldCache.get(table)
+			if !ok {
+				first, ok = fieldCache.resolve(table, firstKey, firstBox)
+			}
+			if !ok {
+				first, ok = table.rawStringFieldBox(firstBox)
+				if firstBox == nil {
+					first, ok = directFrameRawStringField(table, firstKey)
+				}
 			}
 			if !ok {
 				if table.metatable != nil {
@@ -423,9 +459,6 @@ func runDirectLoopKernel(thread *vmThread, frame *vmFrame, kernel *directLoopKer
 			}
 			key := registers[d]
 			if valueKind(key) == StringKind {
-				if functionInstance == nil {
-					functionInstance = thread.functionInstance(proto)
-				}
 				cache := functionInstance.cacheAt(cacheID)
 				if value, ok := cache.getValue(nextTable, key); ok {
 					registers[a] = value

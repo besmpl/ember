@@ -252,6 +252,7 @@ type Table struct {
 	arrayHasNil  bool
 	stringFields []tableStringField
 	inlineFields *[tableInlineStringFieldCapacity]tableStringField
+	shape        *tableShape
 	metatable    *Table
 	cold         *tableCold
 	iteration    *tableIterationJournal
@@ -940,12 +941,14 @@ func tableHashCapacity(count int) int {
 func newTableStorage() *Table {
 	storage := &tableStorage{}
 	storage.table.inlineFields = &storage.inlineFields
+	storage.table.resetShape()
 	return &storage.table
 }
 
 func newTableArrayStorage() *tableArrayStorage {
 	storage := &tableArrayStorage{}
 	storage.table.inlineFields = &storage.inlineFields
+	storage.table.resetShape()
 	return storage
 }
 
@@ -1368,6 +1371,7 @@ func (t *Table) clearRawStorage() {
 		t.stringFields[i] = tableStringField{}
 	}
 	t.stringFields = t.stringFields[:0]
+	t.resetShape()
 
 	if t.cold != nil {
 		generation := t.cold.fields.generation + 1
@@ -2036,10 +2040,25 @@ func (t *Table) setRawStringFieldBox(key string, box *stringBox, value Value) {
 	probe := tableStringProbe{box: box, text: key, hash: stringBoxHash(box, key)}
 	for i := range t.stringFields {
 		field := &t.stringFields[i]
-		if field.value.IsNil() || !probe.matchesBox(field.box, field.key) {
+		if !probe.matchesBox(field.box, field.key) {
 			continue
 		}
+		if !field.value.IsNil() {
+			// Updating an existing equal key preserves its original boxed key
+			// identity, matching the previous table behavior.
+			field.value = value
+			t.stringValueVersion++
+			return
+		}
+		// A shaped deletion is a tombstone. Re-adding the same property keeps
+		// its stable offset while publishing the new key identity to iteration.
+		field.key = key
+		field.box = box
 		field.value = value
+		if t.iteration != nil {
+			t.markIterationKeyPresent(tableKey{kind: StringKind, str: key, strBox: box, strHash: probe.hash})
+		}
+		t.stringVersion++
 		t.stringValueVersion++
 		return
 	}
@@ -2053,35 +2072,24 @@ func (t *Table) setRawStringFieldBox(key string, box *stringBox, value Value) {
 		t.stringValueVersion++
 		return
 	}
-	for i := range t.stringFields {
-		field := &t.stringFields[i]
-		if !field.value.IsNil() {
-			continue
-		}
-		field.key = key
-		field.box = box
-		field.value = value
-		if t.iteration != nil {
-			t.markIterationKeyPresent(tableKey{kind: StringKind, str: key, strBox: box, strHash: probe.hash})
-		}
-		t.stringVersion++
-		t.stringValueVersion++
-		return
-	}
 	if len(t.stringFields) < maxInlineStringFields {
 		if t.stringFields == nil {
 			t.stringFields = tableInlineFields(t)[:0]
 		}
+		offset := len(t.stringFields)
 		t.stringFields = append(t.stringFields, tableStringField{key: key, box: box, value: value})
 		if t.iteration != nil {
 			t.markIterationKeyPresent(tableKey{kind: StringKind, str: key, strBox: box, strHash: probe.hash})
 		}
+		// Publish after append so a visible shape always proves the slot exists.
+		t.publishAppendedStringShape(key, box, offset)
 		t.stringVersion++
 		t.stringValueVersion++
 		return
 	}
-	// Keep the existing inline slots in place.  New fields share the open
-	// addressed sidecar, whose generation guards cached hash indexes.
+	// Keep the existing inline slots in place. New fields share the open
+	// addressed sidecar. Unrelated dictionary growth does not alter the inline
+	// shape, so constant-property caches for the stable prefix stay valid.
 	t.ensureIterationJournal()
 	fields := t.ensureHashFields()
 	storedKey := tableKey{kind: StringKind, str: key, strBox: box, strHash: probe.hash}
@@ -2091,7 +2099,6 @@ func (t *Table) setRawStringFieldBox(key string, box *stringBox, value Value) {
 	t.markIterationKeyPresent(storedKey)
 	t.stringVersion++
 	t.stringValueVersion++
-	return
 }
 
 func (t *Table) deleteRawStringField(key string) {
@@ -2105,7 +2112,10 @@ func (t *Table) deleteRawStringField(key string) {
 			t.ensureIterationJournal()
 		}
 		storedKey := tableKey{kind: StringKind, str: field.key, strBox: field.box, strHash: stringBoxHash(field.box, field.key)}
-		*field = tableStringField{}
+		// Keep the key text as the shaped slot descriptor, but release the old
+		// box and clear only the value. The shape and property offset survive.
+		field.box = nil
+		field.value = NilValue()
 		t.markIterationKeyDeleted(storedKey)
 		t.stringVersion++
 		t.stringValueVersion++

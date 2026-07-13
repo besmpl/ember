@@ -665,8 +665,10 @@ func TestSlotExecutionPoolResetOwnsNoRuntimeReferences(t *testing.T) {
 		if field.Type.Kind() == reflect.Array && field.Type.Elem() == reflect.TypeOf(slot(0)) {
 			continue
 		}
-		if field.Type != reflect.TypeOf([]slot(nil)) && field.Type != reflect.TypeOf([]float64(nil)) {
-			t.Fatalf("slot state field %q has type %s, want compact scalar storage", field.Name, field.Type)
+		if field.Type != reflect.TypeOf([]slot(nil)) &&
+			field.Type != reflect.TypeOf([]float64(nil)) &&
+			field.Type != reflect.TypeOf([]compactCallFrame(nil)) {
+			t.Fatalf("slot state field %q has type %s, want compact pointer-free storage", field.Name, field.Type)
 		}
 	}
 	state := acquireSlotExecutionState(2, 2)
@@ -676,10 +678,12 @@ func TestSlotExecutionPoolResetOwnsNoRuntimeReferences(t *testing.T) {
 	state.constants[0] = slotBool(true)
 	state.results = append(state.results, slot(1))
 	state.prepareNumericRegisters(2)[0] = 42
+	state.compactFrames = append(state.compactFrames, compactCallFrame{callerFunction: 1, returnPC: 2})
 	registerBacking := state.registers[:cap(state.registers)]
 	constantBacking := state.constants[:cap(state.constants)]
 	resultBacking := state.results[:cap(state.results)]
 	numericBacking := state.numericRegisters[:cap(state.numericRegisters)]
+	frameBacking := state.compactFrames[:cap(state.compactFrames)]
 	state.resetForPool()
 	if state.heap == nil {
 		t.Fatal("reset state discarded reusable runtime heap")
@@ -687,8 +691,10 @@ func TestSlotExecutionPoolResetOwnsNoRuntimeReferences(t *testing.T) {
 	if state.heapActive {
 		t.Fatal("reset state left heap active")
 	}
-	if len(state.registers) != 0 || len(state.constants) != 0 || len(state.results) != 0 || len(state.numericRegisters) != 0 {
-		t.Fatalf("reset state lengths = (%d, %d, %d, %d), want all zero", len(state.registers), len(state.constants), len(state.results), len(state.numericRegisters))
+	if len(state.registers) != 0 || len(state.constants) != 0 || len(state.results) != 0 ||
+		len(state.numericRegisters) != 0 || len(state.compactFrames) != 0 {
+		t.Fatalf("reset state lengths = (%d, %d, %d, %d, %d), want all zero",
+			len(state.registers), len(state.constants), len(state.results), len(state.numericRegisters), len(state.compactFrames))
 	}
 	for _, values := range [][]slot{state.registers, state.constants, state.results} {
 		if len(values) != 0 {
@@ -698,6 +704,11 @@ func TestSlotExecutionPoolResetOwnsNoRuntimeReferences(t *testing.T) {
 	for index, value := range numericBacking {
 		if value != 0 {
 			t.Fatalf("reset numeric backing slot %d = %v, want zero", index, value)
+		}
+	}
+	for index, frame := range frameBacking {
+		if frame != (compactCallFrame{}) {
+			t.Fatalf("reset compact frame backing slot %d = %#v, want zero", index, frame)
 		}
 	}
 	for name, values := range map[string][]slot{

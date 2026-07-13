@@ -1721,13 +1721,16 @@ type Proto struct {
 	directLoopKernels       *directLoopKernelSet
 	entryNilRegisters       []int
 	reuseZeroCaptureClosure bool
+	// compact is the immutable direct-call sidecar for an admitted pure numeric
+	// function graph. Child prototypes remain canonical wordcode objects; only
+	// the graph entry retains the shared program.
+	compact *compactProgram
 	// slotExecutionEligible is sealed with the immutable wordcode artifact.
 	// Side-effect-free scalar programs use the compact tagged-slot runner;
 	// slotExecutionNumeric marks the stricter compiler-proven subset that can
 	// execute over an untagged float64 register file.
 	slotExecutionEligible bool
 	slotExecutionNumeric  bool
-	compact               *compactProgram
 	verifyErr             error
 }
 
@@ -1825,6 +1828,7 @@ func finalizeProtoExecutionArtifact(proto *Proto, sourceCode ...[]instruction) e
 	if proto == nil {
 		return nil
 	}
+	proto.compact = nil
 	var code []instruction
 	if len(sourceCode) != 0 {
 		code = sourceCode[0]
@@ -1858,6 +1862,7 @@ func finalizeProtoExecutionArtifact(proto *Proto, sourceCode ...[]instruction) e
 		proto.verifyErr = err
 		return proto.verifyErr
 	}
+	proto.compact = buildCompactCallProgram(proto)
 	return proto.verifyErr
 }
 
@@ -1943,7 +1948,6 @@ func encodeProtoWords(proto *Proto, code []instruction) error {
 	}
 	proto.slotExecutionEligible = slotExecutionEligible(proto, code)
 	proto.slotExecutionNumeric = proto.slotExecutionEligible && slotExecutionNumericEligible(proto, code)
-	proto.compact = buildCompactProgram(proto, code)
 	return nil
 }
 

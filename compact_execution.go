@@ -1,250 +1,294 @@
 package ember
 
-import (
-	"math"
-	"sort"
-	"sync"
-)
+import "math"
 
-// compactProgram is an immutable, compiler-proven numeric call graph. The
-// canonical wordcode remains the executable stream; this sidecar retains only
-// direct call targets and their compact transport facts.
+// compactProgram is an immutable, compiler-built description of a pure
+// numeric call graph. Canonical wordcode remains the executable source of
+// truth; this sidecar only resolves direct call targets and their fixed ABI.
 type compactProgram struct {
 	functions []compactFunction
+	calls     []compactCallSite
 	entry     uint16
 }
 
 type compactFunction struct {
-	proto       *Proto
-	callSites   []compactCallSite
-	selfUpvalue int16
+	proto     *Proto
+	callStart uint32
+	callCount uint16
+	_         uint16
 }
 
 type compactCallSite struct {
 	wordPC        uint32
 	target        uint16
-	argumentStart uint16
-	result        uint16
-	flags         uint16
+	argumentStart uint8
+	argumentCount uint8
+	result        uint8
+	flags         uint8
 }
 
-const compactCallBorrow uint16 = 1
+const compactCallBorrowed uint8 = 1 << iota
 
-// compactCallFrame is the complete caller continuation for the numeric call
-// graph engine. It is pointer-free, so recursion does not produce Go write
-// barriers or retain closures, cells, frames, or register slices.
+// compactCallFrame is the complete continuation for one fixed one-result
+// script call. It intentionally contains no Go pointers, slices, or interface
+// values, so recursive script calls do not create write-barrier traffic.
 type compactCallFrame struct {
+	callerFunction uint16
+	_              uint16
 	returnPC       uint32
 	callerBase     uint32
 	callerTop      uint32
 	resultBase     uint32
-	callerFunction uint16
-	_              uint16
-}
-
-// compactExecutionState is isolated from the leaf scalar runner so adding call
-// transport does not tax already-fast no-call programs. Both buffers contain
-// scalar data only and can be logically reset without pointer clearing.
-type compactExecutionState struct {
-	stack  []float64
-	frames []compactCallFrame
-}
-
-var compactExecutionPool = sync.Pool{
-	New: func() any { return &compactExecutionState{} },
-}
-
-func acquireCompactExecutionState() *compactExecutionState {
-	return compactExecutionPool.Get().(*compactExecutionState)
-}
-
-func releaseCompactExecutionState(state *compactExecutionState) {
-	if state == nil {
-		return
-	}
-	if cap(state.stack) > maxPooledSlotExecutionCapacity {
-		state.stack = nil
-	} else {
-		state.stack = state.stack[:0]
-	}
-	if cap(state.frames) > maxPooledSlotExecutionCapacity {
-		state.frames = nil
-	} else {
-		state.frames = state.frames[:0]
-	}
-	compactExecutionPool.Put(state)
-}
-
-func (state *compactExecutionState) prepareStack(count int) []float64 {
-	if cap(state.stack) < count {
-		state.stack = make([]float64, count)
-	} else {
-		state.stack = state.stack[:count]
-	}
-	state.frames = state.frames[:0]
-	return state.stack
 }
 
 const (
-	compactFactUnknown int32 = -1
-	compactFactNumeric int32 = -2
+	compactFactUnknown uint32 = iota
+	compactFactNumber
+	compactFactFunctionBase
 )
 
 type compactBuildFunction struct {
-	proto       *Proto
-	code        []instruction
-	boundaries  []int
-	selfUpvalue int16
-	callSites   []compactCallSite
+	proto          *Proto
+	code           []instruction
+	boundaries     []int
+	parent         int
+	parentChild    int
+	children       []uint16
+	upvalueTargets []int
+	calls          []compactCallSite
 }
 
-// buildCompactProgram proves a closed, side-effect-free numeric call graph.
-// This first slice admits fixed-arity functions with one numeric result,
-// nonescaping direct child functions, and direct self recursion. Any uncertain
-// target or semantic feature rejects the complete graph, preserving safe
-// whole-run fallback to the established VM.
-func buildCompactProgram(root *Proto, rootCode []instruction) *compactProgram {
-	if root == nil || len(rootCode) == 0 || root.variadic || len(root.upvalues) != 0 || len(root.prototypes) == 0 {
-		return nil
-	}
-	hasCall := false
-	for _, ins := range rootCode {
-		switch ins.op {
-		case opCall, opCallOne, opCallLocalOne, opCallUpvalueOne:
-			hasCall = true
-		}
-	}
-	if !hasCall {
+// buildCompactCallProgram admits the deliberately narrow first whole-graph
+// tier: pure, fixed-arity numeric functions with fixed one-result calls,
+// direct child closures, and direct self recursion. Unsupported graphs simply
+// retain the established VM path.
+func buildCompactCallProgram(root *Proto) *compactProgram {
+	if root == nil || len(root.prototypes) == 0 || root.variadic || len(root.upvalues) != 0 ||
+		!compactGraphCaptureEligible(root) {
 		return nil
 	}
 
-	builders := make([]compactBuildFunction, 0, 1+len(root.prototypes))
-	ids := make(map[*Proto]uint16)
-	var collect func(*Proto, []instruction) bool
-	collect = func(proto *Proto, supplied []instruction) bool {
-		if proto == nil || len(builders) >= int(^uint16(0)) {
-			return false
-		}
-		if _, duplicate := ids[proto]; duplicate {
-			return false
-		}
-		code := supplied
-		if code == nil {
-			var err error
-			code, err = protoDecodedInstructions(proto)
-			if err != nil {
-				return false
-			}
-		}
-		boundaries, err := wordcodeBoundaries(code)
-		if err != nil || len(boundaries) != len(code)+1 {
-			return false
-		}
-		id := uint16(len(builders))
-		ids[proto] = id
-		builders = append(builders, compactBuildFunction{
-			proto:       proto,
-			code:        code,
-			boundaries:  boundaries,
-			selfUpvalue: -1,
-		})
-		for _, child := range proto.prototypes {
-			if !collect(child, nil) {
-				return false
-			}
-		}
-		return true
+	builder := compactProgramBuilder{}
+	if _, ok := builder.collect(root, -1, -1); !ok || len(builder.functions) == 0 {
+		return nil
 	}
-	if !collect(root, rootCode) {
+	if !builder.resolveUpvalueTargets() {
 		return nil
 	}
 
-	// A mutable self-capture is the only upvalue admitted in this slice. The
-	// compact engine resolves it to the current function id and never creates
-	// the closure cycle or cell used by the general VM.
-	for parentIndex := range builders {
-		parent := &builders[parentIndex]
-		for _, ins := range parent.code {
-			if ins.op != opClosure || ins.b < 0 || ins.b >= len(parent.proto.prototypes) {
-				continue
-			}
-			child := parent.proto.prototypes[ins.b]
-			childID, ok := ids[child]
-			if !ok {
-				return nil
-			}
-			childBuild := &builders[int(childID)]
-			if len(child.upvalues) == 0 {
-				continue
-			}
-			if len(child.upvalues) != 1 {
-				return nil
-			}
-			desc := child.upvalues[0]
-			if !desc.local || desc.copy || desc.index != ins.a {
-				return nil
-			}
-			if childBuild.selfUpvalue >= 0 && childBuild.selfUpvalue != 0 {
-				return nil
-			}
-			childBuild.selfUpvalue = 0
-		}
-	}
-
-	for index := range builders {
-		if !analyzeCompactFunction(uint16(index), builders, ids) {
+	totalCalls := 0
+	for index := range builder.functions {
+		if !builder.analyzeFunction(index) {
 			return nil
 		}
+		totalCalls += len(builder.functions[index].calls)
+	}
+	if totalCalls == 0 || len(builder.functions) > math.MaxUint16 {
+		return nil
 	}
 
-	functions := make([]compactFunction, len(builders))
-	for index := range builders {
-		builder := &builders[index]
-		functions[index] = compactFunction{
-			proto:       builder.proto,
-			callSites:   builder.callSites,
-			selfUpvalue: builder.selfUpvalue,
-		}
+	program := &compactProgram{
+		functions: make([]compactFunction, len(builder.functions)),
+		calls:     make([]compactCallSite, 0, totalCalls),
 	}
-	return &compactProgram{functions: functions, entry: ids[root]}
+	for index := range builder.functions {
+		function := &builder.functions[index]
+		if len(program.calls) > math.MaxUint32 || len(function.calls) > math.MaxUint16 {
+			return nil
+		}
+		program.functions[index] = compactFunction{
+			proto:     function.proto,
+			callStart: uint32(len(program.calls)),
+			callCount: uint16(len(function.calls)),
+		}
+		program.calls = append(program.calls, function.calls...)
+	}
+	return program
 }
 
-func analyzeCompactFunction(functionID uint16, builders []compactBuildFunction, ids map[*Proto]uint16) bool {
-	builder := &builders[int(functionID)]
-	proto, code := builder.proto, builder.code
-	if proto == nil || proto.variadic || proto.params < 0 || proto.params > proto.registers || proto.registers <= 0 {
+// compactGraphCaptureEligible rejects ordinary captures before the builder
+// materializes decoded code or data-flow scratch. The only admitted upvalue is
+// a child capturing the exact parent register that receives that child's own
+// closure, which compact execution replaces with the child's function id.
+func compactGraphCaptureEligible(proto *Proto) bool {
+	if proto == nil {
 		return false
 	}
-	if len(proto.upvalues) != 0 && (len(proto.upvalues) != 1 || builder.selfUpvalue != 0) {
-		return false
-	}
-	for _, constant := range proto.constants {
-		if valueKind(constant) != NumberKind {
+	for childIndex, child := range proto.prototypes {
+		if child == nil {
+			return false
+		}
+		closureRegister := compactClosureRegister(proto, childIndex)
+		if closureRegister < 0 {
+			return false
+		}
+		for _, desc := range child.upvalues {
+			if !desc.local || desc.copy || desc.index != closureRegister {
+				return false
+			}
+		}
+		if !compactGraphCaptureEligible(child) {
 			return false
 		}
 	}
-	if len(code) == 0 {
+	return true
+}
+
+func compactClosureRegister(proto *Proto, childIndex int) int {
+	if proto == nil || childIndex < 0 {
+		return -1
+	}
+	closureRegister := -1
+	for pc := 0; pc < len(proto.words); pc++ {
+		raw := proto.words[pc]
+		op := opcode(uint8(raw) & uint8(wordcodeOpcodeMask))
+		next := pc + 1
+		operand := int(uint16(raw >> 16))
+		if raw&wordcodeAuxBit != 0 {
+			if next >= len(proto.words) {
+				return -1
+			}
+			operand = int(int32(proto.words[next]))
+			pc = next
+		}
+		if op != opClosure || operand != childIndex {
+			continue
+		}
+		register := int(uint8(raw >> 8))
+		if closureRegister >= 0 && closureRegister != register {
+			return -1
+		}
+		closureRegister = register
+	}
+	return closureRegister
+}
+
+type compactProgramBuilder struct {
+	functions []compactBuildFunction
+}
+
+func (builder *compactProgramBuilder) collect(proto *Proto, parent, parentChild int) (uint16, bool) {
+	if proto == nil || proto.variadic || proto.registers < 0 || proto.registers > 255 ||
+		proto.params < 0 || proto.params > proto.registers || len(builder.functions) >= math.MaxUint16 {
+		return 0, false
+	}
+	code, err := protoDecodedInstructions(proto)
+	if err != nil || len(code) == 0 {
+		return 0, false
+	}
+	boundaries, err := wordcodeBoundaries(code)
+	if err != nil || len(boundaries) != len(code)+1 || boundaries[len(boundaries)-1] != len(proto.words) {
+		return 0, false
+	}
+
+	id := uint16(len(builder.functions))
+	index := len(builder.functions)
+	builder.functions = append(builder.functions, compactBuildFunction{
+		proto:       proto,
+		code:        code,
+		boundaries:  boundaries,
+		parent:      parent,
+		parentChild: parentChild,
+		children:    make([]uint16, len(proto.prototypes)),
+	})
+	for childIndex, child := range proto.prototypes {
+		childID, ok := builder.collect(child, index, childIndex)
+		if !ok {
+			return 0, false
+		}
+		builder.functions[index].children[childIndex] = childID
+	}
+	return id, true
+}
+
+// The first call-graph slice accepts no captured runtime values. The one
+// exception is a function's own closure cell, which is replaced by its stable
+// compact function id. That removes closure/cell work from direct recursion
+// without weakening ordinary upvalue semantics.
+func (builder *compactProgramBuilder) resolveUpvalueTargets() bool {
+	if len(builder.functions) == 0 || len(builder.functions[0].proto.upvalues) != 0 {
+		return false
+	}
+	for index := 1; index < len(builder.functions); index++ {
+		function := &builder.functions[index]
+		if function.parent < 0 || function.parent >= len(builder.functions) {
+			return false
+		}
+		parent := &builder.functions[function.parent]
+		closureRegister := -1
+		for _, ins := range parent.code {
+			if ins.op != opClosure || ins.b != function.parentChild {
+				continue
+			}
+			if closureRegister >= 0 && closureRegister != ins.a {
+				return false
+			}
+			closureRegister = ins.a
+		}
+		if closureRegister < 0 {
+			return false
+		}
+		if len(function.proto.upvalues) == 0 {
+			continue
+		}
+		function.upvalueTargets = make([]int, len(function.proto.upvalues))
+		for upvalue, desc := range function.proto.upvalues {
+			if !desc.local || desc.copy || desc.index != closureRegister {
+				return false
+			}
+			function.upvalueTargets[upvalue] = index
+		}
+	}
+	return true
+}
+
+func compactFunctionFact(id uint16) uint32 {
+	return compactFactFunctionBase + uint32(id)
+}
+
+func compactFactFunction(fact uint32) (uint16, bool) {
+	if fact < compactFactFunctionBase {
+		return 0, false
+	}
+	value := fact - compactFactFunctionBase
+	if value > math.MaxUint16 {
+		return 0, false
+	}
+	return uint16(value), true
+}
+
+func (builder *compactProgramBuilder) analyzeFunction(index int) bool {
+	function := &builder.functions[index]
+	proto := function.proto
+	code := function.code
+	registers := proto.registers
+	if len(code) == 0 || registers == 0 || len(code) > math.MaxInt/registers {
 		return false
 	}
 
-	registers := proto.registers
-	facts := make([]int32, len(code)*registers)
-	for index := range facts {
-		facts[index] = compactFactUnknown
-	}
+	facts := make([]uint32, len(code)*registers)
 	reachable := make([]bool, len(code))
 	queued := make([]bool, len(code))
 	work := make([]int, 0, len(code))
+	scratch := make([]uint32, registers)
+	sites := make([]compactCallSite, len(code))
+	siteOK := make([]bool, len(code))
+	fallsThrough := false
+	returns := 0
+
 	entry := facts[:registers]
 	for register := 0; register < proto.params; register++ {
-		entry[register] = compactFactNumeric
+		entry[register] = compactFactNumber
 	}
-	reachable[0], queued[0] = true, true
+	reachable[0] = true
+	queued[0] = true
 	work = append(work, 0)
-	returned := false
-	callSites := make([]compactCallSite, 0, 4)
 
-	merge := func(pc int, incoming []int32) bool {
+	merge := func(pc int, incoming []uint32) bool {
+		if pc == len(code) {
+			fallsThrough = true
+			return true
+		}
 		if pc < 0 || pc >= len(code) {
 			return false
 		}
@@ -255,13 +299,9 @@ func analyzeCompactFunction(functionID uint16, builders []compactBuildFunction, 
 			reachable[pc] = true
 			changed = true
 		} else {
-			for index, fact := range incoming {
-				merged := row[index]
-				if merged != fact {
-					merged = compactFactUnknown
-				}
-				if merged != row[index] {
-					row[index] = merged
+			for register, value := range incoming {
+				if row[register] != value && row[register] != compactFactUnknown {
+					row[register] = compactFactUnknown
 					changed = true
 				}
 			}
@@ -273,136 +313,110 @@ func analyzeCompactFunction(functionID uint16, builders []compactBuildFunction, 
 		return true
 	}
 
-	current := make([]int32, registers)
 	for head := 0; head < len(work); head++ {
 		pc := work[head]
 		queued[pc] = false
-		copy(current, facts[pc*registers:(pc+1)*registers])
+		copy(scratch, facts[pc*registers:(pc+1)*registers])
 		ins := code[pc]
-		regOK := func(index int) bool { return index >= 0 && index < registers }
-		numeric := func(index int) bool { return regOK(index) && current[index] == compactFactNumeric }
-		setNumeric := func(index int) bool {
-			if !regOK(index) {
+
+		registerOK := func(register int) bool {
+			return register >= 0 && register < registers
+		}
+		numberFact := func(register int) bool {
+			return registerOK(register) && scratch[register] == compactFactNumber
+		}
+		numberConstant := func(constant int) bool {
+			return constant >= 0 && constant < len(proto.constants) && valueKind(proto.constants[constant]) == NumberKind
+		}
+		setNumber := func(register int) bool {
+			if !registerOK(register) {
 				return false
 			}
-			current[index] = compactFactNumeric
+			scratch[register] = compactFactNumber
 			return true
-		}
-		constantNumber := func(index int) bool {
-			return index >= 0 && index < len(proto.constants) && valueKind(proto.constants[index]) == NumberKind
 		}
 
 		switch ins.op {
+		case opClosure:
+			if !registerOK(ins.a) || ins.b < 0 || ins.b >= len(function.children) {
+				return false
+			}
+			scratch[ins.a] = compactFunctionFact(function.children[ins.b])
 		case opLoadConst:
-			if !constantNumber(ins.b) || !setNumeric(ins.a) {
+			if !numberConstant(ins.b) || !setNumber(ins.a) {
 				return false
 			}
 		case opMove:
-			if !regOK(ins.a) || !regOK(ins.b) || current[ins.b] == compactFactUnknown {
+			if !registerOK(ins.a) || !registerOK(ins.b) {
 				return false
 			}
-			current[ins.a] = current[ins.b]
-		case opClosure:
-			if !regOK(ins.a) || ins.b < 0 || ins.b >= len(proto.prototypes) {
-				return false
-			}
-			target, ok := ids[proto.prototypes[ins.b]]
-			if !ok {
-				return false
-			}
-			current[ins.a] = int32(target)
+			scratch[ins.a] = scratch[ins.b]
 		case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow:
-			if !numeric(ins.b) || !numeric(ins.c) || !setNumeric(ins.a) {
+			if !numberFact(ins.b) || !numberFact(ins.c) || !setNumber(ins.a) {
 				return false
 			}
 		case opNeg:
-			if !numeric(ins.b) || !setNumeric(ins.a) {
+			if !numberFact(ins.b) || !setNumber(ins.a) {
 				return false
 			}
 		case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
-			if !numeric(ins.b) || !constantNumber(ins.c) || !setNumeric(ins.a) {
+			if !numberFact(ins.b) || !numberConstant(ins.c) || !setNumber(ins.a) {
 				return false
 			}
 		case opNumericForCheck:
-			if !numeric(ins.a) || !numeric(ins.b) || !numeric(ins.c) {
+			if !numberFact(ins.a) || !numberFact(ins.b) || !numberFact(ins.c) {
 				return false
 			}
 		case opNumericForLoop:
-			if !numeric(ins.a) || !numeric(ins.b) || !setNumeric(ins.a) {
+			if !numberFact(ins.a) || !numberFact(ins.b) || !setNumber(ins.a) {
 				return false
 			}
 		case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
-			if !numeric(ins.a) || !constantNumber(ins.b) {
+			if !numberFact(ins.a) || !numberConstant(ins.b) {
 				return false
 			}
 		case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
-			if !numeric(ins.a) || !numeric(ins.b) {
-				return false
-			}
-		case opJumpIfFalse:
-			if !numeric(ins.a) {
+			if !numberFact(ins.a) || !numberFact(ins.b) {
 				return false
 			}
 		case opJump:
 		case opCall, opCallOne, opCallLocalOne, opCallUpvalueOne:
-			target, argumentStart, argumentCount, result, borrow, ok := compactCallShape(functionID, builder, builders, ids, current, pc, ins)
-			if !ok || int(target) >= len(builders) || !regOK(result) {
+			site, ok := builder.callSite(index, pc, scratch)
+			if !ok {
 				return false
 			}
-			callee := builders[int(target)].proto
-			if argumentCount < callee.params || argumentStart < 0 || argumentStart+argumentCount > registers {
+			callee := builder.functions[site.target].proto
+			if int(site.argumentCount) != callee.params {
 				return false
 			}
-			for argument := 0; argument < callee.params; argument++ {
-				if !numeric(argumentStart + argument) {
+			argumentStart := int(site.argumentStart)
+			argumentCount := int(site.argumentCount)
+			if argumentStart < 0 || argumentStart+argumentCount > registers {
+				return false
+			}
+			for argument := 0; argument < argumentCount; argument++ {
+				if !numberFact(argumentStart + argument) {
 					return false
 				}
 			}
-			current[result] = compactFactNumeric
-			flags := uint16(0)
-			if borrow {
-				flags = compactCallBorrow
+			if !setNumber(int(site.result)) {
+				return false
 			}
-			site := compactCallSite{
-				wordPC:        uint32(builder.boundaries[pc]),
-				target:        target,
-				argumentStart: uint16(argumentStart),
-				result:        uint16(result),
-				flags:         flags,
+			if siteOK[pc] && sites[pc] != site {
+				return false
 			}
-			replaced := false
-			for index := range callSites {
-				if callSites[index].wordPC == site.wordPC {
-					callSites[index] = site
-					replaced = true
-					break
-				}
-			}
-			if !replaced {
-				callSites = append(callSites, site)
-			}
+			sites[pc] = site
+			siteOK[pc] = true
 		case opReturnOne:
-			if !numeric(ins.a) {
+			if !numberFact(ins.a) {
 				return false
 			}
-			returned = true
+			returns++
 		case opReturn:
-			count := ins.b
-			if count < 0 {
-				prefix := -count - 1
-				if prefix != 0 || pc == 0 {
-					return false
-				}
-				previous := code[pc-1]
-				if previous.op != opCall || previous.a != ins.a {
-					return false
-				}
-				count = 1
-			}
-			if count != 1 || !numeric(ins.a) {
+			if !compactOneResultReturn(code, pc, ins) || !numberFact(ins.a) {
 				return false
 			}
-			returned = true
+			returns++
 		default:
 			return false
 		}
@@ -412,152 +426,222 @@ func analyzeCompactFunction(functionID uint16, builders []compactBuildFunction, 
 			continue
 		case opcodeControlJump:
 			target, ok := instructionJumpTarget(ins)
-			if !ok || !merge(target, current) {
+			if !ok || !merge(target, scratch) {
 				return false
 			}
 		case opcodeControlBranch:
 			target, ok := instructionJumpTarget(ins)
-			if !ok || !merge(target, current) || !merge(pc+1, current) {
+			if !ok || !merge(target, scratch) || !merge(pc+1, scratch) {
 				return false
 			}
 		default:
-			if pc+1 >= len(code) || !merge(pc+1, current) {
+			if !merge(pc+1, scratch) {
 				return false
 			}
 		}
 	}
-	if !returned {
+
+	if fallsThrough || returns == 0 {
 		return false
 	}
-	sort.Slice(callSites, func(left, right int) bool { return callSites[left].wordPC < callSites[right].wordPC })
-	builder.callSites = callSites
+	function.calls = function.calls[:0]
+	for pc, ok := range siteOK {
+		if ok {
+			function.calls = append(function.calls, sites[pc])
+		}
+	}
 	return true
 }
 
-func compactCallShape(functionID uint16, builder *compactBuildFunction, builders []compactBuildFunction, ids map[*Proto]uint16, facts []int32, pc int, ins instruction) (target uint16, argumentStart, argumentCount, result int, borrow, ok bool) {
-	proto := builder.proto
-	resolveRegister := func(register int) (uint16, bool) {
-		if register < 0 || register >= len(facts) || facts[register] < 0 || facts[register] > int32(^uint16(0)) {
-			return 0, false
-		}
-		return uint16(facts[register]), true
+func compactOneResultReturn(code []instruction, pc int, ins instruction) bool {
+	if ins.op != opReturn {
+		return false
 	}
-	result = ins.a
-	switch ins.op {
-	case opCall:
-		var resolved bool
-		target, resolved = resolveRegister(ins.b)
-		if !resolved {
-			return 0, 0, 0, 0, false, false
-		}
-		argumentStart = ins.b + 1
-		if prefix, open := openArgumentCallPrefix(ins); open {
-			if pc == 0 {
-				return 0, 0, 0, 0, false, false
-			}
-			previous := builder.code[pc-1]
-			openStart := argumentStart + prefix
-			if previous.op != opCall || previous.a != openStart {
-				return 0, 0, 0, 0, false, false
-			}
-			argumentCount = prefix + 1
-			borrow = false
-		} else {
-			argumentCount = ins.c
-			borrow = decodeOpenResultCallMarker(ins.d)
-		}
-		if count, fixedMulti := decodeFixedMultiResultCount(ins.d, proto.registers); fixedMulti || count > 1 {
-			return 0, 0, 0, 0, false, false
-		}
-		if ins.d > 1 {
-			return 0, 0, 0, 0, false, false
-		}
-		return target, argumentStart, argumentCount, result, borrow, argumentCount >= 0
-	case opCallOne:
-		var resolved bool
-		target, resolved = resolveRegister(ins.b)
-		if !resolved {
-			return 0, 0, 0, 0, false, false
-		}
-		argumentCount, borrow = decodeFixedCallCount(ins.c)
-		return target, ins.b + 1, argumentCount, result, borrow, true
-	case opCallLocalOne:
-		var resolved bool
-		target, resolved = resolveRegister(ins.b)
-		if !resolved {
-			return 0, 0, 0, 0, false, false
-		}
-		argumentCount, borrow = decodeFixedCallCount(ins.d)
-		return target, ins.c, argumentCount, result, borrow, true
-	case opCallUpvalueOne:
-		if builder.selfUpvalue < 0 || ins.b != int(builder.selfUpvalue) {
-			return 0, 0, 0, 0, false, false
-		}
-		argumentCount, borrow = decodeFixedCallCount(ins.d)
-		return functionID, ins.c, argumentCount, result, borrow, true
-	default:
-		return 0, 0, 0, 0, false, false
+	if ins.b == 1 {
+		return true
 	}
+	if ins.b >= 0 {
+		return false
+	}
+	prefixCount := -ins.b - 1
+	return prefixCount == 0 && compactOpenResultProducer(code, pc-1, ins.a)
 }
 
-func (function *compactFunction) callSiteAt(wordPC int) (compactCallSite, bool) {
-	if function == nil {
+func compactOpenResultProducer(code []instruction, pc, result int) bool {
+	if pc < 0 || pc >= len(code) {
+		return false
+	}
+	ins := code[pc]
+	return ins.op == opCall && ins.a == result && ins.d < 0
+}
+
+func (builder *compactProgramBuilder) callSite(functionIndex, pc int, facts []uint32) (compactCallSite, bool) {
+	function := &builder.functions[functionIndex]
+	if pc < 0 || pc >= len(function.code) || pc >= len(function.boundaries)-1 {
 		return compactCallSite{}, false
 	}
-	for _, site := range function.callSites {
-		if int(site.wordPC) == wordPC {
+	ins := function.code[pc]
+	var target uint16
+	var ok bool
+	argumentStart := 0
+	argumentCount := 0
+	borrowed := false
+
+	switch ins.op {
+	case opCall:
+		if ins.b < 0 || ins.b >= len(facts) {
+			return compactCallSite{}, false
+		}
+		target, ok = compactFactFunction(facts[ins.b])
+		if !ok {
+			return compactCallSite{}, false
+		}
+		argumentStart = ins.b + 1
+		if ins.c >= 0 {
+			argumentCount = ins.c
+		} else {
+			prefixCount, marked := decodeOpenArgumentCallMarker(ins.c)
+			if !marked {
+				prefixCount = -ins.c - 1
+			}
+			if prefixCount < 0 {
+				return compactCallSite{}, false
+			}
+			openStart := argumentStart + prefixCount
+			if !compactOpenResultProducer(function.code, pc-1, openStart) {
+				return compactCallSite{}, false
+			}
+			argumentCount = prefixCount + 1
+			borrowed = marked
+		}
+		if ins.d != 1 {
+			if ins.d >= 0 {
+				return compactCallSite{}, false
+			}
+			if _, fixed := decodeFixedMultiResultCount(ins.d, function.proto.registers); fixed {
+				return compactCallSite{}, false
+			}
+			borrowed = borrowed || decodeOpenResultCallMarker(ins.d)
+		}
+	case opCallOne:
+		if ins.b < 0 || ins.b >= len(facts) {
+			return compactCallSite{}, false
+		}
+		target, ok = compactFactFunction(facts[ins.b])
+		if !ok {
+			return compactCallSite{}, false
+		}
+		argumentStart = ins.b + 1
+		argumentCount, borrowed = decodeFixedCallCount(ins.c)
+	case opCallLocalOne:
+		if ins.b < 0 || ins.b >= len(facts) {
+			return compactCallSite{}, false
+		}
+		target, ok = compactFactFunction(facts[ins.b])
+		if !ok {
+			return compactCallSite{}, false
+		}
+		argumentStart = ins.c
+		argumentCount, borrowed = decodeFixedCallCount(ins.d)
+	case opCallUpvalueOne:
+		if ins.b < 0 || ins.b >= len(function.upvalueTargets) || function.upvalueTargets[ins.b] < 0 {
+			return compactCallSite{}, false
+		}
+		target = uint16(function.upvalueTargets[ins.b])
+		argumentStart = ins.c
+		argumentCount, borrowed = decodeFixedCallCount(ins.d)
+	default:
+		return compactCallSite{}, false
+	}
+
+	if int(target) >= len(builder.functions) || ins.a < 0 || ins.a > math.MaxUint8 ||
+		argumentStart < 0 || argumentStart > math.MaxUint8 ||
+		argumentCount < 0 || argumentCount > math.MaxUint8 ||
+		function.boundaries[pc] < 0 || function.boundaries[pc] > math.MaxUint32 {
+		return compactCallSite{}, false
+	}
+	flags := uint8(0)
+	if borrowed {
+		flags |= compactCallBorrowed
+	}
+	return compactCallSite{
+		wordPC:        uint32(function.boundaries[pc]),
+		target:        target,
+		argumentStart: uint8(argumentStart),
+		argumentCount: uint8(argumentCount),
+		result:        uint8(ins.a),
+		flags:         flags,
+	}, true
+}
+
+func (program *compactProgram) callSite(functionID uint16, pc int) (compactCallSite, bool) {
+	if program == nil || int(functionID) >= len(program.functions) || pc < 0 {
+		return compactCallSite{}, false
+	}
+	function := program.functions[functionID]
+	start := int(function.callStart)
+	end := start + int(function.callCount)
+	if start < 0 || end > len(program.calls) {
+		return compactCallSite{}, false
+	}
+	wordPC := uint32(pc)
+	for index := start; index < end; index++ {
+		site := program.calls[index]
+		if site.wordPC == wordPC {
 			return site, true
+		}
+		if site.wordPC > wordPC {
+			break
 		}
 	}
 	return compactCallSite{}, false
 }
 
-func growCompactNumericStack(stack []float64, needed int) []float64 {
-	if needed <= len(stack) {
-		return stack
-	}
-	if needed <= cap(stack) {
-		return stack[:needed]
-	}
-	capacity := cap(stack) * 2
-	if capacity < needed {
-		capacity = needed
-	}
-	grown := make([]float64, needed, capacity)
-	copy(grown, stack)
-	return grown
-}
-
-// runCompactNumericExecution executes every admitted function in one dispatch
-// loop over one pointer-free scalar stack and one compact continuation stack.
-// handled=false is a safe restart because admission proves the complete graph
-// has no externally visible effect.
-func runCompactNumericExecution(proto *Proto, args []Value, state *compactExecutionState) ([]Value, bool, error) {
-	program := proto.compact
-	if program == nil || state == nil || int(program.entry) >= len(program.functions) {
+func runCompactCallProgram(proto *Proto, args []Value, state *slotExecutionState) ([]Value, bool, error) {
+	if proto == nil || proto.compact == nil || state == nil || int(proto.compact.entry) >= len(proto.compact.functions) {
 		return nil, false, nil
 	}
-	entry := &program.functions[int(program.entry)]
-	if entry.proto != proto || len(args) < proto.params {
+	entry := proto.compact.functions[proto.compact.entry].proto
+	if entry == nil || len(args) < entry.params {
 		return nil, false, nil
 	}
-	stack := state.prepareStack(proto.registers)
-	for index := 0; index < proto.params; index++ {
+	stack := state.prepareNumericRegisters(entry.registers)
+	for index := 0; index < entry.params; index++ {
 		if valueKind(args[index]) != NumberKind {
 			return nil, false, nil
 		}
 		stack[index] = valueNumber(args[index])
 	}
+	state.compactFrames = state.compactFrames[:0]
+	result, ok := runCompactCallProgramWords(proto.compact, state)
+	if !ok || slotExecutionNumberNeedsBox(result) {
+		return nil, false, nil
+	}
+	return []Value{NumberValue(result)}, true, nil
+}
 
+func runCompactCallProgramWords(program *compactProgram, state *slotExecutionState) (float64, bool) {
+	if program == nil || state == nil || int(program.entry) >= len(program.functions) {
+		return 0, false
+	}
 	functionID := program.entry
-	function := entry
+	function := program.functions[functionID]
+	if function.proto == nil {
+		return 0, false
+	}
+	stack := state.numericRegisters
+	frames := state.compactFrames[:0]
+	base := 0
+	top := function.proto.registers
+	pc := 0
 	words := function.proto.words
 	constants := function.proto.constantNumbers
-	base, top, pc := 0, function.proto.registers, 0
 
 	for {
 		if uint(pc) >= uint(len(words)) {
-			return nil, false, nil
+			state.numericRegisters = stack
+			state.compactFrames = frames
+			return 0, false
 		}
 		raw := words[pc]
 		op := opcode(uint8(raw) & uint8(wordcodeOpcodeMask))
@@ -567,26 +651,28 @@ func runCompactNumericExecution(proto *Proto, args []Value, state *compactExecut
 		next := pc + 1
 
 		switch op {
+		case opClosure:
+			if raw&wordcodeAuxBit != 0 {
+				if next >= len(words) {
+					return 0, false
+				}
+				next++
+			}
+
 		case opLoadConst:
 			b = int(uint16(raw >> 16))
 			if raw&wordcodeAuxBit != 0 {
 				if next >= len(words) {
-					return nil, false, nil
+					return 0, false
 				}
 				b = int(int32(words[next]))
 				next++
 			}
 			stack[base+a] = constants[b]
+
 		case opMove:
 			stack[base+a] = stack[base+b]
-		case opClosure:
-			// Function identity is compile-time metadata in an admitted graph.
-			if raw&wordcodeAuxBit != 0 {
-				if next >= len(words) {
-					return nil, false, nil
-				}
-				next++
-			}
+
 		case opAdd:
 			stack[base+a] = stack[base+b] + stack[base+c]
 		case opSub:
@@ -604,10 +690,11 @@ func runCompactNumericExecution(proto *Proto, args []Value, state *compactExecut
 			stack[base+a] = math.Pow(stack[base+b], stack[base+c])
 		case opNeg:
 			stack[base+a] = -stack[base+b]
+
 		case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
 			if raw&wordcodeAuxBit != 0 {
 				if next >= len(words) {
-					return nil, false, nil
+					return 0, false
 				}
 				c = int(int32(words[next]))
 				next++
@@ -627,24 +714,26 @@ func runCompactNumericExecution(proto *Proto, args []Value, state *compactExecut
 			case opIDivK:
 				stack[base+a] = math.Floor(left / right)
 			}
+
 		case opNumericForCheck:
 			if next >= len(words) {
-				return nil, false, nil
+				return 0, false
 			}
 			target := int(int32(words[next]))
 			next++
 			target += next
 			loopValue, limitValue, stepValue := stack[base+a], stack[base+b], stack[base+c]
 			if math.IsNaN(loopValue) || math.IsNaN(limitValue) || math.IsNaN(stepValue) {
-				return nil, false, nil
+				return 0, false
 			}
 			if (stepValue > 0 && loopValue > limitValue) || (stepValue <= 0 && loopValue < limitValue) {
 				pc = target
 				continue
 			}
+
 		case opNumericForLoop:
 			if next >= len(words) {
-				return nil, false, nil
+				return 0, false
 			}
 			target := int(int32(words[next]))
 			next++
@@ -652,9 +741,10 @@ func runCompactNumericExecution(proto *Proto, args []Value, state *compactExecut
 			stack[base+a] += stack[base+b]
 			pc = target
 			continue
+
 		case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
 			if next >= len(words) {
-				return nil, false, nil
+				return 0, false
 			}
 			b = int(uint16(raw >> 16))
 			target := int(int32(words[next]))
@@ -667,7 +757,7 @@ func runCompactNumericExecution(proto *Proto, args []Value, state *compactExecut
 				jump = left != right
 			default:
 				if math.IsNaN(left) || math.IsNaN(right) {
-					return nil, false, nil
+					return 0, false
 				}
 				switch op {
 				case opJumpIfNotLessK:
@@ -684,16 +774,17 @@ func runCompactNumericExecution(proto *Proto, args []Value, state *compactExecut
 				pc = target
 				continue
 			}
+
 		case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
 			if next >= len(words) {
-				return nil, false, nil
+				return 0, false
 			}
 			target := int(int32(words[next]))
 			next++
 			target += next
 			left, right := stack[base+a], stack[base+b]
 			if math.IsNaN(left) || math.IsNaN(right) {
-				return nil, false, nil
+				return 0, false
 			}
 			jump := false
 			switch op {
@@ -710,101 +801,122 @@ func runCompactNumericExecution(proto *Proto, args []Value, state *compactExecut
 				pc = target
 				continue
 			}
-		case opJumpIfFalse:
-			// Every admitted value is a number, and every number is truthy.
-			if raw&wordcodeAuxBit != 0 {
-				if next >= len(words) {
-					return nil, false, nil
-				}
-				next++
-			}
+
 		case opJump:
 			pc = int(int32(raw)>>8) + next
 			continue
+
 		case opCall, opCallOne, opCallLocalOne, opCallUpvalueOne:
-			if next >= len(words) {
-				return nil, false, nil
+			if raw&wordcodeAuxBit != 0 {
+				if next >= len(words) {
+					return 0, false
+				}
+				next++
 			}
-			next++ // all admitted call forms have one required AUX word
-			site, ok := function.callSiteAt(pc)
+			site, ok := program.callSite(functionID, pc)
 			if !ok || int(site.target) >= len(program.functions) {
-				return nil, false, nil
+				return 0, false
 			}
-			callee := &program.functions[int(site.target)]
-			argumentStart := base + int(site.argumentStart)
+			callee := program.functions[site.target]
+			if callee.proto == nil || int(site.argumentCount) != callee.proto.params {
+				return 0, false
+			}
+			callerTop := top
 			calleeBase := top
-			if site.flags&compactCallBorrow != 0 {
-				calleeBase = argumentStart
+			if site.flags&compactCallBorrowed != 0 {
+				calleeBase = base + int(site.argumentStart)
 			}
-			needed := calleeBase + callee.proto.registers
-			stack = growCompactNumericStack(stack, needed)
-			state.stack = stack
-			if site.flags&compactCallBorrow == 0 {
-				copy(stack[calleeBase:calleeBase+callee.proto.params], stack[argumentStart:argumentStart+callee.proto.params])
+			need := calleeBase + callee.proto.registers
+			if calleeBase < 0 || need < calleeBase || uint64(need) > math.MaxUint32 {
+				return 0, false
 			}
-			state.frames = append(state.frames, compactCallFrame{
+			stack = growCompactNumericStack(state, stack, need)
+			if stack == nil {
+				return 0, false
+			}
+			if site.flags&compactCallBorrowed == 0 {
+				argumentStart := base + int(site.argumentStart)
+				argumentEnd := argumentStart + int(site.argumentCount)
+				if argumentStart < 0 || argumentEnd > len(stack) {
+					return 0, false
+				}
+				copy(stack[calleeBase:calleeBase+int(site.argumentCount)], stack[argumentStart:argumentEnd])
+			}
+			frames = append(frames, compactCallFrame{
+				callerFunction: functionID,
 				returnPC:       uint32(next),
 				callerBase:     uint32(base),
-				callerTop:      uint32(top),
+				callerTop:      uint32(callerTop),
 				resultBase:     uint32(base + int(site.result)),
-				callerFunction: functionID,
 			})
+			state.compactFrames = frames
 			functionID = site.target
 			function = callee
-			words = function.proto.words
-			constants = function.proto.constantNumbers
 			base = calleeBase
-			if needed > top {
-				top = needed
+			if need > top {
+				top = need
 			}
 			pc = 0
-			continue
-		case opReturnOne:
-			result := stack[base+a]
-			if len(state.frames) == 0 {
-				if slotExecutionNumberNeedsBox(result) {
-					return nil, false, nil
-				}
-				return []Value{NumberValue(result)}, true, nil
-			}
-			last := len(state.frames) - 1
-			frame := state.frames[last]
-			state.frames = state.frames[:last]
-			functionID = frame.callerFunction
-			function = &program.functions[int(functionID)]
 			words = function.proto.words
 			constants = function.proto.constantNumbers
-			base, top, pc = int(frame.callerBase), int(frame.callerTop), int(frame.returnPC)
-			stack[int(frame.resultBase)] = result
 			continue
-		case opReturn:
-			count := int(int16(uint16(raw >> 16)))
-			if count < 0 {
-				count = 1
+
+		case opReturnOne, opReturn:
+			resultIndex := base + a
+			if resultIndex < 0 || resultIndex >= len(stack) {
+				return 0, false
 			}
-			if count != 1 {
-				return nil, false, nil
+			result := stack[resultIndex]
+			if len(frames) == 0 {
+				state.numericRegisters = stack
+				state.compactFrames = frames
+				return result, true
 			}
-			result := stack[base+a]
-			if len(state.frames) == 0 {
-				if slotExecutionNumberNeedsBox(result) {
-					return nil, false, nil
-				}
-				return []Value{NumberValue(result)}, true, nil
+			last := len(frames) - 1
+			record := frames[last]
+			frames[last] = compactCallFrame{}
+			frames = frames[:last]
+			if int(record.callerFunction) >= len(program.functions) || int(record.resultBase) >= len(stack) {
+				return 0, false
 			}
-			last := len(state.frames) - 1
-			frame := state.frames[last]
-			state.frames = state.frames[:last]
-			functionID = frame.callerFunction
-			function = &program.functions[int(functionID)]
+			functionID = record.callerFunction
+			function = program.functions[functionID]
+			base = int(record.callerBase)
+			top = int(record.callerTop)
+			pc = int(record.returnPC)
+			stack[int(record.resultBase)] = result
 			words = function.proto.words
 			constants = function.proto.constantNumbers
-			base, top, pc = int(frame.callerBase), int(frame.callerTop), int(frame.returnPC)
-			stack[int(frame.resultBase)] = result
 			continue
+
 		default:
-			return nil, false, nil
+			return 0, false
 		}
 		pc = next
 	}
+}
+
+func growCompactNumericStack(state *slotExecutionState, stack []float64, count int) []float64 {
+	if state == nil || count < 0 {
+		return nil
+	}
+	if count <= len(stack) {
+		return stack
+	}
+	if count <= cap(stack) {
+		stack = stack[:count]
+		state.numericRegisters = stack
+		return stack
+	}
+	capacity := cap(stack) * 2
+	if capacity < 16 {
+		capacity = 16
+	}
+	if capacity < count {
+		capacity = count
+	}
+	grown := make([]float64, count, capacity)
+	copy(grown, stack)
+	state.numericRegisters = grown
+	return grown
 }

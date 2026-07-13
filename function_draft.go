@@ -58,6 +58,15 @@ func functionDraftCapturedRegisters(children []*functionDraft) []bool {
 }
 
 func sealFunctionDraft(draft *functionDraft) (*Proto, error) {
+	proto, err := sealFunctionDraftNode(draft)
+	if err != nil {
+		return nil, err
+	}
+	proto.compact = buildCompactCallProgram(proto)
+	return proto, nil
+}
+
+func sealFunctionDraftNode(draft *functionDraft) (*Proto, error) {
 	if draft == nil {
 		return nil, fmt.Errorf("invalid finalized prototype: nil function draft")
 	}
@@ -67,7 +76,7 @@ func sealFunctionDraft(draft *functionDraft) (*Proto, error) {
 		children = make([]*Proto, len(draft.children))
 	}
 	for index, childDraft := range draft.children {
-		child, err := sealFunctionDraft(childDraft)
+		child, err := sealFunctionDraftNode(childDraft)
 		if err != nil {
 			return nil, err
 		}
