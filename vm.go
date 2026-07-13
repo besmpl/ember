@@ -59,7 +59,7 @@ func executeProto(ctx context.Context, proto *Proto, globals *globalEnv, options
 	// corresponding slot ABI slice is proven.
 	if globals == nil && len(options.upvalues) == 0 &&
 		len(options.upvalueValues) == 0 && len(options.upvalueValueOK) == 0 &&
-		(options.controller == nil || options.controller.remaining < 0) {
+		!options.controller.requiresChecks() {
 		if values, handled, err := runSlotExecution(proto, options.args); handled || err != nil {
 			return values, err
 		}
@@ -79,7 +79,7 @@ func executeProtoWithOwner(ctx context.Context, proto *Proto, globals *globalEnv
 	// and the context cannot be cancelled. The owner activity counter keeps
 	// close from racing this VM-thread-free path; the slot runner itself keeps
 	// using its pooled ephemeral heap until collector/root integration lands.
-	if proto != nil && (proto.slotExecutionEligible || proto.compact != nil) && globals.thread == nil && (options.controller == nil || options.controller.remaining < 0) &&
+	if proto != nil && (proto.slotExecutionEligible || proto.compact != nil) && globals.thread == nil && !options.controller.requiresChecks() &&
 		len(options.upvalues) == 0 && len(options.upvalueValues) == 0 &&
 		len(options.upvalueValueOK) == 0 &&
 		(ctx == nil || (ctx.Done() == nil && ctx.Err() == nil)) {
@@ -3870,7 +3870,7 @@ func (frame *vmFrame) applyInlineResultDestination(destination vmResultDestinati
 }
 
 func (thread *vmThread) runFrame(frame *vmFrame) (vmFrameResult, error) {
-	instrumented := thread.directFrameInstrumented || thread.debugHook != nil || (thread.controller != nil && thread.controller.remaining >= 0)
+	instrumented := thread.directFrameInstrumented || thread.debugHook != nil || thread.controller.requiresChecks()
 	for {
 		var exit directFrameSideExit
 		if instrumented {
@@ -5624,20 +5624,20 @@ func runDirectFrameInstrumentedLoop(thread *vmThread, frameRef **vmFrame) direct
 		rootRecordDepth = frame.recordBaseDepth
 	}
 	var (
-		proto                *Proto
-		functionInstance     *vmFunctionInstance
-		words                []wordcodeWord
-		constants            []Value
-		constantKeys         []tableKey
-		constantKeyOK        []bool
-		constantNumbers      []float64
-		constantNumberOK     []bool
-		registers            []Value
-		picCounts            *directFramePICCounts
-		runLineHook          bool
-		runCountHook         bool
-		runInstructionBudget bool
-		directChildActive    bool
+		proto             *Proto
+		functionInstance  *vmFunctionInstance
+		words             []wordcodeWord
+		constants         []Value
+		constantKeys      []tableKey
+		constantKeyOK     []bool
+		constantNumbers   []float64
+		constantNumberOK  []bool
+		registers         []Value
+		picCounts         *directFramePICCounts
+		runLineHook       bool
+		runCountHook      bool
+		runController     bool
+		directChildActive bool
 	)
 
 reload:
@@ -5659,14 +5659,16 @@ reload:
 	picCounts = thread.directFramePICCounts
 	runLineHook = thread.debugHook != nil && thread.debugLineHook
 	runCountHook = thread.debugCountInterval > 0 && thread.debugHook != nil
-	runInstructionBudget = thread.controller != nil && thread.controller.remaining >= 0
+	runController = thread.controller.requiresChecks()
 
 	for uint(pc) < uint(len(words)) {
-		if runInstructionBudget || runLineHook || runCountHook {
+		if runController || runLineHook || runCountHook {
 			frame.pc = pc
 		}
-		if runInstructionBudget && !thread.consumeInstruction() {
-			return directFrameReturn(vmFrameResult{state: vmCallStateHostInterrupt})
+		if runController {
+			if err := thread.controller.stepInstruction(); err != nil {
+				return directFrameFail(err)
+			}
 		}
 		if runLineHook {
 			if err := thread.runDebugLineHook(frame); err != nil {
@@ -9360,13 +9362,6 @@ reload:
 		goto reload
 	}
 	return directFrameExitAt(frame, pc, directFrameReturn(result))
-}
-
-func (thread *vmThread) consumeInstruction() bool {
-	if thread.controller == nil || thread.controller.remaining < 0 {
-		return true
-	}
-	return thread.controller.chargeInstructions(1) == nil
 }
 
 func (thread *vmThread) runDebugCountHook(frame *vmFrame) error {

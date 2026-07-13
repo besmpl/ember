@@ -1,6 +1,7 @@
 package ember
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	goparser "go/parser"
@@ -2735,7 +2736,7 @@ func TestCoroutineSingleYieldUsesInlineValueBuffer(t *testing.T) {
 	}
 }
 
-func TestVMFrameReturnsHostInterruptWhenInstructionBudgetExpires(t *testing.T) {
+func TestVMFrameReturnsLimitErrorWhenInstructionLimitExpires(t *testing.T) {
 	proto := newProto(
 		[]Value{NumberValue(1)},
 		[]instruction{
@@ -2750,16 +2751,13 @@ func TestVMFrameReturnsHostInterruptWhenInstructionBudgetExpires(t *testing.T) {
 	)
 	thread := newVMThread(runtimeGlobals(nil))
 	thread.controller = testExecutionController(t, 1)
-	result, err := thread.runFrame(newVMFrame(proto, nil, nil))
-	if err != nil {
-		t.Fatalf("runFrame returned error: %v", err)
-	}
-	if result.state != vmCallStateHostInterrupt {
-		t.Fatalf("runFrame state is %v, want host interrupt", result.state)
+	_, err := thread.runFrame(newVMFrame(proto, nil, nil))
+	if !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("runFrame error = %v, want instruction limit error", err)
 	}
 }
 
-func TestInstructionBudgetInterruptsFastExecution(t *testing.T) {
+func TestInstructionLimitStopsFastExecution(t *testing.T) {
 	proto, err := Compile(`
 local total = 0
 for i = 1, 100 do
@@ -2782,12 +2780,9 @@ return total
 	thread.directFrameOpcodeCounts = &counts
 	thread.directFramePICCounts = &pic
 
-	result, err := thread.runFrame(newVMFrame(proto, nil, nil))
-	if err != nil {
-		t.Fatalf("runFrame returned error: %v", err)
-	}
-	if result.state != vmCallStateHostInterrupt {
-		t.Fatalf("runFrame state is %v, want host interrupt", result.state)
+	_, err = thread.runFrame(newVMFrame(proto, nil, nil))
+	if !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("runFrame error = %v, want instruction limit error", err)
 	}
 	if counts.count(opNumericForLoop) == 0 && counts.count(opAdd) == 0 && counts.count(opAddK) == 0 {
 		t.Fatalf("direct opcode counts show no loop/body execution: %#v", counts.ranked())
@@ -2797,7 +2792,7 @@ return total
 	}
 }
 
-func TestVMThreadReturnsErrorWhenInstructionBudgetExpires(t *testing.T) {
+func TestVMThreadReturnsErrorWhenInstructionLimitExpires(t *testing.T) {
 	proto := newProto(
 		[]Value{NumberValue(1)},
 		[]instruction{
@@ -2815,10 +2810,10 @@ func TestVMThreadReturnsErrorWhenInstructionBudgetExpires(t *testing.T) {
 
 	_, err := thread.run(proto, nil, nil)
 	if err == nil {
-		t.Fatal("thread.run returned nil error, want instruction budget error")
+		t.Fatal("thread.run returned nil error, want instruction limit error")
 	}
-	if !strings.Contains(err.Error(), "instruction budget exhausted") {
-		t.Fatalf("thread.run error is %q, want instruction budget detail", err)
+	if !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("thread.run error is %q, want instruction limit error", err)
 	}
 }
 

@@ -11,6 +11,29 @@ type executionController struct {
 	ctx       context.Context
 	limits    ExecutionLimits
 	remaining int64
+	onStep    func()
+}
+
+func (controller *executionController) stepInstruction() error {
+	if controller == nil {
+		return nil
+	}
+	if controller.onStep != nil {
+		onStep := controller.onStep
+		controller.onStep = nil
+		onStep()
+	}
+	if err := controller.checkContext(); err != nil {
+		return err
+	}
+	return controller.chargeInstructions(1)
+}
+
+func (controller *executionController) requiresChecks() bool {
+	if controller == nil {
+		return false
+	}
+	return controller.remaining >= 0 || controller.onStep != nil || (controller.ctx != nil && controller.ctx.Done() != nil)
 }
 
 func newExecutionController(ctx context.Context, limits ExecutionLimits) (*executionController, error) {

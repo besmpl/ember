@@ -2,7 +2,7 @@ package ember
 
 import (
 	"context"
-	"strings"
+	"errors"
 	"testing"
 )
 
@@ -35,7 +35,7 @@ return total
 		t.Fatalf("NewRuntime returned error: %v", err)
 	}
 	defer runtime.Close()
-	if _, err := runtime.RunHook(context.Background(), "startup"); err == nil || !strings.Contains(err.Error(), "instruction budget") {
+	if _, err := runtime.RunHook(context.Background(), "startup"); err == nil || !errors.Is(err, ErrLimitExceeded) {
 		t.Fatalf("RunHook error = %v, want shared instruction budget exhaustion", err)
 	}
 }
@@ -50,7 +50,7 @@ func TestInstructionLimitIsSharedAcrossEntrypoints(t *testing.T) {
 		t.Fatalf("NewRuntime returned error: %v", err)
 	}
 	defer runtime.Close()
-	if _, err := runtime.RunHook(context.Background(), "startup"); err == nil || !strings.Contains(err.Error(), "instruction budget") {
+	if _, err := runtime.RunHook(context.Background(), "startup"); err == nil || !errors.Is(err, ErrLimitExceeded) {
 		t.Fatalf("RunHook error = %v, want shared instruction budget exhaustion", err)
 	}
 }
@@ -140,7 +140,7 @@ return { startup = function() return child() end }
 		t.Fatalf("NewRuntime returned error: %v", err)
 	}
 	defer runtime.Close()
-	if _, err := runtime.RunHook(context.Background(), "startup"); err == nil || !strings.Contains(err.Error(), "instruction budget") {
+	if _, err := runtime.RunHook(context.Background(), "startup"); err == nil || !errors.Is(err, ErrLimitExceeded) {
 		t.Fatalf("RunHook error = %v, want shared instruction budget exhaustion", err)
 	}
 }

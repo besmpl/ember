@@ -2,11 +2,11 @@ package ember
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"reflect"
 	"runtime"
-	"strings"
 	"sync"
 	"testing"
 )
@@ -907,7 +907,7 @@ func TestExecuteProtoFixedParametersRespectInstructionBudget(t *testing.T) {
 		args:       []Value{NumberValue(7)},
 		controller: testExecutionController(t, 0),
 	})
-	if values != nil || err == nil || !strings.Contains(err.Error(), "instruction budget exhausted") {
+	if values != nil || err == nil || !errors.Is(err, ErrLimitExceeded) {
 		t.Fatalf("budgeted executeProto = (%#v, %v), want instruction budget error", values, err)
 	}
 }

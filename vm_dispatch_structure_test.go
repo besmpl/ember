@@ -34,12 +34,12 @@ func TestVMExecutionDoesNotMaterializePackedInstructions(t *testing.T) {
 		}
 	}
 	assertDirectLoopUsesLocalPC(t, text, "func runDirectFrameInstrumentedLoop", "func runDirectFrameProductionLoop")
-	assertDirectLoopUsesLocalPC(t, text, "func runDirectFrameProductionLoop", "func (thread *vmThread) consumeInstruction")
+	assertDirectLoopUsesLocalPC(t, text, "func runDirectFrameProductionLoop", "func (thread *vmThread) runDebugCountHook")
 	productionStart := strings.Index(text, "func runDirectFrameProductionLoop")
 	if productionStart < 0 {
 		t.Fatal("vm.go is missing the production direct loop boundaries")
 	}
-	productionEnd := strings.Index(text[productionStart:], "func (thread *vmThread) consumeInstruction")
+	productionEnd := strings.Index(text[productionStart:], "func (thread *vmThread) runDebugCountHook")
 	if productionEnd < 0 {
 		t.Fatal("vm.go is missing the production direct loop end boundary")
 	}
@@ -163,7 +163,7 @@ func TestDirectFrameDefersRuntimeFunctionInstanceLookupUntilCacheUse(t *testing.
 	text := string(source)
 	for _, bounds := range [][2]string{
 		{"func runDirectFrameInstrumentedLoop", "func runDirectFrameProductionLoop"},
-		{"func runDirectFrameProductionLoop", "func (thread *vmThread) consumeInstruction"},
+		{"func runDirectFrameProductionLoop", "func (thread *vmThread) runDebugCountHook"},
 	} {
 		start := strings.Index(text, bounds[0])
 		end := strings.Index(text, bounds[1])

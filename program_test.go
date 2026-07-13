@@ -1350,8 +1350,8 @@ return {
 		t.Fatalf("NewRuntime returned error: %v", err)
 	}
 
-	if _, err := runtime.RunHook(ctx, "startup"); err != nil {
-		t.Fatalf("RunHook returned error: %v", err)
+	if _, err := runtime.RunHook(ctx, "startup"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunHook error = %v, want context cancellation", err)
 	}
 	if !sawCanceled {
 		t.Fatal("context-aware host callback did not observe canceled hook context")
@@ -1401,8 +1401,8 @@ return {}
 		t.Fatalf("NewRuntime returned error: %v", err)
 	}
 
-	if _, err := runtime.RunHook(ctx, "startup"); err != nil {
-		t.Fatalf("RunHook returned error: %v", err)
+	if _, err := runtime.RunHook(ctx, "startup"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunHook error = %v, want context cancellation", err)
 	}
 	if !sawCanceled {
 		t.Fatal("context-aware host callback in required module did not observe canceled context")
@@ -1811,8 +1811,8 @@ return {
 	if err == nil {
 		t.Fatal("RunHook startup succeeded, want instruction budget error")
 	}
-	if !strings.Contains(err.Error(), "instruction budget") {
-		t.Fatalf("RunHook startup error is %q, want instruction budget", err)
+	if !errors.Is(err, ember.ErrLimitExceeded) {
+		t.Fatalf("RunHook startup error is %q, want instruction limit", err)
 	}
 
 	report, err := runtime.RunHook(context.Background(), "update")
@@ -1862,8 +1862,8 @@ return {
 	if err == nil {
 		t.Fatal("RunHook succeeded, want coroutine budget error")
 	}
-	if !strings.Contains(err.Error(), "instruction budget") {
-		t.Fatalf("RunHook error is %q, want instruction budget", err)
+	if !errors.Is(err, ember.ErrLimitExceeded) {
+		t.Fatalf("RunHook error is %q, want instruction limit", err)
 	}
 }
 
