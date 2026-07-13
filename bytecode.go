@@ -1370,14 +1370,6 @@ func assembleBytecodeIR(ir []bytecodeIRInstruction) []instruction {
 	return assembleBytecodeIRResult(ir).code
 }
 
-func assembleBytecodeIRRaw(ir []bytecodeIRInstruction) []instruction {
-	code := make([]instruction, len(ir))
-	for i, ins := range ir {
-		code[i] = assembleBytecodeIRInstruction(ins)
-	}
-	return code
-}
-
 func assembleBytecodeIRResult(ir []bytecodeIRInstruction) assembledBytecodeIR {
 	if len(ir) == 0 {
 		return assembledBytecodeIR{}

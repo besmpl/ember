@@ -73,6 +73,136 @@ func TestFunctionIRCachesBytecodeFeaturesUntilInstructionsChange(t *testing.T) {
 	}
 }
 
+func TestFunctionIRReusesAnalysisForValueOnlyChanges(t *testing.T) {
+	base := []bytecodeIRInstruction{
+		lowerInstructionToBytecodeIR(instruction{op: opLoadConst, a: 0, b: 0}, sourceRange{}),
+		lowerInstructionToBytecodeIR(instruction{op: opReturnOne, a: 0}, sourceRange{}),
+	}
+	function := newFunctionIR(base)
+	analysis := function.currentAnalysis()
+	raw := function.currentCode()
+	if got := function.currentCode(); len(got) == 0 || &got[0] != &raw[0] {
+		t.Fatal("unchanged function rebuilt assembled view")
+	}
+
+	constantOnly := append([]bytecodeIRInstruction(nil), base...)
+	constantOnly[0] = lowerInstructionToBytecodeIR(instruction{op: opLoadConst, a: 0, b: 1}, sourceRange{})
+	function.replace(constantOnly)
+	if got := function.currentAnalysis(); got != analysis {
+		t.Fatal("constant-only replacement rebuilt CFG/liveness analysis")
+	}
+	rawAfterConstant := function.currentCode()
+	if &rawAfterConstant[0] == &raw[0] {
+		t.Fatal("constant-only replacement reused stale assembled view")
+	}
+
+	sourceOnly := append([]bytecodeIRInstruction(nil), constantOnly...)
+	sourceOnly[0].sourceStart = 12
+	sourceOnly[0].sourceEnd = 18
+	function.replace(sourceOnly)
+	if got := function.currentAnalysis(); got != analysis {
+		t.Fatal("source-only replacement rebuilt CFG/liveness analysis")
+	}
+	if got := function.currentCode(); len(got) == 0 || &got[0] != &rawAfterConstant[0] {
+		t.Fatal("source-only replacement rebuilt unchanged assembled view")
+	}
+}
+
+func TestFunctionIRInvalidatesOnlyAffectedAnalysis(t *testing.T) {
+	base := []bytecodeIRInstruction{
+		lowerInstructionToBytecodeIR(instruction{op: opMove, a: 0, b: 1}, sourceRange{}),
+		lowerInstructionToBytecodeIR(instruction{op: opReturnOne, a: 0}, sourceRange{}),
+	}
+	function := newFunctionIR(base)
+	analysis := function.currentAnalysis()
+	if len(analysis.blocks) == 0 || len(analysis.liveness) == 0 {
+		t.Fatal("baseline analysis is empty")
+	}
+	blocks := &analysis.blocks[0]
+	liveness := &analysis.liveness[0]
+
+	registerOnly := append([]bytecodeIRInstruction(nil), base...)
+	registerOnly[0] = lowerInstructionToBytecodeIR(instruction{op: opMove, a: 1, b: 2}, sourceRange{})
+	function.replace(registerOnly)
+	updated := function.currentAnalysis()
+	if len(updated.blocks) == 0 || &updated.blocks[0] != blocks {
+		t.Fatal("register-only replacement rebuilt CFG blocks")
+	}
+	if len(updated.liveness) == 0 || &updated.liveness[0] == liveness {
+		t.Fatal("register-only replacement reused stale liveness")
+	}
+
+	jumpBase := []bytecodeIRInstruction{
+		lowerInstructionToBytecodeIR(instruction{op: opJump, b: 2}, sourceRange{}),
+		lowerInstructionToBytecodeIR(instruction{op: opReturnOne, a: 0}, sourceRange{}),
+		lowerInstructionToBytecodeIR(instruction{op: opReturnOne, a: 0}, sourceRange{}),
+	}
+	function = newFunctionIR(jumpBase)
+	jumpAnalysis := function.currentAnalysis()
+	jumpBlocks := &jumpAnalysis.blocks[0]
+	jumpChanged := append([]bytecodeIRInstruction(nil), jumpBase...)
+	jumpChanged[0] = lowerInstructionToBytecodeIR(instruction{op: opJump, b: 1}, sourceRange{})
+	function.replace(jumpChanged)
+	if got := function.currentAnalysis(); len(got.blocks) == 0 || &got.blocks[0] == jumpBlocks {
+		t.Fatal("jump-target replacement reused stale CFG")
+	}
+}
+
+func TestFunctionIRCountAndOpcodeChangesInvalidateExpectedLayers(t *testing.T) {
+	callBase := []bytecodeIRInstruction{
+		lowerInstructionToBytecodeIR(instruction{op: opCall, a: 0, b: 1, c: 1, d: 1}, sourceRange{}),
+		lowerInstructionToBytecodeIR(instruction{op: opReturnOne, a: 0}, sourceRange{}),
+	}
+	function := newFunctionIR(callBase)
+	analysis := function.currentAnalysis()
+	blocks := &analysis.blocks[0]
+	countChanged := append([]bytecodeIRInstruction(nil), callBase...)
+	countChanged[0] = lowerInstructionToBytecodeIR(instruction{op: opCall, a: 0, b: 1, c: 2, d: 1}, sourceRange{})
+	function.replace(countChanged)
+	updated := function.currentAnalysis()
+	if len(updated.blocks) == 0 || &updated.blocks[0] != blocks {
+		t.Fatal("count-only replacement rebuilt CFG")
+	}
+	if len(updated.liveness) == 0 || &updated.liveness[0] == &analysis.liveness[0] {
+		t.Fatal("count-only replacement reused stale liveness")
+	}
+
+	opcodeChanged := append([]bytecodeIRInstruction(nil), countChanged...)
+	opcodeChanged[0] = lowerInstructionToBytecodeIR(instruction{op: opLoadConst, a: 0, b: 0}, sourceRange{})
+	function.replace(opcodeChanged)
+	if got := function.currentAnalysis(); got == updated || len(got.effects) == 0 || got.effects[0] == updated.effects[0] {
+		t.Fatal("opcode-only replacement reused stale full analysis")
+	}
+
+	rawBefore := function.currentCode()
+	unusedRaw := append([]bytecodeIRInstruction(nil), opcodeChanged...)
+	unusedRaw[0].d = 77
+	function.replace(unusedRaw)
+	before := function.currentCode()
+	if &before[0] == &rawBefore[0] {
+		t.Fatal("unused raw operand change reused stale assembled view")
+	}
+	if before[0].d != 77 {
+		t.Fatalf("unused raw operand=%d, want 77", before[0].d)
+	}
+}
+
+func TestFunctionIROwnsInstructionSlicesAcrossAliases(t *testing.T) {
+	input := []bytecodeIRInstruction{lowerInstructionToBytecodeIR(instruction{op: opReturnOne, a: 0}, sourceRange{})}
+	function := newFunctionIR(input)
+	input[0] = lowerInstructionToBytecodeIR(instruction{op: opJump, b: 0}, sourceRange{})
+	if got := function.currentFeatures(); got.hasControlFlow {
+		t.Fatal("mutating constructor input changed owned function IR")
+	}
+
+	replacement := []bytecodeIRInstruction{lowerInstructionToBytecodeIR(instruction{op: opMove, a: 0, b: 1}, sourceRange{})}
+	function.replace(replacement)
+	replacement[0] = lowerInstructionToBytecodeIR(instruction{op: opJump, b: 0}, sourceRange{})
+	if got := function.currentFeatures(); got.hasControlFlow {
+		t.Fatal("mutating replacement input changed owned function IR")
+	}
+}
+
 func TestOptimizerPlanGatesOpcodeFamilies(t *testing.T) {
 	toIR := func(code ...instruction) []bytecodeIRInstruction {
 		ir := make([]bytecodeIRInstruction, len(code))

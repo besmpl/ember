@@ -185,55 +185,55 @@ func optimizeBytecodeIRWithFacts(ir []bytecodeIRInstruction, facts bytecodeIROpt
 	if facts.constantPool != nil {
 		facts.optimizationPool = newOptimizationConstantPool(facts.constants, len(ir))
 	}
-	function := newFunctionIR(append([]bytecodeIRInstruction(nil), ir...))
+	function := newFunctionIR(ir)
 	// The optional passes only remove or rewrite their corresponding opcode
 	// families; they do not introduce a family that was absent at the start of
 	// this pipeline. Keep one stage-local plan instead of rescanning the IR
 	// before every pass.
 	plan := optimizerPlanForFunction(function)
 	if plan.runMoves {
-		function.replace(applyBytecodeIRRemovalSet(
+		function.replaceOwned(applyBytecodeIRRemovalSet(
 			function.instructions,
-			bytecodeIRPeepholeRemovalSet(function.instructions, assembleBytecodeIRRaw(function.instructions), function.currentAnalysis()),
+			bytecodeIRPeepholeRemovalSetCompact(function.instructions, function.currentAnalysis()),
 		))
 	}
 	if plan.runControlFlow {
-		function.replace(simplifyBytecodeIRControlFlow(function.instructions, bytecodeIROptimizationFacts{}))
+		function.replaceOwned(simplifyBytecodeIRControlFlow(function.instructions, bytecodeIROptimizationFacts{}))
 	}
-	function.replace(propagateBytecodeIRScalarConstants(function.instructions, facts))
+	function.replaceOwned(propagateBytecodeIRScalarConstants(function.instructions, facts))
 	// Folding can turn a long straight-line chain into independent loads. Drop
 	// those dead producers before move/coalescing inspect it, but pay for this
 	// extra analysis only when folding actually created pending constants.
 	if facts.optimizationPool != nil && len(facts.optimizationPool.pending) != 0 && len(function.instructions) > 256 {
-		function.replace(applyBytecodeIRRemovalSet(
+		function.replaceOwned(applyBytecodeIRRemovalSet(
 			function.instructions,
-			bytecodeIRDeadCodeRemovalSet(function.instructions, facts, function.currentAnalysis()),
+			bytecodeIRDeadCodeRemovalSetCompact(function.instructions, facts, function.currentAnalysis()),
 		))
 	}
 	if plan.runMoves {
-		function.replace(propagateBytecodeIRSingleUseMoves(function.instructions, function.currentAnalysis()))
-		function.replace(coalesceBytecodeIRMoveProducers(function.instructions, facts.capturedRegisters, function.currentAnalysis()))
+		function.replaceOwned(propagateBytecodeIRSingleUseMovesWithCode(function.instructions, function.currentAnalysis(), function.currentCode()))
+		function.replaceOwned(coalesceBytecodeIRMoveProducersWithCode(function.instructions, facts.capturedRegisters, function.currentAnalysis(), function.currentCode()))
 	}
 	if plan.runLoop {
-		function.replace(hoistBytecodeIRLoopInvariantHeaderLoads(function.instructions))
+		function.replaceOwned(hoistBytecodeIRLoopInvariantHeaderLoadsWithCode(function.instructions, function.currentCode()))
 	}
-	function.replace(applyBytecodeIRRemovalSet(
+	function.replaceOwned(applyBytecodeIRRemovalSet(
 		function.instructions,
-		bytecodeIRDeadCodeRemovalSet(function.instructions, facts, function.currentAnalysis()),
+		bytecodeIRDeadCodeRemovalSetCompact(function.instructions, facts, function.currentAnalysis()),
 	))
 	if plan.runControlFlow {
-		function.replace(simplifyBytecodeIRControlFlow(function.instructions, bytecodeIROptimizationFacts{}))
+		function.replaceOwned(simplifyBytecodeIRControlFlow(function.instructions, bytecodeIROptimizationFacts{}))
 	}
 	if facts.optimizationPool != nil {
 		if len(facts.optimizationPool.pending) != 0 {
 			compactedIR, compactedConstants := compactOptimizationConstantPool(function.instructions, facts.optimizationPool, facts.constantPool)
-			function.replace(compactedIR)
+			function.replaceOwned(compactedIR)
 			if facts.constantPool != nil {
 				facts.constantPool.constants = compactedConstants
 			}
 		} else if facts.constantPool != nil {
 			compactedIR, compactedConstants := compactBytecodeIRConstants(function.instructions, facts.optimizationPool.seed)
-			function.replace(compactedIR)
+			function.replaceOwned(compactedIR)
 			if !sameValueSlices(compactedConstants, facts.optimizationPool.seed) {
 				facts.constantPool.resetConstants(compactedConstants)
 			}
@@ -310,17 +310,16 @@ func applyBytecodeIRRemovalSet(ir []bytecodeIRInstruction, remove []bool) []byte
 	return optimized
 }
 
-func bytecodeIRDeadCodeRemovalSet(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts, analysis *functionAnalysis) []bool {
-	code := assembleBytecodeIRRaw(ir)
+func bytecodeIRDeadCodeRemovalSetCompact(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts, analysis *functionAnalysis) []bool {
 	remove := make([]bool, len(ir))
-	numberFacts := bytecodeIRNumberFactsBefore(code, facts, analysis.blocks)
+	numberFacts := bytecodeIRNumberFactsBeforeCompact(ir, facts, analysis.blocks)
 	for _, live := range analysis.liveness {
-		if !bytecodeIRBlockAllowsDeadCodeCleanup(code, live.block) {
+		if !bytecodeIRBlockAllowsDeadCodeCleanupCompact(ir, live.block) {
 			continue
 		}
 		liveRegisters := live.liveOut.copy()
 		for pc := live.block.end - 1; pc >= live.block.start; pc-- {
-			ins := code[pc]
+			ins := assembleBytecodeIRInstruction(ir[pc])
 			if instructionWritesOnlyDeadRegisters(ins, liveRegisters) && instructionCanRemoveWhenResultDead(ins, numberFacts[pc], facts) {
 				remove[pc] = true
 				continue
@@ -338,9 +337,9 @@ func bytecodeIRDeadCodeRemovalSet(ir []bytecodeIRInstruction, facts bytecodeIROp
 	return remove
 }
 
-func bytecodeIRBlockAllowsDeadCodeCleanup(code []instruction, block bytecodeIRBlock) bool {
+func bytecodeIRBlockAllowsDeadCodeCleanupCompact(ir []bytecodeIRInstruction, block bytecodeIRBlock) bool {
 	for pc := block.start; pc < block.end; pc++ {
-		if !instructionAllowsDeadCodeCleanupInBlock(code[pc]) {
+		if !instructionAllowsDeadCodeCleanupInBlock(assembleBytecodeIRInstruction(ir[pc])) {
 			return false
 		}
 	}
@@ -413,13 +412,13 @@ func instructionCanRemoveWhenResultDead(ins instruction, numberFacts registerSet
 	}
 }
 
-func bytecodeIRNumberFactsBefore(code []instruction, facts bytecodeIROptimizationFacts, blocks []bytecodeIRBlock) []registerSet {
-	factsBefore := make([]registerSet, len(code))
+func bytecodeIRNumberFactsBeforeCompact(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts, blocks []bytecodeIRBlock) []registerSet {
+	factsBefore := make([]registerSet, len(ir))
 	for _, block := range blocks {
 		numberFacts := registerSet{}
 		for pc := block.start; pc < block.end; pc++ {
 			factsBefore[pc] = numberFacts.copy()
-			applyInstructionNumberFacts(numberFacts, code[pc], facts)
+			applyInstructionNumberFacts(numberFacts, assembleBytecodeIRInstruction(ir[pc]), facts)
 		}
 	}
 	return factsBefore
@@ -466,17 +465,17 @@ func constantIsNumber(facts bytecodeIROptimizationFacts, index int) bool {
 	return ok && valueKind(value) == NumberKind
 }
 
-func bytecodeIRPeepholeRemovalSet(ir []bytecodeIRInstruction, code []instruction, analysis *functionAnalysis) []bool {
+func bytecodeIRPeepholeRemovalSetCompact(ir []bytecodeIRInstruction, analysis *functionAnalysis) []bool {
 	remove := make([]bool, len(ir))
 	for _, live := range analysis.liveness {
 		block := live.block
 		for pc := block.start; pc < block.end; pc++ {
-			ins := code[pc]
+			ins := assembleBytecodeIRInstruction(ir[pc])
 			if ins.op == opMove && ins.a == ins.b {
 				remove[pc] = true
 				continue
 			}
-			if pc+1 < block.end && isDeadMoveRoundTripInBlock(code, pc, block.end, live.liveOut) {
+			if pc+1 < block.end && isDeadMoveRoundTripInIR(ir, pc, block.end, live.liveOut) {
 				remove[pc] = true
 				remove[pc+1] = true
 				pc++
@@ -609,13 +608,12 @@ func bytecodeIRHasJumpIfFalse(ir []bytecodeIRInstruction) bool {
 }
 
 func bytecodeIRConstantFactsBefore(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts) []map[int]int {
-	code := assembleBytecodeIRRaw(ir)
 	factsBefore := make([]map[int]int, len(ir))
 	for _, block := range bytecodeIRBlockOrder(ir) {
 		registerConstants := make(map[int]int)
 		for pc := block.start; pc < block.end; pc++ {
 			factsBefore[pc] = copyRegisterConstants(registerConstants)
-			applyInstructionConstantFacts(registerConstants, code[pc], facts)
+			applyInstructionConstantFacts(registerConstants, assembleBytecodeIRInstruction(ir[pc]), facts)
 		}
 	}
 	for pc := range factsBefore {
@@ -1279,31 +1277,47 @@ func setBytecodeIRJumpTarget(ins *bytecodeIRInstruction, target int) bool {
 }
 
 func propagateBytecodeIRSingleUseMoves(ir []bytecodeIRInstruction, analysis *functionAnalysis) []bytecodeIRInstruction {
+	return propagateBytecodeIRSingleUseMovesWithCode(ir, analysis, materializeBytecodeIR(ir))
+}
+
+func propagateBytecodeIRSingleUseMovesWithCode(ir []bytecodeIRInstruction, analysis *functionAnalysis, sourceCode []instruction) []bytecodeIRInstruction {
 	if len(ir) == 0 {
 		return ir
 	}
-	optimized := append([]bytecodeIRInstruction(nil), ir...)
-	code := assembleBytecodeIRRaw(optimized)
-	remove := make([]bool, len(ir))
+	var optimized []bytecodeIRInstruction
+	var code []instruction
+	var remove []bool
 	for _, live := range analysis.liveness {
 		block := live.block
 		for pc := block.start; pc < block.end; pc++ {
-			move := code[pc]
+			view := sourceCode
+			if code != nil {
+				view = code
+			}
+			move := view[pc]
 			if move.op != opMove || move.a == move.b {
 				continue
 			}
-			usePC, ok := singleUseMoveReadPC(code, pc+1, block.end, live.liveOut, move.a, move.b)
+			usePC, ok := singleUseMoveReadPC(view, pc+1, block.end, live.liveOut, move.a, move.b)
 			if !ok {
 				continue
 			}
-			rewritten, ok := replaceInstructionReadRegister(code[usePC], move.a, move.b)
+			rewritten, ok := replaceInstructionReadRegister(view[usePC], move.a, move.b)
 			if !ok {
 				continue
+			}
+			if optimized == nil {
+				optimized = append([]bytecodeIRInstruction(nil), ir...)
+				code = append([]instruction(nil), sourceCode...)
+				remove = make([]bool, len(ir))
 			}
 			code[usePC] = rewritten
 			optimized[usePC] = lowerInstructionToBytecodeIR(rewritten, optimized[usePC].sourceSpan())
 			remove[pc] = true
 		}
+	}
+	if optimized == nil {
+		return ir
 	}
 	return applyBytecodeIRRemovalSet(optimized, remove)
 }
@@ -1375,27 +1389,35 @@ func replaceInstructionReadRegister(ins instruction, from int, to int) (instruct
 }
 
 func coalesceBytecodeIRMoveProducers(ir []bytecodeIRInstruction, capturedRegisters []bool, analysis *functionAnalysis) []bytecodeIRInstruction {
+	return coalesceBytecodeIRMoveProducersWithCode(ir, capturedRegisters, analysis, materializeBytecodeIR(ir))
+}
+
+func coalesceBytecodeIRMoveProducersWithCode(ir []bytecodeIRInstruction, capturedRegisters []bool, analysis *functionAnalysis, sourceCode []instruction) []bytecodeIRInstruction {
 	if len(ir) < 2 {
 		return ir
 	}
-	optimized := append([]bytecodeIRInstruction(nil), ir...)
-	code := assembleBytecodeIRRaw(optimized)
-	remove := make([]bool, len(ir))
+	var optimized []bytecodeIRInstruction
+	var code []instruction
+	var remove []bool
 	for _, live := range analysis.liveness {
 		block := live.block
 		for pc := block.start + 1; pc < block.end; pc++ {
-			move := code[pc]
+			view := sourceCode
+			if code != nil {
+				view = code
+			}
+			move := view[pc]
 			if move.op != opMove || move.a == move.b {
 				continue
 			}
 			if move.b >= 0 && move.b < len(capturedRegisters) && capturedRegisters[move.b] {
 				continue
 			}
-			if !registerDeadAfterMoveInBlock(code, pc, block.end, live.liveOut, move.b) {
+			if !registerDeadAfterMoveInBlock(view, pc, block.end, live.liveOut, move.b) {
 				continue
 			}
 			producerPC := pc - 1
-			producer := code[producerPC]
+			producer := view[producerPC]
 			if instructionHasRegisterEffect(producer, move.a, instructionRegisterRead) || instructionHasRegisterEffect(producer, move.a, instructionRegisterWrite) {
 				continue
 			}
@@ -1403,10 +1425,18 @@ func coalesceBytecodeIRMoveProducers(ir []bytecodeIRInstruction, capturedRegiste
 			if !ok {
 				continue
 			}
+			if optimized == nil {
+				optimized = append([]bytecodeIRInstruction(nil), ir...)
+				code = append([]instruction(nil), sourceCode...)
+				remove = make([]bool, len(ir))
+			}
 			code[producerPC] = rewritten
 			optimized[producerPC] = lowerInstructionToBytecodeIR(rewritten, optimized[producerPC].sourceSpan())
 			remove[pc] = true
 		}
+	}
+	if optimized == nil {
+		return ir
 	}
 	return applyBytecodeIRRemovalSet(optimized, remove)
 }
@@ -1447,24 +1477,36 @@ func singleResultProducerCanRetarget(ins instruction) bool {
 }
 
 func hoistBytecodeIRLoopInvariantHeaderLoads(ir []bytecodeIRInstruction) []bytecodeIRInstruction {
+	return hoistBytecodeIRLoopInvariantHeaderLoadsWithCode(ir, materializeBytecodeIR(ir))
+}
+
+func hoistBytecodeIRLoopInvariantHeaderLoadsWithCode(ir []bytecodeIRInstruction, sourceCode []instruction) []bytecodeIRInstruction {
 	if len(ir) < 3 {
 		return ir
 	}
-	optimized := append([]bytecodeIRInstruction(nil), ir...)
-	code := assembleBytecodeIRRaw(optimized)
-	for loopEnd, backedge := range code {
+	var optimized []bytecodeIRInstruction
+	var code []instruction
+	for loopEnd, sourceBackedge := range sourceCode {
+		backedge := sourceBackedge
+		if code != nil {
+			backedge = code[loopEnd]
+		}
 		loopStart, ok := loopLocalPathBackedgeTarget(backedge, loopEnd)
 		if !ok || loopStart < 1 || loopStart+1 >= loopEnd {
 			continue
 		}
-		load := code[loopStart]
+		view := sourceCode
+		if code != nil {
+			view = code
+		}
+		load := view[loopStart]
 		if load.op != opGetStringField {
 			continue
 		}
-		if !loopHeaderLoadHasNoMetatableGuard(code, loopStart, loopEnd, load.b) {
+		if !loopHeaderLoadHasNoMetatableGuard(view, loopStart, loopEnd, load.b) {
 			continue
 		}
-		if loopHasInvariantHeaderLoadBarrier(code, loopStart, loopEnd, load) {
+		if loopHasInvariantHeaderLoadBarrier(view, loopStart, loopEnd, load) {
 			continue
 		}
 		rewritten := backedge
@@ -1476,8 +1518,15 @@ func hoistBytecodeIRLoopInvariantHeaderLoads(ir []bytecodeIRInstruction) []bytec
 		default:
 			continue
 		}
+		if optimized == nil {
+			optimized = append([]bytecodeIRInstruction(nil), ir...)
+			code = append([]instruction(nil), sourceCode...)
+		}
 		code[loopEnd] = rewritten
 		optimized[loopEnd] = lowerInstructionToBytecodeIR(rewritten, optimized[loopEnd].sourceSpan())
+	}
+	if optimized == nil {
+		return ir
 	}
 	return optimized
 }
@@ -1571,12 +1620,12 @@ func remapBytecodeIRJumpTargets(ir []bytecodeIRInstruction, oldToNew []int) {
 	}
 }
 
-func isDeadMoveRoundTripInBlock(code []instruction, first int, blockEnd int, liveOut registerSet) bool {
-	if first+1 >= blockEnd || !isDeadMoveRoundTripPair(code[first], code[first+1]) {
+func isDeadMoveRoundTripInIR(ir []bytecodeIRInstruction, first int, blockEnd int, liveOut registerSet) bool {
+	if first+1 >= blockEnd || !isDeadMoveRoundTripPair(assembleBytecodeIRInstruction(ir[first]), assembleBytecodeIRInstruction(ir[first+1])) {
 		return false
 	}
-	register := code[first].a
-	if killed, known := registerKilledBeforeRead(code[first+2:blockEnd], register); known {
+	register := ir[first].operandValue(bytecodeIROperandSlotA)
+	if killed, known := registerKilledBeforeReadIR(ir, first+2, blockEnd, register); known {
 		return killed
 	}
 	return !liveOut.contains(register)
@@ -1591,6 +1640,19 @@ func isDeadMoveRoundTripPair(left instruction, right instruction) bool {
 
 func registerKilledBeforeRead(code []instruction, register int) (bool, bool) {
 	for _, ins := range code {
+		if instructionHasRegisterEffect(ins, register, instructionRegisterRead) {
+			return false, true
+		}
+		if instructionHasRegisterEffect(ins, register, instructionRegisterWrite) {
+			return true, true
+		}
+	}
+	return false, false
+}
+
+func registerKilledBeforeReadIR(ir []bytecodeIRInstruction, start int, end int, register int) (bool, bool) {
+	for pc := start; pc < end; pc++ {
+		ins := assembleBytecodeIRInstruction(ir[pc])
 		if instructionHasRegisterEffect(ins, register, instructionRegisterRead) {
 			return false, true
 		}

@@ -349,7 +349,7 @@ func TestOptimizerThreadsJumpChains(t *testing.T) {
 	builder.emit(instruction{op: opReturnOne, a: 2})
 
 	optimized := optimizeBytecodeIR(builder.ir, optimizationOptions{})
-	got := assembleBytecodeIRRaw(optimized)
+	got := materializeBytecodeIR(optimized)
 	want := []instruction{
 		{op: opJumpIfFalse, a: 0, b: 2},
 		{op: opReturnOne, a: 1},
@@ -619,7 +619,7 @@ func legacyOptimizeBytecodeIRWithFacts(ir []bytecodeIRInstruction, facts bytecod
 	function := newFunctionIR(append([]bytecodeIRInstruction(nil), ir...))
 	function.replace(applyBytecodeIRRemovalSet(
 		function.instructions,
-		bytecodeIRPeepholeRemovalSet(function.instructions, assembleBytecodeIRRaw(function.instructions), function.currentAnalysis()),
+		bytecodeIRPeepholeRemovalSetCompact(function.instructions, function.currentAnalysis()),
 	))
 	function.replace(simplifyBytecodeIRControlFlow(function.instructions, bytecodeIROptimizationFacts{}))
 	function.replace(propagateBytecodeIRScalarConstants(function.instructions, facts))
@@ -628,7 +628,7 @@ func legacyOptimizeBytecodeIRWithFacts(ir []bytecodeIRInstruction, facts bytecod
 	function.replace(hoistBytecodeIRLoopInvariantHeaderLoads(function.instructions))
 	function.replace(applyBytecodeIRRemovalSet(
 		function.instructions,
-		bytecodeIRDeadCodeRemovalSet(function.instructions, facts, function.currentAnalysis()),
+		bytecodeIRDeadCodeRemovalSetCompact(function.instructions, facts, function.currentAnalysis()),
 	))
 	function.replace(simplifyBytecodeIRControlFlow(function.instructions, bytecodeIROptimizationFacts{}))
 	if facts.constantPool != nil {

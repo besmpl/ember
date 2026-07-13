@@ -19,7 +19,7 @@ func TestControlFlowSimplificationFoldsThreadsAndCompactsOnce(t *testing.T) {
 		constants: []Value{BoolValue(true), NumberValue(1), NumberValue(2)},
 	}
 
-	got := assembleBytecodeIRRaw(simplifyBytecodeIRControlFlow(ir, facts))
+	got := materializeBytecodeIR(simplifyBytecodeIRControlFlow(ir, facts))
 	want := []instruction{
 		{op: opLoadConst, a: 0, b: 0},
 		{op: opReturnOne, a: 0},

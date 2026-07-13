@@ -1,11 +1,36 @@
 package ember
 
 type functionIR struct {
-	instructions  []bytecodeIRInstruction
-	revision      uint64
-	analysis      *functionAnalysis
-	features      bytecodeIRFeatures
-	featuresValid bool
+	instructions []bytecodeIRInstruction
+	revision     uint64
+
+	// The caches have separate generations because a constant/source rewrite
+	// does not change the CFG or register liveness, while a register/count
+	// rewrite changes liveness without changing the CFG.
+	cfgRevision      uint64
+	livenessRevision uint64
+	analysis         *functionAnalysis
+	features         bytecodeIRFeatures
+	featuresValid    bool
+	assembled        []instruction
+	assembledValid   bool
+}
+
+type bytecodeIRChangeClass uint8
+
+const (
+	bytecodeIRChangeNone bytecodeIRChangeClass = iota
+	bytecodeIRChangeSource
+	bytecodeIRChangeValue
+	bytecodeIRChangeRegisterEffects
+	bytecodeIRChangeControlFlow
+)
+
+func (class bytecodeIRChangeClass) merge(other bytecodeIRChangeClass) bytecodeIRChangeClass {
+	if other > class {
+		return other
+	}
+	return class
 }
 
 type bytecodeIRFeatures struct {
@@ -16,33 +41,110 @@ type bytecodeIRFeatures struct {
 }
 
 type functionAnalysis struct {
-	revision     uint64
-	blocks       []bytecodeIRBlock
-	successors   [][]int
-	predecessors [][]int
-	reachable    []bool
-	use          []registerSet
-	def          []registerSet
-	liveness     []bytecodeIRLivenessBlock
+	revision         uint64
+	cfgRevision      uint64
+	livenessRevision uint64
+	blocks           []bytecodeIRBlock
+	successors       [][]int
+	predecessors     [][]int
+	reachable        []bool
+	use              []registerSet
+	def              []registerSet
+	liveness         []bytecodeIRLivenessBlock
 	// liveAfter is ephemeral finalization data, never a Proto side table.
 	liveAfter []registerSet
 	effects   []opcodeEffects
 }
 
 func newFunctionIR(ir []bytecodeIRInstruction) *functionIR {
-	return &functionIR{instructions: ir}
+	return &functionIR{instructions: append([]bytecodeIRInstruction(nil), ir...)}
 }
 
 func (function *functionIR) replace(ir []bytecodeIRInstruction) {
+	function.replaceOwned(append([]bytecodeIRInstruction(nil), ir...))
+}
+
+// replaceOwned accepts a slice that the caller will not mutate after this
+// call. Optimizer transformations use it to avoid an extra copy; tests and
+// external callers should use replace, which takes ownership by cloning.
+func (function *functionIR) replaceOwned(ir []bytecodeIRInstruction) {
 	if function == nil {
 		return
 	}
-	if !equalBytecodeIR(function.instructions, ir) {
-		function.revision++
-		function.analysis = nil
+	change := classifyBytecodeIRChange(function.instructions, ir)
+	if change == bytecodeIRChangeNone {
+		return
+	}
+	function.revision++
+	if change != bytecodeIRChangeSource {
+		function.assembledValid = false
+	}
+	switch change {
+	case bytecodeIRChangeSource, bytecodeIRChangeValue:
+		// Semantic analysis and opcode features remain valid.
+	case bytecodeIRChangeRegisterEffects:
+		function.livenessRevision++
+	case bytecodeIRChangeControlFlow:
+		function.cfgRevision++
+		function.livenessRevision++
 		function.featuresValid = false
 	}
 	function.instructions = ir
+}
+
+// currentCode returns a shared, read-only assembled view. Mutating passes must
+// clone it before changing any element.
+func (function *functionIR) currentCode() []instruction {
+	if function == nil {
+		return nil
+	}
+	if !function.assembledValid {
+		function.assembled = materializeBytecodeIR(function.instructions)
+		function.assembledValid = true
+	}
+	return function.assembled
+}
+
+func materializeBytecodeIR(ir []bytecodeIRInstruction) []instruction {
+	code := make([]instruction, len(ir))
+	for index, instruction := range ir {
+		code[index] = assembleBytecodeIRInstruction(instruction)
+	}
+	return code
+}
+
+func classifyBytecodeIRChange(before, after []bytecodeIRInstruction) bytecodeIRChangeClass {
+	if len(before) != len(after) {
+		return bytecodeIRChangeControlFlow
+	}
+	change := bytecodeIRChangeNone
+	for index := range before {
+		left, right := before[index], after[index]
+		if left.opcodeValue() != right.opcodeValue() {
+			return bytecodeIRChangeControlFlow
+		}
+		if left.sourceStart != right.sourceStart || left.sourceEnd != right.sourceEnd {
+			change = change.merge(bytecodeIRChangeSource)
+		}
+		for slot := bytecodeIROperandSlotA; slot <= bytecodeIROperandSlotD; slot++ {
+			if left.operandValue(slot) == right.operandValue(slot) {
+				continue
+			}
+			kind := left.operandKind(slot)
+			if kind != right.operandKind(slot) {
+				return bytecodeIRChangeControlFlow
+			}
+			switch kind {
+			case bytecodeOperandJumpTarget:
+				return bytecodeIRChangeControlFlow
+			case bytecodeOperandRegister, bytecodeOperandCount:
+				change = change.merge(bytecodeIRChangeRegisterEffects)
+			default:
+				change = change.merge(bytecodeIRChangeValue)
+			}
+		}
+	}
+	return change
 }
 
 func (function *functionIR) currentFeatures() bytecodeIRFeatures {
@@ -93,48 +195,58 @@ func (function *functionIR) currentAnalysis() *functionAnalysis {
 	if function == nil {
 		return nil
 	}
-	if function.analysis == nil || function.analysis.revision != function.revision {
+	if function.analysis == nil || function.analysis.cfgRevision != function.cfgRevision {
 		function.analysis = analyzeBytecodeIR(function.instructions, function.revision)
+		function.analysis.cfgRevision = function.cfgRevision
+		function.analysis.livenessRevision = function.livenessRevision
+	} else if function.analysis.livenessRevision != function.livenessRevision {
+		previous := function.analysis
+		function.analysis = &functionAnalysis{
+			revision:         function.revision,
+			cfgRevision:      function.cfgRevision,
+			livenessRevision: function.livenessRevision,
+			blocks:           previous.blocks,
+			successors:       previous.successors,
+			predecessors:     previous.predecessors,
+			reachable:        previous.reachable,
+			effects:          previous.effects,
+		}
+		refreshFunctionAnalysisLiveness(function.instructions, function.analysis)
 	}
 	return function.analysis
-}
-
-func equalBytecodeIR(left []bytecodeIRInstruction, right []bytecodeIRInstruction) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
 }
 
 func analyzeBytecodeIR(ir []bytecodeIRInstruction, revision uint64) *functionAnalysis {
 	blocks := bytecodeIRBlockOrder(ir)
 	successors := bytecodeIRBlockSuccessors(ir, blocks)
-	liveness := bytecodeIRLivenessForGraph(ir, blocks, successors)
 	analysis := &functionAnalysis{
 		revision:     revision,
 		blocks:       blocks,
 		successors:   successors,
 		predecessors: bytecodeIRBlockPredecessors(successors),
 		reachable:    bytecodeIRReachableBlocks(successors),
-		use:          make([]registerSet, len(liveness)),
-		def:          make([]registerSet, len(liveness)),
-		liveness:     liveness,
-		liveAfter:    bytecodeIRLiveAfter(ir, blocks, liveness),
 		effects:      make([]opcodeEffects, len(ir)),
-	}
-	for block := range liveness {
-		analysis.use[block] = liveness[block].use
-		analysis.def[block] = liveness[block].def
 	}
 	for pc, ins := range ir {
 		analysis.effects[pc] = opcodeEffect(ins.opcodeValue())
 	}
+	refreshFunctionAnalysisLiveness(ir, analysis)
 	return analysis
+}
+
+func refreshFunctionAnalysisLiveness(ir []bytecodeIRInstruction, analysis *functionAnalysis) {
+	if analysis == nil {
+		return
+	}
+	liveness := bytecodeIRLivenessForGraph(ir, analysis.blocks, analysis.successors)
+	analysis.use = make([]registerSet, len(liveness))
+	analysis.def = make([]registerSet, len(liveness))
+	analysis.liveness = liveness
+	analysis.liveAfter = bytecodeIRLiveAfter(ir, analysis.blocks, liveness)
+	for block := range liveness {
+		analysis.use[block] = liveness[block].use
+		analysis.def[block] = liveness[block].def
+	}
 }
 
 func bytecodeIRLiveAfter(ir []bytecodeIRInstruction, blocks []bytecodeIRBlock, liveness []bytecodeIRLivenessBlock) []registerSet {

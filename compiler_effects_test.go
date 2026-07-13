@@ -181,7 +181,7 @@ func TestLoopInvariantLoadTreatsMetamethodOperationsAsBarriers(t *testing.T) {
 			builder.emit(instruction{op: opReturnOne, a: 2})
 
 			optimized := hoistBytecodeIRLoopInvariantHeaderLoads(builder.ir)
-			code := assembleBytecodeIRRaw(optimized)
+			code := materializeBytecodeIR(optimized)
 			backedge := code[fallback-1]
 			if backedge.op != opJump {
 				t.Fatalf("backedge opcode is %s, want JUMP", opcodeName(backedge.op))
