@@ -112,6 +112,16 @@ testable seam.
 - `RunWithGlobals(proto *Proto, globals map[string]Value) ([]Value, error)`
   executes with Ember's pure base globals plus explicit host-provided globals.
   Host-provided globals override base globals with the same name.
+- Execution failures returned to Go are represented by `*RuntimeError` when
+  script frames are available. `RuntimeError.Message` is the stable message,
+  `Frames` is ordered innermost-first, and `Cause` remains available through
+  `errors.Is` and `errors.As`; `RunHook` adds contextual `%w` wrapping while
+  `Callback.Call` preserves the runtime error without flattening it. Ordinary
+  script and host errors are values under `pcall`/`xpcall` (the latter may
+  invoke its handler), while
+  context cancellation/deadline and every `LimitError` are protected-boundary
+  failures that escape to Go and preserve their `errors.Is`/`errors.As`
+  identity.
 - A compiled `*Proto` is immutable after sealing and may be executed
   concurrently. Each execution runtime owns its function instances, inline
   caches, and reusable closure values, so warming one runtime does not mutate

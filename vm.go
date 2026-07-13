@@ -1973,8 +1973,10 @@ func (thread *vmThread) continueSuspended(args []Value) ([]Value, error) {
 	if thread.resumeCallDepthErr != nil {
 		err := thread.resumeCallDepthErr
 		thread.resumeCallDepthErr = nil
-		if thread.recoverProtectedError(err) {
+		if recovered, escapeErr := thread.recoverProtectedError(err); recovered {
 			return thread.runUntilDepth(0)
+		} else if escapeErr != nil {
+			return nil, escapeErr
 		}
 		var frame *vmFrame
 		if len(thread.frames) != 0 {
@@ -2012,8 +2014,10 @@ func (thread *vmThread) continueHostCall(frame *vmFrame, args []Value) ([]Value,
 				host:      yield.host,
 			}
 		}
-		if thread.recoverProtectedError(err) {
+		if recovered, escapeErr := thread.recoverProtectedError(err); recovered {
 			return thread.runUntilDepth(0)
+		} else if escapeErr != nil {
+			return nil, escapeErr
 		}
 		callSite := *frame
 		callSite.pc = previousWordcodeInstruction(callSite.proto, callSite.pc)
@@ -2102,8 +2106,10 @@ func (thread *vmThread) runUntilDepthResult(baseDepth int) (vmFrameResult, error
 		frame := thread.frames[len(thread.frames)-1]
 		result, err := thread.runFrame(frame)
 		if err != nil {
-			if thread.recoverProtectedError(err) {
+			if recovered, escapeErr := thread.recoverProtectedError(err); recovered {
 				continue
+			} else if escapeErr != nil {
+				return vmFrameResult{}, escapeErr
 			}
 			active := frame
 			if len(thread.frames) > baseDepth {
@@ -2119,8 +2125,10 @@ func (thread *vmThread) runUntilDepthResult(baseDepth int) (vmFrameResult, error
 			}
 			frame = thread.newScriptCallFrame(caller, call)
 			if frame.callDepthErr != nil {
-				if thread.recoverProtectedError(frame.callDepthErr) {
+				if recovered, escapeErr := thread.recoverProtectedError(frame.callDepthErr); recovered {
 					continue
+				} else if escapeErr != nil {
+					return vmFrameResult{}, escapeErr
 				}
 				// The callee could not become active, so report the call-site
 				// instruction in the still-live caller as the failing frame.
@@ -2132,8 +2140,10 @@ func (thread *vmThread) runUntilDepthResult(baseDepth int) (vmFrameResult, error
 			thread.directFramePICCounts.addFixedCallTrampolineEntry()
 			if thread.debugHook != nil && thread.debugCallHook {
 				if err := thread.runDebugCallHook(frame); err != nil {
-					if thread.recoverProtectedError(err) {
+					if recovered, escapeErr := thread.recoverProtectedError(err); recovered {
 						continue
+					} else if escapeErr != nil {
+						return vmFrameResult{}, escapeErr
 					}
 					return vmFrameResult{}, thread.captureRuntimeError(err, frame, baseDepth)
 				}
@@ -2149,8 +2159,10 @@ func (thread *vmThread) runUntilDepthResult(baseDepth int) (vmFrameResult, error
 
 		if thread.debugHook != nil && thread.debugReturnHook {
 			if err := thread.runDebugReturnHook(frame); err != nil {
-				if thread.recoverProtectedError(err) {
+				if recovered, escapeErr := thread.recoverProtectedError(err); recovered {
 					continue
+				} else if escapeErr != nil {
+					return vmFrameResult{}, escapeErr
 				}
 				return vmFrameResult{}, thread.captureRuntimeError(err, frame, baseDepth)
 			}
@@ -2218,16 +2230,20 @@ func (thread *vmThread) runInlineScriptFrame(calleeFrame *vmFrame, baseDepth int
 	thread.pushFrame(calleeFrame)
 	if thread.debugHook != nil && thread.debugCallHook {
 		if err := thread.runDebugCallHook(calleeFrame); err != nil {
-			if thread.recoverProtectedError(err) {
+			if recovered, escapeErr := thread.recoverProtectedError(err); recovered {
 				return thread.runUntilDepthResult(baseDepth)
+			} else if escapeErr != nil {
+				return vmFrameResult{}, escapeErr
 			}
 			return vmFrameResult{}, err
 		}
 	}
 	result, err := thread.runFrame(calleeFrame)
 	if err != nil {
-		if thread.recoverProtectedError(err) {
+		if recovered, escapeErr := thread.recoverProtectedError(err); recovered {
 			return thread.runUntilDepthResult(baseDepth)
+		} else if escapeErr != nil {
+			return vmFrameResult{}, escapeErr
 		}
 		return vmFrameResult{}, err
 	}
@@ -2242,8 +2258,10 @@ func (thread *vmThread) runInlineScriptFrame(calleeFrame *vmFrame, baseDepth int
 		thread.directFramePICCounts.addFixedCallTrampolineEntry()
 		if thread.debugHook != nil && thread.debugCallHook {
 			if err := thread.runDebugCallHook(frame); err != nil {
-				if thread.recoverProtectedError(err) {
+				if recovered, escapeErr := thread.recoverProtectedError(err); recovered {
 					return thread.runUntilDepthResult(baseDepth)
+				} else if escapeErr != nil {
+					return vmFrameResult{}, escapeErr
 				}
 				return vmFrameResult{}, err
 			}
@@ -2258,8 +2276,10 @@ func (thread *vmThread) runInlineScriptFrame(calleeFrame *vmFrame, baseDepth int
 	}
 	if thread.debugHook != nil && thread.debugReturnHook {
 		if err := thread.runDebugReturnHook(calleeFrame); err != nil {
-			if thread.recoverProtectedError(err) {
+			if recovered, escapeErr := thread.recoverProtectedError(err); recovered {
 				return thread.runUntilDepthResult(baseDepth)
+			} else if escapeErr != nil {
+				return vmFrameResult{}, escapeErr
 			}
 			return vmFrameResult{}, err
 		}
@@ -2306,12 +2326,14 @@ func (thread *vmThread) runInlineScriptCallOneNoHook(closure *closure, args []Va
 	thread.pushFrame(calleeFrame)
 	result, err := thread.runFrame(calleeFrame)
 	if err != nil {
-		if thread.recoverProtectedError(err) {
+		if recovered, escapeErr := thread.recoverProtectedError(err); recovered {
 			result, err = thread.runUntilDepthResult(baseDepth)
 			if err != nil {
 				return NilValue(), err
 			}
 			return result.window.at(0), nil
+		} else if escapeErr != nil {
+			return NilValue(), escapeErr
 		}
 		return NilValue(), err
 	}
@@ -2360,12 +2382,14 @@ func (thread *vmThread) runInlineScriptCallFixedOneNoHook(closure *closure, firs
 	thread.pushFrame(calleeFrame)
 	result, err := thread.runFrame(calleeFrame)
 	if err != nil {
-		if thread.recoverProtectedError(err) {
+		if recovered, escapeErr := thread.recoverProtectedError(err); recovered {
 			result, err = thread.runUntilDepthResult(baseDepth)
 			if err != nil {
 				return NilValue(), err
 			}
 			return result.window.at(0), nil
+		} else if escapeErr != nil {
+			return NilValue(), escapeErr
 		}
 		return NilValue(), err
 	}
@@ -2408,25 +2432,25 @@ func fixedRegisterArgs(registers []Value, start int, count int) (Value, Value, V
 	return first, second, third
 }
 
-func (thread *vmThread) recoverProtectedError(err error) bool {
-	if isVMYieldRequest(err) || isVMHostInterrupt(err) {
-		return false
+func (thread *vmThread) recoverProtectedError(err error) (bool, error) {
+	if isVMYieldRequest(err) || isVMHostInterrupt(err) || isProtectedBoundaryError(err) {
+		return false, nil
 	}
 	thread.protectedRecoveryLookups++
 	index := thread.nearestProtectedFrame
 	if index < 0 {
-		return false
+		return false, nil
 	}
 	if index >= len(thread.frames) {
 		thread.protectedRecoveryErrors++
 		thread.nearestProtectedFrame = noProtectedFrame
-		return false
+		return false, nil
 	}
 	frame := thread.frames[index]
 	if frame == nil || frame.depth != index || !frame.hasPendingCall || frame.pendingCall.protected == nil {
 		thread.protectedRecoveryErrors++
 		thread.nearestProtectedFrame = noProtectedFrame
-		return false
+		return false, nil
 	}
 	protected := frame.pendingCall.protected
 	thread.dropFrames(index + 1)
@@ -2436,13 +2460,30 @@ func (thread *vmThread) recoverProtectedError(err error) bool {
 		handled, handlerErr := callValue(protected.handler, thread.globals, results)
 		restore()
 		if handlerErr != nil {
+			if isProtectedBoundaryError(handlerErr) {
+				return false, handlerErr
+			}
 			results = []Value{StringValue(handlerErr.Error())}
 		} else {
 			results = handled
 		}
 	}
 	frame.applyProtectedErrorResults(thread, append([]Value{BoolValue(false)}, results...))
-	return true
+	return true, nil
+}
+
+func isProtectedBoundaryError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if errors.Is(err, ErrLimitExceeded) {
+		return true
+	}
+	var limitErr *LimitError
+	return errors.As(err, &limitErr)
 }
 
 func (thread *vmThread) pushFrame(frame *vmFrame) {

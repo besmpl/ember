@@ -24,7 +24,7 @@ func TestVMProtectedRecoveryUsesNearestBoundaryMarker(t *testing.T) {
 	if got, want := thread.nearestProtectedFrame, child.depth; got != want {
 		t.Fatalf("nearest protected frame is %d, want child depth %d", got, want)
 	}
-	if !thread.recoverProtectedError(errors.New("child failure")) {
+	if recovered, escapeErr := thread.recoverProtectedError(errors.New("child failure")); !recovered || escapeErr != nil {
 		t.Fatal("recoverProtectedError did not recover the nearest protected call")
 	}
 	if got, want := thread.nearestProtectedFrame, parent.depth; got != want {
@@ -40,7 +40,7 @@ func TestVMProtectedRecoveryUsesNearestBoundaryMarker(t *testing.T) {
 		t.Fatalf("protected recovery performed %d frame scans, want 0", got)
 	}
 
-	if !thread.recoverProtectedError(errors.New("parent failure")) {
+	if recovered, escapeErr := thread.recoverProtectedError(errors.New("parent failure")); !recovered || escapeErr != nil {
 		t.Fatal("recoverProtectedError did not recover the prior protected call")
 	}
 	if got := thread.nearestProtectedFrame; got != noProtectedFrame {
@@ -69,13 +69,13 @@ func TestVMProtectedBoundaryMarkerKeepsSuspendedChildNearest(t *testing.T) {
 	if got := parent.pendingCall.protectedBoundary; !got {
 		t.Fatalf("parent protected pending call boundary bit is false, want true")
 	}
-	if !thread.recoverProtectedError(errors.New("child failure")) {
+	if recovered, escapeErr := thread.recoverProtectedError(errors.New("child failure")); !recovered || escapeErr != nil {
 		t.Fatal("recoverProtectedError did not recover the child boundary")
 	}
 	if got, want := thread.nearestProtectedFrame, parent.depth; got != want {
 		t.Fatalf("nearest protected frame after child recovery is %d, want parent depth %d", got, want)
 	}
-	if !thread.recoverProtectedError(errors.New("parent failure")) {
+	if recovered, escapeErr := thread.recoverProtectedError(errors.New("parent failure")); !recovered || escapeErr != nil {
 		t.Fatal("recoverProtectedError did not recover the parent boundary")
 	}
 	if got := thread.nearestProtectedFrame; got != noProtectedFrame {

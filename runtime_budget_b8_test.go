@@ -208,15 +208,14 @@ again = function() coroutine.create(paused) end }
 	}
 }
 
-func TestB8FailedCreateDoesNotLeakCapacity(t *testing.T) {
+func TestB8CoroutineLimitEscapesProtectedCall(t *testing.T) {
 	program := newB3Program(t, []b3EntrypointSource{{name: "main", path: "main", source: `
 local function paused() coroutine.yield() end
 return { startup = function()
   local first = coroutine.create(paused)
   local ok = pcall(function() coroutine.create(paused) end)
   coroutine.close(first)
-  local second = coroutine.create(paused)
-  return ok, second ~= nil
+  return ok
 end }
 `}})
 	runtime, err := program.NewRuntime(RuntimeOptions{Limits: ExecutionLimits{MaxCoroutines: 1}})
@@ -224,8 +223,10 @@ end }
 		t.Fatal(err)
 	}
 	defer runtime.Close()
-	if _, err := runtime.RunHook(context.Background(), "startup"); err != nil {
-		t.Fatalf("failed-create run = %v", err)
+	_, err = runtime.RunHook(context.Background(), "startup")
+	var limit *LimitError
+	if !errors.As(err, &limit) || limit.Kind != LimitCoroutines {
+		t.Fatalf("protected coroutine create error = %v, want escaped coroutine limit", err)
 	}
 }
 

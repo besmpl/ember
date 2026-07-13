@@ -3332,7 +3332,7 @@ func TestVMProtectedRecoveryDoesNotCatchHostInterrupt(t *testing.T) {
 	thread := newVMThread(runtimeGlobals(nil))
 	thread.pushFrame(frame)
 
-	if thread.recoverProtectedError(vmHostInterrupt{}) {
+	if recovered, escapeErr := thread.recoverProtectedError(vmHostInterrupt{}); recovered || escapeErr != nil {
 		t.Fatal("protected recovery caught host interrupt, want it to propagate")
 	}
 }

@@ -156,6 +156,9 @@ func basePCall(globals *globalEnv, args []Value) ([]Value, error) {
 		if isVMHostInterrupt(err) {
 			return nil, err
 		}
+		if isProtectedBoundaryError(err) {
+			return nil, err
+		}
 		return []Value{BoolValue(false), StringValue(err.Error())}, nil
 	}
 	return append([]Value{BoolValue(true)}, results...), nil
@@ -184,12 +187,18 @@ func baseXPCall(globals *globalEnv, args []Value) ([]Value, error) {
 	if isVMHostInterrupt(err) {
 		return nil, err
 	}
+	if isProtectedBoundaryError(err) {
+		return nil, err
+	}
 	handled, handlerErr := protectedErrorHandlerCall(globals, args[1], StringValue(err.Error()))
 	if handlerErr != nil {
 		if _, ok := handlerErr.(vmYieldRequest); ok {
 			return nil, handlerErr
 		}
 		if isVMHostInterrupt(handlerErr) {
+			return nil, handlerErr
+		}
+		if isProtectedBoundaryError(handlerErr) {
 			return nil, handlerErr
 		}
 		return []Value{BoolValue(false), StringValue(handlerErr.Error())}, nil
