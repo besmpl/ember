@@ -59,6 +59,39 @@ func TestCompileLexerBoundsSparseCommentPreallocation(t *testing.T) {
 	}
 }
 
+func TestCompileLexerTiesTokenPreallocationToExplicitLimit(t *testing.T) {
+	lexed, err := lexSourceWithOptions("return 1", lexerOptions{maxTokens: 1})
+	if err == nil {
+		t.Fatal("lexSourceWithOptions succeeded, want token limit error")
+	}
+
+	lexed, err = lexSourceWithOptions("return 1", lexerOptions{maxTokens: 2})
+	if err != nil {
+		t.Fatalf("lexSourceWithOptions returned error: %v", err)
+	}
+	if got := cap(lexed.tokens); got > 2 {
+		t.Fatalf("token capacity = %d, want at most explicit limit 2", got)
+	}
+}
+
+func TestEstimatedTokenCapacityKeepsDenseAndCommentHeavyBounds(t *testing.T) {
+	if got := estimatedTokenCapacityForSource(strings.Repeat("value = value + 1\n", 15000), 0); got != 64<<10 {
+		t.Fatalf("dense token capacity = %d, want exact 64K-token cap", got)
+	}
+	denseWithComment := strings.Repeat("value = value + 1\n", 15000) + "-- one comment\n"
+	if got := estimatedTokenCapacityForSource(denseWithComment, 0); got != 64<<10 {
+		t.Fatalf("dense source with one comment capacity = %d, want exact 64K-token cap", got)
+	}
+	stringMarkerSource := strings.Repeat("return \"-- marker\"\n", 16000)
+	if got := estimatedTokenCapacityForSource(stringMarkerSource, 0); got != 64<<10 {
+		t.Fatalf("string marker source capacity = %d, want exact 64K-token cap", got)
+	}
+	commentSource := strings.Repeat("-- comment\n", 1<<14) + "return 1\n"
+	if got := estimatedTokenCapacityForSource(commentSource, 0); got > 4096 {
+		t.Fatalf("comment-heavy token capacity = %d, want sparse bound 4096", got)
+	}
+}
+
 func TestCompactTokenPayloadsSeparateRawAndEscapedStrings(t *testing.T) {
 	source := `return "plain", "line\nfeed"`
 	lexed, err := lexSourceForCompile(source)

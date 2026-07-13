@@ -76,6 +76,41 @@ return values[1], values[2], calls`,
 	}
 }
 
+func TestCompileRunContextualTypeAndExportIdentifierStatements(t *testing.T) {
+	results := compileRunIdentifierStatementSource(t, `type = 1
+export = type + 2
+return export`)
+	if len(results) != 1 {
+		t.Fatalf("Run returned %d results, want 1", len(results))
+	}
+	got, ok := results[0].Number()
+	if !ok || got != 3 {
+		t.Fatalf("Run result is %v (%t), want 3", results[0], ok)
+	}
+}
+
+func TestMalformedTypeAliasFallsBackToIdentifierError(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{name: "type alias", source: "type Value\nreturn 1", want: "compile: byte 5: expected ="},
+		{name: "export type alias", source: "export type Value\nreturn 1", want: "compile: byte 7: expected ="},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Compile(test.source)
+			if err == nil {
+				t.Fatal("Compile succeeded, want malformed type alias error")
+			}
+			if got := err.Error(); got != test.want {
+				t.Fatalf("Compile error is %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestCompileRunIdentifierStatementCalls(t *testing.T) {
 	tests := []struct {
 		name   string

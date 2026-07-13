@@ -126,7 +126,7 @@ func lexSourceWithOptions(source string, options lexerOptions) (lexResult, error
 	}
 	// Source density is intentionally only a hint and is bounded so a huge
 	// comment or string cannot turn preallocation into an unbounded request.
-	tokens := make([]sourceToken, 0, estimatedTokenCapacity(len(source)))
+	tokens := make([]sourceToken, 0, estimatedTokenCapacityForSource(source, options.maxTokens))
 	var comments []sourceComment
 	if options.retainComments {
 		comments = make([]sourceComment, 0, estimatedCommentCapacity(len(source)))
@@ -175,11 +175,62 @@ func estimatedTokenCapacity(sourceLength int) int {
 	if capacity < 8 {
 		capacity = 8
 	}
-	const maxTokenCapacity = 4096
+	const maxTokenCapacity = 64 << 10
 	if capacity > maxTokenCapacity {
 		return maxTokenCapacity
 	}
 	return capacity
+}
+
+func estimatedTokenCapacityForSource(source string, maxTokens uint64) int {
+	capacity := estimatedTokenCapacity(len(source))
+	// Comment-only and comment-heavy inputs have very few tokens despite their
+	// byte length. Keep their initial allocation bounded while allowing dense
+	// source to start near its measured token count.
+	if capacity > 4096 && commentHeavySource(source) {
+		capacity = 4096
+	}
+	if maxTokens != 0 && maxTokens < uint64(capacity) {
+		capacity = int(maxTokens)
+	}
+	return capacity
+}
+
+// commentHeavySource uses line prefixes as a cheap conservative signal. It
+// avoids treating inline comments or string literals containing "--" as a
+// sparse source while still bounding comment-only inputs.
+func commentHeavySource(source string) bool {
+	var codeBytes, commentBytes uint64
+	for lineStart := 0; lineStart < len(source); {
+		lineEnd := strings.IndexByte(source[lineStart:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(source)
+		} else {
+			lineEnd += lineStart
+		}
+		first := lineStart
+		for first < lineEnd && (source[first] == ' ' || source[first] == '\t' || source[first] == '\r') {
+			first++
+		}
+		if first < lineEnd {
+			var nonspace uint64
+			for index := first; index < lineEnd; index++ {
+				if source[index] != ' ' && source[index] != '\t' && source[index] != '\r' {
+					nonspace++
+				}
+			}
+			if first+1 < lineEnd && source[first] == '-' && source[first+1] == '-' {
+				commentBytes += nonspace
+			} else {
+				codeBytes += nonspace
+			}
+		}
+		if lineEnd == len(source) {
+			break
+		}
+		lineStart = lineEnd + 1
+	}
+	return codeBytes == 0 || commentBytes >= codeBytes*3
 }
 
 func estimatedCommentCapacity(sourceLength int) int {

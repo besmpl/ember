@@ -449,14 +449,22 @@ func (p *parser) parseBlock(stopKeywords ...string) ([]statement, error) {
 }
 
 func (p *parser) parseStatement() (statement, error) {
-	if alias, ok, err := p.tryParseTypeAliasStatement(); ok || err != nil {
-		if err != nil {
-			return statement{}, err
+	token, ok := p.currentToken()
+	if !ok {
+		return statement{}, p.errorf("expected statement")
+	}
+	if token.matchesWordAt(p.source, p.pos, "type") || token.matchesWordAt(p.source, p.pos, "export") {
+		if alias, parsed, err := p.tryParseTypeAliasStatement(); parsed || err != nil {
+			if err != nil {
+				return statement{}, err
+			}
+			return statement{typeAlias: alias}, nil
 		}
-		return statement{typeAlias: alias}, nil
 	}
 
-	if p.consumeKeyword("local") {
+	switch {
+	case token.matchesWordAt(p.source, p.pos, "local"):
+		p.consumeKeyword("local")
 		p.skipSpace()
 		if p.consumeKeyword("function") {
 			stmt, err := p.parseLocalFunctionStatement()
@@ -471,9 +479,8 @@ func (p *parser) parseStatement() (statement, error) {
 			return statement{}, err
 		}
 		return statement{local: &stmt}, nil
-	}
 
-	if token, ok := p.currentToken(); ok && token.matchesWordAt(p.source, p.pos, "return") {
+	case token.matchesWordAt(p.source, p.pos, "return"):
 		p.consumeKeyword("return")
 		stmt, err := p.parseReturnStatement()
 		if err != nil {
@@ -482,33 +489,29 @@ func (p *parser) parseStatement() (statement, error) {
 		stmt.start = token.startOffset()
 		stmt.end = token.endOffset()
 		return statement{ret: &stmt}, nil
-	}
-
-	if p.consumeKeyword("function") {
+	case token.matchesWordAt(p.source, p.pos, "function"):
+		p.consumeKeyword("function")
 		stmt, err := p.parseFunctionDeclarationStatement()
 		if err != nil {
 			return statement{}, err
 		}
 		return statement{funcDecl: &stmt}, nil
-	}
-
-	if p.consumeKeyword("if") {
+	case token.matchesWordAt(p.source, p.pos, "if"):
+		p.consumeKeyword("if")
 		stmt, err := p.parseIfStatement()
 		if err != nil {
 			return statement{}, err
 		}
 		return statement{ifStmt: &stmt}, nil
-	}
-
-	if p.consumeKeyword("while") {
+	case token.matchesWordAt(p.source, p.pos, "while"):
+		p.consumeKeyword("while")
 		stmt, err := p.parseWhileStatement()
 		if err != nil {
 			return statement{}, err
 		}
 		return statement{while: &stmt}, nil
-	}
-
-	if p.consumeKeyword("for") {
+	case token.matchesWordAt(p.source, p.pos, "for"):
+		p.consumeKeyword("for")
 		stmt, err := p.parseForStatement()
 		if err != nil {
 			return statement{}, err
@@ -517,37 +520,31 @@ func (p *parser) parseStatement() (statement, error) {
 			return statement{forLoop: stmt.numeric}, nil
 		}
 		return statement{genericFor: stmt.generic}, nil
-	}
-
-	if p.consumeKeyword("repeat") {
+	case token.matchesWordAt(p.source, p.pos, "repeat"):
+		p.consumeKeyword("repeat")
 		stmt, err := p.parseRepeatStatement()
 		if err != nil {
 			return statement{}, err
 		}
 		return statement{repeat: &stmt}, nil
-	}
-
-	if p.consumeKeyword("do") {
+	case token.matchesWordAt(p.source, p.pos, "do"):
+		p.consumeKeyword("do")
 		stmt, err := p.parseDoBlockStatement()
 		if err != nil {
 			return statement{}, err
 		}
 		return statement{block: &stmt}, nil
-	}
-
-	if p.consumeKeyword("break") {
+	case token.matchesWordAt(p.source, p.pos, "break"):
+		p.consumeKeyword("break")
 		return statement{breaking: true}, nil
-	}
-
-	if p.consumeKeyword("continue") {
+	case token.matchesWordAt(p.source, p.pos, "continue"):
+		p.consumeKeyword("continue")
 		return statement{continues: true}, nil
-	}
-
-	if p.currentIdentifier() {
+	case token.kind == tokenIdentifier:
 		return p.parseIdentifierStatement()
+	default:
+		return statement{}, p.errorf("expected statement")
 	}
-
-	return statement{}, p.errorf("expected statement")
 }
 
 func (p *parser) tryParseTypeAliasStatement() (*typeAliasStatement, bool, error) {
