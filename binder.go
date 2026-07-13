@@ -229,8 +229,7 @@ func (b *binder) bindStatement(stmt statementID) {
 		}
 		annotations, _ := b.tree.statementTypes(local.annotations)
 		for _, annotation := range annotations {
-			value, _ := b.tree.statementType(annotation)
-			b.bindTypeExpression(value)
+			b.bindTypeExpression(annotation)
 		}
 		values, _ := b.tree.statementExpressions(local.values)
 		for _, value := range values {
@@ -360,8 +359,7 @@ func (b *binder) bindStatement(stmt statementID) {
 		for i, nameID := range typePacks {
 			b.defineArenaName(nameID, symbolTypePack, syntaxNameID(typeAlias.typePackID, i))
 		}
-		value, _ := b.tree.statementType(typeAlias.value)
-		b.bindTypeExpression(value)
+		b.bindTypeExpression(typeAlias.value)
 		b.popScope()
 	}
 }
@@ -378,13 +376,10 @@ func (b *binder) bindFunctionParts(functionID int, typeParams nodeSpan, typePara
 	}
 	annotations, _ := b.tree.statementTypes(paramAnnotations)
 	for _, annotationID := range annotations {
-		annotation, _ := b.tree.statementType(annotationID)
-		b.bindTypeExpression(annotation)
+		b.bindTypeExpression(annotationID)
 	}
-	variadicValue, _ := b.tree.statementType(variadicAnnotation)
-	b.bindTypeExpression(variadicValue)
-	returnValue, _ := b.tree.statementType(returnAnnotation)
-	b.bindTypeExpression(returnValue)
+	b.bindTypeExpression(variadicAnnotation)
+	b.bindTypeExpression(returnAnnotation)
 	if selfID != 0 {
 		b.define("self", symbolParameter, selfID)
 	}
@@ -518,61 +513,118 @@ func (b *binder) bindCall(call arenaCallID) {
 	}
 }
 
-func (b *binder) bindTypeExpression(value *typeExpression) {
-	if value == nil {
+func (b *binder) bindTypeExpression(value typeID) {
+	if value == 0 {
 		return
 	}
 	switch b.tree.typeKind(value) {
 	case typeKindName:
-		name := b.tree.typeName(value)
-		if len(name) > 0 {
-			namespace := typeNamespace
-			// Qualified module types resolve their root through the value
-			// namespace (for example, Types.Count); the exported member is
-			// checked against the module summary rather than local type facts.
-			if len(name) > 1 {
-				namespace = valueNamespace
-			}
-			b.recordUse(b.tree.typeID(value), name[0], namespace)
+		nameIDs, ok := b.tree.typeNameIDs(value)
+		if !ok || len(nameIDs) == 0 {
+			return
 		}
-		for _, arg := range b.tree.typeArgs(value) {
+		name, ok := b.tree.stringValue(nameIDs[0])
+		if !ok || name == "" {
+			return
+		}
+		namespace := typeNamespace
+		// Qualified module types resolve their root through the value
+		// namespace (for example, Types.Count); the exported member is
+		// checked against the module summary rather than local type facts.
+		if len(nameIDs) > 1 {
+			namespace = valueNamespace
+		}
+		b.recordUse(b.tree.typeID(value), name, namespace)
+		args, ok := b.tree.typeArgIDs(value)
+		if !ok {
+			return
+		}
+		for _, arg := range args {
 			b.bindTypeExpression(arg)
 		}
+	case typeKindGenericPack:
+		inner, ok := b.tree.typeInner(value)
+		if ok {
+			b.bindTypeExpression(inner)
+		}
 	case typeKindUnion, typeKindIntersection:
-		for _, option := range b.tree.typeChildren(value) {
+		options, ok := b.tree.typeChildIDs(value)
+		if !ok {
+			return
+		}
+		for _, option := range options {
 			b.bindTypeExpression(option)
 		}
-	case typeKindNilable, typeKindVariadic, typeKindGenericPack:
-		b.bindTypeExpression(b.tree.typeInner(value))
+	case typeKindNilable, typeKindVariadic:
+		inner, ok := b.tree.typeInner(value)
+		if ok {
+			b.bindTypeExpression(inner)
+		}
 	case typeKindTable:
-		for _, field := range b.tree.typeFields(value) {
-			b.bindTypeExpression(b.tree.typeFieldKey(&field))
-			b.bindTypeExpression(b.tree.typeFieldValue(&field))
+		fields, ok := b.tree.typeFieldSpan(value)
+		if !ok {
+			return
+		}
+		fieldValues, ok := b.tree.arena.types.spanFields(fields)
+		if !ok {
+			return
+		}
+		for _, field := range fieldValues {
+			b.bindTypeExpression(field.key)
+			b.bindTypeExpression(field.value)
 		}
 	case typeKindFunction:
 		b.bindTypeFunction(value)
 	case typeKindGenericFunction:
 		b.pushScope()
-		for i, name := range b.tree.typeTypeParams(value) {
+		paramIDs, ok := b.tree.typeTypeParamIDs(value)
+		if !ok {
+			b.popScope()
+			return
+		}
+		for i, nameID := range paramIDs {
+			name, ok := b.tree.stringValue(nameID)
+			if !ok {
+				continue
+			}
 			b.define(name, symbolTypeParameter, syntaxNameID(b.tree.typeParamID(value), i))
 		}
-		for i, name := range b.tree.typePacks(value) {
+		packIDs, ok := b.tree.typePackIDs(value)
+		if !ok {
+			b.popScope()
+			return
+		}
+		for i, nameID := range packIDs {
+			name, ok := b.tree.stringValue(nameID)
+			if !ok {
+				continue
+			}
 			b.define(name, symbolTypePack, syntaxNameID(b.tree.typePackID(value), i))
 		}
 		b.bindTypeFunction(value)
 		b.popScope()
 	case typeKindTypeof:
-		if expr := b.tree.typeExpression(value); expr != 0 {
+		if expr, ok := b.tree.typeExpression(value); ok {
 			b.bindExpression(expr)
 		}
 	}
 }
 
-func (b *binder) bindTypeFunction(value *typeExpression) {
-	for _, param := range b.tree.typeParams(value) {
-		b.bindTypeExpression(b.tree.typeParamValue(&param))
+func (b *binder) bindTypeFunction(value typeID) {
+	params, ok := b.tree.typeParamSpan(value)
+	if !ok {
+		return
 	}
-	b.bindTypeExpression(b.tree.typeReturn(value))
+	paramValues, ok := b.tree.arena.types.spanParams(params)
+	if !ok {
+		return
+	}
+	for _, param := range paramValues {
+		b.bindTypeExpression(param.value)
+	}
+	if returnType, ok := b.tree.typeReturn(value); ok {
+		b.bindTypeExpression(returnType)
+	}
 }
 
 func (b *binder) bindAssignTargetID(targetID assignTargetID, assignment bool) {

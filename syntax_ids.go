@@ -25,9 +25,7 @@ func assignProgramSyntaxIDsWithLimit(prog *program, limit uint64) error {
 }
 
 // assignSyntaxTreeIDsWithLimit assigns IDs through the syntaxTree root seam.
-// The concrete pointers returned by the facade are intentionally retained so
-// this remains allocation-free while allowing the storage behind syntaxTree to
-// change in a later arena slice.
+// Arena nodes are read by value and written back after their IDs are assigned.
 func assignSyntaxTreeIDs(tree *syntaxTree) {
 	_ = assignSyntaxTreeIDsWithLimit(tree, 0)
 }
@@ -115,11 +113,7 @@ func (a *syntaxIDAssigner) arenaTypeID(id typeID) {
 	if id == 0 || a.tree.arena == nil || a.err != nil {
 		return
 	}
-	value, ok := a.tree.arena.typeNode(id)
-	if !ok {
-		return
-	}
-	a.typeExpression(value)
+	a.typeExpression(id)
 }
 
 func (a *syntaxIDAssigner) arenaStatements(span nodeSpan) {
@@ -533,7 +527,8 @@ func (a *syntaxIDAssigner) term(id termID) {
 		if ok {
 			a.term(call.target)
 			a.term(call.receiver)
-			a.types(call.typeArgs)
+			typeArgs, _ := a.tree.arena.types.spanTypeIDs(call.typeArgs)
+			a.types(typeArgs)
 			args, _ := a.tree.arena.callArgIDs(call.args)
 			a.expressions(args)
 		}
@@ -543,9 +538,7 @@ func (a *syntaxIDAssigner) term(id termID) {
 		a.expression(expressionID(node.payload))
 	}
 	if node.castType != 0 {
-		if cast, ok := a.tree.arena.cast(uint32(node.castType)); ok {
-			a.typeExpression(cast)
-		}
+		a.typeExpression(node.castType)
 	}
 	selectors, _ := a.tree.arena.selectorIDs(node.selectors)
 	for _, selector := range selectors {
@@ -568,7 +561,7 @@ func (a *syntaxIDAssigner) assignTarget(target *assignTarget) {
 	}
 }
 
-func (a *syntaxIDAssigner) types(values []*typeExpression) {
+func (a *syntaxIDAssigner) types(values []typeID) {
 	for _, value := range values {
 		if a.err != nil {
 			return
@@ -577,28 +570,57 @@ func (a *syntaxIDAssigner) types(values []*typeExpression) {
 	}
 }
 
-func (a *syntaxIDAssigner) typeExpression(value *typeExpression) {
-	if value == nil {
+func (a *syntaxIDAssigner) typeExpression(value typeID) {
+	if value == 0 || a.tree.arena == nil || a.err != nil {
 		return
 	}
-	value.id = a.node()
+	node, ok := a.tree.arena.types.node(value)
+	if !ok {
+		return
+	}
+	node.id = a.node()
+	a.tree.arena.types.setNode(value, node)
 	if a.err != nil {
 		return
 	}
-	value.typeParamID, value.typePackID = a.names(a.tree.typeTypeParams(value)), a.names(a.tree.typePacks(value))
+	if fn, ok := a.tree.typeFunctionNode(value); ok {
+		paramIDs, paramsOK := a.tree.arena.types.spanStringIDs(fn.typeParams)
+		packIDs, packsOK := a.tree.arena.types.spanStringIDs(fn.typePacks)
+		if paramsOK {
+			fn.typeParamID = a.rawNames(paramIDs)
+		}
+		if packsOK {
+			fn.typePackID = a.rawNames(packIDs)
+		}
+		a.tree.arena.types.functions[arenaFunctionTypeID(node.payload)-1] = fn
+	}
 	a.types(a.tree.typeArgs(value))
 	a.types(a.tree.typeChildren(value))
-	a.typeExpression(a.tree.typeInner(value))
-	for i := range a.tree.typeFields(value) {
-		field := &a.tree.typeFields(value)[i]
+	if inner, ok := a.tree.typeInner(value); ok {
+		a.typeExpression(inner)
+	}
+	for _, field := range a.tree.typeFields(value) {
 		a.typeExpression(a.tree.typeFieldKey(field))
 		a.typeExpression(a.tree.typeFieldValue(field))
 	}
-	for i := range a.tree.typeParams(value) {
-		a.typeExpression(a.tree.typeParamValue(&a.tree.typeParams(value)[i]))
+	for _, param := range a.tree.typeParams(value) {
+		a.typeExpression(a.tree.typeParamValue(param))
 	}
-	a.typeExpression(a.tree.typeReturn(value))
-	if expr := a.tree.typeExpression(value); expr != 0 {
+	if result, ok := a.tree.typeReturn(value); ok {
+		a.typeExpression(result)
+	}
+	if expr, ok := a.tree.typeExpression(value); ok {
 		a.expression(expr)
 	}
+}
+
+func (a *syntaxIDAssigner) rawNames(ids []stringID) syntaxID {
+	if len(ids) == 0 || a.err != nil {
+		return 0
+	}
+	first := a.node()
+	for range ids[1:] {
+		a.node()
+	}
+	return first
 }

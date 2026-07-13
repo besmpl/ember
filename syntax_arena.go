@@ -61,6 +61,13 @@ func (b *idListBuilder[T]) append(id T) {
 	b.count++
 }
 
+func (b *idListBuilder[T]) at(index int) T {
+	if index < len(b.inline) {
+		return b.inline[index]
+	}
+	return b.extra[index-len(b.inline)]
+}
+
 func (b *idListBuilder[T]) span(dst *[]T) (nodeSpan, bool) {
 	if b.count < 0 || uint64(len(*dst)) > math.MaxUint32 || uint64(b.count) > math.MaxUint32-uint64(len(*dst)) {
 		return nodeSpan{}, false
@@ -138,7 +145,7 @@ type arenaTerm struct {
 	kind      termKind
 	payload   uint64
 	selectors nodeSpan
-	castType  arenaCastID
+	castType  typeID
 }
 
 type arenaTable struct {
@@ -148,7 +155,7 @@ type arenaTable struct {
 type arenaCall struct {
 	target   termID
 	receiver termID
-	typeArgs []*typeExpression
+	typeArgs nodeSpan // typeID
 	args     nodeSpan
 }
 
@@ -199,7 +206,6 @@ type syntaxArena struct {
 	// keeps the boxed Value identity stable when compiler passes revisit the
 	// same arena term (important for immutable constant pools).
 	stringLiterals map[stringID]Value
-	castTypes      []*typeExpression
 	tables         []arenaTable
 	tableFields    []arenaTableField
 	calls          []arenaCall
@@ -208,22 +214,7 @@ type syntaxArena struct {
 	ifExpressions  []arenaIfExpression
 	powers         []arenaPower
 	statements     statementArena
-	typeNodes      []*typeExpression
-}
-
-func (a *syntaxArena) appendTypeNode(node *typeExpression) typeID {
-	if node == nil {
-		return 0
-	}
-	a.typeNodes = append(a.typeNodes, node)
-	return typeID(len(a.typeNodes))
-}
-
-func (a *syntaxArena) typeNode(id typeID) (*typeExpression, bool) {
-	if id == 0 || uint64(id) > uint64(len(a.typeNodes)) {
-		return nil, false
-	}
-	return a.typeNodes[uint64(id)-1], true
+	types          syntaxTypeArena
 }
 
 func newSyntaxArena(tokenCount int) *syntaxArena {
@@ -246,7 +237,7 @@ func newSyntaxArena(tokenCount int) *syntaxArena {
 		andTerms:        make([]comparisonExpressionID, 0, baseNodes),
 		additiveRest:    make([]arenaAdditivePart, 0, baseNodes),
 		strings:         make([]string, 0, baseNodes),
-		typeNodes:       make([]*typeExpression, 0, baseNodes),
+		types:           newSyntaxTypeArena(baseNodes),
 		statements: statementArena{
 			statements:           make([]arenaStatement, 0, statementNodes),
 			statementIDs:         make([]statementID, 0, statementNodes),
@@ -272,7 +263,6 @@ func newSyntaxArena(tokenCount int) *syntaxArena {
 	}
 }
 
-type arenaCastID uint32
 type arenaComparisonOp uint8
 type arenaAdditiveOp uint8
 type arenaMultiplicativeOp uint8
@@ -525,12 +515,6 @@ func (a *syntaxArena) power(id arenaPowerID) (arenaPower, bool) {
 	return arenaNode(a.powers, id)
 }
 
-func (a *syntaxArena) cast(id uint32) (*typeExpression, bool) {
-	if a == nil || id == 0 || uint64(id) > uint64(len(a.castTypes)) {
-		return nil, false
-	}
-	return a.castTypes[id-1], true
-}
 func (a *syntaxArena) stringValue(id stringID) (string, bool) {
 	if a == nil || id == 0 || uint64(id) > uint64(len(a.strings)) {
 		return "", false

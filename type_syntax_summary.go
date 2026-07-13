@@ -2,18 +2,19 @@ package ember
 
 import (
 	"fmt"
+	"math"
 	"strings"
 )
 
-func typeSummaryFromAlias(tree syntaxTree, alias typeAliasStatement) TypeSummary {
-	summary := typeSummaryFromExpression(tree, tree.typeAliasValue(&alias))
-	summary.TypeParams = append([]string(nil), tree.typeAliasTypeParams(&alias)...)
-	summary.TypePacks = append([]string(nil), tree.typeAliasTypePacks(&alias)...)
+func typeSummaryFromAlias(tree syntaxTree, alias arenaTypeAliasStatement) TypeSummary {
+	summary := typeSummaryFromExpression(tree, alias.value)
+	summary.TypeParams = consumerStatementStrings(tree, alias.typeParams)
+	summary.TypePacks = consumerStatementStrings(tree, alias.typePacks)
 	return summary
 }
 
-func typeSummaryFromExpression(tree syntaxTree, expr *typeExpression) TypeSummary {
-	if expr == nil {
+func typeSummaryFromExpression(tree syntaxTree, expr typeID) TypeSummary {
+	if expr == 0 {
 		return TypeSummary{
 			Kind:    TypeSummaryUnknown,
 			Display: "unknown",
@@ -21,7 +22,8 @@ func typeSummaryFromExpression(tree syntaxTree, expr *typeExpression) TypeSummar
 	}
 	switch tree.typeKind(expr) {
 	case typeKindName:
-		display := strings.Join(tree.typeName(expr), ".")
+		nameIDs, _ := tree.typeNameIDs(expr)
+		display := joinSyntaxStrings(tree, nameIDs, ".")
 		if display == "" {
 			display = "unknown"
 		}
@@ -36,30 +38,30 @@ func typeSummaryFromExpression(tree syntaxTree, expr *typeExpression) TypeSummar
 		types := typeSummariesFromExpressions(tree, tree.typeChildren(expr))
 		return TypeSummary{Kind: TypeSummaryIntersection, Display: joinTypeDisplays(types, " & "), Types: types}
 	case typeKindNilable:
-		inner := typeSummaryFromExpression(tree, tree.typeInner(expr))
+		innerID, _ := tree.typeInner(expr)
+		inner := typeSummaryFromExpression(tree, innerID)
 		return TypeSummary{Kind: TypeSummaryNilable, Display: inner.Display + "?", Inner: &inner}
 	case typeKindTable:
 		return tableTypeSummary(tree, expr)
 	case typeKindFunction, typeKindGenericFunction:
 		return functionTypeSummary(tree, expr)
 	case typeKindVariadic:
-		inner := typeSummaryFromExpression(tree, tree.typeInner(expr))
+		innerID, hasInner := tree.typeInner(expr)
+		inner := typeSummaryFromExpression(tree, innerID)
 		display := "..."
-		if tree.typeInner(expr) != nil {
+		if hasInner {
 			display += inner.Display
 		}
 		return TypeSummary{Kind: TypeSummaryVariadic, Display: display, Inner: &inner}
 	case typeKindGenericPack:
-		display := strings.Join(tree.typeName(expr), ".")
-		if display == "" {
-			display = "..."
+		innerID, ok := tree.typeInner(expr)
+		if !ok {
+			return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 		}
-		return TypeSummary{Kind: TypeSummaryGenericPack, Display: display + "..."}
+		inner := typeSummaryFromExpression(tree, innerID)
+		return TypeSummary{Kind: TypeSummaryGenericPack, Display: inner.Display + "...", Inner: &inner}
 	case typeKindSingleton:
-		if tree.typeLiteral(expr) == nil {
-			return TypeSummary{Kind: TypeSummarySingleton, Display: "unknown"}
-		}
-		return TypeSummary{Kind: TypeSummarySingleton, Display: valueSummaryDisplay(*tree.typeLiteral(expr))}
+		return TypeSummary{Kind: TypeSummarySingleton, Display: typeSingletonDisplay(tree, expr)}
 	case typeKindTypeof:
 		return TypeSummary{Kind: TypeSummaryTypeof, Display: "typeof"}
 	default:
@@ -67,7 +69,7 @@ func typeSummaryFromExpression(tree syntaxTree, expr *typeExpression) TypeSummar
 	}
 }
 
-func typeSummariesFromExpressions(tree syntaxTree, expressions []*typeExpression) []TypeSummary {
+func typeSummariesFromExpressions(tree syntaxTree, expressions []typeID) []TypeSummary {
 	summaries := make([]TypeSummary, len(expressions))
 	for i, expr := range expressions {
 		summaries[i] = typeSummaryFromExpression(tree, expr)
@@ -75,10 +77,9 @@ func typeSummariesFromExpressions(tree syntaxTree, expressions []*typeExpression
 	return summaries
 }
 
-func tableTypeSummary(tree syntaxTree, expr *typeExpression) TypeSummary {
+func tableTypeSummary(tree syntaxTree, expr typeID) TypeSummary {
 	summary := TypeSummary{Kind: TypeSummaryTable, Display: "table"}
-	for i := range tree.typeFields(expr) {
-		field := &tree.typeFields(expr)[i]
+	for _, field := range tree.typeFields(expr) {
 		value := typeSummaryFromExpression(tree, tree.typeFieldValue(field))
 		if tree.typeFieldName(field) != "" {
 			summary.Properties = append(summary.Properties, TablePropertySummary{
@@ -88,7 +89,7 @@ func tableTypeSummary(tree syntaxTree, expr *typeExpression) TypeSummary {
 			})
 			continue
 		}
-		if tree.typeFieldKey(field) != nil {
+		if tree.typeFieldKey(field) != 0 {
 			summary.Indexers = append(summary.Indexers, TableIndexerSummary{
 				Access: tree.typeFieldAccess(field),
 				Key:    typeSummaryFromExpression(tree, tree.typeFieldKey(field)),
@@ -99,18 +100,21 @@ func tableTypeSummary(tree syntaxTree, expr *typeExpression) TypeSummary {
 	return summary
 }
 
-func functionTypeSummary(tree syntaxTree, expr *typeExpression) TypeSummary {
+func functionTypeSummary(tree syntaxTree, expr typeID) TypeSummary {
 	kind := TypeSummaryFunction
 	if tree.typeKind(expr) == typeKindGenericFunction {
 		kind = TypeSummaryGenericFunction
 	}
 	params := typeSummariesFromExpressions(tree, typePackValueExpressions(tree, tree.typeParams(expr)))
-	ret := typeSummaryFromExpression(tree, tree.typeReturn(expr))
+	returnID, _ := tree.typeReturn(expr)
+	ret := typeSummaryFromExpression(tree, returnID)
+	typeParamIDs, _ := tree.typeTypeParamIDs(expr)
+	typePackIDs, _ := tree.typePackIDs(expr)
 	summary := TypeSummary{
 		Kind:       kind,
 		Display:    "(" + joinTypeDisplays(params, ", ") + ") -> " + ret.Display,
-		TypeParams: append([]string(nil), tree.typeTypeParams(expr)...),
-		TypePacks:  append([]string(nil), tree.typePacks(expr)...),
+		TypeParams: syntaxStrings(tree, typeParamIDs),
+		TypePacks:  syntaxStrings(tree, typePackIDs),
 		Params:     params,
 		Return:     &ret,
 		ParamPack:  typePackSummary(params, nil),
@@ -119,17 +123,83 @@ func functionTypeSummary(tree syntaxTree, expr *typeExpression) TypeSummary {
 	return summary
 }
 
-func typePackValueExpressions(tree syntaxTree, values []typeFunctionParam) []*typeExpression {
-	expressions := make([]*typeExpression, 0, len(values))
+func syntaxStrings(tree syntaxTree, ids []stringID) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	values := make([]string, len(ids))
+	for i, id := range ids {
+		values[i], _ = tree.stringValue(id)
+	}
+	return values
+}
+
+func joinSyntaxStrings(tree syntaxTree, ids []stringID, separator string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	var builder strings.Builder
+	for i, id := range ids {
+		value, _ := tree.stringValue(id)
+		if i != 0 {
+			builder.WriteString(separator)
+		}
+		builder.WriteString(value)
+	}
+	return builder.String()
+}
+
+func syntaxStringsLength(tree syntaxTree, ids []stringID, separatorLength int) int {
+	length := 0
+	for _, id := range ids {
+		value, _ := tree.stringValue(id)
+		length += len(value)
+	}
+	if len(ids) > 1 {
+		length += (len(ids) - 1) * separatorLength
+	}
+	return length
+}
+
+func typePackValueExpressions(tree syntaxTree, values []arenaTypeParam) []typeID {
+	expressions := make([]typeID, 0, len(values))
 	for _, value := range values {
-		expressions = append(expressions, tree.typeParamValue(&value))
+		expressions = append(expressions, tree.typeParamValue(value))
 	}
 	return expressions
 }
 
-func typeArgumentSummaryDisplay(tree syntaxTree, args []*typeExpression) string {
+func typeArgumentSummaryDisplay(tree syntaxTree, args []typeID) string {
 	summaries := typeSummariesFromExpressions(tree, args)
 	return "<" + joinTypeDisplays(summaries, ", ") + ">"
+}
+
+func typeSingletonDisplay(tree syntaxTree, expr typeID) string {
+	kind, payload, ok := tree.typeSingletonScalar(expr)
+	if !ok {
+		return "unknown"
+	}
+	switch kind {
+	case BoolKind:
+		if payload != 0 {
+			return "true"
+		}
+		return "false"
+	case NumberKind:
+		return fmt.Sprintf("%g", math.Float64frombits(payload))
+	case StringKind:
+		id, ok := tree.typeSingletonStringID(expr)
+		if !ok {
+			return "unknown"
+		}
+		value, ok := tree.stringValue(id)
+		if !ok {
+			return "unknown"
+		}
+		return fmt.Sprintf("%q", value)
+	default:
+		return "unknown"
+	}
 }
 
 func joinTypeDisplays(types []TypeSummary, separator string) string {

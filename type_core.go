@@ -12,7 +12,7 @@ type typeStore struct {
 	tree      syntaxTree
 	types     []typeNode
 	packs     []typePackNode
-	aliases   map[string]*typeExpression
+	aliases   map[string]typeID
 	resolving map[string]bool
 }
 
@@ -37,7 +37,6 @@ type typeNode struct {
 	returnType TypeRef
 	paramsPack PackRef
 	returnPack PackRef
-	literal    *Value
 }
 
 type typePropertyNode struct {
@@ -120,13 +119,12 @@ func lowerTypeAliases(store *typeStore, statements []statementID) []loweredTypeA
 			continue
 		}
 		name, _ := store.tree.stringValue(alias.name)
-		value, _ := store.tree.statementType(alias.value)
 		aliases = append(aliases, loweredTypeAlias{
 			name:       name,
 			exported:   alias.exported,
 			typeParams: consumerStatementStrings(store.tree, alias.typeParams),
 			typePacks:  consumerStatementStrings(store.tree, alias.typePacks),
-			typ:        store.lowerType(value),
+			typ:        store.lowerType(alias.value),
 			start:      alias.start,
 			end:        alias.end,
 			nameStart:  alias.nameStart,
@@ -138,7 +136,7 @@ func lowerTypeAliases(store *typeStore, statements []statementID) []loweredTypeA
 
 func (s *typeStore) bindAliases(statements []statementID) {
 	if s.aliases == nil {
-		s.aliases = make(map[string]*typeExpression)
+		s.aliases = make(map[string]typeID)
 	}
 	for _, statement := range statements {
 		alias, ok := s.tree.typeAliasArena(statement)
@@ -146,8 +144,7 @@ func (s *typeStore) bindAliases(statements []statementID) {
 			continue
 		}
 		name, _ := s.tree.stringValue(alias.name)
-		value, _ := s.tree.statementType(alias.value)
-		s.aliases[name] = value
+		s.aliases[name] = alias.value
 	}
 }
 
@@ -176,21 +173,16 @@ func consumerStatementStrings(tree syntaxTree, span nodeSpan) []string {
 	return values
 }
 
-func consumerStatementTypes(tree syntaxTree, span nodeSpan) []*typeExpression {
+func consumerStatementTypes(tree syntaxTree, span nodeSpan) []typeID {
 	ids, ok := tree.statementTypes(span)
 	if !ok {
 		return nil
 	}
-	values := make([]*typeExpression, 0, len(ids))
-	for _, id := range ids {
-		value, _ := tree.statementType(id)
-		values = append(values, value)
-	}
-	return values
+	return ids
 }
 
-func (s *typeStore) lowerType(expr *typeExpression) TypeRef {
-	if expr == nil {
+func (s *typeStore) lowerType(expr typeID) TypeRef {
+	if expr == 0 {
 		return TypeRef(1)
 	}
 	switch s.tree.typeKind(expr) {
@@ -198,14 +190,17 @@ func (s *typeStore) lowerType(expr *typeExpression) TypeRef {
 		if resolved, ok := s.lowerAliasReference(expr); ok {
 			return resolved
 		}
-		typeArgs := make([]TypeRef, len(s.tree.typeArgs(expr)))
-		for i, arg := range s.tree.typeArgs(expr) {
+		args := s.tree.typeArgs(expr)
+		typeArgs := make([]TypeRef, len(args))
+		for i, arg := range args {
 			typeArgs[i] = s.lowerType(arg)
 		}
+		nameIDs, _ := s.tree.typeNameIDs(expr)
+		name := syntaxStrings(s.tree, nameIDs)
 		return s.addType(typeNode{
 			kind:     TypeSummaryName,
-			display:  s.namedDisplay(s.tree.typeName(expr), typeArgs),
-			name:     append([]string(nil), s.tree.typeName(expr)...),
+			display:  s.namedDisplay(name, typeArgs),
+			name:     append([]string(nil), name...),
 			typeArgs: typeArgs,
 		})
 	case typeKindUnion:
@@ -226,31 +221,36 @@ func (s *typeStore) lowerType(expr *typeExpression) TypeRef {
 		}
 		return s.addType(typeNode{kind: TypeSummaryIntersection, display: s.joinDisplays(refs, " & "), types: refs})
 	case typeKindNilable:
-		inner := s.lowerType(s.tree.typeInner(expr))
+		innerID, _ := s.tree.typeInner(expr)
+		inner := s.lowerType(innerID)
 		return s.addType(typeNode{kind: TypeSummaryNilable, display: s.display(inner) + "?", inner: inner})
 	case typeKindTable:
 		return s.lowerTableType(expr)
 	case typeKindFunction, typeKindGenericFunction:
 		return s.lowerFunctionType(expr)
 	case typeKindVariadic:
-		inner := s.lowerType(s.tree.typeInner(expr))
+		innerID, hasInner := s.tree.typeInner(expr)
+		inner := s.lowerType(innerID)
 		display := "..."
-		if s.tree.typeInner(expr) != nil {
+		if hasInner {
 			display += s.display(inner)
 		}
 		return s.addType(typeNode{kind: TypeSummaryVariadic, display: display, inner: inner})
 	case typeKindGenericPack:
-		display := strings.Join(s.tree.typeName(expr), ".")
+		innerID, ok := s.tree.typeInner(expr)
+		if !ok {
+			return TypeRef(1)
+		}
+		inner := s.lowerType(innerID)
+		nameIDs, _ := s.tree.typeNameIDs(innerID)
+		name := syntaxStrings(s.tree, nameIDs)
+		display := s.display(inner)
 		if display == "" {
 			display = "..."
 		}
-		return s.addType(typeNode{kind: TypeSummaryGenericPack, display: display + "...", name: append([]string(nil), s.tree.typeName(expr)...)})
+		return s.addType(typeNode{kind: TypeSummaryGenericPack, display: display + "...", name: name, inner: inner})
 	case typeKindSingleton:
-		display := "unknown"
-		if literal := s.tree.typeLiteral(expr); literal != nil {
-			display = valueSummaryDisplay(*literal)
-		}
-		return s.addType(typeNode{kind: TypeSummarySingleton, display: display, literal: s.tree.typeLiteral(expr)})
+		return s.addType(typeNode{kind: TypeSummarySingleton, display: typeSingletonDisplay(s.tree, expr)})
 	case typeKindTypeof:
 		return s.addType(typeNode{kind: TypeSummaryTypeof, display: "typeof"})
 	default:
@@ -258,28 +258,29 @@ func (s *typeStore) lowerType(expr *typeExpression) TypeRef {
 	}
 }
 
-func (s *typeStore) lowerAliasReference(expr *typeExpression) (TypeRef, bool) {
-	name := s.tree.typeName(expr)
-	if expr == nil || len(name) != 1 || len(s.tree.typeArgs(expr)) != 0 {
+func (s *typeStore) lowerAliasReference(expr typeID) (TypeRef, bool) {
+	nameIDs, ok := s.tree.typeNameIDs(expr)
+	if expr == 0 || !ok || len(nameIDs) != 1 || len(s.tree.typeArgs(expr)) != 0 {
 		return 0, false
 	}
-	alias, ok := s.aliases[name[0]]
+	name, _ := s.tree.stringValue(nameIDs[0])
+	alias, ok := s.aliases[name]
 	if !ok {
 		return 0, false
 	}
 	if s.resolving == nil {
 		s.resolving = make(map[string]bool)
 	}
-	if s.resolving[name[0]] {
+	if s.resolving[name] {
 		return 0, false
 	}
-	s.resolving[name[0]] = true
+	s.resolving[name] = true
 	ref := s.lowerType(alias)
-	delete(s.resolving, name[0])
+	delete(s.resolving, name)
 	return ref, true
 }
 
-func (s *typeStore) lowerTypes(expressions []*typeExpression) []TypeRef {
+func (s *typeStore) lowerTypes(expressions []typeID) []TypeRef {
 	refs := make([]TypeRef, len(expressions))
 	for i, expr := range expressions {
 		refs[i] = s.lowerType(expr)
@@ -388,10 +389,9 @@ func (s *typeStore) normalizationKey(ref TypeRef) string {
 	return string(node.kind) + ":" + node.display
 }
 
-func (s *typeStore) lowerTableType(expr *typeExpression) TypeRef {
+func (s *typeStore) lowerTableType(expr typeID) TypeRef {
 	node := typeNode{kind: TypeSummaryTable, display: "table"}
-	for i := range s.tree.typeFields(expr) {
-		field := &s.tree.typeFields(expr)[i]
+	for _, field := range s.tree.typeFields(expr) {
 		value := s.lowerType(s.tree.typeFieldValue(field))
 		if s.tree.typeFieldName(field) != "" {
 			node.properties = append(node.properties, typePropertyNode{
@@ -401,7 +401,7 @@ func (s *typeStore) lowerTableType(expr *typeExpression) TypeRef {
 			})
 			continue
 		}
-		if key := s.tree.typeFieldKey(field); key != nil {
+		if key := s.tree.typeFieldKey(field); key != 0 {
 			node.indexers = append(node.indexers, typeIndexerNode{
 				access: s.tree.typeFieldAccess(field),
 				key:    s.lowerType(key),
@@ -412,24 +412,27 @@ func (s *typeStore) lowerTableType(expr *typeExpression) TypeRef {
 	return s.addType(node)
 }
 
-func (s *typeStore) lowerFunctionType(expr *typeExpression) TypeRef {
+func (s *typeStore) lowerFunctionType(expr typeID) TypeRef {
 	kind := TypeSummaryFunction
 	if s.tree.typeKind(expr) == typeKindGenericFunction {
 		kind = TypeSummaryGenericFunction
 	}
 	params := make([]TypeRef, 0, len(s.tree.typeParams(expr)))
-	for i := range s.tree.typeParams(expr) {
-		param := &s.tree.typeParams(expr)[i]
+	paramsSyntax := s.tree.typeParams(expr)
+	for _, param := range paramsSyntax {
 		params = append(params, s.lowerType(s.tree.typeParamValue(param)))
 	}
-	ret := s.lowerType(s.tree.typeReturn(expr))
-	paramsPack := s.lowerTypePackValues(s.tree.typeParams(expr))
-	returnPack := s.lowerReturnTypePack(s.tree.typeReturn(expr))
+	returnSyntax, _ := s.tree.typeReturn(expr)
+	ret := s.lowerType(returnSyntax)
+	paramsPack := s.lowerTypePackValues(paramsSyntax)
+	returnPack := s.lowerReturnTypePack(returnSyntax)
+	typeParamIDs, _ := s.tree.typeTypeParamIDs(expr)
+	typePackIDs, _ := s.tree.typePackIDs(expr)
 	return s.addType(typeNode{
 		kind:       kind,
 		display:    "(" + s.joinDisplays(params, ", ") + ") -> " + s.display(ret),
-		typeParams: append([]string(nil), s.tree.typeTypeParams(expr)...),
-		typePacks:  append([]string(nil), s.tree.typePacks(expr)...),
+		typeParams: syntaxStrings(s.tree, typeParamIDs),
+		typePacks:  syntaxStrings(s.tree, typePackIDs),
 		params:     params,
 		returnType: ret,
 		paramsPack: paramsPack,
@@ -437,10 +440,10 @@ func (s *typeStore) lowerFunctionType(expr *typeExpression) TypeRef {
 	})
 }
 
-func (s *typeStore) lowerTypePackValues(values []typeFunctionParam) PackRef {
+func (s *typeStore) lowerTypePackValues(values []arenaTypeParam) PackRef {
 	head := make([]TypeRef, 0, len(values))
-	for i := range values {
-		head = append(head, s.lowerType(s.tree.typeParamValue(&values[i])))
+	for _, value := range values {
+		head = append(head, s.lowerType(s.tree.typeParamValue(value)))
 	}
 	return s.addPack(typePackNode{
 		kind:    TypeSummaryFunction,
@@ -449,8 +452,8 @@ func (s *typeStore) lowerTypePackValues(values []typeFunctionParam) PackRef {
 	})
 }
 
-func (s *typeStore) lowerReturnTypePack(expr *typeExpression) PackRef {
-	if expr != nil && s.tree.typeKind(expr) == typeKindVariadic {
+func (s *typeStore) lowerReturnTypePack(expr typeID) PackRef {
+	if expr != 0 && s.tree.typeKind(expr) == typeKindVariadic {
 		tail := s.lowerType(expr)
 		return s.addPack(typePackNode{
 			kind:    TypeSummaryVariadic,

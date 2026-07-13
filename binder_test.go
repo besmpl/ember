@@ -1,6 +1,9 @@
 package ember
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestBindProgramRecordsLexicalSymbolsAndScopes(t *testing.T) {
 	tree := parseSourceForBindTest(t, `
@@ -151,6 +154,52 @@ return convert(value)
 	if got := result.countUses(alias.id); got != 4 {
 		t.Fatalf("Alias use count = %d, want 4", got)
 	}
+}
+
+func TestBindProgramResolvesGenericPackTypeUse(t *testing.T) {
+	tree := parseSourceForBindTest(t, "type Pack<T...> = T...")
+	result := bindSyntaxTree(tree)
+
+	pack := result.mustSymbol(t, "T", symbolTypePack, 1)
+	if got := result.countUses(pack.id); got != 1 {
+		t.Fatalf("generic type pack use count = %d, want one", got)
+	}
+}
+
+func TestBinderFailsClosedOnMalformedArenaTypeData(t *testing.T) {
+	t.Run("annotation span", func(t *testing.T) {
+		tree := parseSourceForBindTest(t, "local value: number = 1")
+		statements, ok := tree.statementIDs()
+		if !ok || len(statements) != 1 {
+			t.Fatalf("statement IDs = %v, want one local statement", statements)
+		}
+		node, ok := tree.statementNode(statements[0])
+		if !ok || node.kind != syntaxStatementLocal || node.payload == 0 {
+			t.Fatal("local statement is not present in the statement arena")
+		}
+		localIndex := int(node.payload) - 1
+		tree.arena.statements.locals[localIndex].annotations = nodeSpan{start: math.MaxUint32, count: 1}
+
+		result := bindSyntaxTree(tree)
+		result.mustSymbol(t, "value", symbolLocal, 0)
+	})
+
+	t.Run("type ID", func(t *testing.T) {
+		tree := parseSourceForBindTest(t, "type Alias = number")
+		statements, ok := tree.statementIDs()
+		if !ok || len(statements) != 1 {
+			t.Fatalf("statement IDs = %v, want one type alias statement", statements)
+		}
+		node, ok := tree.statementNode(statements[0])
+		if !ok || node.kind != syntaxStatementTypeAlias || node.payload == 0 {
+			t.Fatal("type alias statement is not present in the statement arena")
+		}
+		aliasIndex := int(node.payload) - 1
+		tree.arena.statements.typeAliases[aliasIndex].value = typeID(math.MaxUint32)
+
+		result := bindSyntaxTree(tree)
+		result.mustSymbol(t, "Alias", symbolTypeAlias, 0)
+	})
 }
 
 func TestBindProgramIndexesUsesAndDefinitionsByStableSyntaxID(t *testing.T) {

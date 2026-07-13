@@ -47,7 +47,7 @@ type localStatement struct {
 	names       []string
 	nameID      syntaxID
 	nameRanges  []sourceRange
-	annotations []*typeExpression
+	annotations []typeID
 	values      []expressionID
 }
 
@@ -64,7 +64,7 @@ type typeAliasStatement struct {
 	typeParamID syntaxID
 	typePacks   []string
 	typePackID  syntaxID
-	value       *typeExpression
+	value       typeID
 }
 
 type localFunctionStatement struct {
@@ -78,10 +78,10 @@ type localFunctionStatement struct {
 	typePackID         syntaxID
 	params             []string
 	paramID            syntaxID
-	paramAnnotations   []*typeExpression
+	paramAnnotations   []typeID
 	variadic           bool
-	variadicAnnotation *typeExpression
-	returnAnnotation   *typeExpression
+	variadicAnnotation typeID
+	returnAnnotation   typeID
 	statements         []statement
 }
 
@@ -96,10 +96,10 @@ type functionDeclarationStatement struct {
 	params             []string
 	paramID            syntaxID
 	selfID             syntaxID
-	paramAnnotations   []*typeExpression
+	paramAnnotations   []typeID
 	variadic           bool
-	variadicAnnotation *typeExpression
-	returnAnnotation   *typeExpression
+	variadicAnnotation typeID
+	returnAnnotation   typeID
 	statements         []statement
 	method             bool
 }
@@ -113,60 +113,11 @@ type parserFunctionDraft struct {
 	typePackID         syntaxID
 	params             []string
 	paramID            syntaxID
-	paramAnnotations   []*typeExpression
+	paramAnnotations   []typeID
 	variadic           bool
-	variadicAnnotation *typeExpression
-	returnAnnotation   *typeExpression
+	variadicAnnotation typeID
+	returnAnnotation   typeID
 	statements         []statement
-}
-
-type typeKind string
-
-const (
-	typeKindName            typeKind = "name"
-	typeKindUnion           typeKind = "union"
-	typeKindIntersection    typeKind = "intersection"
-	typeKindNilable         typeKind = "nilable"
-	typeKindTable           typeKind = "table"
-	typeKindFunction        typeKind = "function"
-	typeKindGenericFunction typeKind = "genericFunction"
-	typeKindTypeof          typeKind = "typeof"
-	typeKindVariadic        typeKind = "variadic"
-	typeKindGenericPack     typeKind = "genericPack"
-	typeKindSingleton       typeKind = "singleton"
-)
-
-type typeExpression struct {
-	id          syntaxID
-	start       int
-	end         int
-	kind        typeKind
-	name        []string
-	typeArgs    []*typeExpression
-	types       []*typeExpression
-	inner       *typeExpression
-	fields      []typeField
-	params      []typeFunctionParam
-	returnType  *typeExpression
-	typeParams  []string
-	typeParamID syntaxID
-	typePacks   []string
-	typePackID  syntaxID
-	expr        expressionID
-	literal     *Value
-}
-
-type typeField struct {
-	access string
-	name   string
-	key    *typeExpression
-	value  *typeExpression
-}
-
-type typeFunctionParam struct {
-	name     string
-	value    *typeExpression
-	variadic bool
 }
 
 type assignStatement struct {
@@ -355,16 +306,12 @@ func (p *parser) appendStatementStrings(values []string) nodeSpan {
 	return nodeSpan{start: start, count: uint32(len(values))}
 }
 
-func (p *parser) appendStatementTypes(values []*typeExpression) nodeSpan {
+func (p *parser) appendStatementTypes(values []typeID) nodeSpan {
 	if len(values) == 0 {
 		return nodeSpan{}
 	}
-	ids := p.arena.statements.typeIDs
-	start := uint32(len(ids))
-	for _, value := range values {
-		ids = append(ids, p.arena.appendTypeNode(value))
-	}
-	p.arena.statements.typeIDs = ids
+	start := uint32(len(p.arena.statements.typeIDs))
+	p.arena.statements.typeIDs = append(p.arena.statements.typeIDs, values...)
 	return nodeSpan{start: start, count: uint32(len(values))}
 }
 
@@ -462,7 +409,7 @@ func (p *parser) materializeStatement(stmt *statement) statementID {
 	case stmt.typeAlias != nil:
 		kind = syntaxStatementTypeAlias
 		value := stmt.typeAlias
-		payload = p.arena.statements.appendTypeAlias(arenaTypeAliasStatement{id: value.id, exported: value.exported, name: p.stringID(value.name), nameID: value.nameID, start: value.start, end: value.end, nameStart: value.nameStart, nameEnd: value.nameEnd, typeParams: p.appendStatementStrings(value.typeParams), typeParamID: value.typeParamID, typePacks: p.appendStatementStrings(value.typePacks), typePackID: value.typePackID, value: p.arena.appendTypeNode(value.value)})
+		payload = p.arena.statements.appendTypeAlias(arenaTypeAliasStatement{id: value.id, exported: value.exported, name: p.stringID(value.name), nameID: value.nameID, start: value.start, end: value.end, nameStart: value.nameStart, nameEnd: value.nameEnd, typeParams: p.appendStatementStrings(value.typeParams), typeParamID: value.typeParamID, typePacks: p.appendStatementStrings(value.typePacks), typePackID: value.typePackID, value: value.value})
 	case stmt.breaking:
 		kind = syntaxStatementBreak
 	case stmt.continues:
@@ -477,8 +424,8 @@ func (p *parser) materializeStatement(stmt *statement) statementID {
 	return p.arena.statements.appendStatement(arenaStatement{id: stmt.id, kind: kind, payload: payload})
 }
 
-func (p *parser) materializeFunctionStatement(id syntaxID, functionID int, name string, target assignTargetID, typeParams, typePacks, params []string, paramID syntaxID, annotations []*typeExpression, variadic bool, variadicAnnotation, returnAnnotation *typeExpression, statements []statement, method bool) arenaFunctionStatement {
-	return arenaFunctionStatement{id: id, functionID: functionID, name: p.stringID(name), target: target, typeParams: p.appendStatementStrings(typeParams), typePacks: p.appendStatementStrings(typePacks), params: p.appendStatementStrings(params), paramID: paramID, paramAnnotations: p.appendStatementTypes(annotations), variadic: variadic, variadicAnnotation: p.arena.appendTypeNode(variadicAnnotation), returnAnnotation: p.arena.appendTypeNode(returnAnnotation), statements: p.materializeStatementSpan(statements), method: method}
+func (p *parser) materializeFunctionStatement(id syntaxID, functionID int, name string, target assignTargetID, typeParams, typePacks, params []string, paramID syntaxID, annotations []typeID, variadic bool, variadicAnnotation, returnAnnotation typeID, statements []statement, method bool) arenaFunctionStatement {
+	return arenaFunctionStatement{id: id, functionID: functionID, name: p.stringID(name), target: target, typeParams: p.appendStatementStrings(typeParams), typePacks: p.appendStatementStrings(typePacks), params: p.appendStatementStrings(params), paramID: paramID, paramAnnotations: p.appendStatementTypes(annotations), variadic: variadic, variadicAnnotation: variadicAnnotation, returnAnnotation: returnAnnotation, statements: p.materializeStatementSpan(statements), method: method}
 }
 
 func (p *parser) materializeAssignTarget(value *assignTarget) assignTargetID {
@@ -828,10 +775,10 @@ func (p *parser) parseArenaLocalStatement() (statementID, error) {
 	rangesStart := uint32(len(p.arena.statements.sourceRanges))
 	typesStart := uint32(len(p.arena.statements.typeIDs))
 	nameCount := uint32(0)
-	appendName := func(value string, start, end int, annotation *typeExpression) {
+	appendName := func(value string, start, end int, annotation typeID) {
 		p.arena.statements.stringIDs = append(p.arena.statements.stringIDs, p.stringID(value))
 		p.arena.statements.sourceRanges = append(p.arena.statements.sourceRanges, sourceRange{start: start, end: end})
-		p.arena.statements.typeIDs = append(p.arena.statements.typeIDs, p.arena.appendTypeNode(annotation))
+		p.arena.statements.typeIDs = append(p.arena.statements.typeIDs, annotation)
 		nameCount++
 	}
 	nameEnd := p.pos
@@ -909,7 +856,11 @@ func (p *parser) parseArenaTypeAliasStatement() (statementID, bool, error) {
 	if err != nil {
 		return 0, true, err
 	}
-	payload := p.arena.statements.appendTypeAlias(arenaTypeAliasStatement{exported: exported, name: p.stringID(name), start: start, end: p.trimSourceEnd(value.end), nameStart: nameStart, nameEnd: nameEnd, typeParams: p.appendStatementStrings(typeParams), typePacks: p.appendStatementStrings(typePacks), value: p.arena.appendTypeNode(value)})
+	valueNode, err := p.parsedType(value)
+	if err != nil {
+		return 0, true, err
+	}
+	payload := p.arena.statements.appendTypeAlias(arenaTypeAliasStatement{exported: exported, name: p.stringID(name), start: start, end: p.trimSourceEnd(valueNode.end), nameStart: nameStart, nameEnd: nameEnd, typeParams: p.appendStatementStrings(typeParams), typePacks: p.appendStatementStrings(typePacks), value: value})
 	return p.appendArenaStatement(syntaxStatementTypeAlias, payload), true, nil
 }
 
@@ -1012,7 +963,7 @@ func (p *parser) parseArenaFunctionBody() (parserArenaFunctionBody, error) {
 	if !p.consumeKeyword("end") {
 		return parserArenaFunctionBody{}, p.errorf("expected end")
 	}
-	return parserArenaFunctionBody{typeParams: p.appendStatementStrings(typeParams), typePacks: p.appendStatementStrings(typePacks), params: params, paramAnnotations: annotations, variadic: variadic, variadicAnnotation: variadicAnnotation, returnAnnotation: p.arena.appendTypeNode(returnAnnotation), statements: statements}, nil
+	return parserArenaFunctionBody{typeParams: p.appendStatementStrings(typeParams), typePacks: p.appendStatementStrings(typePacks), params: params, paramAnnotations: annotations, variadic: variadic, variadicAnnotation: variadicAnnotation, returnAnnotation: returnAnnotation, statements: statements}, nil
 }
 
 func (p *parser) parseArenaParameterList() (nodeSpan, nodeSpan, bool, typeID, error) {
@@ -1044,7 +995,7 @@ func (p *parser) parseArenaParameterList() (nodeSpan, nodeSpan, bool, typeID, er
 			if !ok {
 				return nodeSpan{}, nodeSpan{}, false, 0, p.errorf("statement arena exhausted")
 			}
-			return paramSpan, annotationSpan, true, p.arena.appendTypeNode(annotation), nil
+			return paramSpan, annotationSpan, true, annotation, nil
 		}
 		name, err := p.parseIdentifier()
 		if err != nil {
@@ -1055,7 +1006,7 @@ func (p *parser) parseArenaParameterList() (nodeSpan, nodeSpan, bool, typeID, er
 			return nodeSpan{}, nodeSpan{}, false, 0, err
 		}
 		params.append(p.stringID(name))
-		annotations.append(p.arena.appendTypeNode(annotation))
+		annotations.append(annotation)
 		p.skipSpace()
 		if p.consumeByte(')') {
 			break
@@ -1452,7 +1403,11 @@ func (p *parser) tryParseTypeAliasStatement() (*typeAliasStatement, bool, error)
 	if err != nil {
 		return nil, true, err
 	}
-	return &typeAliasStatement{exported: exported, name: name, start: start, end: p.trimSourceEnd(value.end), nameStart: nameStart, nameEnd: nameEnd, typeParams: typeParams, typePacks: typePacks, value: value}, true, nil
+	valueNode, err := p.parsedType(value)
+	if err != nil {
+		return nil, true, err
+	}
+	return &typeAliasStatement{exported: exported, name: name, start: start, end: p.trimSourceEnd(valueNode.end), nameStart: nameStart, nameEnd: nameEnd, typeParams: typeParams, typePacks: typePacks, value: value}, true, nil
 }
 
 func (p *parser) parseLocalFunctionStatement() (localFunctionStatement, error) {
@@ -1594,48 +1549,48 @@ func (p *parser) parseFunctionBody() (parserFunctionDraft, error) {
 	}, nil
 }
 
-func (p *parser) parseParameterList() ([]string, []*typeExpression, bool, *typeExpression, error) {
+func (p *parser) parseParameterList() ([]string, []typeID, bool, typeID, error) {
 	p.skipSpace()
 	if !p.consumeByte('(') {
-		return nil, nil, false, nil, p.errorf("expected (")
+		return nil, nil, false, 0, p.errorf("expected (")
 	}
 	p.skipSpace()
 	if p.consumeByte(')') {
-		return nil, nil, false, nil, nil
+		return nil, nil, false, 0, nil
 	}
 
 	var params []string
-	var annotations []*typeExpression
+	var annotations []typeID
 	for {
 		if p.consumeString("...") {
 			annotation, err := p.parseOptionalTypeAnnotation()
 			if err != nil {
-				return nil, nil, false, nil, err
+				return nil, nil, false, 0, err
 			}
 			p.skipSpace()
 			if !p.consumeByte(')') {
-				return nil, nil, false, nil, p.errorf("expected )")
+				return nil, nil, false, 0, p.errorf("expected )")
 			}
 			return params, annotations, true, annotation, nil
 		}
 
 		param, err := p.parseIdentifier()
 		if err != nil {
-			return nil, nil, false, nil, err
+			return nil, nil, false, 0, err
 		}
 		annotation, err := p.parseOptionalTypeAnnotation()
 		if err != nil {
-			return nil, nil, false, nil, err
+			return nil, nil, false, 0, err
 		}
 		params = append(params, param)
 		annotations = append(annotations, annotation)
 
 		p.skipSpace()
 		if p.consumeByte(')') {
-			return params, annotations, false, nil, nil
+			return params, annotations, false, 0, nil
 		}
 		if !p.consumeByte(',') {
-			return nil, nil, false, nil, p.errorf("expected , or )")
+			return nil, nil, false, 0, p.errorf("expected , or )")
 		}
 		p.skipSpace()
 	}
@@ -2015,7 +1970,7 @@ func (p *parser) parseLocalStatement() (localStatement, error) {
 	}
 	names := []string{name}
 	nameRanges := []sourceRange{{start: nameStart, end: nameEnd}}
-	annotations := []*typeExpression{annotation}
+	annotations := []typeID{annotation}
 
 	for {
 		p.skipSpace()
@@ -2052,104 +2007,146 @@ func (p *parser) parseLocalStatement() (localStatement, error) {
 	return localStatement{names: names, nameRanges: nameRanges, annotations: annotations, values: values}, nil
 }
 
-func (p *parser) parseOptionalTypeAnnotation() (*typeExpression, error) {
+func (p *parser) parseOptionalTypeAnnotation() (typeID, error) {
 	p.skipSpace()
 	if !p.consumeByte(':') {
-		return nil, nil
+		return 0, nil
 	}
 
 	p.skipSpace()
 	return p.parseType()
 }
 
-func (p *parser) parseType() (*typeExpression, error) {
+func (p *parser) appendType(node arenaType) (typeID, error) {
+	used := uint64(len(p.arena.types.nodes)) + 1
+	if limit := p.limits.MaxSyntaxNodes; limit != 0 && used > limit {
+		return 0, &LimitError{Kind: LimitSyntaxNodes, Limit: limit, Used: used}
+	}
+	id, ok := p.arena.types.append(node)
+	if !ok {
+		return 0, p.errorf("type arena exhausted")
+	}
+	return id, nil
+}
+
+func (p *parser) parsedType(id typeID) (arenaType, error) {
+	node, ok := p.arena.types.node(id)
+	if !ok {
+		return arenaType{}, p.errorf("invalid type arena ID")
+	}
+	return node, nil
+}
+
+func (p *parser) parseType() (typeID, error) {
 	if err := p.enterNesting("type"); err != nil {
-		return nil, err
+		return 0, err
 	}
 	defer p.leaveNesting()
 	first, err := p.parseIntersectionType()
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	types := []*typeExpression{first}
+	types := idListBuilder[typeID]{}
+	types.append(first)
 
 	for {
 		p.skipSpace()
 		if !p.consumeByte('|') {
-			if len(types) == 1 {
+			if types.count == 1 {
 				return first, nil
 			}
-			return &typeExpression{
-				start: first.start,
-				end:   types[len(types)-1].end,
-				kind:  typeKindUnion,
-				types: types,
-			}, nil
+			last := types.at(types.count - 1)
+			children, ok := types.span(&p.arena.types.typeIDs)
+			if !ok {
+				return 0, p.errorf("type arena exhausted")
+			}
+			firstNode, err := p.parsedType(first)
+			if err != nil {
+				return 0, err
+			}
+			lastNode, err := p.parsedType(last)
+			if err != nil {
+				return 0, err
+			}
+			return p.appendType(arenaType{start: firstNode.start, end: lastNode.end, kind: typeKindUnion, children: children})
 		}
 		p.skipSpace()
 		next, err := p.parseIntersectionType()
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
-		types = append(types, next)
+		types.append(next)
 	}
 }
 
-func (p *parser) parseIntersectionType() (*typeExpression, error) {
+func (p *parser) parseIntersectionType() (typeID, error) {
 	first, err := p.parsePostfixType()
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	types := []*typeExpression{first}
+	types := idListBuilder[typeID]{}
+	types.append(first)
 
 	for {
 		p.skipSpace()
 		if !p.consumeByte('&') {
-			if len(types) == 1 {
+			if types.count == 1 {
 				return first, nil
 			}
-			return &typeExpression{
-				start: first.start,
-				end:   types[len(types)-1].end,
-				kind:  typeKindIntersection,
-				types: types,
-			}, nil
+			last := types.at(types.count - 1)
+			children, ok := types.span(&p.arena.types.typeIDs)
+			if !ok {
+				return 0, p.errorf("type arena exhausted")
+			}
+			firstNode, err := p.parsedType(first)
+			if err != nil {
+				return 0, err
+			}
+			lastNode, err := p.parsedType(last)
+			if err != nil {
+				return 0, err
+			}
+			return p.appendType(arenaType{start: firstNode.start, end: lastNode.end, kind: typeKindIntersection, children: children})
 		}
 		p.skipSpace()
 		next, err := p.parsePostfixType()
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
-		types = append(types, next)
+		types.append(next)
 	}
 }
 
-func (p *parser) parsePostfixType() (*typeExpression, error) {
+func (p *parser) parsePostfixType() (typeID, error) {
 	value, err := p.parsePrimaryType()
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
 	for {
 		p.skipSpace()
 		if p.consumeString("...") {
-			value.kind = typeKindGenericPack
-			value.end = p.pos
-			return value, nil
+			node, err := p.parsedType(value)
+			if err != nil {
+				return 0, err
+			}
+			return p.appendType(arenaType{start: node.start, end: p.pos, kind: typeKindGenericPack, payload: uint64(value)})
 		}
 		if !p.consumeByte('?') {
 			return value, nil
 		}
-		value = &typeExpression{
-			start: value.start,
-			end:   p.pos,
-			kind:  typeKindNilable,
-			inner: value,
+		node, err := p.parsedType(value)
+		if err != nil {
+			return 0, err
+		}
+		value, err = p.appendType(arenaType{start: node.start, end: p.pos, kind: typeKindNilable, payload: uint64(value)})
+		if err != nil {
+			return 0, err
 		}
 	}
 }
 
-func (p *parser) parsePrimaryType() (*typeExpression, error) {
+func (p *parser) parsePrimaryType() (typeID, error) {
 	p.skipSpace()
 	if value, ok, err := p.tryParseTypeofType(); ok {
 		return value, err
@@ -2165,108 +2162,126 @@ func (p *parser) parsePrimaryType() (*typeExpression, error) {
 		return p.parseParenthesizedOrFunctionType(start)
 	}
 	if p.consumeKeyword("nil") {
-		return &typeExpression{start: start, end: p.pos, kind: typeKindName, name: []string{"nil"}}, nil
+		parts := idListBuilder[stringID]{}
+		parts.append(p.stringID("nil"))
+		partSpan, _ := parts.span(&p.arena.types.stringIDs)
+		named, ok := p.arena.types.appendNamed(arenaNamedType{parts: partSpan})
+		if !ok {
+			return 0, p.errorf("type arena exhausted")
+		}
+		return p.appendType(arenaType{start: start, end: p.pos, kind: typeKindName, payload: uint64(named)})
 	}
 	if p.consumeKeyword("true") {
-		v := BoolValue(true)
-		return &typeExpression{start: start, end: p.pos, kind: typeKindSingleton, literal: &v}, nil
+		return p.appendType(arenaType{start: start, end: p.pos, kind: typeKindSingleton, scalarKind: BoolKind, payload: 1})
 	}
 	if p.consumeKeyword("false") {
-		v := BoolValue(false)
-		return &typeExpression{start: start, end: p.pos, kind: typeKindSingleton, literal: &v}, nil
+		return p.appendType(arenaType{start: start, end: p.pos, kind: typeKindSingleton, scalarKind: BoolKind})
 	}
 	if p.currentDoubleQuotedString() {
 		s, err := p.parseString()
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
-		v := StringValue(s)
-		return &typeExpression{start: start, end: p.pos, kind: typeKindSingleton, literal: &v}, nil
+		return p.appendType(arenaType{start: start, end: p.pos, kind: typeKindSingleton, scalarKind: StringKind, payload: uint64(p.typeStringID(s))})
 	}
 	if p.currentTokenKind(tokenNumber) {
 		n, err := p.parseNumber()
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
-		v := NumberValue(n)
-		return &typeExpression{start: start, end: p.pos, kind: typeKindSingleton, literal: &v}, nil
+		return p.appendType(arenaType{start: start, end: p.pos, kind: typeKindSingleton, scalarKind: NumberKind, payload: math.Float64bits(n)})
 	}
 	if p.consumeString("...") {
 		p.skipSpace()
 		if p.done() || p.currentSymbol(")") || p.currentSymbol(",") {
-			return &typeExpression{start: start, end: p.pos, kind: typeKindVariadic}, nil
+			return p.appendType(arenaType{start: start, end: p.pos, kind: typeKindVariadic})
 		}
 		value, err := p.parseType()
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
-		return &typeExpression{start: start, end: value.end, kind: typeKindVariadic, inner: value}, nil
+		node, err := p.parsedType(value)
+		if err != nil {
+			return 0, err
+		}
+		return p.appendType(arenaType{start: start, end: node.end, kind: typeKindVariadic, payload: uint64(value)})
 	}
 	return p.parseTypeName()
 }
 
-func (p *parser) tryParseTypeofType() (*typeExpression, bool, error) {
+func (p *parser) tryParseTypeofType() (typeID, bool, error) {
 	checkpoint := p.mark()
 	start := checkpoint.pos
 	if !p.consumeKeyword("typeof") {
-		return nil, false, nil
+		return 0, false, nil
 	}
 
 	p.skipSpace()
 	if !p.consumeByte('(') {
 		p.restore(checkpoint)
-		return nil, false, nil
+		return 0, false, nil
 	}
 
 	p.skipSpace()
 	expr, err := p.parseExpression()
 	if err != nil {
-		return nil, true, err
+		return 0, true, err
 	}
 	p.skipSpace()
 	if !p.consumeByte(')') {
-		return nil, true, p.errorf("expected )")
+		return 0, true, p.errorf("expected )")
 	}
-	return &typeExpression{start: start, end: p.pos, kind: typeKindTypeof, expr: expr}, true, nil
+	value, err := p.appendType(arenaType{start: start, end: p.pos, kind: typeKindTypeof, payload: uint64(expr)})
+	return value, true, err
 }
 
-func (p *parser) parseGenericFunctionType(start int) (*typeExpression, error) {
+func (p *parser) parseGenericFunctionType(start int) (typeID, error) {
 	typeParams, typePacks, err := p.parseTypeParameterListAfterOpen()
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
 	p.skipSpace()
 	if !p.consumeByte('(') {
-		return nil, p.errorf("expected (")
+		return 0, p.errorf("expected (")
 	}
 	value, err := p.parseParenthesizedOrFunctionType(p.pos - 1)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	value.start = start
-	value.kind = typeKindGenericFunction
-	value.typeParams = typeParams
-	value.typePacks = typePacks
+	node, err := p.parsedType(value)
+	if err != nil {
+		return 0, err
+	}
+	fn, ok := p.arena.types.functionType(arenaFunctionTypeID(node.payload))
+	if !ok {
+		return 0, p.errorf("expected function type")
+	}
+	fn.typeParams = p.appendTypeStrings(typeParams)
+	fn.typePacks = p.appendTypeStrings(typePacks)
+	p.arena.types.functions[arenaFunctionTypeID(node.payload)-1] = fn
+	node.start = start
+	node.kind = typeKindGenericFunction
+	p.arena.types.setNode(value, node)
 	return value, nil
 }
 
-func (p *parser) parseParenthesizedOrFunctionType(start int) (*typeExpression, error) {
+func (p *parser) parseParenthesizedOrFunctionType(start int) (typeID, error) {
 	p.skipSpace()
-	var params []typeFunctionParam
+	params := idListBuilder[arenaTypeParam]{}
 	if !p.consumeByte(')') {
 		for {
 			param, err := p.parseFunctionTypeArgument()
 			if err != nil {
-				return nil, err
+				return 0, err
 			}
-			params = append(params, param)
+			params.append(param)
 			p.skipSpace()
 			if p.consumeByte(')') {
 				break
 			}
 			if !p.consumeByte(',') {
-				return nil, p.errorf("expected , or )")
+				return 0, p.errorf("expected , or )")
 			}
 			p.skipSpace()
 		}
@@ -2275,20 +2290,43 @@ func (p *parser) parseParenthesizedOrFunctionType(start int) (*typeExpression, e
 
 	p.skipSpace()
 	if !p.consumeString("->") {
-		if len(params) == 1 && params[0].name == "" && !params[0].variadic {
-			return params[0].value, nil
+		if params.count == 1 {
+			param := params.at(0)
+			if param.name == 0 && !param.variadic {
+				return param.value, nil
+			}
 		}
-		return &typeExpression{start: start, end: closeEnd, kind: typeKindFunction, params: params}, nil
+		paramSpan, ok := params.span(&p.arena.types.params)
+		if !ok {
+			return 0, p.errorf("type arena exhausted")
+		}
+		fn, ok := p.arena.types.appendFunction(arenaFunctionType{params: paramSpan})
+		if !ok {
+			return 0, p.errorf("type arena exhausted")
+		}
+		return p.appendType(arenaType{start: start, end: closeEnd, kind: typeKindFunction, payload: uint64(fn)})
 	}
 	p.skipSpace()
 	returnType, err := p.parseType()
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	return &typeExpression{start: start, end: returnType.end, kind: typeKindFunction, params: params, returnType: returnType}, nil
+	returnNode, err := p.parsedType(returnType)
+	if err != nil {
+		return 0, err
+	}
+	paramSpan, ok := params.span(&p.arena.types.params)
+	if !ok {
+		return 0, p.errorf("type arena exhausted")
+	}
+	fn, ok := p.arena.types.appendFunction(arenaFunctionType{params: paramSpan, returnType: returnType})
+	if !ok {
+		return 0, p.errorf("type arena exhausted")
+	}
+	return p.appendType(arenaType{start: start, end: returnNode.end, kind: typeKindFunction, payload: uint64(fn)})
 }
 
-func (p *parser) parseFunctionTypeArgument() (typeFunctionParam, error) {
+func (p *parser) parseFunctionTypeArgument() (arenaTypeParam, error) {
 	p.skipSpace()
 	start := p.pos
 	if p.consumeString("...") {
@@ -2297,124 +2335,143 @@ func (p *parser) parseFunctionTypeArgument() (typeFunctionParam, error) {
 			p.skipSpace()
 			value, err := p.parseType()
 			if err != nil {
-				return typeFunctionParam{}, err
+				return arenaTypeParam{}, err
 			}
-			return typeFunctionParam{value: value, variadic: true}, nil
+			return arenaTypeParam{value: value, variadic: true}, nil
 		}
 		if p.done() || p.currentSymbol(")") || p.currentSymbol(",") {
-			return typeFunctionParam{variadic: true}, nil
+			return arenaTypeParam{variadic: true}, nil
 		}
 		value, err := p.parseType()
 		if err != nil {
-			return typeFunctionParam{}, err
+			return arenaTypeParam{}, err
 		}
-		return typeFunctionParam{
-			value: &typeExpression{start: start, end: value.end, kind: typeKindVariadic, inner: value},
-		}, nil
+		node, err := p.parsedType(value)
+		if err != nil {
+			return arenaTypeParam{}, err
+		}
+		variadic, err := p.appendType(arenaType{start: start, end: node.end, kind: typeKindVariadic, payload: uint64(value)})
+		return arenaTypeParam{value: variadic}, err
 	}
 
 	if p.currentIdentifier() {
 		checkpoint := p.mark()
 		name, err := p.parseIdentifier()
 		if err != nil {
-			return typeFunctionParam{}, err
+			return arenaTypeParam{}, err
 		}
 		p.skipSpace()
 		if p.consumeByte(':') {
 			p.skipSpace()
 			value, err := p.parseType()
 			if err != nil {
-				return typeFunctionParam{}, err
+				return arenaTypeParam{}, err
 			}
-			return typeFunctionParam{name: name, value: value}, nil
+			return arenaTypeParam{name: p.stringID(name), value: value}, nil
 		}
 		p.restore(checkpoint)
 	}
 
 	value, err := p.parseType()
 	if err != nil {
-		return typeFunctionParam{}, err
+		return arenaTypeParam{}, err
 	}
-	return typeFunctionParam{value: value}, nil
+	return arenaTypeParam{value: value}, nil
 }
 
-func (p *parser) parseTableTypeBody(start int) (*typeExpression, error) {
+func (p *parser) parseTableTypeBody(start int) (typeID, error) {
 	p.skipSpace()
 	if p.consumeByte('}') {
-		return &typeExpression{start: start, end: p.pos, kind: typeKindTable}, nil
+		table, ok := p.arena.types.appendTable(arenaTableType{})
+		if !ok {
+			return 0, p.errorf("type arena exhausted")
+		}
+		return p.appendType(arenaType{start: start, end: p.pos, kind: typeKindTable, payload: uint64(table)})
 	}
 
-	var fields []typeField
+	fields := idListBuilder[arenaTypeField]{}
 	for {
 		access := p.parseOptionalTableFieldAccess()
 		if p.consumeByte('[') {
 			p.skipSpace()
 			key, err := p.parseType()
 			if err != nil {
-				return nil, err
+				return 0, err
 			}
 			p.skipSpace()
 			if !p.consumeByte(']') {
-				return nil, p.errorf("expected ]")
+				return 0, p.errorf("expected ]")
 			}
 			p.skipSpace()
 			if !p.consumeByte(':') {
-				return nil, p.errorf("expected :")
+				return 0, p.errorf("expected :")
 			}
 			p.skipSpace()
 			value, err := p.parseType()
 			if err != nil {
-				return nil, err
+				return 0, err
 			}
-			fields = append(fields, typeField{access: access, key: key, value: value})
+			fields.append(arenaTypeField{access: typeFieldAccess(access), key: key, value: value})
 		} else if p.currentIdentifier() {
 			fieldCheckpoint := p.mark()
 			name, err := p.parseIdentifier()
 			if err != nil {
-				return nil, err
+				return 0, err
 			}
 			p.skipSpace()
 			if p.consumeByte(':') {
 				p.skipSpace()
 				value, err := p.parseType()
 				if err != nil {
-					return nil, err
+					return 0, err
 				}
-				fields = append(fields, typeField{access: access, name: name, value: value})
+				fields.append(arenaTypeField{access: typeFieldAccess(access), name: p.stringID(name), value: value})
 			} else {
 				if access != "" {
-					return nil, p.errorf("expected :")
+					return 0, p.errorf("expected :")
 				}
 				p.restore(fieldCheckpoint)
 				value, err := p.parseType()
 				if err != nil {
-					return nil, err
+					return 0, err
 				}
-				fields = append(fields, typeField{value: value})
+				fields.append(arenaTypeField{value: value})
 			}
 		} else {
 			if access != "" {
-				return nil, p.errorf("expected table property or indexer")
+				return 0, p.errorf("expected table property or indexer")
 			}
 			value, err := p.parseType()
 			if err != nil {
-				return nil, err
+				return 0, err
 			}
-			fields = append(fields, typeField{value: value})
+			fields.append(arenaTypeField{value: value})
 		}
 
 		p.skipSpace()
 		if p.consumeByte('}') {
-			return &typeExpression{start: start, end: p.pos, kind: typeKindTable, fields: fields}, nil
+			return p.finishTableType(start, fields)
 		}
 		if !p.consumeByte(',') && !p.consumeByte(';') {
-			return nil, p.errorf("expected , ; or }")
+			return 0, p.errorf("expected , ; or }")
 		}
 		p.skipSpace()
 		if p.consumeByte('}') {
-			return &typeExpression{start: start, end: p.pos, kind: typeKindTable, fields: fields}, nil
+			return p.finishTableType(start, fields)
 		}
 	}
+}
+
+func (p *parser) finishTableType(start int, fields idListBuilder[arenaTypeField]) (typeID, error) {
+	fieldSpan, ok := fields.span(&p.arena.types.fields)
+	if !ok {
+		return 0, p.errorf("type arena exhausted")
+	}
+	table, ok := p.arena.types.appendTable(arenaTableType{fields: fieldSpan})
+	if !ok {
+		return 0, p.errorf("type arena exhausted")
+	}
+	return p.appendType(arenaType{start: start, end: p.pos, kind: typeKindTable, payload: uint64(table)})
 }
 
 func (p *parser) parseOptionalTableFieldAccess() string {
@@ -2437,42 +2494,72 @@ func (p *parser) parseOptionalTableFieldAccess() string {
 	return ""
 }
 
-func (p *parser) parseTypeName() (*typeExpression, error) {
+func (p *parser) parseTypeName() (typeID, error) {
 	start := p.pos
 	name, err := p.parseTypeNamePart()
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	parts := []string{name}
+	parts := idListBuilder[stringID]{}
+	parts.append(p.stringID(name))
+	nameEnd := p.pos
 	typeArgs, err := p.parseOptionalTypeArguments()
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	end := p.pos
+	end := nameEnd
+	if typeArgs.count != 0 {
+		end = p.pos
+	}
 
 	for {
 		p.skipSpace()
 		if p.currentSymbol("...") {
-			return &typeExpression{start: start, end: end, kind: typeKindName, name: parts, typeArgs: typeArgs}, nil
+			return p.finishNamedType(start, end, parts, typeArgs)
 		}
 		if !p.consumeByte('.') {
-			return &typeExpression{start: start, end: end, kind: typeKindName, name: parts, typeArgs: typeArgs}, nil
+			return p.finishNamedType(start, end, parts, typeArgs)
 		}
 		p.skipSpace()
 		part, err := p.parseTypeNamePart()
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
-		parts = append(parts, part)
+		parts.append(p.stringID(part))
+		partEnd := p.pos
 		nextArgs, err := p.parseOptionalTypeArguments()
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
-		if len(nextArgs) > 0 {
+		if nextArgs.count > 0 {
 			typeArgs = nextArgs
 		}
-		end = p.pos
+		end = partEnd
+		if nextArgs.count != 0 {
+			end = p.pos
+		}
 	}
+}
+
+func (p *parser) finishNamedType(start, end int, parts idListBuilder[stringID], args nodeSpan) (typeID, error) {
+	partSpan, ok := parts.span(&p.arena.types.stringIDs)
+	if !ok {
+		return 0, p.errorf("type arena exhausted")
+	}
+	named, ok := p.arena.types.appendNamed(arenaNamedType{parts: partSpan, args: args})
+	if !ok {
+		return 0, p.errorf("type arena exhausted")
+	}
+	return p.appendType(arenaType{start: start, end: end, kind: typeKindName, payload: uint64(named)})
+}
+
+func (p *parser) appendTypeStrings(values []string) nodeSpan {
+	ids := idListBuilder[stringID]{}
+	for _, value := range values {
+		ids.append(p.stringID(value))
+	}
+	span, _ := ids.span(&p.arena.types.stringIDs)
+	return span
 }
 
 func (p *parser) parseOptionalTypeParameterList() ([]string, []string, error) {
@@ -2512,26 +2599,30 @@ func (p *parser) parseTypeNamePart() (string, error) {
 	return p.parseIdentifier()
 }
 
-func (p *parser) parseOptionalTypeArguments() ([]*typeExpression, error) {
+func (p *parser) parseOptionalTypeArguments() (nodeSpan, error) {
 	p.skipSpace()
 	if !p.consumeByte('<') {
-		return nil, nil
+		return nodeSpan{}, nil
 	}
 
-	var args []*typeExpression
+	args := idListBuilder[typeID]{}
 	for {
 		p.skipSpace()
 		arg, err := p.parseType()
 		if err != nil {
-			return nil, err
+			return nodeSpan{}, err
 		}
-		args = append(args, arg)
+		args.append(arg)
 		p.skipSpace()
 		if p.consumeByte('>') {
-			return args, nil
+			span, ok := args.span(&p.arena.types.typeIDs)
+			if !ok {
+				return nodeSpan{}, p.errorf("type arena exhausted")
+			}
+			return span, nil
 		}
 		if !p.consumeByte(',') {
-			return nil, p.errorf("expected , or >")
+			return nodeSpan{}, p.errorf("expected , or >")
 		}
 	}
 }
@@ -2836,6 +2927,28 @@ func (p *parser) stringID(value string) stringID {
 	return stringID(len(p.arena.strings))
 }
 
+// typeStringID interns a type-syntax string without constructing a runtime
+// Value. Unlike ordinary identifier storage, the empty singleton string needs
+// a real non-zero ID so zero remains the absence value.
+func (p *parser) typeStringID(value string) stringID {
+	if value != "" {
+		return p.stringID(value)
+	}
+	p.arena.strings = append(p.arena.strings, value)
+	return stringID(len(p.arena.strings))
+}
+
+func typeFieldAccess(value string) arenaTypeFieldAccess {
+	switch value {
+	case "read":
+		return arenaTypeFieldAccessRead
+	case "write":
+		return arenaTypeFieldAccessWrite
+	default:
+		return arenaTypeFieldAccessNone
+	}
+}
+
 func (p *parser) literalStringID(value string) stringID {
 	var id stringID
 	if value == "" {
@@ -3038,16 +3151,12 @@ func (p *parser) parseTermSuffixesWithCasts(value termID, allowCasts bool) (term
 			if !ok {
 				return 0, p.errorf("invalid term")
 			}
-			if node.castType == 0 {
-				if uint64(len(p.arena.castTypes)) >= math.MaxUint32 {
-					return 0, p.errorf("expression arena exhausted")
-				}
-				p.arena.castTypes = append(p.arena.castTypes, cast)
-				node.castType = arenaCastID(len(p.arena.castTypes))
-			} else {
-				p.arena.castTypes[node.castType-1] = cast
+			node.castType = cast
+			castNode, err := p.parsedType(cast)
+			if err != nil {
+				return 0, err
 			}
-			node.end = cast.end
+			node.end = castNode.end
 			p.arena.terms[value-1] = node
 			continue
 		}
@@ -3107,7 +3216,7 @@ func (p *parser) parseTermSuffixesWithCasts(value termID, allowCasts bool) (term
 			selectors = idListBuilder[arenaSelector]{}
 			continue
 		}
-		if len(typeArgs) > 0 {
+		if typeArgs.count > 0 {
 			return 0, p.errorf("expected (")
 		}
 		if p.consumeByte(':') {
@@ -3165,27 +3274,31 @@ func (p *parser) parseTermSuffixesWithCasts(value termID, allowCasts bool) (term
 	}
 }
 
-func (p *parser) parseOptionalCallTypeArguments() ([]*typeExpression, error) {
+func (p *parser) parseOptionalCallTypeArguments() (nodeSpan, error) {
 	p.skipSpace()
 	if !p.consumeString("<<") {
-		return nil, nil
+		return nodeSpan{}, nil
 	}
 
-	var args []*typeExpression
+	args := idListBuilder[typeID]{}
 	for {
 		p.skipSpace()
 		arg, err := p.parseType()
 		if err != nil {
-			return nil, err
+			return nodeSpan{}, err
 		}
-		args = append(args, arg)
+		args.append(arg)
 
 		p.skipSpace()
 		if p.consumeString(">>") {
-			return args, nil
+			span, ok := args.span(&p.arena.types.typeIDs)
+			if !ok {
+				return nodeSpan{}, p.errorf("type arena exhausted")
+			}
+			return span, nil
 		}
 		if !p.consumeByte(',') {
-			return nil, p.errorf("expected , or >>")
+			return nodeSpan{}, p.errorf("expected , or >>")
 		}
 	}
 }

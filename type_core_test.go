@@ -129,12 +129,21 @@ func TestTypeStoreKeepsGenericFunctionParameters(t *testing.T) {
 }
 
 func TestTypeStoreSummarizesTableMetatable(t *testing.T) {
-	artifact, err := parseSource(Source{Text: "return 1"})
+	artifact, err := parseSource(Source{Text: `local value: string = "x"`})
 	if err != nil {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
 	store := newTypeStoreTree(artifact.tree)
-	stringRef := store.lowerType(&typeExpression{kind: typeKindName, name: []string{"string"}})
+	statements, ok := artifact.tree.statementIDs()
+	if !ok || len(statements) != 1 {
+		t.Fatalf("statements are unavailable: %#v", statements)
+	}
+	local, ok := artifact.tree.localArena(statements[0])
+	if !ok {
+		t.Fatal("local statement is unavailable")
+	}
+	annotations := consumerStatementTypes(artifact.tree, local.annotations)
+	stringRef := store.lowerType(annotations[0])
 	indexRef := store.addType(typeNode{
 		kind:    TypeSummaryTable,
 		display: "table",

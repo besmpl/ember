@@ -136,7 +136,7 @@ func (f moduleValueFlow) applyStatements(tree syntaxTree, statements []statement
 			annotations := consumerStatementTypes(tree, local.annotations)
 			values, _ := tree.statementExpressions(local.values)
 			for i, name := range consumerStatementStrings(tree, local.names) {
-				if i < len(annotations) && annotations[i] != nil {
+				if i < len(annotations) && annotations[i] != 0 {
 					f.values[name] = store.summary(store.lowerType(annotations[i]))
 					continue
 				}

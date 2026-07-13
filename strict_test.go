@@ -327,6 +327,24 @@ return value
 	}
 }
 
+func TestAnalyzerCheckReportsUnknownTypeInsideGenericPack(t *testing.T) {
+	for _, annotation := range []string{"Unknown?...", "(Unknown?)..."} {
+		t.Run(annotation, func(t *testing.T) {
+			source := "--!strict\nexport type X = " + annotation + "\nreturn 1"
+			result, err := ember.NewAnalyzer().Check(context.Background(), ember.Source{Name: "strict.luau", Text: source})
+			if err != nil {
+				t.Fatalf("Check returned error: %v", err)
+			}
+			if len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "unknown-type" {
+				t.Fatalf("Check diagnostics are %#v, want one unknown-type", result.Diagnostics)
+			}
+			if got := source[result.Diagnostics[0].Start:result.Diagnostics[0].End]; got != "Unknown" {
+				t.Fatalf("Diagnostic range points at %q, want Unknown", got)
+			}
+		})
+	}
+}
+
 func TestAnalyzerCheckReportsUnknownFunctionAnnotationTypeName(t *testing.T) {
 	analyzer := ember.NewAnalyzer()
 	source := `

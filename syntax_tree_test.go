@@ -47,7 +47,7 @@ func TestSyntaxTreeFacadePreservesNilAndEmptyChildren(t *testing.T) {
 	if terms, ok := tree.expressionTerms(0); ok || terms != nil {
 		t.Fatal("zero expression ID returned children")
 	}
-	if tree.typeArgs(nil) != nil {
+	if tree.typeArgs(0) != nil {
 		t.Fatal("nil child facade returned non-nil value")
 	}
 	if group, ok := tree.termGroup(0); ok || group != 0 {

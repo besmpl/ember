@@ -26,18 +26,26 @@ func firstStatementID(t *testing.T, result checkResult) statementID {
 	return statements[0]
 }
 
-func statementTypeExpressions(t *testing.T, tree syntaxTree, span nodeSpan) []*typeExpression {
+func statementTypeExpressions(t *testing.T, tree syntaxTree, span nodeSpan) []typeID {
 	t.Helper()
 
 	typeIDs, ok := tree.statementTypes(span)
 	if !ok {
 		t.Fatalf("type span is %#v, want valid statement type span", span)
 	}
-	types := make([]*typeExpression, len(typeIDs))
+	types := make([]typeID, len(typeIDs))
 	for i, typeID := range typeIDs {
 		types[i], _ = tree.statementType(typeID)
 	}
 	return types
+}
+
+func requireTypeName(t *testing.T, tree syntaxTree, value typeID, want string) {
+	t.Helper()
+	got := tree.typeName(value)
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("type name is %#v, want %q", got, want)
+	}
 }
 
 func statementStringValues(t *testing.T, tree syntaxTree, span nodeSpan) []string {
@@ -166,25 +174,25 @@ return value
 	}
 
 	annotation := annotations[0]
-	if annotation == nil {
+	if annotation == 0 {
 		t.Fatal("local annotation is nil")
 	}
-	if annotation.kind != typeKindUnion {
-		t.Fatalf("annotation kind is %q, want union", annotation.kind)
+	if got := result.tree.typeKind(annotation); got != typeKindUnion {
+		t.Fatalf("annotation kind is %d, want union", got)
 	}
-	if len(annotation.types) != 2 {
-		t.Fatalf("union has %d options, want 2", len(annotation.types))
+	children := result.tree.typeChildren(annotation)
+	if len(children) != 2 {
+		t.Fatalf("union has %d options, want 2", len(children))
 	}
-	if got := annotation.types[0].name; len(got) != 1 || got[0] != "number" {
-		t.Fatalf("first union option name is %#v, want number", got)
+	requireTypeName(t, result.tree, children[0], "number")
+	if got := result.tree.typeKind(children[1]); got != typeKindNilable {
+		t.Fatalf("second union option kind is %d, want nilable", got)
 	}
-	if annotation.types[1].kind != typeKindNilable {
-		t.Fatalf("second union option kind is %q, want nilable", annotation.types[1].kind)
+	inner, ok := result.tree.typeInner(children[1])
+	if !ok {
+		t.Fatal("nilable inner is missing")
 	}
-	inner := annotation.types[1].inner
-	if inner == nil || len(inner.name) != 1 || inner.name[0] != "string" {
-		t.Fatalf("nilable inner is %#v, want string name", inner)
-	}
+	requireTypeName(t, result.tree, inner, "string")
 }
 
 func TestParseKeepsTypeAliasTree(t *testing.T) {
@@ -206,19 +214,16 @@ return 1
 		t.Fatalf("alias type params are %#v, want T", typeParams)
 	}
 	value, _ := result.tree.statementType(alias.value)
-	if value == nil || value.kind != typeKindTable {
+	if value == 0 || result.tree.typeKind(value) != typeKindTable {
 		t.Fatalf("alias value is %#v, want table type", value)
 	}
-	if len(value.fields) != 1 {
-		t.Fatalf("table has %d fields, want 1", len(value.fields))
+	fields := result.tree.typeFields(value)
+	if len(fields) != 1 {
+		t.Fatalf("table has %d fields, want 1", len(fields))
 	}
-	field := value.fields[0]
-	if field.key == nil || len(field.key.name) != 1 || field.key.name[0] != "string" {
-		t.Fatalf("indexer key is %#v, want string", field.key)
-	}
-	if field.value == nil || len(field.value.name) != 1 || field.value.name[0] != "T" {
-		t.Fatalf("indexer value is %#v, want T", field.value)
-	}
+	field := fields[0]
+	requireTypeName(t, result.tree, result.tree.typeFieldKey(field), "string")
+	requireTypeName(t, result.tree, result.tree.typeFieldValue(field), "T")
 }
 
 func TestParseKeepsFunctionTypeAnnotations(t *testing.T) {
@@ -238,13 +243,9 @@ return identity(1)
 	if len(paramAnnotations) != 1 {
 		t.Fatalf("function has %d param annotations, want 1", len(paramAnnotations))
 	}
-	if param := paramAnnotations[0]; param == nil || len(param.name) != 1 || param.name[0] != "T" {
-		t.Fatalf("param annotation is %#v, want T", param)
-	}
+	requireTypeName(t, result.tree, paramAnnotations[0], "T")
 	ret, _ := result.tree.statementType(fn.returnAnnotation)
-	if ret == nil || len(ret.name) != 1 || ret.name[0] != "T" {
-		t.Fatalf("return annotation is %#v, want T", ret)
-	}
+	requireTypeName(t, result.tree, ret, "T")
 }
 
 func TestParseKeepsTypeCastTree(t *testing.T) {
@@ -254,9 +255,10 @@ return (value :: number) + 2
 `)
 
 	cast, ok := result.tree.termCast(firstReturnedGroupedTerm(t, result))
-	if !ok || cast == nil || len(cast.name) != 1 || cast.name[0] != "number" {
+	if !ok || cast == 0 {
 		t.Fatalf("cast type is %#v, want number", cast)
 	}
+	requireTypeName(t, result.tree, cast, "number")
 }
 
 func TestParseKeepsTypePackTrees(t *testing.T) {
@@ -275,20 +277,31 @@ return 1
 		t.Fatalf("alias type packs are %#v, want U", typePacks)
 	}
 	value, _ := result.tree.statementType(alias.value)
-	if value == nil || value.kind != typeKindFunction {
+	if value == 0 || result.tree.typeKind(value) != typeKindFunction {
 		t.Fatalf("alias value is %#v, want function type", value)
 	}
-	if len(value.params) != 2 {
-		t.Fatalf("function type has %d params, want 2", len(value.params))
+	params := result.tree.typeParams(value)
+	if len(params) != 2 {
+		t.Fatalf("function type has %d params, want 2", len(params))
 	}
-	packParam := value.params[1].value
-	if packParam == nil || packParam.kind != typeKindGenericPack || len(packParam.name) != 1 || packParam.name[0] != "U" {
+	packParam := result.tree.typeParamValue(params[1])
+	if packParam == 0 || result.tree.typeKind(packParam) != typeKindGenericPack {
 		t.Fatalf("second param is %#v, want U generic pack", packParam)
 	}
-	ret := value.returnType
-	if ret == nil || ret.kind != typeKindVariadic || ret.inner == nil || len(ret.inner.name) != 1 || ret.inner.name[0] != "T" {
+	packInner, ok := result.tree.typeInner(packParam)
+	if !ok {
+		t.Fatal("generic pack has no inner type")
+	}
+	requireTypeName(t, result.tree, packInner, "U")
+	ret, ok := result.tree.typeReturn(value)
+	if !ok || result.tree.typeKind(ret) != typeKindVariadic {
 		t.Fatalf("return type is %#v, want variadic T", ret)
 	}
+	inner, ok := result.tree.typeInner(ret)
+	if !ok {
+		t.Fatal("variadic return has no inner type")
+	}
+	requireTypeName(t, result.tree, inner, "T")
 }
 
 func TestParseKeepsCallTypeArguments(t *testing.T) {
@@ -303,11 +316,23 @@ return make<<number, string>>()
 	if len(typeArgs) != 2 {
 		t.Fatalf("call has %d type args, want 2", len(typeArgs))
 	}
-	if got := typeArgs[0].name; len(got) != 1 || got[0] != "number" {
-		t.Fatalf("first type arg is %#v, want number", got)
+	requireTypeName(t, result.tree, typeArgs[0], "number")
+	requireTypeName(t, result.tree, typeArgs[1], "string")
+}
+
+func TestCallTypeArgumentsRejectMalformedTypeIDs(t *testing.T) {
+	if got := (syntaxTree{}).callTypeArgs(1); got != nil {
+		t.Fatalf("nil arena resolved call type arguments as %#v", got)
 	}
-	if got := typeArgs[1].name; len(got) != 1 || got[0] != "string" {
-		t.Fatalf("second type arg is %#v, want string", got)
+	_, result := checkTypedSource(t, `return make<<number>>()`)
+	call := firstReturnedCall(t, result)
+	node, ok := result.tree.arena.call(call)
+	if !ok || node.typeArgs.count != 1 {
+		t.Fatal("call type arguments are unavailable")
+	}
+	result.tree.arena.types.typeIDs[node.typeArgs.start] = typeID(len(result.tree.arena.types.nodes) + 1)
+	if got := result.tree.callTypeArgs(call); got != nil {
+		t.Fatalf("malformed call type arguments resolved as %#v", got)
 	}
 }
 
@@ -319,16 +344,30 @@ return value
 
 	local := firstLocalStatement(t, result)
 	annotation := statementTypeExpressions(t, result.tree, local.annotations)[0]
-	if got := source[annotation.start:annotation.end]; got != "number | string?" {
+	start, end := result.tree.typeRange(annotation)
+	if got := source[start:end]; got != "number | string?" {
 		t.Fatalf("annotation source is %q, want number | string?", got)
 	}
 
-	nilable := annotation.types[1]
-	if got := source[nilable.start:nilable.end]; got != "string?" {
+	nilable := result.tree.typeChildren(annotation)[1]
+	start, end = result.tree.typeRange(nilable)
+	if got := source[start:end]; got != "string?" {
 		t.Fatalf("nilable source is %q, want string?", got)
 	}
-	if got := source[nilable.inner.start:nilable.inner.end]; got != "string" {
+	inner, _ := result.tree.typeInner(nilable)
+	start, end = result.tree.typeRange(inner)
+	if got := source[start:end]; got != "string" {
 		t.Fatalf("nilable inner source is %q, want string", got)
+	}
+}
+
+func TestParseTypeNameRangeExcludesTrailingWhitespace(t *testing.T) {
+	source, result := checkTypedSource(t, `local value: Module.Name   = nil`)
+	local := firstLocalStatement(t, result)
+	annotation := statementTypeExpressions(t, result.tree, local.annotations)[0]
+	start, end := result.tree.typeRange(annotation)
+	if got := source[start:end]; got != "Module.Name" {
+		t.Fatalf("annotation source is %q, want Module.Name", got)
 	}
 }
 
@@ -343,31 +382,137 @@ return 1
 
 	alias := firstTypeAlias(t, result)
 	value, _ := result.tree.statementType(alias.value)
-	if value == nil || value.kind != typeKindTable {
+	if value == 0 || result.tree.typeKind(value) != typeKindTable {
 		t.Fatalf("alias value is %#v, want table type", value)
 	}
-	fields := value.fields
+	fields := result.tree.typeFields(value)
 	if len(fields) != 2 {
 		t.Fatalf("table has %d fields, want 2", len(fields))
 	}
 
-	if fields[0].access != "read" {
-		t.Fatalf("first field access is %q, want read", fields[0].access)
+	if got := result.tree.typeFieldAccess(fields[0]); got != "read" {
+		t.Fatalf("first field access is %q, want read", got)
 	}
-	if fields[0].name != "Name" {
-		t.Fatalf("first field name is %q, want Name", fields[0].name)
+	if got := result.tree.typeFieldName(fields[0]); got != "Name" {
+		t.Fatalf("first field name is %q, want Name", got)
 	}
-	if fields[0].value == nil || len(fields[0].value.name) != 1 || fields[0].value.name[0] != "string" {
-		t.Fatalf("first field value is %#v, want string", fields[0].value)
-	}
+	requireTypeName(t, result.tree, result.tree.typeFieldValue(fields[0]), "string")
 
-	if fields[1].access != "write" {
-		t.Fatalf("second field access is %q, want write", fields[1].access)
+	if got := result.tree.typeFieldAccess(fields[1]); got != "write" {
+		t.Fatalf("second field access is %q, want write", got)
 	}
-	if fields[1].key == nil || len(fields[1].key.name) != 1 || fields[1].key.name[0] != "number" {
-		t.Fatalf("second field key is %#v, want number", fields[1].key)
+	requireTypeName(t, result.tree, result.tree.typeFieldKey(fields[1]), "number")
+	requireTypeName(t, result.tree, result.tree.typeFieldValue(fields[1]), "boolean")
+}
+
+func TestParseTypeArenaCoversEveryTypeFamily(t *testing.T) {
+	source := `
+type Named = Package.Member<number>
+type Combined = (A & B) | C?
+type Table = {read Name: string, [number]: boolean}
+type Function = (value: A, ...: B) -> C
+type GenericFunction = <T, U...>(T, U...) -> typeof(value)
+type Variadic = ...A
+type Pack = A...
+type Singleton = true | false | "text" | 1
+return 1
+`
+	_, result := checkTypedSource(t, source)
+	seen := make(map[typeKind]bool)
+	var visit func(typeID)
+	visit = func(value typeID) {
+		if value == 0 {
+			return
+		}
+		seen[result.tree.typeKind(value)] = true
+		for _, child := range result.tree.typeArgs(value) {
+			visit(child)
+		}
+		for _, child := range result.tree.typeChildren(value) {
+			visit(child)
+		}
+		if inner, ok := result.tree.typeInner(value); ok {
+			visit(inner)
+		}
+		for _, field := range result.tree.typeFields(value) {
+			visit(result.tree.typeFieldKey(field))
+			visit(result.tree.typeFieldValue(field))
+		}
+		for _, param := range result.tree.typeParams(value) {
+			visit(result.tree.typeParamValue(param))
+		}
+		if ret, ok := result.tree.typeReturn(value); ok {
+			visit(ret)
+		}
 	}
-	if fields[1].value == nil || len(fields[1].value.name) != 1 || fields[1].value.name[0] != "boolean" {
-		t.Fatalf("second field value is %#v, want boolean", fields[1].value)
+	statements, _ := result.tree.statementIDs()
+	for _, statement := range statements {
+		if alias, ok := result.tree.typeAliasArena(statement); ok {
+			visit(alias.value)
+		}
+	}
+	for _, kind := range []typeKind{
+		typeKindName, typeKindUnion, typeKindIntersection, typeKindNilable,
+		typeKindTable, typeKindFunction, typeKindGenericFunction, typeKindTypeof,
+		typeKindVariadic, typeKindGenericPack, typeKindSingleton,
+	} {
+		if !seen[kind] {
+			t.Errorf("type kind %d was not represented in the arena", kind)
+		}
+	}
+}
+
+func TestParseSingletonStringDoesNotBoxRuntimeValue(t *testing.T) {
+	tree, err := (&parser{source: `type Empty = ""`}).parse()
+	if err != nil {
+		t.Fatalf("parse returned error: %v", err)
+	}
+	statements, _ := tree.statementIDs()
+	alias, ok := tree.typeAliasArena(statements[0])
+	if !ok {
+		t.Fatal("first statement is not a type alias")
+	}
+	id, ok := tree.typeSingletonStringID(alias.value)
+	if !ok || id == 0 {
+		t.Fatalf("singleton string ID is %d, %v; want non-zero valid ID", id, ok)
+	}
+	text, _ := tree.stringValue(id)
+	if text != "" {
+		t.Fatalf("singleton string is %q, want empty", text)
+	}
+	if len(tree.arena.stringLiterals) != 0 {
+		t.Fatalf("type parsing boxed %d runtime string Values, want 0", len(tree.arena.stringLiterals))
+	}
+}
+
+func TestTypeSyntaxIDsFollowDepthFirstArenaOrder(t *testing.T) {
+	tree, err := (&parser{source: `type X = A<B> | C?`}).parse()
+	if err != nil {
+		t.Fatalf("parse returned error: %v", err)
+	}
+	statements, _ := tree.statementIDs()
+	alias, _ := tree.typeAliasArena(statements[0])
+	root := alias.value
+	children := tree.typeChildren(root)
+	args := tree.typeArgs(children[0])
+	inner, _ := tree.typeInner(children[1])
+	want := []typeID{root, children[0], args[0], children[1], inner}
+	first := tree.typeID(root)
+	for i, value := range want {
+		if got := tree.typeID(value); got != first+syntaxID(i) {
+			t.Fatalf("DFS type %d has syntax ID %d, want %d", i, got, first+syntaxID(i))
+		}
+	}
+}
+
+func TestTypeArenaChargesSyntaxLimitBeforeAppending(t *testing.T) {
+	p := parser{
+		source: `type T = A | B | C | D`,
+		limits: CompileLimits{MaxSyntaxNodes: 3},
+	}
+	_, err := p.parse()
+	assertCompileLimitKind(t, err, LimitSyntaxNodes)
+	if got := len(p.arena.types.nodes); got != 3 {
+		t.Fatalf("type arena contains %d nodes after limit crossing, want 3", got)
 	}
 }

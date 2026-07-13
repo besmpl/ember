@@ -101,7 +101,7 @@ type returnPackFact struct {
 type typeAliasFact struct {
 	typeParams []string
 	typePacks  []string
-	value      *typeExpression
+	value      typeID
 }
 
 type sourceRange struct {
@@ -109,14 +109,14 @@ type sourceRange struct {
 	end   int
 }
 
-func annotationRange(tree syntaxTree, annotation *typeExpression) sourceRange {
-	if annotation == nil {
+func annotationRange(tree syntaxTree, annotation typeID) sourceRange {
+	if annotation == 0 {
 		return sourceRange{}
 	}
-	name := tree.typeName(annotation)
+	nameIDs, _ := tree.typeNameIDs(annotation)
 	start, end := tree.typeRange(annotation)
-	if tree.typeKind(annotation) == typeKindName && len(name) != 0 {
-		return sourceRange{start: start, end: start + len(strings.Join(name, "."))}
+	if tree.typeKind(annotation) == typeKindName && len(nameIDs) != 0 {
+		return sourceRange{start: start, end: start + syntaxStringsLength(tree, nameIDs, 1)}
 	}
 	return sourceRange{start: start, end: end}
 }
@@ -447,8 +447,7 @@ func (a *analysisState) analyzeTypeAliasStatement(stmt arenaTypeAliasStatement) 
 	if _, ok := a.claimSymbol(stmt.nameID, symbolTypeAlias); ok {
 		a.defineTypeAlias(stmt)
 	}
-	value, _ := a.tree.statementType(stmt.value)
-	a.checkUnknownTypeNames(value)
+	a.checkUnknownTypeNames(stmt.value)
 }
 
 func (a *analysisState) analyzeScopedStatements(statements []statementID) {
@@ -459,8 +458,8 @@ func (a *analysisState) analyzeScopedStatements(statements []statementID) {
 
 func (a *analysisState) analyzeLocalFunctionStatement(stmt arenaFunctionStatement) {
 	paramAnnotations := consumerStatementTypes(a.tree, stmt.paramAnnotations)
-	variadicAnnotation, _ := a.tree.statementType(stmt.variadicAnnotation)
-	returnAnnotation, _ := a.tree.statementType(stmt.returnAnnotation)
+	variadicAnnotation := stmt.variadicAnnotation
+	returnAnnotation := stmt.returnAnnotation
 	typeParams := consumerStatementStrings(a.tree, stmt.typeParams)
 	a.checkFunctionParameterTypeNames(paramAnnotations, variadicAnnotation)
 	paramTypes := a.simpleTypesFromAnnotations(paramAnnotations)
@@ -486,7 +485,7 @@ func (a *analysisState) analyzeLocalFunctionStatement(stmt arenaFunctionStatemen
 	restore()
 }
 
-func (a *analysisState) analyzeFunctionBody(returnAnnotation *typeExpression, statements []statementID) {
+func (a *analysisState) analyzeFunctionBody(returnAnnotation typeID, statements []statementID) {
 	a.checkUnknownTypeNames(returnAnnotation)
 	returnPack := a.returnPackFromAnnotation(returnAnnotation)
 	a.analyzeFunctionBodyWithReturn(
@@ -542,7 +541,7 @@ func (a *analysisState) analyzeLocalStatement(stmt arenaLocalStatement) {
 	nameID := stmt.nameID
 	for i, name := range names {
 		var expected simpleType
-		var annotation *typeExpression
+		var annotation typeID
 		expectedTable := tableFact{}
 		actualTable := tableFact{}
 		var functionFact functionFact
@@ -772,7 +771,7 @@ func localNameRange(tree syntaxTree, stmt arenaLocalStatement, index int) source
 	return sourceRange{}
 }
 
-func (a *analysisState) analyzeAnnotatedExpression(annotation *typeExpression, value expressionID) {
+func (a *analysisState) analyzeAnnotatedExpression(annotation typeID, value expressionID) {
 	a.analyzeAnnotatedFunctionExpression(annotation, value)
 	expectedFact := a.tableFactFromAnnotation(annotation)
 	if expectedFact.empty() {
@@ -877,7 +876,7 @@ func (a *analysisState) analyzeAnnotatedExpression(annotation *typeExpression, v
 	}
 }
 
-func (a *analysisState) analyzeAnnotatedFunctionExpression(annotation *typeExpression, value expressionID) {
+func (a *analysisState) analyzeAnnotatedFunctionExpression(annotation typeID, value expressionID) {
 	fact, ok := a.functionFactFromAnnotation(annotation)
 	if !ok {
 		return
@@ -927,11 +926,11 @@ func functionExpressionFromExpression(tree syntaxTree, value expressionID) (aren
 }
 
 func functionExpressionHasAnnotations(tree syntaxTree, function arenaFunctionID) bool {
-	if tree.functionExpressionReturnAnnotation(function) != nil || tree.functionExpressionVariadicAnnotation(function) != nil {
+	if tree.functionExpressionReturnAnnotation(function) != 0 || tree.functionExpressionVariadicAnnotation(function) != 0 {
 		return true
 	}
 	for _, annotation := range tree.functionExpressionParamAnnotations(function) {
-		if annotation != nil {
+		if annotation != 0 {
 			return true
 		}
 	}
@@ -970,28 +969,28 @@ func functionExpressionParamTypes(tree syntaxTree, function arenaFunctionID, fac
 	return types
 }
 
-func (a *analysisState) returnPackFromAnnotation(annotation *typeExpression) returnPackFact {
+func (a *analysisState) returnPackFromAnnotation(annotation typeID) returnPackFact {
 	return a.returnPackFromAnnotationWith(annotation, nil)
 }
 
-func (a *analysisState) returnPackFromAnnotationWith(annotation *typeExpression, substitutions map[string]simpleType) returnPackFact {
+func (a *analysisState) returnPackFromAnnotationWith(annotation typeID, substitutions map[string]simpleType) returnPackFact {
 	tree := a.tree
-	if annotation == nil {
+	if annotation == 0 {
 		return returnPackFact{}
 	}
 	params := tree.typeParams(annotation)
-	if tree.typeKind(annotation) == typeKindFunction && tree.typeReturn(annotation) == nil {
+	_, hasReturn := tree.typeReturn(annotation)
+	if tree.typeKind(annotation) == typeKindFunction && !hasReturn {
 		pack := returnPackFact{
 			known:  true,
 			types:  make([]simpleType, 0, len(params)),
 			tables: make([]tableFact, 0, len(params)),
 			spans:  make([]sourceRange, 0, len(params)),
 		}
-		for i := range params {
-			param := &params[i]
+		for _, param := range params {
 			value := tree.typeParamValue(param)
-			if value != nil && tree.typeKind(value) == typeKindVariadic {
-				value = tree.typeInner(value)
+			if value != 0 && tree.typeKind(value) == typeKindVariadic {
+				value, _ = tree.typeInner(value)
 			}
 			pack.types = append(pack.types, a.simpleTypeFromAnnotationWith(value, substitutions))
 			pack.tables = append(pack.tables, a.tableFactFromAnnotation(value))
@@ -1955,7 +1954,7 @@ func (a *analysisState) tableFunctionFactForCallTarget(target termID, diagnoseAc
 	return fact, ok
 }
 
-func (a *analysisState) functionFactFromAnnotation(annotation *typeExpression) (functionFact, bool) {
+func (a *analysisState) functionFactFromAnnotation(annotation typeID) (functionFact, bool) {
 	tree := a.tree
 	if summary, ok := a.moduleExportedTypeAliasSummary(annotation); ok {
 		if summary.Kind == TypeSummaryFunction || summary.Kind == TypeSummaryGenericFunction {
@@ -1963,12 +1962,13 @@ func (a *analysisState) functionFactFromAnnotation(annotation *typeExpression) (
 		}
 	}
 	annotation, substitutions := a.functionAnnotation(annotation)
-	if annotation == nil || (tree.typeKind(annotation) != typeKindFunction && tree.typeKind(annotation) != typeKindGenericFunction) {
+	if annotation == 0 || (tree.typeKind(annotation) != typeKindFunction && tree.typeKind(annotation) != typeKindGenericFunction) {
 		return functionFact{}, false
 	}
-	returnAnnotation := tree.typeReturn(annotation)
+	returnAnnotation, _ := tree.typeReturn(annotation)
 	params := tree.typeParams(annotation)
-	typeParams := tree.typeTypeParams(annotation)
+	typeParamIDs, _ := tree.typeTypeParamIDs(annotation)
+	typeParams := syntaxStrings(tree, typeParamIDs)
 	returnPack := a.returnPackFromAnnotationWith(returnAnnotation, substitutions)
 	fact := functionFact{
 		typeParams:    append([]string(nil), typeParams...),
@@ -1980,13 +1980,12 @@ func (a *analysisState) functionFactFromAnnotation(annotation *typeExpression) (
 		returnPack:    returnPack,
 		returnGeneric: genericAnnotationName(a.tree, returnAnnotation, typeParams),
 	}
-	for i := range params {
-		param := &params[i]
+	for _, param := range params {
 		value := tree.typeParamValue(param)
-		if value != nil && tree.typeKind(value) == typeKindVariadic {
-			value = tree.typeInner(value)
+		if value != 0 && tree.typeKind(value) == typeKindVariadic {
+			value, _ = tree.typeInner(value)
 		}
-		if tree.typeParamVariadic(param) || (tree.typeParamValue(param) != nil && tree.typeKind(tree.typeParamValue(param)) == typeKindVariadic) {
+		if tree.typeParamVariadic(param) || (tree.typeParamValue(param) != 0 && tree.typeKind(tree.typeParamValue(param)) == typeKindVariadic) {
 			fact.variadic = a.simpleTypeFromAnnotationWith(value, substitutions)
 			fact.variadicGeneric = genericAnnotationName(a.tree, value, typeParams)
 			continue
@@ -1997,11 +1996,11 @@ func (a *analysisState) functionFactFromAnnotation(annotation *typeExpression) (
 	return fact, true
 }
 
-func (a *analysisState) functionAnnotation(annotation *typeExpression) (*typeExpression, map[string]simpleType) {
+func (a *analysisState) functionAnnotation(annotation typeID) (typeID, map[string]simpleType) {
 	annotation, substitutions := a.resolveAliasAnnotation(annotation)
 	kind := a.tree.typeKind(annotation)
-	if annotation == nil || (kind != typeKindFunction && kind != typeKindGenericFunction) {
-		return nil, nil
+	if annotation == 0 || (kind != typeKindFunction && kind != typeKindGenericFunction) {
+		return 0, nil
 	}
 	return annotation, substitutions
 }
@@ -2222,7 +2221,7 @@ func genericAt(values []string, index int) string {
 	return values[index]
 }
 
-func genericAnnotationNames(tree syntaxTree, annotations []*typeExpression, typeParams []string) []string {
+func genericAnnotationNames(tree syntaxTree, annotations []typeID, typeParams []string) []string {
 	names := make([]string, len(annotations))
 	for i, annotation := range annotations {
 		names[i] = genericAnnotationName(tree, annotation, typeParams)
@@ -2230,12 +2229,12 @@ func genericAnnotationNames(tree syntaxTree, annotations []*typeExpression, type
 	return names
 }
 
-func genericAnnotationName(tree syntaxTree, annotation *typeExpression, typeParams []string) string {
-	nameParts := tree.typeName(annotation)
-	if annotation == nil || tree.typeKind(annotation) != typeKindName || len(nameParts) != 1 || len(tree.typeArgs(annotation)) != 0 {
+func genericAnnotationName(tree syntaxTree, annotation typeID, typeParams []string) string {
+	nameIDs, ok := tree.typeNameIDs(annotation)
+	if annotation == 0 || !ok || tree.typeKind(annotation) != typeKindName || len(nameIDs) != 1 || len(tree.typeArgs(annotation)) != 0 {
 		return ""
 	}
-	name := nameParts[0]
+	name, _ := tree.stringValue(nameIDs[0])
 	for _, typeParam := range typeParams {
 		if name == typeParam {
 			return name
@@ -2244,15 +2243,15 @@ func genericAnnotationName(tree syntaxTree, annotation *typeExpression, typePara
 	return ""
 }
 
-func (a *analysisState) checkFunctionParameterTypeNames(annotations []*typeExpression, variadicAnnotation *typeExpression) {
+func (a *analysisState) checkFunctionParameterTypeNames(annotations []typeID, variadicAnnotation typeID) {
 	for _, annotation := range annotations {
 		a.checkUnknownTypeNames(annotation)
 	}
 	a.checkUnknownTypeNames(variadicAnnotation)
 }
 
-func (a *analysisState) checkUnknownTypeNames(annotation *typeExpression) {
-	if !policyForMode(a.mode).reportsUnknownTypes() || annotation == nil {
+func (a *analysisState) checkUnknownTypeNames(annotation typeID) {
+	if !policyForMode(a.mode).reportsUnknownTypes() || annotation == 0 {
 		return
 	}
 	tree := a.tree
@@ -2267,11 +2266,12 @@ func (a *analysisState) checkUnknownTypeNames(annotation *typeExpression) {
 			a.checkUnknownTypeNames(option)
 		}
 	case typeKindNilable, typeKindVariadic, typeKindGenericPack:
-		a.checkUnknownTypeNames(tree.typeInner(annotation))
+		inner, _ := tree.typeInner(annotation)
+		a.checkUnknownTypeNames(inner)
 	case typeKindTable:
 		for _, field := range tree.typeFields(annotation) {
-			a.checkUnknownTypeNames(tree.typeFieldKey(&field))
-			a.checkUnknownTypeNames(tree.typeFieldValue(&field))
+			a.checkUnknownTypeNames(tree.typeFieldKey(field))
+			a.checkUnknownTypeNames(tree.typeFieldValue(field))
 		}
 	case typeKindFunction:
 		a.checkFunctionTypeNames(annotation)
@@ -2281,37 +2281,43 @@ func (a *analysisState) checkUnknownTypeNames(annotation *typeExpression) {
 	}
 }
 
-func (a *analysisState) checkFunctionTypeNames(annotation *typeExpression) {
+func (a *analysisState) checkFunctionTypeNames(annotation typeID) {
 	for _, param := range a.tree.typeParams(annotation) {
-		a.checkUnknownTypeNames(a.tree.typeParamValue(&param))
+		a.checkUnknownTypeNames(a.tree.typeParamValue(param))
 	}
-	a.checkUnknownTypeNames(a.tree.typeReturn(annotation))
+	ret, _ := a.tree.typeReturn(annotation)
+	a.checkUnknownTypeNames(ret)
 }
 
-func (a *analysisState) checkUnknownTypeName(annotation *typeExpression) {
+func (a *analysisState) checkUnknownTypeName(annotation typeID) {
 	tree := a.tree
-	name := tree.typeName(annotation)
-	if len(name) == 0 || a.isKnownBuiltinTypeName(name[0]) {
+	nameIDs, ok := tree.typeNameIDs(annotation)
+	if !ok || len(nameIDs) == 0 {
+		return
+	}
+	first, _ := tree.stringValue(nameIDs[0])
+	if a.isKnownBuiltinTypeName(first) {
 		return
 	}
 	start, _ := tree.typeRange(annotation)
-	end := start + len(name[0])
+	end := start + len(first)
 	if _, ok := a.bind.use(tree.typeID(annotation)); ok {
-		if len(name) == 2 {
-			if _, isModule := a.lookupModuleLocal(name[0]); isModule {
-				if _, ok := a.lookupModuleExportedTypeAlias(name[0], name[1]); !ok {
+		if len(nameIDs) == 2 {
+			second, _ := tree.stringValue(nameIDs[1])
+			if _, isModule := a.lookupModuleLocal(first); isModule {
+				if _, ok := a.lookupModuleExportedTypeAlias(first, second); !ok {
 					aliasStart := end + 1
 					a.diagnostics = append(a.diagnostics, unknownTypeDiagnostic(
-						name[1],
+						second,
 						aliasStart,
-						aliasStart+len(name[1]),
+						aliasStart+len(second),
 					))
 				}
 			}
 		}
 		return
 	}
-	a.diagnostics = append(a.diagnostics, unknownTypeDiagnostic(name[0], start, end))
+	a.diagnostics = append(a.diagnostics, unknownTypeDiagnostic(first, start, end))
 }
 
 func (a *analysisState) isKnownBuiltinTypeName(name string) bool {
@@ -2324,12 +2330,12 @@ func (a *analysisState) isKnownBuiltinTypeName(name string) bool {
 	}
 }
 
-func (a *analysisState) simpleTypeFromAnnotation(annotation *typeExpression) simpleType {
+func (a *analysisState) simpleTypeFromAnnotation(annotation typeID) simpleType {
 	return a.simpleTypeFromAnnotationWith(annotation, nil)
 }
 
-func (a *analysisState) simpleTypeFromAnnotationWith(annotation *typeExpression, substitutions map[string]simpleType) simpleType {
-	if annotation == nil {
+func (a *analysisState) simpleTypeFromAnnotationWith(annotation typeID, substitutions map[string]simpleType) simpleType {
+	if annotation == 0 {
 		return simpleTypeUnknown
 	}
 	tree := a.tree
@@ -2340,7 +2346,8 @@ func (a *analysisState) simpleTypeFromAnnotationWith(annotation *typeExpression,
 	case typeKindFunction, typeKindGenericFunction:
 		return simpleTypeFunction
 	case typeKindNilable:
-		inner := a.simpleTypeFromAnnotationWith(tree.typeInner(annotation), substitutions)
+		innerID, _ := tree.typeInner(annotation)
+		inner := a.simpleTypeFromAnnotationWith(innerID, substitutions)
 		if inner == simpleTypeUnknown {
 			return simpleTypeUnknown
 		}
@@ -2356,14 +2363,14 @@ func (a *analysisState) simpleTypeFromAnnotationWith(annotation *typeExpression,
 		}
 		return simpleType(strings.Join(parts, "|"))
 	}
-	nameParts := tree.typeName(annotation)
-	if kind != typeKindName || len(nameParts) != 1 {
+	nameIDs, nameOK := tree.typeNameIDs(annotation)
+	if kind != typeKindName || !nameOK || len(nameIDs) != 1 {
 		if summary, ok := a.moduleExportedTypeAliasSummary(annotation); ok {
 			return simpleTypeFromSummary(summary)
 		}
 		return simpleTypeUnknown
 	}
-	name := nameParts[0]
+	name, _ := tree.stringValue(nameIDs[0])
 	typeArgs := tree.typeArgs(annotation)
 	if len(typeArgs) == 0 {
 		if substituted, ok := substitutions[name]; ok {
@@ -2443,7 +2450,7 @@ func (a *analysisState) simpleTypeFromAnnotationWith(annotation *typeExpression,
 	}
 }
 
-func (a *analysisState) genericAliasSubstitutions(alias typeAliasFact, args []*typeExpression, outer map[string]simpleType) (map[string]simpleType, bool) {
+func (a *analysisState) genericAliasSubstitutions(alias typeAliasFact, args []typeID, outer map[string]simpleType) (map[string]simpleType, bool) {
 	if len(alias.typePacks) != 0 || len(args) != len(alias.typeParams) {
 		return nil, false
 	}
@@ -2467,7 +2474,7 @@ func (a *analysisState) genericAliasSubstitutions(alias typeAliasFact, args []*t
 	return next, true
 }
 
-func (a *analysisState) simpleTypesFromAnnotations(annotations []*typeExpression) []simpleType {
+func (a *analysisState) simpleTypesFromAnnotations(annotations []typeID) []simpleType {
 	types := make([]simpleType, len(annotations))
 	for i, annotation := range annotations {
 		types[i] = a.simpleTypeFromAnnotation(annotation)
@@ -2475,11 +2482,11 @@ func (a *analysisState) simpleTypesFromAnnotations(annotations []*typeExpression
 	return types
 }
 
-func (a *analysisState) tableFieldTypes(annotation *typeExpression) map[string]simpleType {
+func (a *analysisState) tableFieldTypes(annotation typeID) map[string]simpleType {
 	return a.tableFactFromAnnotation(annotation).fields
 }
 
-func (a *analysisState) tableFactFromAnnotation(annotation *typeExpression) tableFact {
+func (a *analysisState) tableFactFromAnnotation(annotation typeID) tableFact {
 	if summary, ok := a.moduleExportedTypeAliasSummary(annotation); ok && summary.Kind == TypeSummaryTable {
 		return tableFactFromSummary(summary)
 	}
@@ -2487,15 +2494,15 @@ func (a *analysisState) tableFactFromAnnotation(annotation *typeExpression) tabl
 	access := make(map[string]string)
 	functions := make(map[string]functionFact)
 	annotation, substitutions := a.tableAnnotation(annotation)
-	if annotation == nil {
+	if annotation == 0 {
 		return tableFact{}
 	}
 	var indexers []tableIndexerFact
 	for _, field := range a.tree.typeFields(annotation) {
-		fieldName := a.tree.typeFieldName(&field)
-		fieldValue := a.tree.typeFieldValue(&field)
-		fieldAccess := a.tree.typeFieldAccess(&field)
-		fieldKey := a.tree.typeFieldKey(&field)
+		fieldName := a.tree.typeFieldName(field)
+		fieldValue := a.tree.typeFieldValue(field)
+		fieldAccess := a.tree.typeFieldAccess(field)
+		fieldKey := a.tree.typeFieldKey(field)
 		if fieldName != "" {
 			fields[fieldName] = a.simpleTypeFromAnnotationWith(fieldValue, substitutions)
 			if fieldAccess != "" {
@@ -2506,7 +2513,7 @@ func (a *analysisState) tableFactFromAnnotation(annotation *typeExpression) tabl
 			}
 			continue
 		}
-		if fieldKey == nil {
+		if fieldKey == 0 {
 			value := a.simpleTypeFromAnnotationWith(fieldValue, substitutions)
 			if value != simpleTypeUnknown {
 				indexers = append(indexers, tableIndexerFact{key: simpleTypeNumber, value: value, access: fieldAccess})
@@ -2523,35 +2530,38 @@ func (a *analysisState) tableFactFromAnnotation(annotation *typeExpression) tabl
 	return tableFact{known: true, fields: fields, access: access, functions: functions, indexers: indexers}
 }
 
-func (a *analysisState) moduleExportedTypeAliasSummary(annotation *typeExpression) (TypeSummary, bool) {
-	name := a.tree.typeName(annotation)
-	if annotation == nil || a.tree.typeKind(annotation) != typeKindName || len(name) != 2 || len(a.tree.typeArgs(annotation)) != 0 {
+func (a *analysisState) moduleExportedTypeAliasSummary(annotation typeID) (TypeSummary, bool) {
+	nameIDs, ok := a.tree.typeNameIDs(annotation)
+	if annotation == 0 || !ok || a.tree.typeKind(annotation) != typeKindName || len(nameIDs) != 2 || len(a.tree.typeArgs(annotation)) != 0 {
 		return TypeSummary{}, false
 	}
-	exported, ok := a.lookupModuleExportedTypeAlias(name[0], name[1])
+	moduleName, _ := a.tree.stringValue(nameIDs[0])
+	aliasName, _ := a.tree.stringValue(nameIDs[1])
+	exported, ok := a.lookupModuleExportedTypeAlias(moduleName, aliasName)
 	if !ok {
 		return TypeSummary{}, false
 	}
 	return exported.Type, true
 }
 
-func (a *analysisState) tableAnnotation(annotation *typeExpression) (*typeExpression, map[string]simpleType) {
+func (a *analysisState) tableAnnotation(annotation typeID) (typeID, map[string]simpleType) {
 	annotation, substitutions := a.resolveAliasAnnotation(annotation)
-	if annotation == nil || a.tree.typeKind(annotation) != typeKindTable {
-		return nil, nil
+	if annotation == 0 || a.tree.typeKind(annotation) != typeKindTable {
+		return 0, nil
 	}
 	return annotation, substitutions
 }
 
-func (a *analysisState) resolveAliasAnnotation(annotation *typeExpression) (*typeExpression, map[string]simpleType) {
-	name := a.tree.typeName(annotation)
-	if annotation == nil || a.tree.typeKind(annotation) != typeKindName || len(name) != 1 {
+func (a *analysisState) resolveAliasAnnotation(annotation typeID) (typeID, map[string]simpleType) {
+	nameIDs, ok := a.tree.typeNameIDs(annotation)
+	if annotation == 0 || !ok || a.tree.typeKind(annotation) != typeKindName || len(nameIDs) != 1 {
 		return annotation, nil
 	}
-	if alias, ok := a.lookupTypeAlias(name[0]); ok {
+	name, _ := a.tree.stringValue(nameIDs[0])
+	if alias, ok := a.lookupTypeAlias(name); ok {
 		substitutions, ok := a.genericAliasSubstitutions(alias, a.tree.typeArgs(annotation), nil)
 		if !ok {
-			return nil, nil
+			return 0, nil
 		}
 		return alias.value, substitutions
 	}
