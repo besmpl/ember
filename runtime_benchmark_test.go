@@ -15,6 +15,274 @@ local y = 2
 return (x + y) * 3 - 4 / 2
 `
 
+var runtimeLaneResultsSink []ember.Value
+
+type runtimeLaneWorkload struct {
+	name       string
+	stateless  string
+	persistent string
+}
+
+var runtimeLaneWorkloads = []runtimeLaneWorkload{
+	{
+		name: "scalar_arithmetic",
+		stateless: `
+local total = 0
+for i = 1, 200 do
+    total = total + ((i * 3 - i // 2) % 17)
+end
+return total
+`,
+		persistent: `
+local state = {ticks = 0, total = 0}
+return {
+    startup = function()
+        state.ticks = 0
+        state.total = 0
+    end,
+    update = function(delta)
+        state.ticks = state.ticks + delta
+        local total = 0
+        for i = 1, 30 do
+            total = total + ((i * 3 - i // 2) % 17)
+        end
+        state.total = state.total + total
+    end,
+    verify = function()
+        record(state.ticks, state.total)
+    end,
+}
+`,
+	},
+	{
+		name: "recursive_calls",
+		stateless: `
+local function fib(n)
+    if n < 2 then
+        return n
+    end
+    return fib(n - 1) + fib(n - 2)
+end
+return fib(18)
+`,
+		persistent: `
+local state = {ticks = 0, total = 0}
+local function fib(n)
+    if n < 2 then
+        return n
+    end
+    return fib(n - 1) + fib(n - 2)
+end
+return {
+    startup = function()
+        state.ticks = 0
+        state.total = 0
+    end,
+    update = function(delta)
+        state.ticks = state.ticks + delta
+        state.total = state.total + fib(12)
+    end,
+    verify = function()
+        record(state.ticks, state.total)
+    end,
+}
+`,
+	},
+	{
+		name: "nested_table_mutation",
+		stateless: `
+local state = {outer = {inner = {value = 0}}}
+for i = 1, 100 do
+    state.outer.inner.value = state.outer.inner.value + i
+end
+return state.outer.inner.value
+`,
+		persistent: `
+local state = {ticks = 0, root = {outer = {inner = {value = 0}}}}
+return {
+    startup = function()
+        state.ticks = 0
+        state.root.outer.inner.value = 0
+    end,
+    update = function(delta)
+        state.ticks = state.ticks + delta
+        local inner = state.root.outer.inner
+        for i = 1, 8 do
+            inner.value = inner.value + i + delta
+        end
+    end,
+    verify = function()
+        record(state.ticks, state.root.outer.inner.value)
+    end,
+}
+`,
+	},
+	{
+		name: "dynamic_string_growth",
+		stateless: `
+local cells = {["0:0"] = {heat = 1}}
+local total = 0
+for x = 0, 12 do
+    for y = 0, 12 do
+        local key = tostring(x) .. ":" .. tostring(y)
+        local cell = cells[key]
+        if cell == nil then
+            cells[key] = {heat = x + y}
+            total = total + cells[key].heat
+        else
+            cell.heat = cell.heat + 1
+            total = total + cell.heat
+        end
+    end
+end
+return total
+`,
+		persistent: `
+local state = {ticks = 0, cells = {["0:0"] = {heat = 1}}, total = 0}
+return {
+    startup = function()
+        state.ticks = 0
+        state.total = 0
+    end,
+    update = function(delta)
+        state.ticks = state.ticks + delta
+        for x = 0, 4 do
+            for y = 0, 4 do
+                local key = tostring(x) .. ":" .. tostring(y)
+                local cell = state.cells[key]
+                if cell == nil then
+                    state.cells[key] = {heat = x + y + delta}
+                    state.total = state.total + state.cells[key].heat
+                else
+                    cell.heat = cell.heat + delta
+                    state.total = state.total + cell.heat
+                end
+            end
+        end
+    end,
+    verify = function()
+        record(state.ticks, state.total)
+    end,
+}
+`,
+	},
+}
+
+// BenchmarkRuntimeLaneStatelessRun measures one-shot execution after compile.
+func BenchmarkRuntimeLaneStatelessRun(b *testing.B) {
+	for _, workload := range runtimeLaneWorkloads {
+		b.Run(workload.name, func(b *testing.B) {
+			proto := benchmarkCompile(b, workload.stateless)
+			results, err := ember.Run(proto)
+			if err != nil {
+				b.Fatal(err)
+			}
+			runtimeLaneResultsSink = results
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				results, err := ember.Run(proto)
+				if err != nil {
+					b.Fatal(err)
+				}
+				runtimeLaneResultsSink = results
+			}
+		})
+	}
+}
+
+// BenchmarkRuntimeLanePersistentRuntimeRunHook measures updates on one
+// Runtime after loading the program and running startup outside timing.
+func BenchmarkRuntimeLanePersistentRuntimeRunHook(b *testing.B) {
+	for _, workload := range runtimeLaneWorkloads {
+		b.Run(workload.name, func(b *testing.B) {
+			benchmarkRuntimeLaneRunHook(b, workload, ember.RuntimeOptions{}, context.Background())
+		})
+	}
+}
+
+// BenchmarkRuntimeLaneBoundedRuntimeRunHook measures the same persistent
+// updates with a high instruction budget that never trips.
+func BenchmarkRuntimeLaneBoundedRuntimeRunHook(b *testing.B) {
+	for _, workload := range runtimeLaneWorkloads {
+		b.Run(workload.name, func(b *testing.B) {
+			benchmarkRuntimeLaneRunHook(b, workload, ember.RuntimeOptions{MaxInstructions: 1 << 60}, context.Background())
+		})
+	}
+}
+
+// BenchmarkRuntimeLaneCancelableRuntimeRunHook measures the same persistent
+// updates with a live, non-cancelled context that has a Done channel.
+func BenchmarkRuntimeLaneCancelableRuntimeRunHook(b *testing.B) {
+	for _, workload := range runtimeLaneWorkloads {
+		b.Run(workload.name, func(b *testing.B) {
+			ctx, cancel := context.WithCancel(context.Background())
+			_ = ctx.Done()
+			defer cancel()
+			benchmarkRuntimeLaneRunHook(b, workload, ember.RuntimeOptions{}, ctx)
+		})
+	}
+}
+
+type runtimeLaneVerifier struct {
+	values []ember.Value
+}
+
+func newRuntimeLaneVerifier() (ember.RuntimeHost, *runtimeLaneVerifier) {
+	verifier := &runtimeLaneVerifier{}
+	host := ember.RuntimeHostFunc(func(_ context.Context, call ember.HostCall) (map[string]ember.Value, error) {
+		if call.Hook != "verify" {
+			return nil, nil
+		}
+		return map[string]ember.Value{
+			"record": ember.HostFuncValue(verifier.record),
+		}, nil
+	})
+	return host, verifier
+}
+
+func (verifier *runtimeLaneVerifier) record(args []ember.Value) ([]ember.Value, error) {
+	verifier.values = append(verifier.values[:0], args...)
+	return nil, nil
+}
+
+func (verifier *runtimeLaneVerifier) validate(tb testing.TB, updates int) {
+	tb.Helper()
+	if len(verifier.values) < 1 {
+		tb.Fatalf("verify hook recorded %d values, want at least 1", len(verifier.values))
+	}
+	ticks, ok := verifier.values[0].Number()
+	if !ok || ticks != float64(updates) {
+		tb.Fatalf("persistent ticks = %v, want %d", verifier.values[0], updates)
+	}
+}
+
+func benchmarkRuntimeLaneRunHook(b *testing.B, workload runtimeLaneWorkload, options ember.RuntimeOptions, ctx context.Context) {
+	b.Helper()
+	host, verifier := newRuntimeLaneVerifier()
+	options.Host = host
+	runtime := newRuntimeLaneWithOptions(b, workload.persistent, options)
+	defer runtime.Close()
+	if _, err := runtime.RunHook(context.Background(), "startup"); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	updates := 0
+	for b.Loop() {
+		if _, err := runtime.RunHook(ctx, "update", ember.NumberValue(1)); err != nil {
+			b.Fatal(err)
+		}
+		updates++
+	}
+	b.StopTimer()
+	if _, err := runtime.RunHook(context.Background(), "verify"); err != nil {
+		b.Fatal(err)
+	}
+	verifier.validate(b, updates)
+}
+
 // BenchmarkRuntimeLaneCompileRun measures the cold compile-and-run lifecycle.
 // Compilation is intentionally inside the timed region; this is the lane a
 // script loader pays when it has no retained prototype.
@@ -237,6 +505,10 @@ func (loader runtimeLaneLoader) LoadModule(ctx context.Context, id ember.ModuleI
 }
 
 func newRuntimeLane(tb testing.TB, source string, host ember.RuntimeHost) *ember.Runtime {
+	return newRuntimeLaneWithOptions(tb, source, ember.RuntimeOptions{Host: host})
+}
+
+func newRuntimeLaneWithOptions(tb testing.TB, source string, options ember.RuntimeOptions) *ember.Runtime {
 	tb.Helper()
 	module := ember.LogicalModule("benchmark/init")
 	program, _, err := ember.LoadProgram(context.Background(), runtimeLaneLoader{
@@ -248,7 +520,7 @@ func newRuntimeLane(tb testing.TB, source string, host ember.RuntimeHost) *ember
 	if err != nil {
 		tb.Fatal(err)
 	}
-	runtime, err := program.NewRuntime(ember.RuntimeOptions{Host: host})
+	runtime, err := program.NewRuntime(options)
 	if err != nil {
 		tb.Fatal(err)
 	}
