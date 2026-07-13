@@ -94,7 +94,13 @@ type ModuleReport struct {
 
 // RuntimeOptions configures mutable execution state for a Program.
 type RuntimeOptions struct {
-	Host            RuntimeHost
+	Host   RuntimeHost
+	Limits ExecutionLimits
+
+	// MaxInstructions is the legacy instruction limit. Use Limits instead.
+	// If both fields are nonzero, they must be equal.
+	//
+	// Deprecated: use Limits.MaxInstructions.
 	MaxInstructions uint64
 }
 
@@ -129,6 +135,7 @@ type Runtime struct {
 	entrypoints     map[moduleKey]Value
 	loaded          map[moduleKey]Value
 	active          map[moduleKey]bool
+	limits          ExecutionLimits
 	stack           []moduleKey
 	maxInstructions int
 	closed          bool
@@ -216,7 +223,11 @@ func (p *Program) NewRuntime(options RuntimeOptions) (*Runtime, error) {
 	if p == nil {
 		return nil, fmt.Errorf("runtime: nil program")
 	}
-	maxInstructions, err := runtimeInstructionBudget(options.MaxInstructions)
+	limits, err := normalizeExecutionLimits(options.MaxInstructions, options.Limits)
+	if err != nil {
+		return nil, err
+	}
+	maxInstructions, err := runtimeInstructionBudget(limits.MaxInstructions)
 	if err != nil {
 		return nil, err
 	}
@@ -227,6 +238,7 @@ func (p *Program) NewRuntime(options RuntimeOptions) (*Runtime, error) {
 		entrypoints:     make(map[moduleKey]Value),
 		loaded:          make(map[moduleKey]Value),
 		active:          make(map[moduleKey]bool),
+		limits:          limits,
 		maxInstructions: maxInstructions,
 	}, nil
 }
