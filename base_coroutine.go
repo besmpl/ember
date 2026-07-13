@@ -49,11 +49,19 @@ func baseCoroutineCreate(globals *globalEnv, args []Value) ([]Value, error) {
 	if !ok {
 		return nil, fmt.Errorf("coroutine.create: argument is %s, want function", args[0].Kind())
 	}
-	coroutine := newVMCoroutine(globals, closure)
+	coroutine, err := newVMCoroutineChecked(globals, closure)
+	if err != nil {
+		return nil, err
+	}
 	return []Value{UserDataValue(coroutine.userdata)}, nil
 }
 
 func newVMCoroutine(globals *globalEnv, root *closure) *vmCoroutine {
+	coroutine, _ := newVMCoroutineChecked(globals, root)
+	return coroutine
+}
+
+func newVMCoroutineChecked(globals *globalEnv, root *closure) (*vmCoroutine, error) {
 	owner := runtimeOwnerFromGlobals(globals)
 	coroutineGlobals := globals
 	if globals != nil && globals.pooled {
@@ -73,9 +81,12 @@ func newVMCoroutine(globals *globalEnv, root *closure) *vmCoroutine {
 	}
 	coroutine.userdata = NewUserData(coroutine)
 	if owner != nil {
-		_ = owner.retainCoroutine(coroutine)
+		if err := owner.retainCoroutine(coroutine); err != nil {
+			coroutine.disposeFrames()
+			return nil, err
+		}
 	}
-	return coroutine
+	return coroutine, nil
 }
 
 func baseCoroutineResume(globals *globalEnv, args []Value) ([]Value, error) {
@@ -189,6 +200,7 @@ func (coroutine *vmCoroutine) disposeFrames() {
 	coroutine.thread.baseGlobals = globalEnv{}
 	coroutine.thread.ctx = context.Background()
 	coroutine.thread.controller = nil
+	coroutine.thread.resumeCallDepthErr = nil
 	coroutine.thread.coroutine = nil
 	coroutine.thread.stringIntern = nil
 	coroutine.thread.stringConcatIntern = nil
@@ -338,7 +350,10 @@ func baseCoroutineWrap(globals *globalEnv, args []Value) ([]Value, error) {
 	if !ok {
 		return nil, fmt.Errorf("coroutine.wrap: argument is %s, want function", args[0].Kind())
 	}
-	coroutine := newVMCoroutine(globals, closure)
+	coroutine, err := newVMCoroutineChecked(globals, closure)
+	if err != nil {
+		return nil, err
+	}
 	definingGlobals := coroutine.thread.globals
 	wrapped := func(callerGlobals *globalEnv, args []Value) ([]Value, error) {
 		if callerGlobals == nil {

@@ -175,6 +175,7 @@ type vmThread struct {
 	debugLineHook         bool
 	debugCallHook         bool
 	debugReturnHook       bool
+	resumeCallDepthErr    error
 
 	maxFrames               int
 	directFrameInstrumented bool
@@ -550,6 +551,7 @@ func runWithDirectFrameMechanismCounters(proto *Proto, globals map[string]Value)
 
 	thread := newVMThreadWithContext(context.Background(), runtimeGlobals(globals))
 	thread.controller = nil
+	thread.resumeCallDepthErr = nil
 	thread.executionWindow = executionWindow{}
 	thread.directFrameInstrumented = true
 	thread.directFrameOpcodeCounts = &snapshot.opcodeCounts
@@ -622,6 +624,7 @@ const (
 	vmFrameRecordFlagRecordOnly
 	vmFrameRecordFlagCallerBorrowed
 	vmFrameRecordFlagOpenArguments
+	vmFrameRecordFlagCallDepth
 )
 
 func (thread *vmThread) pushFrameRecord(record vmFrameRecord) {
@@ -642,6 +645,9 @@ func (thread *vmThread) popFrameRecord() (vmFrameRecord, bool) {
 	record := thread.frameRecords[last]
 	thread.frameRecords[last] = vmFrameRecord{}
 	thread.frameRecords = thread.frameRecords[:last]
+	if record.flags&vmFrameRecordFlagCallDepth != 0 && thread.controller != nil {
+		thread.controller.leaveCall()
+	}
 	return record, true
 }
 
@@ -673,6 +679,7 @@ func (thread *vmThread) clearFrameRecords() {
 	if thread == nil {
 		return
 	}
+	thread.releaseRecordCallDepth(0)
 	clear(thread.frameRecords)
 	thread.frameRecords = thread.frameRecords[:0]
 	thread.maxFrameRecords = 0
@@ -717,8 +724,21 @@ func (thread *vmThread) truncateFrameRecords(depth int) {
 	if depth >= len(thread.frameRecords) {
 		return
 	}
+	thread.releaseRecordCallDepth(depth)
 	clear(thread.frameRecords[depth:])
 	thread.frameRecords = thread.frameRecords[:depth]
+}
+
+func (thread *vmThread) releaseRecordCallDepth(depth int) {
+	if thread == nil || thread.controller == nil || depth < 0 || depth >= len(thread.frameRecords) {
+		return
+	}
+	for i := depth; i < len(thread.frameRecords); i++ {
+		if thread.frameRecords[i].flags&vmFrameRecordFlagCallDepth != 0 {
+			thread.frameRecords[i].flags &^= vmFrameRecordFlagCallDepth
+			thread.controller.leaveCall()
+		}
+	}
 }
 
 type vmFrame struct {
@@ -755,7 +775,9 @@ type vmFrame struct {
 	// recordBaseDepth is the compact continuation depth owned by this physical
 	// frame. It survives direct-loop side exits so a resumed logical callee can
 	// still unwind record-only callers.
-	recordBaseDepth int
+	recordBaseDepth  int
+	callDepthCharged bool
+	callDepthErr     error
 }
 
 // vmRegisterWindow describes one frame's view into the thread stack.  The
@@ -863,6 +885,25 @@ type vmSuspendedFrames struct {
 	debugCallHook         bool
 	debugReturnHook       bool
 	maxFrames             int
+	callDepth             uint32
+}
+
+func (thread *vmThread) semanticCallDepth() uint32 {
+	if thread == nil {
+		return 0
+	}
+	var depth uint32
+	for _, frame := range thread.frames {
+		if frame != nil && frame.callDepthCharged {
+			depth++
+		}
+	}
+	for _, record := range thread.frameRecords {
+		if record.flags&vmFrameRecordFlagCallDepth != 0 {
+			depth++
+		}
+	}
+	return depth
 }
 
 type vmDebugEventKind int
@@ -1340,6 +1381,7 @@ func (thread *vmThread) resetForRun(ctx context.Context, globals *globalEnv) {
 	thread.protectedRecoveryScans = 0
 	thread.protectedRecoveryErrors = 0
 	thread.controller = nil
+	thread.resumeCallDepthErr = nil
 	thread.executionWindow = executionWindow{}
 	thread.coroutine = nil
 	thread.nonYieldableDepth = 0
@@ -1391,6 +1433,7 @@ func (thread *vmThread) resetForPool() {
 	thread.globals = nil
 	thread.baseGlobals = globalEnv{}
 	thread.controller = nil
+	thread.resumeCallDepthErr = nil
 	thread.executionWindow = executionWindow{}
 	thread.coroutine = nil
 	thread.nonYieldableDepth = 0
@@ -1702,8 +1745,14 @@ func (thread *vmThread) runWithUpvalues(proto *Proto, args []Value, upvalues []*
 }
 
 func (thread *vmThread) runScriptWithUpvalues(proto *Proto, args []Value, upvalues []*cell, upvalueValues []Value, upvalueValueOK []bool) ([]Value, error) {
+	if thread.controller != nil {
+		if err := thread.controller.enterCall(); err != nil {
+			return nil, err
+		}
+	}
 	baseDepth := len(thread.frames)
 	frame := thread.newFrameWithUpvalues(proto, args, upvalues, upvalueValues, upvalueValueOK)
+	frame.callDepthCharged = thread.controller != nil
 	thread.pushFrame(frame)
 	if thread.debugHook != nil && thread.debugCallHook {
 		if err := thread.runDebugCallHook(frame); err != nil {
@@ -1717,8 +1766,14 @@ func (thread *vmThread) runScriptWithUpvalues(proto *Proto, args []Value, upvalu
 }
 
 func (thread *vmThread) runScriptProtectedWithUpvalues(proto *Proto, args []Value, upvalues []*cell, upvalueValues []Value, upvalueValueOK []bool) ([]Value, error) {
+	if thread.controller != nil {
+		if err := thread.controller.enterCall(); err != nil {
+			return nil, err
+		}
+	}
 	baseDepth := len(thread.frames)
 	frame := thread.newFrameWithUpvalues(proto, args, upvalues, upvalueValues, upvalueValueOK)
+	frame.callDepthCharged = thread.controller != nil
 	thread.pushFrame(frame)
 	if thread.debugHook != nil && thread.debugCallHook {
 		if err := thread.runDebugCallHook(frame); err != nil {
@@ -1744,6 +1799,12 @@ func (thread *vmThread) activate() func() {
 }
 
 func (thread *vmThread) suspendFrames() vmSuspendedFrames {
+	callDepth := thread.semanticCallDepth()
+	if thread.controller != nil {
+		for i := uint32(0); i < callDepth; i++ {
+			thread.controller.leaveCall()
+		}
+	}
 	suspended := vmSuspendedFrames{
 		ctx:                   thread.ctx,
 		globals:               thread.globals,
@@ -1765,6 +1826,7 @@ func (thread *vmThread) suspendFrames() vmSuspendedFrames {
 		debugCallHook:         thread.debugCallHook,
 		debugReturnHook:       thread.debugReturnHook,
 		maxFrames:             thread.maxFrames,
+		callDepth:             callDepth,
 	}
 	thread.frames = nil
 	thread.frameRecords = nil
@@ -1803,6 +1865,10 @@ func (thread *vmThread) resumeFrames(suspended vmSuspendedFrames) {
 	thread.controller = suspended.controller
 	if invocationController != nil {
 		thread.controller = invocationController
+		if err := invocationController.enterCalls(suspended.callDepth); err != nil {
+			thread.resumeCallDepthErr = err
+			thread.controller = nil
+		}
 	}
 	thread.coroutine = suspended.coroutine
 	thread.nonYieldableDepth = suspended.nonYieldableDepth
@@ -1832,6 +1898,11 @@ func (thread *vmThread) continueSuspended(args []Value) ([]Value, error) {
 
 	if len(thread.frames) == 0 {
 		return nil, fmt.Errorf("coroutine.resume: missing suspended frame")
+	}
+	if thread.resumeCallDepthErr != nil {
+		err := thread.resumeCallDepthErr
+		thread.resumeCallDepthErr = nil
+		return nil, err
 	}
 	frame := thread.frames[len(thread.frames)-1]
 	if !frame.hasPendingCall {
@@ -1873,8 +1944,14 @@ func (thread *vmThread) continueHostCall(frame *vmFrame, args []Value) ([]Value,
 }
 
 func (thread *vmThread) runScript(proto *Proto, args []Value, upvalues []*cell) ([]Value, error) {
+	if thread.controller != nil {
+		if err := thread.controller.enterCall(); err != nil {
+			return nil, err
+		}
+	}
 	baseDepth := len(thread.frames)
 	frame := thread.newFrame(proto, args, upvalues)
+	frame.callDepthCharged = thread.controller != nil
 	thread.pushFrame(frame)
 	if thread.debugHook != nil && thread.debugCallHook {
 		if err := thread.runDebugCallHook(frame); err != nil {
@@ -1892,8 +1969,14 @@ func (thread *vmThread) runScript(proto *Proto, args []Value, upvalues []*cell) 
 }
 
 func (thread *vmThread) runScriptProtected(proto *Proto, args []Value, upvalues []*cell) ([]Value, error) {
+	if thread.controller != nil {
+		if err := thread.controller.enterCall(); err != nil {
+			return nil, err
+		}
+	}
 	baseDepth := len(thread.frames)
 	frame := thread.newFrame(proto, args, upvalues)
+	frame.callDepthCharged = thread.controller != nil
 	thread.pushFrame(frame)
 	if thread.debugHook != nil && thread.debugCallHook {
 		if err := thread.runDebugCallHook(frame); err != nil {
@@ -1951,6 +2034,9 @@ func (thread *vmThread) runUntilDepthResult(baseDepth int) (vmFrameResult, error
 				caller = call.caller
 			}
 			frame = thread.newScriptCallFrame(caller, call)
+			if frame.callDepthErr != nil {
+				return vmFrameResult{}, frame.callDepthErr
+			}
 			thread.pushFrame(frame)
 			thread.directFramePICCounts.addFixedCallTrampolineEntry()
 			if thread.debugHook != nil && thread.debugCallHook {
@@ -2032,6 +2118,12 @@ func (thread *vmThread) runInlineScriptCallPrependedFromFrame(closure *closure, 
 }
 
 func (thread *vmThread) runInlineScriptFrame(calleeFrame *vmFrame, baseDepth int) (vmFrameResult, error) {
+	if thread.controller != nil {
+		if err := thread.controller.enterCall(); err != nil {
+			return vmFrameResult{}, err
+		}
+		calleeFrame.callDepthCharged = true
+	}
 	thread.pushFrame(calleeFrame)
 	if thread.debugHook != nil && thread.debugCallHook {
 		if err := thread.runDebugCallHook(calleeFrame); err != nil {
@@ -2051,6 +2143,10 @@ func (thread *vmThread) runInlineScriptFrame(calleeFrame *vmFrame, baseDepth int
 	if result.state == vmCallStateScriptCall {
 		call := result.scriptCall
 		frame := thread.newScriptCallFrame(calleeFrame, call)
+		if frame.callDepthErr != nil {
+			thread.popFrame()
+			return vmFrameResult{}, frame.callDepthErr
+		}
 		thread.pushFrame(frame)
 		thread.directFramePICCounts.addFixedCallTrampolineEntry()
 		if thread.debugHook != nil && thread.debugCallHook {
@@ -2109,7 +2205,13 @@ func (thread *vmThread) runInlineScriptCallOneNoHook(closure *closure, args []Va
 	}
 
 	baseDepth := len(thread.frames)
+	if thread.controller != nil {
+		if err := thread.controller.enterCall(); err != nil {
+			return NilValue(), err
+		}
+	}
 	calleeFrame := thread.newClosureCallFrame(closure, args)
+	calleeFrame.callDepthCharged = thread.controller != nil
 	thread.pushFrame(calleeFrame)
 	result, err := thread.runFrame(calleeFrame)
 	if err != nil {
@@ -2124,7 +2226,11 @@ func (thread *vmThread) runInlineScriptCallOneNoHook(closure *closure, args []Va
 	}
 	if result.state == vmCallStateScriptCall {
 		call := result.scriptCall
-		frame := thread.newClosureCallFrame(call.closure, call.args)
+		frame := thread.newScriptCallFrame(calleeFrame, call)
+		if frame.callDepthErr != nil {
+			thread.popFrame()
+			return NilValue(), frame.callDepthErr
+		}
 		thread.pushFrame(frame)
 		result, err = thread.runUntilDepthResult(baseDepth)
 		if err != nil {
@@ -2153,7 +2259,13 @@ func (thread *vmThread) runInlineScriptCallFixedOneNoHook(closure *closure, firs
 	}
 
 	baseDepth := len(thread.frames)
+	if thread.controller != nil {
+		if err := thread.controller.enterCall(); err != nil {
+			return NilValue(), err
+		}
+	}
 	calleeFrame := thread.newClosureCallFrameFixed(closure, first, second, third, count)
+	calleeFrame.callDepthCharged = thread.controller != nil
 	thread.pushFrame(calleeFrame)
 	result, err := thread.runFrame(calleeFrame)
 	if err != nil {
@@ -2168,7 +2280,11 @@ func (thread *vmThread) runInlineScriptCallFixedOneNoHook(closure *closure, firs
 	}
 	if result.state == vmCallStateScriptCall {
 		call := result.scriptCall
-		frame := thread.newClosureCallFrame(call.closure, call.args)
+		frame := thread.newScriptCallFrame(calleeFrame, call)
+		if frame.callDepthErr != nil {
+			thread.popFrame()
+			return NilValue(), frame.callDepthErr
+		}
 		thread.pushFrame(frame)
 		result, err = thread.runUntilDepthResult(baseDepth)
 		if err != nil {
@@ -2262,10 +2378,13 @@ func (thread *vmThread) popFrame() {
 	}
 	thread.clearPendingCall(frame)
 	thread.frames = thread.frames[:len(thread.frames)-1]
+	thread.popFrameRecordFor(frame)
 	if frame != nil && frame.recordBaseDepth >= 0 {
 		thread.truncateFrameRecords(frame.recordBaseDepth)
 	}
-	thread.popFrameRecordFor(frame)
+	if frame != nil && frame.callDepthCharged && thread.controller != nil {
+		thread.controller.leaveCall()
+	}
 	thread.releaseFrameWindow(frame)
 	frame.resetForReuse()
 	thread.clearRootClosureSlot(depth)
@@ -2449,6 +2568,14 @@ func (thread *vmThread) newBorrowedFixedFrameRecord(
 		varargCount:       0,
 		flags:             flags,
 	}
+	if thread.controller != nil {
+		if err := thread.controller.enterCall(); err != nil {
+			thread.releaseFrameWindow(child)
+			child.resetForReuse()
+			return nil, vmFrameRecord{}, false
+		}
+		child.callDepthCharged = true
+	}
 	return child, record, true
 }
 
@@ -2562,6 +2689,11 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 	if paramCount > proto.registers {
 		paramCount = proto.registers
 	}
+	if thread.controller != nil {
+		if err := thread.controller.enterCall(); err != nil {
+			return vmFrameRecord{}, false
+		}
+	}
 	args := owner.values[childBase : childBase+paramCount]
 	registers := owner.values[childBase:childEnd]
 	physicalDepth := frame.depth
@@ -2607,6 +2739,7 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 		borrowed:            true,
 	}
 	flags := vmFrameRecordFlagRecordOnly
+	flags |= vmFrameRecordFlagCallDepth
 	if openDestination {
 		flags |= vmFrameRecordFlagOpenResults
 	}
@@ -2735,6 +2868,11 @@ func (thread *vmThread) maybeEnterRecordOnlyOpenArgumentCall(
 	if owner == nil || childEnd > len(owner.values) {
 		return vmFrameRecord{}, false
 	}
+	if thread.controller != nil {
+		if err := thread.controller.enterCall(); err != nil {
+			return vmFrameRecord{}, false
+		}
+	}
 	// Copy only the fixed prefix. The dynamic tail already starts at
 	// childBase+prefixCount and remains in place for the child parameters.
 	if prefixCount > 0 {
@@ -2796,6 +2934,7 @@ func (thread *vmThread) maybeEnterRecordOnlyOpenArgumentCall(
 		borrowed:            true,
 	}
 	flags := vmFrameRecordFlagRecordOnly | vmFrameRecordFlagOpenArguments
+	flags |= vmFrameRecordFlagCallDepth
 	if openDestination {
 		flags |= vmFrameRecordFlagOpenResults
 	}
@@ -2853,17 +2992,27 @@ func installFixedResultPendingCall(frame *vmFrame, destination vmResultDestinati
 // the frame stack with its pending result destination while the new frame is
 // dispatched by runUntilDepthResult.
 func (thread *vmThread) newScriptCallFrame(caller *vmFrame, call vmScriptCall) *vmFrame {
+	var frame *vmFrame
 	if call.borrowHint && caller != nil {
-		if frame, ok := thread.newBorrowedClosureCallFrame(call.closure, caller, call.argumentStart, call.argumentCount); ok {
-			return frame
+		if borrowed, ok := thread.newBorrowedClosureCallFrame(call.closure, caller, call.argumentStart, call.argumentCount); ok {
+			frame = borrowed
 		}
 	}
-
-	args := call.args
-	if args == nil && caller != nil {
-		args = caller.retainedFixedCallArgs(call.argumentStart, call.argumentCount).values
+	if frame == nil {
+		args := call.args
+		if args == nil && caller != nil {
+			args = caller.retainedFixedCallArgs(call.argumentStart, call.argumentCount).values
+		}
+		frame = thread.newClosureCallFrame(call.closure, args)
 	}
-	return thread.newClosureCallFrame(call.closure, args)
+	if controller := thread.controller; controller != nil {
+		if err := controller.enterCall(); err != nil {
+			frame.callDepthErr = err
+		} else {
+			frame.callDepthCharged = true
+		}
+	}
+	return frame
 }
 
 func (thread *vmThread) newCallFrameWithUpvalues(proto *Proto, args []Value, upvalues []*cell, upvalueValues []Value, upvalueValueOK []bool) *vmFrame {
@@ -3222,12 +3371,16 @@ func (thread *vmThread) dropFrames(depth int) {
 		}
 		thread.clearPendingCall(frame)
 		thread.clearDroppedFrameRecordArguments(frame)
+		thread.popFrameRecordFor(frame)
 		if frame != nil && frame.recordBaseDepth >= 0 {
 			thread.truncateFrameRecords(frame.recordBaseDepth)
 		}
-		thread.popFrameRecordFor(frame)
 		thread.releaseFrameWindow(frame)
 		if frame != nil {
+			if frame.callDepthCharged && thread.controller != nil {
+				thread.controller.leaveCall()
+				frame.callDepthCharged = false
+			}
 			frame.resetForReuse()
 		}
 		thread.clearRootClosureSlot(frameDepth)
@@ -3401,6 +3554,8 @@ func (frame *vmFrame) resetFrameIntoRegistersWithVarargSource(
 	frame.openRangeLogicalTop = -1
 	frame.resetPendingCallState()
 	frame.recordBaseDepth = -1
+	frame.callDepthCharged = false
+	frame.callDepthErr = nil
 }
 
 func (frame *vmFrame) resetForReuse() {
@@ -3429,6 +3584,8 @@ func (frame *vmFrame) resetForReuse() {
 	frame.openRangeLogicalTop = -1
 	frame.resetPendingCallState()
 	frame.recordBaseDepth = -1
+	frame.callDepthCharged = false
+	frame.callDepthErr = nil
 }
 
 func (frame *vmFrame) resetForPool() {

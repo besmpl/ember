@@ -242,8 +242,10 @@ func (p *Program) NewRuntime(options RuntimeOptions) (*Runtime, error) {
 	if err := validateExecutionLimits(limits); err != nil {
 		return nil, err
 	}
+	owner := newRuntimeOwner()
+	owner.coroutineLimit = limits.MaxCoroutines
 	return &Runtime{
-		owner:       newRuntimeOwner(),
+		owner:       owner,
 		program:     p,
 		host:        options.Host,
 		entrypoints: make(map[moduleKey]Value),

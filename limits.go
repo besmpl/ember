@@ -23,6 +23,12 @@ const (
 	LimitModules LimitKind = "modules"
 	// LimitTotalSourceBytes identifies the aggregate program source limit.
 	LimitTotalSourceBytes LimitKind = "total-source-bytes"
+	// LimitCallDepth identifies the aggregate script call depth limit.
+	LimitCallDepth LimitKind = "call-depth"
+	// LimitModuleInitializations identifies the lazy module initialization limit.
+	LimitModuleInitializations LimitKind = "module-initializations"
+	// LimitCoroutines identifies the live runtime-owned coroutine limit.
+	LimitCoroutines LimitKind = "coroutines"
 )
 
 // ErrLimitExceeded reports that a configured execution or compilation
@@ -52,7 +58,10 @@ func (e *LimitError) Is(target error) bool {
 // ExecutionLimits configures resource limits for one runtime invocation.
 // Zero means unlimited.
 type ExecutionLimits struct {
-	MaxInstructions uint64
+	MaxInstructions          uint64
+	MaxCallDepth             uint32
+	MaxModuleInitializations uint32
+	MaxCoroutines            uint32
 }
 
 func normalizeExecutionLimits(legacy uint64, limits ExecutionLimits) (ExecutionLimits, error) {

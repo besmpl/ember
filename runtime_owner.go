@@ -38,7 +38,8 @@ type runtimeOwner struct {
 	coroutines     map[*vmCoroutine]struct{}
 	// coroutineRefs retains suspended owned coroutines so Close can dispose
 	// transferred stacks without treating suspension as active execution.
-	coroutineRefs map[*vmCoroutine]struct{}
+	coroutineRefs  map[*vmCoroutine]struct{}
+	coroutineLimit uint32
 
 	roots map[uint64]*runtimeRoot
 	pins  map[uint64]*runtimePin
@@ -765,6 +766,9 @@ func (owner *runtimeOwner) retainCoroutine(coroutine *vmCoroutine) error {
 	defer owner.mu.Unlock()
 	if owner.state == runtimeOwnerClosed {
 		return errRuntimeOwnerClosed
+	}
+	if owner.coroutineLimit != 0 && uint32(len(owner.coroutineRefs)) >= owner.coroutineLimit {
+		return &LimitError{Kind: LimitCoroutines, Limit: uint64(owner.coroutineLimit), Used: uint64(len(owner.coroutineRefs)) + 1}
 	}
 	if owner.coroutineRefs == nil {
 		owner.coroutineRefs = make(map[*vmCoroutine]struct{})

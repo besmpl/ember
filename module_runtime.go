@@ -23,6 +23,9 @@ func (r *Runtime) runModuleWithContextGlobalsController(ctx context.Context, key
 	if !ok {
 		return nil, fmt.Errorf("module runtime: missing proto for %s", key.String())
 	}
+	if err := controller.chargeModuleInitialization(); err != nil {
+		return nil, err
+	}
 
 	r.active[key] = true
 	r.stack = append(r.stack, key)

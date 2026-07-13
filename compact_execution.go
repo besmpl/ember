@@ -602,6 +602,17 @@ func runCompactCallProgram(proto *Proto, args []Value, state *slotExecutionState
 }
 
 func runCompactCallProgramWithController(proto *Proto, args []Value, state *slotExecutionState, controller *executionController) ([]Value, bool, error) {
+	if controller != nil {
+		if err := controller.enterCall(); err != nil {
+			return nil, true, err
+		}
+		entryDepth := controller.callDepth - 1
+		defer func() {
+			for controller.callDepth > entryDepth {
+				controller.leaveCall()
+			}
+		}()
+	}
 	if proto == nil || proto.compact == nil || state == nil || int(proto.compact.entry) >= len(proto.compact.functions) {
 		return nil, false, nil
 	}
@@ -849,6 +860,11 @@ func runCompactCallProgramWordsWithController(program *compactProgram, state *sl
 			if callee.proto == nil || int(site.argumentCount) != callee.proto.params {
 				return 0, false, nil
 			}
+			if controller != nil {
+				if err := controller.enterCall(); err != nil {
+					return 0, false, err
+				}
+			}
 			callerTop := top
 			calleeBase := top
 			if site.flags&compactCallBorrowed != 0 {
@@ -901,6 +917,9 @@ func runCompactCallProgramWordsWithController(program *compactProgram, state *sl
 				return result, true, nil
 			}
 			last := len(frames) - 1
+			if controller != nil {
+				controller.leaveCall()
+			}
 			record := frames[last]
 			frames[last] = compactCallFrame{}
 			frames = frames[:last]

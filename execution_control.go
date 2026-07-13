@@ -89,10 +89,51 @@ func (window *executionWindow) refresh() {
 }
 
 type executionController struct {
-	ctx       context.Context
-	limits    ExecutionLimits
-	remaining int64
-	onStep    func()
+	ctx                   context.Context
+	limits                ExecutionLimits
+	remaining             int64
+	onStep                func()
+	callDepth             uint32
+	moduleInitializations uint32
+}
+
+func (controller *executionController) enterCall() error {
+	if controller == nil {
+		return nil
+	}
+	if controller.limits.MaxCallDepth != 0 && controller.callDepth >= controller.limits.MaxCallDepth {
+		return &LimitError{Kind: LimitCallDepth, Limit: uint64(controller.limits.MaxCallDepth), Used: uint64(controller.callDepth) + 1}
+	}
+	controller.callDepth++
+	return nil
+}
+
+func (controller *executionController) enterCalls(count uint32) error {
+	if controller == nil || count == 0 {
+		return nil
+	}
+	if controller.limits.MaxCallDepth != 0 && (controller.callDepth > controller.limits.MaxCallDepth || count > controller.limits.MaxCallDepth-controller.callDepth) {
+		return &LimitError{Kind: LimitCallDepth, Limit: uint64(controller.limits.MaxCallDepth), Used: uint64(controller.callDepth) + uint64(count)}
+	}
+	controller.callDepth += count
+	return nil
+}
+
+func (controller *executionController) leaveCall() {
+	if controller != nil && controller.callDepth > 0 {
+		controller.callDepth--
+	}
+}
+
+func (controller *executionController) chargeModuleInitialization() error {
+	if controller == nil {
+		return nil
+	}
+	if controller.limits.MaxModuleInitializations != 0 && controller.moduleInitializations >= controller.limits.MaxModuleInitializations {
+		return &LimitError{Kind: LimitModuleInitializations, Limit: uint64(controller.limits.MaxModuleInitializations), Used: uint64(controller.moduleInitializations) + 1}
+	}
+	controller.moduleInitializations++
+	return nil
 }
 
 func newExecutionController(ctx context.Context, limits ExecutionLimits) (*executionController, error) {
