@@ -172,6 +172,7 @@ func (r bindResult) expressionFact(node syntaxID) (boundExpressionFact, bool) {
 }
 
 type binder struct {
+	tree             syntaxTree
 	result           bindResult
 	scopes           []int
 	scopeLastSymbols []int32
@@ -182,15 +183,20 @@ type binder struct {
 }
 
 func bindProgram(prog program) bindResult {
-	if prog.nodeCount == 0 {
-		assignProgramSyntaxIDs(&prog)
+	return bindSyntaxTree(newSyntaxTree(prog))
+}
+
+func bindSyntaxTree(tree syntaxTree) bindResult {
+	if tree.nodeCount() == 0 {
+		assignSyntaxTreeIDs(&tree)
 	}
-	nodeFacts := make([]boundNodeFacts, prog.nodeCount+1)
+	nodeFacts := make([]boundNodeFacts, tree.nodeCount()+1)
 	for i := range nodeFacts {
 		nodeFacts[i].definition = -1
 		nodeFacts[i].use = int32(boundUseUnvisited)
 	}
 	b := binder{
+		tree: tree,
 		result: bindResult{
 			nodeFacts: nodeFacts,
 		},
@@ -198,7 +204,7 @@ func bindProgram(prog program) bindResult {
 		activeTypeNames:  make(map[string]int),
 	}
 	b.pushScopeForFunction(0)
-	b.bindStatements(prog.statements)
+	b.bindStatements(tree.statements())
 	b.popScope()
 	for i := range b.result.symbols {
 		facts := &b.result.symbols[i].facts
@@ -214,86 +220,97 @@ func (b *binder) bindStatements(statements []statement) {
 }
 
 func (b *binder) bindStatement(stmt statement) {
-	switch {
-	case stmt.local != nil:
-		for _, annotation := range stmt.local.annotations {
+	switch b.tree.statementKind(&stmt) {
+	case syntaxStatementLocal:
+		local := b.tree.local(&stmt)
+		for _, annotation := range b.tree.localAnnotations(local) {
 			b.bindTypeExpression(annotation)
 		}
-		for _, value := range stmt.local.values {
+		for _, value := range b.tree.localValues(local) {
 			b.bindExpression(value)
 		}
-		for i, name := range stmt.local.names {
-			b.define(name, symbolLocal, syntaxNameID(stmt.local.nameID, i))
+		for i, name := range b.tree.localNames(local) {
+			b.define(name, symbolLocal, syntaxNameID(b.tree.localNameID(local), i))
 		}
-	case stmt.localFunc != nil:
-		b.define(stmt.localFunc.name, symbolLocalFunction, stmt.localFunc.nameID)
-		b.bindFunction(stmt.localFunc.functionID, stmt.localFunc.typeParams, stmt.localFunc.typeParamID, stmt.localFunc.typePacks, stmt.localFunc.typePackID, stmt.localFunc.params, stmt.localFunc.paramID, stmt.localFunc.paramAnnotations, stmt.localFunc.variadicAnnotation, stmt.localFunc.returnAnnotation, stmt.localFunc.statements)
-	case stmt.funcDecl != nil:
-		b.bindAssignTarget(stmt.funcDecl.target, true)
-		params := stmt.funcDecl.params
-		paramID := stmt.funcDecl.paramID
-		if stmt.funcDecl.method {
+	case syntaxStatementLocalFunction:
+		localFunc := b.tree.localFunction(&stmt)
+		b.define(b.tree.localFunctionName(localFunc), symbolLocalFunction, b.tree.localFunctionNameID(localFunc))
+		b.bindFunction(b.tree.localFunctionID(localFunc), b.tree.localFunctionTypeParams(localFunc), b.tree.localFunctionTypeParamID(localFunc), b.tree.localFunctionTypePacks(localFunc), b.tree.localFunctionTypePackID(localFunc), b.tree.localFunctionParams(localFunc), b.tree.localFunctionParamID(localFunc), b.tree.localFunctionParamAnnotations(localFunc), b.tree.localFunctionVariadicAnnotation(localFunc), b.tree.localFunctionReturnAnnotation(localFunc), b.tree.localFunctionStatements(localFunc))
+	case syntaxStatementFunctionDeclaration:
+		funcDecl := b.tree.functionDeclaration(&stmt)
+		target := b.tree.functionDeclarationTarget(funcDecl)
+		b.bindAssignTarget(*target, true)
+		params := b.tree.functionDeclarationParams(funcDecl)
+		paramID := b.tree.functionDeclarationParamID(funcDecl)
+		if b.tree.functionDeclarationMethod(funcDecl) {
 			params = append([]string{"self"}, params...)
-			paramID = stmt.funcDecl.selfID
+			paramID = b.tree.functionDeclarationSelfID(funcDecl)
 		}
-		b.bindFunction(stmt.funcDecl.functionID, stmt.funcDecl.typeParams, stmt.funcDecl.typeParamID, stmt.funcDecl.typePacks, stmt.funcDecl.typePackID, params, paramID, stmt.funcDecl.paramAnnotations, stmt.funcDecl.variadicAnnotation, stmt.funcDecl.returnAnnotation, stmt.funcDecl.statements)
-	case stmt.assign != nil:
-		for _, value := range stmt.assign.values {
+		b.bindFunction(b.tree.functionDeclarationID(funcDecl), b.tree.functionDeclarationTypeParams(funcDecl), b.tree.functionDeclarationTypeParamID(funcDecl), b.tree.functionDeclarationTypePacks(funcDecl), b.tree.functionDeclarationTypePackID(funcDecl), params, paramID, b.tree.functionDeclarationParamAnnotations(funcDecl), b.tree.functionDeclarationVariadicAnnotation(funcDecl), b.tree.functionDeclarationReturnAnnotation(funcDecl), b.tree.functionDeclarationStatements(funcDecl))
+	case syntaxStatementAssign:
+		assign := b.tree.assignment(&stmt)
+		for _, value := range b.tree.assignmentValues(assign) {
 			b.bindExpression(value)
 		}
-		for _, target := range stmt.assign.targets {
+		for _, target := range b.tree.assignmentTargets(assign) {
 			b.bindAssignTarget(target, true)
 		}
-	case stmt.call != nil:
-		b.bindTerm(*stmt.call)
-	case stmt.ifStmt != nil:
-		b.bindExpression(stmt.ifStmt.condition)
-		b.bindScoped(stmt.ifStmt.thenStatements)
-		b.bindScoped(stmt.ifStmt.elseStatements)
-	case stmt.while != nil:
-		b.bindExpression(stmt.while.condition)
-		b.bindScoped(stmt.while.statements)
-	case stmt.forLoop != nil:
-		b.bindExpression(stmt.forLoop.start)
-		b.bindExpression(stmt.forLoop.limit)
-		if stmt.forLoop.step != nil {
-			b.bindExpression(*stmt.forLoop.step)
+	case syntaxStatementCall:
+		b.bindTerm(*b.tree.call(&stmt))
+	case syntaxStatementIf:
+		ifStmt := b.tree.ifStatement(&stmt)
+		b.bindExpression(*b.tree.ifCondition(ifStmt))
+		b.bindScoped(b.tree.ifThenStatements(ifStmt))
+		b.bindScoped(b.tree.ifElseStatements(ifStmt))
+	case syntaxStatementWhile:
+		while := b.tree.whileStatement(&stmt)
+		b.bindExpression(*b.tree.whileCondition(while))
+		b.bindScoped(b.tree.whileStatements(while))
+	case syntaxStatementFor:
+		forLoop := b.tree.forStatement(&stmt)
+		b.bindExpression(*b.tree.numericForStart(forLoop))
+		b.bindExpression(*b.tree.numericForLimit(forLoop))
+		if step := b.tree.numericForStep(forLoop); step != nil {
+			b.bindExpression(*step)
 		}
 		b.pushScope()
-		b.define(stmt.forLoop.name, symbolLocal, stmt.forLoop.nameID)
-		b.bindStatements(stmt.forLoop.statements)
+		b.define(b.tree.numericForName(forLoop), symbolLocal, b.tree.numericForNameID(forLoop))
+		b.bindStatements(b.tree.numericForStatements(forLoop))
 		b.popScope()
-	case stmt.genericFor != nil:
-		for _, value := range stmt.genericFor.values {
+	case syntaxStatementGenericFor:
+		genericFor := b.tree.genericForStatement(&stmt)
+		for _, value := range b.tree.genericForValues(genericFor) {
 			b.bindExpression(value)
 		}
 		b.pushScope()
-		for i, name := range stmt.genericFor.names {
-			b.define(name, symbolLocal, syntaxNameID(stmt.genericFor.nameID, i))
+		for i, name := range b.tree.genericForNames(genericFor) {
+			b.define(name, symbolLocal, syntaxNameID(b.tree.genericForNameID(genericFor), i))
 		}
-		b.bindStatements(stmt.genericFor.statements)
+		b.bindStatements(b.tree.genericForStatements(genericFor))
 		b.popScope()
-	case stmt.repeat != nil:
+	case syntaxStatementRepeat:
+		repeat := b.tree.repeatStatement(&stmt)
 		b.pushScope()
-		b.bindStatements(stmt.repeat.statements)
-		b.bindExpression(stmt.repeat.condition)
+		b.bindStatements(b.tree.repeatStatements(repeat))
+		b.bindExpression(*b.tree.repeatCondition(repeat))
 		b.popScope()
-	case stmt.block != nil:
-		b.bindScoped(stmt.block.statements)
-	case stmt.ret != nil:
-		for _, value := range stmt.ret.values {
+	case syntaxStatementBlock:
+		b.bindScoped(b.tree.blockStatements(b.tree.blockStatement(&stmt)))
+	case syntaxStatementReturn:
+		for _, value := range b.tree.returnValues(b.tree.returnStatement(&stmt)) {
 			b.bindExpression(value)
 		}
-	case stmt.typeAlias != nil:
-		b.define(stmt.typeAlias.name, symbolTypeAlias, stmt.typeAlias.nameID)
+	case syntaxStatementTypeAlias:
+		typeAlias := b.tree.typeAliasStatement(&stmt)
+		b.define(b.tree.typeAliasName(typeAlias), symbolTypeAlias, b.tree.typeAliasNameID(typeAlias))
 		b.pushScope()
-		for i, name := range stmt.typeAlias.typeParams {
-			b.define(name, symbolTypeParameter, syntaxNameID(stmt.typeAlias.typeParamID, i))
+		for i, name := range b.tree.typeAliasTypeParams(typeAlias) {
+			b.define(name, symbolTypeParameter, syntaxNameID(b.tree.typeAliasTypeParamID(typeAlias), i))
 		}
-		for i, name := range stmt.typeAlias.typePacks {
-			b.define(name, symbolTypePack, syntaxNameID(stmt.typeAlias.typePackID, i))
+		for i, name := range b.tree.typeAliasTypePacks(typeAlias) {
+			b.define(name, symbolTypePack, syntaxNameID(b.tree.typeAliasTypePackID(typeAlias), i))
 		}
-		b.bindTypeExpression(stmt.typeAlias.value)
+		b.bindTypeExpression(b.tree.typeAliasValue(typeAlias))
 		b.popScope()
 	}
 }
@@ -319,106 +336,106 @@ func (b *binder) bindFunction(functionID int, typeParams []string, typeParamID s
 }
 
 func (b *binder) bindExpression(expr expression) {
-	if expr.id > 0 {
-		multiret := expressionExpands(expr)
+	if b.tree.expressionID(&expr) > 0 {
+		multiret := expressionExpands(b.tree, expr)
 		arity := 1
 		if multiret {
 			arity = -1
 		}
-		facts := &b.result.nodeFacts[expr.id]
+		facts := &b.result.nodeFacts[b.tree.expressionID(&expr)]
 		facts.expressionArity = int32(arity)
 		facts.flags |= boundNodeExpressionValid
 		if multiret {
 			facts.flags |= boundNodeMultiret
 		}
 	}
-	for _, and := range expr.terms {
-		for _, comparison := range and.terms {
-			b.bindConcatExpression(comparison.left)
-			if comparison.right != nil {
-				b.bindConcatExpression(*comparison.right)
+	for _, and := range b.tree.expressionTerms(&expr) {
+		for _, comparison := range b.tree.andTerms(&and) {
+			b.bindConcatExpression(b.tree.comparisonLeft(&comparison))
+			if right := b.tree.comparisonRight(&comparison); right != nil {
+				b.bindConcatExpression(*right)
 			}
 		}
 	}
 }
 
 func (b *binder) bindConcatExpression(expr concatExpression) {
-	b.bindAdditiveExpression(expr.first)
-	for _, part := range expr.rest {
+	b.bindAdditiveExpression(b.tree.concatFirst(&expr))
+	for _, part := range b.tree.concatRest(&expr) {
 		b.bindAdditiveExpression(part)
 	}
 }
 
 func (b *binder) bindAdditiveExpression(expr additiveExpression) {
-	b.bindMultiplicativeExpression(expr.first)
-	for _, part := range expr.rest {
-		b.bindMultiplicativeExpression(part.value)
+	b.bindMultiplicativeExpression(b.tree.additiveFirst(&expr))
+	for _, part := range b.tree.additiveRest(&expr) {
+		b.bindMultiplicativeExpression(*b.tree.additivePartValue(&part))
 	}
 }
 
 func (b *binder) bindMultiplicativeExpression(expr multiplicativeExpression) {
-	b.bindTerm(expr.first)
-	for _, part := range expr.rest {
-		b.bindTerm(part.value)
+	b.bindTerm(b.tree.multiplicativeFirst(&expr))
+	for _, part := range b.tree.multiplicativeRest(&expr) {
+		b.bindTerm(*b.tree.multiplicativePartValue(&part))
 	}
 }
 
 func (b *binder) bindTerm(value term) {
-	if value.power != nil {
-		b.bindTerm(value.power.base)
-		b.bindTerm(value.power.exponent)
+	if power := b.tree.termPower(&value); power != nil {
+		b.bindTerm(*b.tree.powerBase(power))
+		b.bindTerm(*b.tree.powerExponent(power))
 	}
-	if value.table != nil {
-		for _, field := range value.table.fields {
-			if field.key != nil {
-				b.bindExpression(*field.key)
+	if table := b.tree.termTable(&value); table != nil {
+		for _, field := range b.tree.tableFields(table) {
+			if key := b.tree.tableFieldKey(&field); key != nil {
+				b.bindExpression(*key)
 			}
-			b.bindExpression(field.value)
+			b.bindExpression(*b.tree.tableFieldValue(&field))
 		}
 	}
-	if value.function != nil {
-		b.bindFunction(value.function.functionID, value.function.typeParams, value.function.typeParamID, value.function.typePacks, value.function.typePackID, value.function.params, value.function.paramID, value.function.paramAnnotations, value.function.variadicAnnotation, value.function.returnAnnotation, value.function.statements)
+	if function := b.tree.termFunction(&value); function != nil {
+		b.bindFunction(b.tree.functionExpressionFunctionID(function), b.tree.functionExpressionTypeParams(function), b.tree.functionExpressionTypeParamID(function), b.tree.functionExpressionTypePacks(function), b.tree.functionExpressionTypePackID(function), b.tree.functionExpressionParams(function), b.tree.functionExpressionParamID(function), b.tree.functionExpressionParamAnnotations(function), b.tree.functionExpressionVariadicAnnotation(function), b.tree.functionExpressionReturnAnnotation(function), b.tree.functionExpressionStatements(function))
 	}
-	if value.ifExpr != nil {
-		b.bindExpression(value.ifExpr.condition)
-		b.bindExpression(value.ifExpr.thenValue)
-		b.bindExpression(value.ifExpr.elseValue)
+	if ifExpr := b.tree.termIf(&value); ifExpr != nil {
+		b.bindExpression(*b.tree.ifExpressionCondition(ifExpr))
+		b.bindExpression(*b.tree.ifExpressionThen(ifExpr))
+		b.bindExpression(*b.tree.ifExpressionElse(ifExpr))
 	}
-	if value.call != nil {
-		b.bindCall(*value.call)
+	if call := b.tree.termCall(&value); call != nil {
+		b.bindCall(*call)
 	}
-	if value.unaryNot != nil {
-		b.bindTerm(*value.unaryNot)
+	if unaryNot := b.tree.termUnaryNot(&value); unaryNot != nil {
+		b.bindTerm(*unaryNot)
 	}
-	if value.unaryMinus != nil {
-		b.bindTerm(*value.unaryMinus)
+	if unaryMinus := b.tree.termUnaryMinus(&value); unaryMinus != nil {
+		b.bindTerm(*unaryMinus)
 	}
-	if value.unaryLen != nil {
-		b.bindTerm(*value.unaryLen)
+	if unaryLen := b.tree.termUnaryLength(&value); unaryLen != nil {
+		b.bindTerm(*unaryLen)
 	}
-	if value.group != nil {
-		b.bindExpression(*value.group)
+	if group := b.tree.termGroup(&value); group != nil {
+		b.bindExpression(*group)
 	}
-	b.bindTypeExpression(value.cast)
-	if value.name != "" {
-		b.recordUse(value.id, value.name, valueNamespace)
+	b.bindTypeExpression(b.tree.termCast(&value))
+	if name := b.tree.termName(&value); name != "" {
+		b.recordUse(b.tree.termID(&value), name, valueNamespace)
 	}
-	for _, selector := range value.selectors {
-		if selector.index != nil {
-			b.bindExpression(*selector.index)
+	for _, selector := range b.tree.termSelectors(&value) {
+		if index := b.tree.selectorIndex(&selector); index != nil {
+			b.bindExpression(*index)
 		}
 	}
 }
 
 func (b *binder) bindCall(call callExpression) {
-	b.bindTerm(call.target)
-	if call.receiver != nil {
-		b.bindTerm(*call.receiver)
+	b.bindTerm(*b.tree.callTarget(&call))
+	if receiver := b.tree.callReceiver(&call); receiver != nil {
+		b.bindTerm(*receiver)
 	}
-	for _, arg := range call.typeArgs {
+	for _, arg := range b.tree.callTypeArgs(&call) {
 		b.bindTypeExpression(arg)
 	}
-	for _, arg := range call.args {
+	for _, arg := range b.tree.callArgs(&call) {
 		b.bindExpression(arg)
 	}
 }
@@ -427,62 +444,64 @@ func (b *binder) bindTypeExpression(value *typeExpression) {
 	if value == nil {
 		return
 	}
-	switch value.kind {
+	switch b.tree.typeKind(value) {
 	case typeKindName:
-		if len(value.name) > 0 {
+		name := b.tree.typeName(value)
+		if len(name) > 0 {
 			namespace := typeNamespace
 			// Qualified module types resolve their root through the value
 			// namespace (for example, Types.Count); the exported member is
 			// checked against the module summary rather than local type facts.
-			if len(value.name) > 1 {
+			if len(name) > 1 {
 				namespace = valueNamespace
 			}
-			b.recordUse(value.id, value.name[0], namespace)
+			b.recordUse(b.tree.typeID(value), name[0], namespace)
 		}
-		for _, arg := range value.typeArgs {
+		for _, arg := range b.tree.typeArgs(value) {
 			b.bindTypeExpression(arg)
 		}
 	case typeKindUnion, typeKindIntersection:
-		for _, option := range value.types {
+		for _, option := range b.tree.typeChildren(value) {
 			b.bindTypeExpression(option)
 		}
 	case typeKindNilable, typeKindVariadic, typeKindGenericPack:
-		b.bindTypeExpression(value.inner)
+		b.bindTypeExpression(b.tree.typeInner(value))
 	case typeKindTable:
-		for _, field := range value.fields {
-			b.bindTypeExpression(field.key)
-			b.bindTypeExpression(field.value)
+		for _, field := range b.tree.typeFields(value) {
+			b.bindTypeExpression(b.tree.typeFieldKey(&field))
+			b.bindTypeExpression(b.tree.typeFieldValue(&field))
 		}
 	case typeKindFunction:
 		b.bindTypeFunction(value)
 	case typeKindGenericFunction:
 		b.pushScope()
-		for i, name := range value.typeParams {
-			b.define(name, symbolTypeParameter, syntaxNameID(value.typeParamID, i))
+		for i, name := range b.tree.typeTypeParams(value) {
+			b.define(name, symbolTypeParameter, syntaxNameID(b.tree.typeParamID(value), i))
 		}
-		for i, name := range value.typePacks {
-			b.define(name, symbolTypePack, syntaxNameID(value.typePackID, i))
+		for i, name := range b.tree.typePacks(value) {
+			b.define(name, symbolTypePack, syntaxNameID(b.tree.typePackID(value), i))
 		}
 		b.bindTypeFunction(value)
 		b.popScope()
 	case typeKindTypeof:
-		if value.expr != nil {
-			b.bindExpression(*value.expr)
+		if expr := b.tree.typeExpression(value); expr != nil {
+			b.bindExpression(*expr)
 		}
 	}
 }
 
 func (b *binder) bindTypeFunction(value *typeExpression) {
-	for _, param := range value.params {
-		b.bindTypeExpression(param.value)
+	for _, param := range b.tree.typeParams(value) {
+		b.bindTypeExpression(b.tree.typeParamValue(&param))
 	}
-	b.bindTypeExpression(value.returnType)
+	b.bindTypeExpression(b.tree.typeReturn(value))
 }
 
 func (b *binder) bindAssignTarget(target assignTarget, assignment bool) {
-	b.recordUse(target.id, target.name, valueNamespace)
-	if assignment && len(target.selectors) == 0 {
-		if use, ok := b.result.use(target.id); ok {
+	targetID := b.tree.assignTargetID(&target)
+	b.recordUse(targetID, b.tree.assignTargetName(&target), valueNamespace)
+	if assignment && len(b.tree.assignTargetSelectors(&target)) == 0 {
+		if use, ok := b.result.use(targetID); ok {
 			facts := &b.result.symbols[use.symbol].facts
 			facts.assigned = true
 			if facts.captured {
@@ -490,9 +509,9 @@ func (b *binder) bindAssignTarget(target assignTarget, assignment bool) {
 			}
 		}
 	}
-	for _, selector := range target.selectors {
-		if selector.index != nil {
-			b.bindExpression(*selector.index)
+	for _, selector := range b.tree.assignTargetSelectors(&target) {
+		if index := b.tree.selectorIndex(&selector); index != nil {
+			b.bindExpression(*index)
 		}
 	}
 }

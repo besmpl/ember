@@ -18,16 +18,17 @@ func TestPhase22BoundFactsUseCompactStorage(t *testing.T) {
 
 func TestPhase22BindingDistinguishesGlobalsFromUnvisitedNodes(t *testing.T) {
 	prog := parseSourceForBindTest(t, "return hostGlobal, 1")
+	tree := newSyntaxTree(prog)
 	result := bindProgram(prog)
 
-	global, ok := expressionSingleTerm(prog.statements[0].ret.values[0])
+	global, ok := expressionSingleTerm(tree, prog.statements[0].ret.values[0])
 	if !ok {
 		t.Fatal("global expression is not a single term")
 	}
 	if got := result.useClassification(global.id); got != boundUseGlobal {
 		t.Fatalf("global use classification = %v, want global", got)
 	}
-	literal, ok := expressionSingleTerm(prog.statements[0].ret.values[1])
+	literal, ok := expressionSingleTerm(tree, prog.statements[0].ret.values[1])
 	if !ok {
 		t.Fatal("literal expression is not a single term")
 	}
@@ -130,6 +131,7 @@ local value: T = "typed"
 return T, value
 `)
 	result := bindProgram(prog)
+	tree := newSyntaxTree(prog)
 	value := result.mustSymbol(t, "T", symbolLocal, 0)
 	alias := result.mustSymbol(t, "T", symbolTypeAlias, 0)
 
@@ -137,7 +139,7 @@ return T, value
 	if use, ok := result.use(annotation.id); !ok || use.symbol != alias.id {
 		t.Fatalf("type annotation use = %#v, %t, want type alias %d", use, ok, alias.id)
 	}
-	returnValue, ok := expressionSingleTerm(prog.statements[3].ret.values[0])
+	returnValue, ok := expressionSingleTerm(tree, prog.statements[3].ret.values[0])
 	if !ok {
 		t.Fatal("return T expression is not a single term")
 	}
@@ -159,6 +161,7 @@ local after: T = "done"
 return T
 `)
 	result := bindProgram(prog)
+	tree := newSyntaxTree(prog)
 	outerValue := result.mustSymbol(t, "T", symbolLocal, 0)
 	outerType := result.mustSymbol(t, "T", symbolTypeAlias, 0)
 	blockValue := result.mustSymbol(t, "T", symbolLocal, 2)
@@ -172,7 +175,7 @@ return T
 	if use, ok := result.use(after.id); !ok || use.symbol != outerType.id {
 		t.Fatalf("restored type use = %#v, %t, want outer type %d", use, ok, outerType.id)
 	}
-	returnValue, ok := expressionSingleTerm(prog.statements[4].ret.values[0])
+	returnValue, ok := expressionSingleTerm(tree, prog.statements[4].ret.values[0])
 	if !ok {
 		t.Fatal("return T expression is not a single term")
 	}

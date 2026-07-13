@@ -1663,31 +1663,32 @@ func registerKilledBeforeReadIR(ir []bytecodeIRInstruction, start int, end int, 
 	return false, false
 }
 
-func foldConstantExpression(expr expression) (Value, bool) {
-	if len(expr.terms) != 1 {
+func foldConstantExpression(tree syntaxTree, expr expression) (Value, bool) {
+	terms := tree.expressionTerms(&expr)
+	if len(terms) != 1 {
 		return NilValue(), false
 	}
-	and := expr.terms[0]
-	if len(and.terms) != 1 {
+	and := terms[0]
+	if len(tree.andTerms(&and)) != 1 {
 		return NilValue(), false
 	}
-	comparison := and.terms[0]
-	if comparison.op != "" || comparison.right != nil {
+	comparison := tree.andTerms(&and)[0]
+	if tree.comparisonOperator(&comparison) != "" || tree.comparisonRight(&comparison) != nil {
 		return NilValue(), false
 	}
-	return foldConstantConcat(comparison.left)
+	return foldConstantConcat(tree, tree.comparisonLeft(&comparison))
 }
 
-func foldConstantConcat(expr concatExpression) (Value, bool) {
-	value, ok := foldConstantAdditive(expr.first)
+func foldConstantConcat(tree syntaxTree, expr concatExpression) (Value, bool) {
+	value, ok := foldConstantAdditive(tree, tree.concatFirst(&expr))
 	if !ok {
 		return NilValue(), false
 	}
-	if len(expr.rest) == 0 {
+	if len(tree.concatRest(&expr)) == 0 {
 		return value, true
 	}
-	for _, part := range expr.rest {
-		right, ok := foldConstantAdditive(part)
+	for _, part := range tree.concatRest(&expr) {
+		right, ok := foldConstantAdditive(tree, part)
 		if !ok {
 			return NilValue(), false
 		}
@@ -1700,20 +1701,21 @@ func foldConstantConcat(expr concatExpression) (Value, bool) {
 	return value, true
 }
 
-func foldConstantAdditive(expr additiveExpression) (Value, bool) {
-	value, ok := foldConstantMultiplicative(expr.first)
+func foldConstantAdditive(tree syntaxTree, expr additiveExpression) (Value, bool) {
+	value, ok := foldConstantMultiplicative(tree, tree.additiveFirst(&expr))
 	if !ok {
 		return NilValue(), false
 	}
-	if len(expr.rest) == 0 {
+	if len(tree.additiveRest(&expr)) == 0 {
 		return value, true
 	}
 	left, ok := numericOperandValue(value)
 	if !ok {
 		return NilValue(), false
 	}
-	for _, part := range expr.rest {
-		rightValue, ok := foldConstantMultiplicative(part.value)
+	for i := range tree.additiveRest(&expr) {
+		part := &tree.additiveRest(&expr)[i]
+		rightValue, ok := foldConstantMultiplicative(tree, *tree.additivePartValue(part))
 		if !ok {
 			return NilValue(), false
 		}
@@ -1721,7 +1723,7 @@ func foldConstantAdditive(expr additiveExpression) (Value, bool) {
 		if !ok {
 			return NilValue(), false
 		}
-		switch part.op {
+		switch tree.additivePartOperator(part) {
 		case additiveAdd:
 			left += right
 		case additiveSubtract:
@@ -1733,20 +1735,21 @@ func foldConstantAdditive(expr additiveExpression) (Value, bool) {
 	return NumberValue(left), true
 }
 
-func foldConstantMultiplicative(expr multiplicativeExpression) (Value, bool) {
-	value, ok := foldConstantTerm(expr.first)
+func foldConstantMultiplicative(tree syntaxTree, expr multiplicativeExpression) (Value, bool) {
+	value, ok := foldConstantTerm(tree, tree.multiplicativeFirst(&expr))
 	if !ok {
 		return NilValue(), false
 	}
-	if len(expr.rest) == 0 {
+	if len(tree.multiplicativeRest(&expr)) == 0 {
 		return value, true
 	}
 	left, ok := numericOperandValue(value)
 	if !ok {
 		return NilValue(), false
 	}
-	for _, part := range expr.rest {
-		rightValue, ok := foldConstantTerm(part.value)
+	for i := range tree.multiplicativeRest(&expr) {
+		part := &tree.multiplicativeRest(&expr)[i]
+		rightValue, ok := foldConstantTerm(tree, *tree.multiplicativePartValue(part))
 		if !ok {
 			return NilValue(), false
 		}
@@ -1754,7 +1757,7 @@ func foldConstantMultiplicative(expr multiplicativeExpression) (Value, bool) {
 		if !ok {
 			return NilValue(), false
 		}
-		switch part.op {
+		switch tree.multiplicativePartOperator(part) {
 		case multiplicativeMultiply:
 			left *= right
 		case multiplicativeDivide:
@@ -1770,16 +1773,16 @@ func foldConstantMultiplicative(expr multiplicativeExpression) (Value, bool) {
 	return NumberValue(left), true
 }
 
-func foldConstantTerm(expr term) (Value, bool) {
-	if len(expr.selectors) != 0 {
+func foldConstantTerm(tree syntaxTree, expr term) (Value, bool) {
+	if len(tree.termSelectors(&expr)) != 0 {
 		return NilValue(), false
 	}
-	if expr.power != nil {
-		base, ok := foldConstantTerm(expr.power.base)
+	if power := tree.termPower(&expr); power != nil {
+		base, ok := foldConstantTerm(tree, *tree.powerBase(power))
 		if !ok {
 			return NilValue(), false
 		}
-		exponent, ok := foldConstantTerm(expr.power.exponent)
+		exponent, ok := foldConstantTerm(tree, *tree.powerExponent(power))
 		if !ok {
 			return NilValue(), false
 		}
@@ -1790,21 +1793,21 @@ func foldConstantTerm(expr term) (Value, bool) {
 		}
 		return NumberValue(math.Pow(baseNumber, exponentNumber)), true
 	}
-	if expr.number != nil {
-		return NumberValue(*expr.number), true
+	if number := tree.termNumber(&expr); number != nil {
+		return NumberValue(*number), true
 	}
-	if expr.lit != nil {
-		return *expr.lit, true
+	if literal := tree.termLiteral(&expr); literal != nil {
+		return *literal, true
 	}
-	if expr.unaryNot != nil {
-		value, ok := foldConstantTerm(*expr.unaryNot)
+	if unary := tree.termUnaryNot(&expr); unary != nil {
+		value, ok := foldConstantTerm(tree, *unary)
 		if !ok {
 			return NilValue(), false
 		}
 		return BoolValue(!value.truthy()), true
 	}
-	if expr.unaryMinus != nil {
-		value, ok := foldConstantTerm(*expr.unaryMinus)
+	if unary := tree.termUnaryMinus(&expr); unary != nil {
+		value, ok := foldConstantTerm(tree, *unary)
 		if !ok {
 			return NilValue(), false
 		}
@@ -1814,30 +1817,30 @@ func foldConstantTerm(expr term) (Value, bool) {
 		}
 		return NumberValue(-number), true
 	}
-	if expr.unaryLen != nil {
-		return foldConstantLength(*expr.unaryLen)
+	if unary := tree.termUnaryLength(&expr); unary != nil {
+		return foldConstantLength(tree, *unary)
 	}
-	if expr.group != nil {
-		return foldConstantExpression(*expr.group)
+	if group := tree.termGroup(&expr); group != nil {
+		return foldConstantExpression(tree, *group)
 	}
 	return NilValue(), false
 }
 
-func foldConstantLength(expr term) (Value, bool) {
-	if len(expr.selectors) != 0 {
+func foldConstantLength(tree syntaxTree, expr term) (Value, bool) {
+	if len(tree.termSelectors(&expr)) != 0 {
 		return NilValue(), false
 	}
-	if expr.lit != nil && valueKind(*expr.lit) == StringKind {
-		return NumberValue(float64(len(expr.lit.stringText()))), true
+	if literal := tree.termLiteral(&expr); literal != nil && valueKind(*literal) == StringKind {
+		return NumberValue(float64(len(literal.stringText()))), true
 	}
-	if expr.table != nil {
-		length, ok := foldConstantTableLength(*expr.table)
+	if table := tree.termTable(&expr); table != nil {
+		length, ok := foldConstantTableLength(tree, *table)
 		if ok {
 			return NumberValue(float64(length)), true
 		}
 	}
-	if expr.group != nil {
-		value, ok := foldConstantExpression(*expr.group)
+	if group := tree.termGroup(&expr); group != nil {
+		value, ok := foldConstantExpression(tree, *group)
 		if ok && valueKind(value) == StringKind {
 			return NumberValue(float64(len(value.stringText()))), true
 		}
@@ -1845,55 +1848,59 @@ func foldConstantLength(expr term) (Value, bool) {
 	return NilValue(), false
 }
 
-func foldConstantTableLength(table tableExpression) (int, bool) {
-	if len(table.fields) == 0 {
+func foldConstantTableLength(tree syntaxTree, table tableExpression) (int, bool) {
+	fields := tree.tableFields(&table)
+	if len(fields) == 0 {
 		return 0, true
 	}
-	for index, field := range table.fields {
-		if field.key != nil || field.name != "" || field.arrayIndex != index+1 {
+	for index := range fields {
+		field := &fields[index]
+		if tree.tableFieldKey(field) != nil || tree.tableFieldName(field) != "" || tree.tableFieldArrayIndex(field) != index+1 {
 			return 0, false
 		}
-		value, ok := foldConstantExpression(field.value)
+		value, ok := foldConstantExpression(tree, *tree.tableFieldValue(field))
 		if !ok || valueKind(value) == NilKind {
 			return 0, false
 		}
 	}
-	return len(table.fields), true
+	return len(fields), true
 }
 
-func foldNumberExpression(expr expression) (float64, bool) {
-	if len(expr.terms) != 1 {
+func foldNumberExpression(tree syntaxTree, expr expression) (float64, bool) {
+	terms := tree.expressionTerms(&expr)
+	if len(terms) != 1 {
 		return 0, false
 	}
-	and := expr.terms[0]
-	if len(and.terms) != 1 {
+	and := terms[0]
+	if len(tree.andTerms(&and)) != 1 {
 		return 0, false
 	}
-	comparison := and.terms[0]
-	if comparison.op != "" || comparison.right != nil {
+	comparison := tree.andTerms(&and)[0]
+	if tree.comparisonOperator(&comparison) != "" || tree.comparisonRight(&comparison) != nil {
 		return 0, false
 	}
-	return foldNumberConcat(comparison.left)
+	return foldNumberConcat(tree, tree.comparisonLeft(&comparison))
 }
 
-func foldNumberConcat(expr concatExpression) (float64, bool) {
-	if len(expr.rest) != 0 {
+func foldNumberConcat(tree syntaxTree, expr concatExpression) (float64, bool) {
+	if len(tree.concatRest(&expr)) != 0 {
 		return 0, false
 	}
-	return foldNumberAdditive(expr.first)
+	return foldNumberAdditive(tree, tree.concatFirst(&expr))
 }
 
-func foldNumberAdditive(expr additiveExpression) (float64, bool) {
-	value, ok := foldNumberMultiplicative(expr.first)
+func foldNumberAdditive(tree syntaxTree, expr additiveExpression) (float64, bool) {
+	value, ok := foldNumberMultiplicative(tree, tree.additiveFirst(&expr))
 	if !ok {
 		return 0, false
 	}
-	for _, part := range expr.rest {
-		right, ok := foldNumberMultiplicative(part.value)
+	for i := range tree.additiveRest(&expr) {
+		part := &tree.additiveRest(&expr)[i]
+		right, ok := foldNumberMultiplicative(tree, *tree.additivePartValue(part))
 		if !ok {
 			return 0, false
 		}
-		switch part.op {
+		switch tree.additivePartOperator(part) {
 		case additiveAdd:
 			value += right
 		case additiveSubtract:
@@ -1905,17 +1912,18 @@ func foldNumberAdditive(expr additiveExpression) (float64, bool) {
 	return value, true
 }
 
-func foldNumberMultiplicative(expr multiplicativeExpression) (float64, bool) {
-	value, ok := foldNumberTerm(expr.first)
+func foldNumberMultiplicative(tree syntaxTree, expr multiplicativeExpression) (float64, bool) {
+	value, ok := foldNumberTerm(tree, tree.multiplicativeFirst(&expr))
 	if !ok {
 		return 0, false
 	}
-	for _, part := range expr.rest {
-		right, ok := foldNumberTerm(part.value)
+	for i := range tree.multiplicativeRest(&expr) {
+		part := &tree.multiplicativeRest(&expr)[i]
+		right, ok := foldNumberTerm(tree, *tree.multiplicativePartValue(part))
 		if !ok {
 			return 0, false
 		}
-		switch part.op {
+		switch tree.multiplicativePartOperator(part) {
 		case multiplicativeMultiply:
 			value *= right
 		case multiplicativeDivide:
@@ -1931,30 +1939,30 @@ func foldNumberMultiplicative(expr multiplicativeExpression) (float64, bool) {
 	return value, true
 }
 
-func foldNumberTerm(expr term) (float64, bool) {
-	if len(expr.selectors) != 0 {
+func foldNumberTerm(tree syntaxTree, expr term) (float64, bool) {
+	if len(tree.termSelectors(&expr)) != 0 {
 		return 0, false
 	}
-	if expr.power != nil {
-		base, ok := foldNumberTerm(expr.power.base)
+	if power := tree.termPower(&expr); power != nil {
+		base, ok := foldNumberTerm(tree, *tree.powerBase(power))
 		if !ok {
 			return 0, false
 		}
-		exponent, ok := foldNumberTerm(expr.power.exponent)
+		exponent, ok := foldNumberTerm(tree, *tree.powerExponent(power))
 		if !ok {
 			return 0, false
 		}
 		return math.Pow(base, exponent), true
 	}
-	if expr.number != nil {
-		return *expr.number, true
+	if number := tree.termNumber(&expr); number != nil {
+		return *number, true
 	}
-	if expr.unaryMinus != nil {
-		value, ok := foldNumberTerm(*expr.unaryMinus)
+	if unary := tree.termUnaryMinus(&expr); unary != nil {
+		value, ok := foldNumberTerm(tree, *unary)
 		return -value, ok
 	}
-	if expr.group != nil {
-		return foldNumberExpression(*expr.group)
+	if group := tree.termGroup(&expr); group != nil {
+		return foldNumberExpression(tree, *group)
 	}
 	return 0, false
 }

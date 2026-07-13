@@ -15,17 +15,18 @@ type valuePlan struct {
 }
 
 type valueListPlan struct {
+	tree        syntaxTree
 	values      []expression
 	targetCount int
 	open        bool
 }
 
-func fixedValueListPlan(values []expression, targetCount int) valueListPlan {
-	return valueListPlan{values: values, targetCount: targetCount}
+func fixedValueListPlan(tree syntaxTree, values []expression, targetCount int) valueListPlan {
+	return valueListPlan{tree: tree, values: values, targetCount: targetCount}
 }
 
-func openValueListPlan(values []expression) valueListPlan {
-	return valueListPlan{values: values, targetCount: len(values), open: true}
+func openValueListPlan(tree syntaxTree, values []expression) valueListPlan {
+	return valueListPlan{tree: tree, values: values, targetCount: len(values), open: true}
 }
 
 func (p valueListPlan) len() int {
@@ -39,7 +40,7 @@ func (p valueListPlan) item(index int) valuePlan {
 	if index >= len(p.values) {
 		return valuePlan{kind: valuePlanNil, source: -1, resultCount: 1}
 	}
-	if index == len(p.values)-1 && expressionExpands(p.values[index]) {
+	if index == len(p.values)-1 && expressionExpands(p.tree, p.values[index]) {
 		resultCount := p.targetCount - index
 		if p.open {
 			resultCount = -1
@@ -56,15 +57,15 @@ type callPlan struct {
 	fixedArgCount int
 }
 
-func planCall(call callExpression) callPlan {
+func planCall(tree syntaxTree, call callExpression) callPlan {
 	fixedArgCount := 0
-	if call.receiver != nil {
+	if tree.callReceiver(&call) != nil {
 		fixedArgCount = 1
 	}
 	return callPlan{
-		target:        call.target,
-		receiver:      call.receiver,
-		args:          openValueListPlan(call.args),
+		target:        *tree.callTarget(&call),
+		receiver:      tree.callReceiver(&call),
+		args:          openValueListPlan(tree, tree.callArgs(&call)),
 		fixedArgCount: fixedArgCount,
 	}
 }
@@ -78,51 +79,53 @@ type closurePlan struct {
 	functionName   string
 }
 
-func planFunctionExpression(fn functionExpression) closurePlan {
+func planFunctionExpression(tree syntaxTree, fn functionExpression) closurePlan {
 	return closurePlan{
-		params:       fn.params,
-		paramID:      fn.paramID,
-		variadic:     fn.variadic,
-		body:         fn.statements,
+		params:       tree.functionExpressionParams(&fn),
+		paramID:      tree.functionExpressionParamID(&fn),
+		variadic:     tree.functionExpressionVariadic(&fn),
+		body:         tree.functionExpressionStatements(&fn),
 		functionName: "<anonymous>",
 	}
 }
 
-func planLocalFunction(stmt localFunctionStatement) closurePlan {
+func planLocalFunction(tree syntaxTree, stmt localFunctionStatement) closurePlan {
 	return closurePlan{
-		params:       stmt.params,
-		paramID:      stmt.paramID,
-		variadic:     stmt.variadic,
-		body:         stmt.statements,
-		functionName: stmt.name,
+		params:       tree.localFunctionParams(&stmt),
+		paramID:      tree.localFunctionParamID(&stmt),
+		variadic:     tree.localFunctionVariadic(&stmt),
+		body:         tree.localFunctionStatements(&stmt),
+		functionName: tree.localFunctionName(&stmt),
 	}
 }
 
-func planFunctionDeclaration(stmt functionDeclarationStatement) closurePlan {
+func planFunctionDeclaration(tree syntaxTree, stmt functionDeclarationStatement) closurePlan {
 	plan := closurePlan{
-		params:       stmt.params,
-		paramID:      stmt.paramID,
-		variadic:     stmt.variadic,
-		body:         stmt.statements,
-		functionName: functionDeclarationName(stmt.target, stmt.method),
+		params:       tree.functionDeclarationParams(&stmt),
+		paramID:      tree.functionDeclarationParamID(&stmt),
+		variadic:     tree.functionDeclarationVariadic(&stmt),
+		body:         tree.functionDeclarationStatements(&stmt),
+		functionName: functionDeclarationName(tree, *tree.functionDeclarationTarget(&stmt), tree.functionDeclarationMethod(&stmt)),
 	}
-	if stmt.method {
-		plan.implicitSelfID = stmt.selfID
+	if tree.functionDeclarationMethod(&stmt) {
+		plan.implicitSelfID = tree.functionDeclarationSelfID(&stmt)
 	}
 	return plan
 }
 
-func functionDeclarationName(target assignTarget, method bool) string {
-	name := target.name
-	for index, selector := range target.selectors {
-		if selector.field == "" {
+func functionDeclarationName(tree syntaxTree, target assignTarget, method bool) string {
+	name := tree.assignTargetName(&target)
+	selectors := tree.assignTargetSelectors(&target)
+	for index := range selectors {
+		selector := &selectors[index]
+		if tree.selectorField(selector) == "" {
 			continue
 		}
 		separator := "."
-		if method && index == len(target.selectors)-1 {
+		if method && index == len(selectors)-1 {
 			separator = ":"
 		}
-		name += separator + selector.field
+		name += separator + tree.selectorField(selector)
 	}
 	return name
 }
@@ -144,11 +147,11 @@ func (p closurePlan) param(index int) (string, syntaxID) {
 	return p.params[index], syntaxNameID(p.paramID, index)
 }
 
-func expressionExpands(expr expression) bool {
-	if _, ok := expressionSingleVararg(expr); ok {
+func expressionExpands(tree syntaxTree, expr expression) bool {
+	if _, ok := expressionSingleVararg(tree, expr); ok {
 		return true
 	}
-	if _, ok := expressionSingleCall(expr); ok {
+	if _, ok := expressionSingleCall(tree, expr); ok {
 		return true
 	}
 	return false

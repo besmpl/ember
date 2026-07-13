@@ -23,9 +23,13 @@ func sourceInvalidationHash(source Source) string {
 }
 
 func buildTypedArtifactFacts(prog program, diagnostics []Diagnostic) typedArtifactFacts {
+	return buildTypedArtifactFactsTree(newSyntaxTree(prog), diagnostics)
+}
+
+func buildTypedArtifactFactsTree(tree syntaxTree, diagnostics []Diagnostic) typedArtifactFacts {
 	diagCodes := diagnosticCodes(diagnostics)
-	store := newTypeStore()
-	lowered := lowerTypeAliases(store, prog.statements)
+	store := newTypeStoreTree(tree)
+	lowered := lowerTypeAliases(store, tree.statements())
 	exports := make([]ModuleExport, 0, len(lowered))
 	aliases := make([]ToolingTypeAliasFact, 0, len(lowered))
 	for _, item := range lowered {
@@ -50,8 +54,8 @@ func buildTypedArtifactFacts(prog program, diagnostics []Diagnostic) typedArtifa
 			})
 		}
 	}
-	valueFlow := moduleLocalValueSummaries(prog, store)
-	if value, ok := moduleReturnExport(prog, diagCodes, valueFlow); ok {
+	valueFlow := moduleLocalValueSummariesTree(tree, store)
+	if value, ok := moduleReturnExportTree(tree, diagCodes, valueFlow); ok {
 		exports = append(exports, value)
 	}
 	return typedArtifactFacts{
@@ -72,72 +76,88 @@ func applyAliasTypeParameters(summary *TypeSummary, item loweredTypeAlias) {
 }
 
 type moduleValueFlow struct {
+	tree   syntaxTree
 	values map[string]TypeSummary
 }
 
 func moduleLocalValueSummaries(prog program, store *typeStore) moduleValueFlow {
-	flow := moduleValueFlow{values: baseGlobalValueSummaries()}
-	flow.applyStatements(prog.statements, store)
+	return moduleLocalValueSummariesTree(newSyntaxTree(prog), store)
+}
+
+func moduleLocalValueSummariesTree(tree syntaxTree, store *typeStore) moduleValueFlow {
+	flow := moduleValueFlow{tree: tree, values: baseGlobalValueSummaries()}
+	flow.applyStatements(tree, tree.statements(), store)
 	return flow
 }
 
-func (f moduleValueFlow) applyAssignment(stmt assignStatement) {
-	for i, target := range stmt.targets {
-		if i >= len(stmt.values) {
+func (f moduleValueFlow) applyAssignment(tree syntaxTree, stmt assignStatement) {
+	targets := tree.assignmentTargets(&stmt)
+	values := tree.assignmentValues(&stmt)
+	for i := range targets {
+		target := &targets[i]
+		if i >= len(values) {
 			continue
 		}
-		if len(target.selectors) == 0 {
-			if _, ok := f.values[target.name]; ok {
-				f.values[target.name] = f.value(stmt.values[i])
+		selectors := tree.assignTargetSelectors(target)
+		name := tree.assignTargetName(target)
+		if len(selectors) == 0 {
+			if _, ok := f.values[name]; ok {
+				f.values[name] = f.value(values[i])
 			}
 			continue
 		}
-		table, ok := f.values[target.name]
+		table, ok := f.values[name]
 		if !ok || table.Kind != TypeSummaryTable {
 			continue
 		}
-		if setTableSummaryPath(&table, target.selectors, f.value(stmt.values[i])) {
-			f.values[target.name] = table
+		if setTableSummaryPath(f.tree, &table, selectors, f.value(values[i])) {
+			f.values[name] = table
 		}
 	}
 }
 
-func (f moduleValueFlow) applyIf(stmt ifStatement, store *typeStore) {
-	if len(stmt.thenStatements) == 0 {
+func (f moduleValueFlow) applyIf(tree syntaxTree, stmt ifStatement, store *typeStore) {
+	thenStatements := tree.ifThenStatements(&stmt)
+	elseStatements := tree.ifElseStatements(&stmt)
+	if len(thenStatements) == 0 {
 		return
 	}
 	thenFlow := f.clone()
-	thenFlow.applyStatements(stmt.thenStatements, store)
+	thenFlow.applyStatements(tree, thenStatements, store)
 	elseFlow := f.clone()
-	if len(stmt.elseStatements) != 0 {
-		elseFlow.applyStatements(stmt.elseStatements, store)
+	if len(elseStatements) != 0 {
+		elseFlow.applyStatements(tree, elseStatements, store)
 	}
 	f.mergeAgreed(thenFlow, elseFlow)
 }
 
-func (f moduleValueFlow) applyStatements(statements []statement, store *typeStore) {
-	for _, stmt := range statements {
-		switch {
-		case stmt.local != nil:
-			for i, name := range stmt.local.names {
-				if i < len(stmt.local.annotations) && stmt.local.annotations[i] != nil {
-					f.values[name] = store.summary(store.lowerType(stmt.local.annotations[i]))
+func (f moduleValueFlow) applyStatements(tree syntaxTree, statements []statement, store *typeStore) {
+	for i := range statements {
+		stmt := &statements[i]
+		switch tree.statementKind(stmt) {
+		case syntaxStatementLocal:
+			local := tree.local(stmt)
+			annotations := tree.localAnnotations(local)
+			values := tree.localValues(local)
+			for i, name := range tree.localNames(local) {
+				if i < len(annotations) && annotations[i] != nil {
+					f.values[name] = store.summary(store.lowerType(annotations[i]))
 					continue
 				}
-				if i < len(stmt.local.values) {
-					f.values[name] = f.value(stmt.local.values[i])
+				if i < len(values) {
+					f.values[name] = f.value(values[i])
 				}
 			}
-		case stmt.assign != nil:
-			f.applyAssignment(*stmt.assign)
-		case stmt.ifStmt != nil:
-			f.applyIf(*stmt.ifStmt, store)
+		case syntaxStatementAssign:
+			f.applyAssignment(tree, *tree.assignment(stmt))
+		case syntaxStatementIf:
+			f.applyIf(tree, *tree.ifStatement(stmt), store)
 		}
 	}
 }
 
 func (f moduleValueFlow) clone() moduleValueFlow {
-	return moduleValueFlow{values: cloneTypeSummaryMap(f.values)}
+	return moduleValueFlow{tree: f.tree, values: cloneTypeSummaryMap(f.values)}
 }
 
 func cloneTypeSummaryMap(values map[string]TypeSummary) map[string]TypeSummary {
@@ -269,14 +289,19 @@ func appendUnionTypeMembers(members []TypeSummary, summary TypeSummary) []TypeSu
 }
 
 func moduleReturnExport(prog program, diagCodes []string, flow moduleValueFlow) (ModuleExport, bool) {
-	for _, stmt := range prog.statements {
-		if stmt.ret == nil || len(stmt.ret.values) == 0 {
+	return moduleReturnExportTree(newSyntaxTree(prog), diagCodes, flow)
+}
+
+func moduleReturnExportTree(tree syntaxTree, diagCodes []string, flow moduleValueFlow) (ModuleExport, bool) {
+	for i := range tree.statements() {
+		ret := tree.returnStatement(tree.statement(i))
+		if ret == nil || len(tree.returnValues(ret)) == 0 {
 			continue
 		}
 		return ModuleExport{
 			Name:      "return",
 			Kind:      ModuleExportValue,
-			Type:      flow.value(stmt.ret.values[0]),
+			Type:      flow.value(tree.returnValues(ret)[0]),
 			DiagCodes: diagCodes,
 		}, true
 	}
@@ -284,40 +309,45 @@ func moduleReturnExport(prog program, diagCodes []string, flow moduleValueFlow) 
 }
 
 func (f moduleValueFlow) value(expr expression) TypeSummary {
-	value, ok := expressionSingleTerm(expr)
+	tree := f.tree
+	value, ok := expressionSingleTerm(f.tree, expr)
 	if !ok {
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
-	if value.name != "" {
-		if len(value.selectors) != 0 {
-			if summary, ok := f.values[value.name]; ok {
-				if field, ok := tableSummaryPath(summary, value.selectors); ok {
+	name := tree.termName(&value)
+	selectors := tree.termSelectors(&value)
+	if name != "" {
+		if len(selectors) != 0 {
+			if summary, ok := f.values[name]; ok {
+				if field, ok := tableSummaryPath(f.tree, summary, selectors); ok {
 					return field
 				}
 			}
 			return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 		}
-		if summary, ok := f.values[value.name]; ok {
+		if summary, ok := f.values[name]; ok {
 			return summary
 		}
 	}
-	if len(value.selectors) != 0 {
+	if len(selectors) != 0 {
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
-	if value.call != nil {
-		return f.callValue(*value.call)
+	if call := tree.termCall(&value); call != nil {
+		return f.callValue(*call)
 	}
-	if value.table != nil {
-		return f.tableValue(*value.table)
+	if table := tree.termTable(&value); table != nil {
+		return f.tableValue(*table)
 	}
-	return simpleTypeSummary(simpleTypeFromTerm(value))
+	return simpleTypeSummary(simpleTypeFromTerm(f.tree, value))
 }
 
 func (f moduleValueFlow) callValue(call callExpression) TypeSummary {
-	if len(call.target.selectors) != 0 {
+	tree := f.tree
+	target := tree.callTarget(&call)
+	if len(tree.termSelectors(target)) != 0 {
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
-	switch call.target.name {
+	switch tree.termName(target) {
 	case "setmetatable":
 		return f.setMetatableCallValue(call)
 	case "getmetatable":
@@ -328,14 +358,15 @@ func (f moduleValueFlow) callValue(call callExpression) TypeSummary {
 }
 
 func (f moduleValueFlow) setMetatableCallValue(call callExpression) TypeSummary {
-	if len(call.args) < 2 {
+	args := f.tree.callArgs(&call)
+	if len(args) < 2 {
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
-	table := f.value(call.args[0])
+	table := f.value(args[0])
 	if table.Kind != TypeSummaryTable {
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
-	metatable := f.value(call.args[1])
+	metatable := f.value(args[1])
 	if metatable.Kind != TypeSummaryTable {
 		return table
 	}
@@ -344,10 +375,11 @@ func (f moduleValueFlow) setMetatableCallValue(call callExpression) TypeSummary 
 }
 
 func (f moduleValueFlow) getMetatableCallValue(call callExpression) TypeSummary {
-	if len(call.args) == 0 {
+	args := f.tree.callArgs(&call)
+	if len(args) == 0 {
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
-	table := f.value(call.args[0])
+	table := f.value(args[0])
 	if table.Metatable == nil {
 		return TypeSummary{Kind: TypeSummaryUnknown, Display: "unknown"}
 	}
@@ -355,14 +387,16 @@ func (f moduleValueFlow) getMetatableCallValue(call callExpression) TypeSummary 
 }
 
 func (f moduleValueFlow) tableValue(table tableExpression) TypeSummary {
+	tree := f.tree
 	summary := TypeSummary{Kind: TypeSummaryTable, Display: "table"}
-	for _, field := range table.fields {
-		if field.name == "" {
+	for i := range tree.tableFields(&table) {
+		field := &tree.tableFields(&table)[i]
+		if tree.tableFieldName(field) == "" {
 			continue
 		}
 		summary.Properties = append(summary.Properties, TablePropertySummary{
-			Name: field.name,
-			Type: f.value(field.value),
+			Name: tree.tableFieldName(field),
+			Type: f.value(*tree.tableFieldValue(field)),
 		})
 	}
 	return summary

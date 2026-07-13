@@ -67,7 +67,7 @@ func TestSlice23CompileRejectsMissingBindingFact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
-	term := artifact.program.statements[0].ret.values[0].terms[0].terms[0].left.first.first.first
+	term := artifact.tree.statements()[0].ret.values[0].terms[0].terms[0].left.first.first.first
 	if term.id <= 0 {
 		t.Fatalf("return term has invalid syntax id %d", term.id)
 	}
@@ -87,7 +87,7 @@ func TestSlice23CompileRejectsStaleBindingIDWithoutValidFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
-	term := artifact.program.statements[0].ret.values[0].terms[0].terms[0].left.first.first.first
+	term := artifact.tree.statements()[0].ret.values[0].terms[0].terms[0].left.first.first.first
 	artifact.bind.nodeFacts[term.id].use = 0
 	artifact.bind.nodeFacts[term.id].flags &^= boundNodeUseValid
 	_, err = compileProgram(artifact)
@@ -154,7 +154,7 @@ func TestSlice23CompilerUsesBoundGlobalClassification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
-	term := artifact.program.statements[0].ret.values[0].terms[0].terms[0].left.first.first.first
+	term := artifact.tree.statements()[0].ret.values[0].terms[0].terms[0].left.first.first.first
 	if got := artifact.bind.useClassification(term.id); got != boundUseGlobal {
 		t.Fatalf("host term classification = %d, want global %d", got, boundUseGlobal)
 	}
@@ -180,7 +180,7 @@ func TestSlice23MissingBindingErrorIncludesNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
-	term := artifact.program.statements[0].ret.values[0].terms[0].terms[0].left.first.first.first
+	term := artifact.tree.statements()[0].ret.values[0].terms[0].terms[0].left.first.first.first
 	artifact.bind.nodeFacts[term.id].use = int32(boundUseUnvisited)
 	artifact.bind.nodeFacts[term.id].flags &^= boundNodeUseValid
 	_, err = compileProgram(artifact)

@@ -3828,7 +3828,7 @@ func TestCompilerAttachesExpressionSourceMetadataToBytecodeIR(t *testing.T) {
 		},
 	})
 
-	if err := compiler.compileStatements(artifact.program.statements); err != nil {
+	if err := compiler.compileStatements(artifact.tree.statements()); err != nil {
 		t.Fatalf("compileStatements returned error: %v", err)
 	}
 	add, ok := findBytecodeIRInstruction(compiler.ir, opAdd)

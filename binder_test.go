@@ -54,7 +54,7 @@ return value
 	if err != nil {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
-	if len(artifact.program.statements) == 0 {
+	if len(artifact.tree.statements()) == 0 {
 		t.Fatal("parseSource returned no statements")
 	}
 	artifact.bind.mustSymbol(t, "value", symbolLocal, 0)
@@ -149,6 +149,7 @@ value = value + 1
 return value
 `)
 	result := bindProgram(prog)
+	tree := newSyntaxTree(prog)
 
 	definitionID := prog.statements[0].local.nameID
 	symbol, ok := result.definition(definitionID)
@@ -160,7 +161,7 @@ return value
 	if !ok || use.symbol != symbol.id {
 		t.Fatalf("use(%d) = %#v, %t, want symbol %d", assignmentID, use, ok, symbol.id)
 	}
-	returnTerm, ok := expressionSingleTerm(prog.statements[2].ret.values[0])
+	returnTerm, ok := expressionSingleTerm(tree, prog.statements[2].ret.values[0])
 	if !ok {
 		t.Fatal("return expression is not a single term")
 	}
@@ -214,13 +215,15 @@ end
 `
 	first := parseSourceForBindTest(t, source)
 	second := parseSourceForBindTest(t, source)
+	firstTree := newSyntaxTree(first)
+	secondTree := newSyntaxTree(second)
 	outerFirst := first.statements[0].localFunc
 	outerSecond := second.statements[0].localFunc
-	innerFirst, ok := expressionSingleTerm(outerFirst.statements[0].ret.values[0])
+	innerFirst, ok := expressionSingleTerm(firstTree, outerFirst.statements[0].ret.values[0])
 	if !ok || innerFirst.function == nil {
 		t.Fatal("inner expression is not a function")
 	}
-	innerSecond, ok := expressionSingleTerm(outerSecond.statements[0].ret.values[0])
+	innerSecond, ok := expressionSingleTerm(secondTree, outerSecond.statements[0].ret.values[0])
 	if !ok || innerSecond.function == nil {
 		t.Fatal("second inner expression is not a function")
 	}

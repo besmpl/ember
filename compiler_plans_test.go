@@ -10,8 +10,9 @@ func TestValueListPlanComputesItemsWithoutMaterializingSlice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse returned error: %v", err)
 	}
+	tree := newSyntaxTree(prog)
 	values := prog.statements[0].ret.values
-	plan := fixedValueListPlan(values, 4)
+	plan := fixedValueListPlan(tree, values, 4)
 	want := []valuePlan{
 		{kind: valuePlanSingle, source: 0, resultCount: 1},
 		{kind: valuePlanExpanded, source: 1, resultCount: 3},
@@ -27,12 +28,14 @@ func TestValueListPlanComputesItemsWithoutMaterializingSlice(t *testing.T) {
 
 func TestClosurePlanViewsMethodSelfWithoutCopyingParams(t *testing.T) {
 	params := []string{"amount"}
-	plan := planFunctionDeclaration(functionDeclarationStatement{
+	stmt := functionDeclarationStatement{
 		params:  params,
 		paramID: 10,
 		selfID:  9,
 		method:  true,
-	})
+	}
+	tree := newSyntaxTree(program{statements: []statement{{funcDecl: &stmt}}})
+	plan := planFunctionDeclaration(tree, *tree.functionDeclaration(tree.statement(0)))
 	if plan.paramCount() != 2 {
 		t.Fatalf("param count = %d, want 2", plan.paramCount())
 	}

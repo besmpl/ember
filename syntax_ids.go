@@ -7,6 +7,7 @@ type syntaxIDAssigner struct {
 	nextFunction int
 	limit        uint64
 	err          error
+	tree         syntaxTree
 }
 
 func assignProgramSyntaxIDs(prog *program) {
@@ -17,10 +18,28 @@ func assignProgramSyntaxIDsWithLimit(prog *program, limit uint64) error {
 	if prog == nil {
 		return nil
 	}
-	a := syntaxIDAssigner{limit: limit}
-	prog.id = a.node()
-	a.statements(prog.statements)
-	prog.nodeCount = int(a.nextNode)
+	tree := newSyntaxTree(*prog)
+	err := assignSyntaxTreeIDsWithLimit(&tree, limit)
+	*prog = tree.root
+	return err
+}
+
+// assignSyntaxTreeIDsWithLimit assigns IDs through the syntaxTree root seam.
+// The concrete pointers returned by the facade are intentionally retained so
+// this remains allocation-free while allowing the storage behind syntaxTree to
+// change in a later arena slice.
+func assignSyntaxTreeIDs(tree *syntaxTree) {
+	_ = assignSyntaxTreeIDsWithLimit(tree, 0)
+}
+
+func assignSyntaxTreeIDsWithLimit(tree *syntaxTree, limit uint64) error {
+	if tree == nil {
+		return nil
+	}
+	a := syntaxIDAssigner{limit: limit, tree: *tree}
+	tree.root.id = a.node()
+	a.statements(tree.statements())
+	tree.root.nodeCount = int(a.nextNode)
 	return a.err
 }
 
@@ -79,70 +98,77 @@ func (a *syntaxIDAssigner) statement(stmt *statement) {
 	if a.err != nil {
 		return
 	}
-	switch {
-	case stmt.local != nil:
-		stmt.local.nameID = a.names(stmt.local.names)
-		a.types(stmt.local.annotations)
-		a.expressions(stmt.local.values)
-	case stmt.localFunc != nil:
-		fn := stmt.localFunc
+	switch a.tree.statementKind(stmt) {
+	case syntaxStatementLocal:
+		local := a.tree.local(stmt)
+		local.nameID = a.names(a.tree.localNames(local))
+		a.types(a.tree.localAnnotations(local))
+		a.expressions(a.tree.localValues(local))
+	case syntaxStatementLocalFunction:
+		fn := a.tree.localFunction(stmt)
 		fn.id, fn.nameID, fn.functionID = a.node(), a.node(), a.function()
-		fn.typeParamID, fn.typePackID, fn.paramID = a.names(fn.typeParams), a.names(fn.typePacks), a.names(fn.params)
-		a.types(fn.paramAnnotations)
-		a.typeExpression(fn.variadicAnnotation)
-		a.typeExpression(fn.returnAnnotation)
-		a.statements(fn.statements)
-	case stmt.funcDecl != nil:
-		fn := stmt.funcDecl
+		fn.typeParamID, fn.typePackID, fn.paramID = a.names(a.tree.localFunctionTypeParams(fn)), a.names(a.tree.localFunctionTypePacks(fn)), a.names(a.tree.localFunctionParams(fn))
+		a.types(a.tree.localFunctionParamAnnotations(fn))
+		a.typeExpression(a.tree.localFunctionVariadicAnnotation(fn))
+		a.typeExpression(a.tree.localFunctionReturnAnnotation(fn))
+		a.statements(a.tree.localFunctionStatements(fn))
+	case syntaxStatementFunctionDeclaration:
+		fn := a.tree.functionDeclaration(stmt)
 		fn.id, fn.functionID = a.node(), a.function()
-		a.assignTarget(&fn.target)
-		fn.typeParamID, fn.typePackID = a.names(fn.typeParams), a.names(fn.typePacks)
-		if fn.method {
+		a.assignTarget(a.tree.functionDeclarationTarget(fn))
+		fn.typeParamID, fn.typePackID = a.names(a.tree.functionDeclarationTypeParams(fn)), a.names(a.tree.functionDeclarationTypePacks(fn))
+		if a.tree.functionDeclarationMethod(fn) {
 			fn.selfID = a.node()
 		}
-		fn.paramID = a.names(fn.params)
-		a.types(fn.paramAnnotations)
-		a.typeExpression(fn.variadicAnnotation)
-		a.typeExpression(fn.returnAnnotation)
-		a.statements(fn.statements)
-	case stmt.assign != nil:
-		for i := range stmt.assign.targets {
-			a.assignTarget(&stmt.assign.targets[i])
+		fn.paramID = a.names(a.tree.functionDeclarationParams(fn))
+		a.types(a.tree.functionDeclarationParamAnnotations(fn))
+		a.typeExpression(a.tree.functionDeclarationVariadicAnnotation(fn))
+		a.typeExpression(a.tree.functionDeclarationReturnAnnotation(fn))
+		a.statements(a.tree.functionDeclarationStatements(fn))
+	case syntaxStatementAssign:
+		assign := a.tree.assignment(stmt)
+		for i := range a.tree.assignmentTargets(assign) {
+			a.assignTarget(&a.tree.assignmentTargets(assign)[i])
 		}
-		a.expressions(stmt.assign.values)
-	case stmt.call != nil:
-		a.term(stmt.call)
-	case stmt.ifStmt != nil:
-		a.expression(&stmt.ifStmt.condition)
-		a.statements(stmt.ifStmt.thenStatements)
-		a.statements(stmt.ifStmt.elseStatements)
-	case stmt.while != nil:
-		a.expression(&stmt.while.condition)
-		a.statements(stmt.while.statements)
-	case stmt.forLoop != nil:
-		stmt.forLoop.nameID = a.node()
-		a.expression(&stmt.forLoop.start)
-		a.expression(&stmt.forLoop.limit)
-		if stmt.forLoop.step != nil {
-			a.expression(stmt.forLoop.step)
+		a.expressions(a.tree.assignmentValues(assign))
+	case syntaxStatementCall:
+		a.term(a.tree.call(stmt))
+	case syntaxStatementIf:
+		ifStmt := a.tree.ifStatement(stmt)
+		a.expression(a.tree.ifCondition(ifStmt))
+		a.statements(a.tree.ifThenStatements(ifStmt))
+		a.statements(a.tree.ifElseStatements(ifStmt))
+	case syntaxStatementWhile:
+		whileStmt := a.tree.whileStatement(stmt)
+		a.expression(a.tree.whileCondition(whileStmt))
+		a.statements(a.tree.whileStatements(whileStmt))
+	case syntaxStatementFor:
+		forStmt := a.tree.forStatement(stmt)
+		forStmt.nameID = a.node()
+		a.expression(a.tree.numericForStart(forStmt))
+		a.expression(a.tree.numericForLimit(forStmt))
+		if step := a.tree.numericForStep(forStmt); step != nil {
+			a.expression(step)
 		}
-		a.statements(stmt.forLoop.statements)
-	case stmt.genericFor != nil:
-		stmt.genericFor.nameID = a.names(stmt.genericFor.names)
-		a.expressions(stmt.genericFor.values)
-		a.statements(stmt.genericFor.statements)
-	case stmt.repeat != nil:
-		a.statements(stmt.repeat.statements)
-		a.expression(&stmt.repeat.condition)
-	case stmt.block != nil:
-		a.statements(stmt.block.statements)
-	case stmt.ret != nil:
-		a.expressions(stmt.ret.values)
-	case stmt.typeAlias != nil:
-		alias := stmt.typeAlias
+		a.statements(a.tree.numericForStatements(forStmt))
+	case syntaxStatementGenericFor:
+		forStmt := a.tree.genericForStatement(stmt)
+		forStmt.nameID = a.names(a.tree.genericForNames(forStmt))
+		a.expressions(a.tree.genericForValues(forStmt))
+		a.statements(a.tree.genericForStatements(forStmt))
+	case syntaxStatementRepeat:
+		repeat := a.tree.repeatStatement(stmt)
+		a.statements(a.tree.repeatStatements(repeat))
+		a.expression(a.tree.repeatCondition(repeat))
+	case syntaxStatementBlock:
+		a.statements(a.tree.blockStatements(a.tree.blockStatement(stmt)))
+	case syntaxStatementReturn:
+		a.expressions(a.tree.returnValues(a.tree.returnStatement(stmt)))
+	case syntaxStatementTypeAlias:
+		alias := a.tree.typeAliasStatement(stmt)
 		alias.id, alias.nameID = a.node(), a.node()
-		alias.typeParamID, alias.typePackID = a.names(alias.typeParams), a.names(alias.typePacks)
-		a.typeExpression(alias.value)
+		alias.typeParamID, alias.typePackID = a.names(a.tree.typeAliasTypeParams(alias)), a.names(a.tree.typeAliasTypePacks(alias))
+		a.typeExpression(a.tree.typeAliasValue(alias))
 	}
 }
 
@@ -163,12 +189,13 @@ func (a *syntaxIDAssigner) expression(expr *expression) {
 	if a.err != nil {
 		return
 	}
-	for i := range expr.terms {
-		for j := range expr.terms[i].terms {
-			comparison := &expr.terms[i].terms[j]
-			a.concat(&comparison.left)
-			if comparison.right != nil {
-				a.concat(comparison.right)
+	for i := range a.tree.expressionTerms(expr) {
+		and := &a.tree.expressionTerms(expr)[i]
+		for j := range a.tree.andTerms(and) {
+			comparison := &a.tree.andTerms(and)[j]
+			a.concat(a.tree.comparisonLeftRef(comparison))
+			if right := a.tree.comparisonRight(comparison); right != nil {
+				a.concat(right)
 			}
 		}
 	}
@@ -178,9 +205,9 @@ func (a *syntaxIDAssigner) concat(expr *concatExpression) {
 	if a.err != nil {
 		return
 	}
-	a.additive(&expr.first)
-	for i := range expr.rest {
-		a.additive(&expr.rest[i])
+	a.additive(a.tree.concatFirstRef(expr))
+	for i := range a.tree.concatRest(expr) {
+		a.additive(&a.tree.concatRest(expr)[i])
 	}
 }
 
@@ -188,9 +215,9 @@ func (a *syntaxIDAssigner) additive(expr *additiveExpression) {
 	if a.err != nil {
 		return
 	}
-	a.multiplicative(&expr.first)
-	for i := range expr.rest {
-		a.multiplicative(&expr.rest[i].value)
+	a.multiplicative(a.tree.additiveFirstRef(expr))
+	for i := range a.tree.additiveRest(expr) {
+		a.multiplicative(a.tree.additivePartValue(&a.tree.additiveRest(expr)[i]))
 	}
 }
 
@@ -198,9 +225,9 @@ func (a *syntaxIDAssigner) multiplicative(expr *multiplicativeExpression) {
 	if a.err != nil {
 		return
 	}
-	a.term(&expr.first)
-	for i := range expr.rest {
-		a.term(&expr.rest[i].value)
+	a.term(a.tree.multiplicativeFirstRef(expr))
+	for i := range a.tree.multiplicativeRest(expr) {
+		a.term(a.tree.multiplicativePartValue(&a.tree.multiplicativeRest(expr)[i]))
 	}
 }
 
@@ -212,48 +239,47 @@ func (a *syntaxIDAssigner) term(value *term) {
 	if a.err != nil {
 		return
 	}
-	if value.power != nil {
-		a.term(&value.power.base)
-		a.term(&value.power.exponent)
+	if power := a.tree.termPower(value); power != nil {
+		a.term(a.tree.powerBase(power))
+		a.term(a.tree.powerExponent(power))
 	}
-	if value.table != nil {
-		for i := range value.table.fields {
-			field := &value.table.fields[i]
-			if field.key != nil {
-				a.expression(field.key)
+	if table := a.tree.termTable(value); table != nil {
+		for i := range a.tree.tableFields(table) {
+			field := &a.tree.tableFields(table)[i]
+			if key := a.tree.tableFieldKey(field); key != nil {
+				a.expression(key)
 			}
-			a.expression(&field.value)
+			a.expression(a.tree.tableFieldValue(field))
 		}
 	}
-	if value.function != nil {
-		fn := value.function
+	if fn := a.tree.termFunction(value); fn != nil {
 		fn.id, fn.functionID = a.node(), a.function()
-		fn.typeParamID, fn.typePackID = a.names(fn.typeParams), a.names(fn.typePacks)
-		fn.paramID = a.names(fn.params)
-		a.types(fn.paramAnnotations)
-		a.typeExpression(fn.variadicAnnotation)
-		a.typeExpression(fn.returnAnnotation)
-		a.statements(fn.statements)
+		fn.typeParamID, fn.typePackID = a.names(a.tree.functionExpressionTypeParams(fn)), a.names(a.tree.functionExpressionTypePacks(fn))
+		fn.paramID = a.names(a.tree.functionExpressionParams(fn))
+		a.types(a.tree.functionExpressionParamAnnotations(fn))
+		a.typeExpression(a.tree.functionExpressionVariadicAnnotation(fn))
+		a.typeExpression(a.tree.functionExpressionReturnAnnotation(fn))
+		a.statements(a.tree.functionExpressionStatements(fn))
 	}
-	if value.ifExpr != nil {
-		a.expression(&value.ifExpr.condition)
-		a.expression(&value.ifExpr.thenValue)
-		a.expression(&value.ifExpr.elseValue)
+	if ifExpr := a.tree.termIf(value); ifExpr != nil {
+		a.expression(a.tree.ifExpressionCondition(ifExpr))
+		a.expression(a.tree.ifExpressionThen(ifExpr))
+		a.expression(a.tree.ifExpressionElse(ifExpr))
 	}
-	if value.call != nil {
-		a.term(&value.call.target)
-		a.term(value.call.receiver)
-		a.types(value.call.typeArgs)
-		a.expressions(value.call.args)
+	if call := a.tree.termCall(value); call != nil {
+		a.term(a.tree.callTarget(call))
+		a.term(a.tree.callReceiver(call))
+		a.types(a.tree.callTypeArgs(call))
+		a.expressions(a.tree.callArgs(call))
 	}
-	a.term(value.unaryNot)
-	a.term(value.unaryMinus)
-	a.term(value.unaryLen)
-	a.expression(value.group)
-	a.typeExpression(value.cast)
-	for i := range value.selectors {
-		if value.selectors[i].index != nil {
-			a.expression(value.selectors[i].index)
+	a.term(a.tree.termUnaryNot(value))
+	a.term(a.tree.termUnaryMinus(value))
+	a.term(a.tree.termUnaryLength(value))
+	a.expression(a.tree.termGroup(value))
+	a.typeExpression(a.tree.termCast(value))
+	for i := range a.tree.termSelectors(value) {
+		if index := a.tree.selectorIndex(&a.tree.termSelectors(value)[i]); index != nil {
+			a.expression(index)
 		}
 	}
 }
@@ -266,9 +292,9 @@ func (a *syntaxIDAssigner) assignTarget(target *assignTarget) {
 	if a.err != nil {
 		return
 	}
-	for i := range target.selectors {
-		if target.selectors[i].index != nil {
-			a.expression(target.selectors[i].index)
+	for i := range a.tree.assignTargetSelectors(target) {
+		if index := a.tree.selectorIndex(&a.tree.assignTargetSelectors(target)[i]); index != nil {
+			a.expression(index)
 		}
 	}
 }
@@ -290,19 +316,20 @@ func (a *syntaxIDAssigner) typeExpression(value *typeExpression) {
 	if a.err != nil {
 		return
 	}
-	value.typeParamID, value.typePackID = a.names(value.typeParams), a.names(value.typePacks)
-	a.types(value.typeArgs)
-	a.types(value.types)
-	a.typeExpression(value.inner)
-	for i := range value.fields {
-		a.typeExpression(value.fields[i].key)
-		a.typeExpression(value.fields[i].value)
+	value.typeParamID, value.typePackID = a.names(a.tree.typeTypeParams(value)), a.names(a.tree.typePacks(value))
+	a.types(a.tree.typeArgs(value))
+	a.types(a.tree.typeChildren(value))
+	a.typeExpression(a.tree.typeInner(value))
+	for i := range a.tree.typeFields(value) {
+		field := &a.tree.typeFields(value)[i]
+		a.typeExpression(a.tree.typeFieldKey(field))
+		a.typeExpression(a.tree.typeFieldValue(field))
 	}
-	for i := range value.params {
-		a.typeExpression(value.params[i].value)
+	for i := range a.tree.typeParams(value) {
+		a.typeExpression(a.tree.typeParamValue(&a.tree.typeParams(value)[i]))
 	}
-	a.typeExpression(value.returnType)
-	if value.expr != nil {
-		a.expression(value.expr)
+	a.typeExpression(a.tree.typeReturn(value))
+	if expr := a.tree.typeExpression(value); expr != nil {
+		a.expression(expr)
 	}
 }

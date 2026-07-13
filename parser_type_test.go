@@ -19,39 +19,39 @@ func checkTypedSource(t *testing.T, body string) (string, checkResult) {
 func firstLocalStatement(t *testing.T, result checkResult) *localStatement {
 	t.Helper()
 
-	if len(result.program.statements) < 1 || result.program.statements[0].local == nil {
-		t.Fatalf("first statement is %#v, want local statement", result.program.statements)
+	if len(result.tree.statements()) < 1 || result.tree.statements()[0].local == nil {
+		t.Fatalf("first statement is %#v, want local statement", result.tree.statements())
 	}
-	return result.program.statements[0].local
+	return result.tree.statements()[0].local
 }
 
 func firstTypeAlias(t *testing.T, result checkResult) *typeAliasStatement {
 	t.Helper()
 
-	if len(result.program.statements) < 1 || result.program.statements[0].typeAlias == nil {
-		t.Fatalf("first statement is %#v, want type alias", result.program.statements)
+	if len(result.tree.statements()) < 1 || result.tree.statements()[0].typeAlias == nil {
+		t.Fatalf("first statement is %#v, want type alias", result.tree.statements())
 	}
-	return result.program.statements[0].typeAlias
+	return result.tree.statements()[0].typeAlias
 }
 
 func firstLocalFunction(t *testing.T, result checkResult) *localFunctionStatement {
 	t.Helper()
 
-	if len(result.program.statements) < 1 || result.program.statements[0].localFunc == nil {
-		t.Fatalf("first statement is %#v, want local function", result.program.statements)
+	if len(result.tree.statements()) < 1 || result.tree.statements()[0].localFunc == nil {
+		t.Fatalf("first statement is %#v, want local function", result.tree.statements())
 	}
-	return result.program.statements[0].localFunc
+	return result.tree.statements()[0].localFunc
 }
 
 func firstReturnStatement(t *testing.T, result checkResult) *returnStatement {
 	t.Helper()
 
-	for _, stmt := range result.program.statements {
+	for _, stmt := range result.tree.statements() {
 		if stmt.ret != nil {
 			return stmt.ret
 		}
 	}
-	t.Fatalf("statements are %#v, want return statement", result.program.statements)
+	t.Fatalf("statements are %#v, want return statement", result.tree.statements())
 	return nil
 }
 

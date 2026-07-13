@@ -21,14 +21,16 @@ func (p refinablePlace) hasField() bool {
 	return p.field != ""
 }
 
-func (a *analysisState) trueConditionRefinements(expr expression) []conditionRefinement {
-	if len(expr.terms) != 1 {
-		return a.orTrueConditionRefinements(expr)
+func (a *analysisState) trueConditionRefinements(tree syntaxTree, expr expression) []conditionRefinement {
+	terms := tree.expressionTerms(&expr)
+	if len(terms) != 1 {
+		return a.orTrueConditionRefinements(tree, expr)
 	}
 	var refinements []conditionRefinement
-	for _, term := range expr.terms[0].terms {
+	andTerms := tree.andTerms(&terms[0])
+	for _, term := range andTerms {
 		single := expression{terms: []andExpression{{terms: []comparisonExpression{term}}}}
-		refinement := a.conditionRefinement(single)
+		refinement := a.conditionRefinement(tree, single)
 		if !refinement.place.valid() || refinement.trueType == simpleTypeUnknown {
 			continue
 		}
@@ -37,15 +39,16 @@ func (a *analysisState) trueConditionRefinements(expr expression) []conditionRef
 	return refinements
 }
 
-func (a *analysisState) orTrueConditionRefinements(expr expression) []conditionRefinement {
+func (a *analysisState) orTrueConditionRefinements(tree syntaxTree, expr expression) []conditionRefinement {
 	var place refinablePlace
 	typ := simpleTypeUnknown
-	for _, term := range expr.terms {
-		if len(term.terms) != 1 {
+	for _, term := range tree.expressionTerms(&expr) {
+		andTerms := tree.andTerms(&term)
+		if len(andTerms) != 1 {
 			return nil
 		}
-		single := expression{terms: []andExpression{{terms: []comparisonExpression{term.terms[0]}}}}
-		refinement := a.conditionRefinement(single)
+		single := expression{terms: []andExpression{{terms: []comparisonExpression{andTerms[0]}}}}
+		refinement := a.conditionRefinement(tree, single)
 		if !refinement.place.valid() || refinement.trueType == simpleTypeUnknown {
 			return nil
 		}
@@ -86,23 +89,25 @@ func (a *analysisState) applyTrueRefinementsToExisting(refinements []conditionRe
 	}
 }
 
-func (a *analysisState) applyFalseConditionRefinements(expr expression) {
-	if len(expr.terms) == 0 {
+func (a *analysisState) applyFalseConditionRefinements(tree syntaxTree, expr expression) {
+	terms := tree.expressionTerms(&expr)
+	if len(terms) == 0 {
 		return
 	}
-	if len(expr.terms) == 1 {
-		refinement := a.conditionRefinement(expr)
+	if len(terms) == 1 {
+		refinement := a.conditionRefinement(tree, expr)
 		if refinement.place.valid() && refinement.falseType != simpleTypeUnknown {
 			a.applyRefinement(refinement.place, refinement.falseType)
 		}
 		return
 	}
-	for _, term := range expr.terms {
-		if len(term.terms) != 1 {
+	for _, term := range terms {
+		andTerms := tree.andTerms(&term)
+		if len(andTerms) != 1 {
 			return
 		}
-		single := expression{terms: []andExpression{{terms: []comparisonExpression{term.terms[0]}}}}
-		refinement := a.conditionRefinement(single)
+		single := expression{terms: []andExpression{{terms: []comparisonExpression{andTerms[0]}}}}
+		refinement := a.conditionRefinement(tree, single)
 		if !refinement.place.valid() || refinement.falseType == simpleTypeUnknown {
 			return
 		}
@@ -132,24 +137,24 @@ func (a *analysisState) refinablePlaceType(place refinablePlace) simpleType {
 	return a.lookupLocal(place.name)
 }
 
-func (a *analysisState) conditionRefinement(expr expression) conditionRefinement {
-	if refinement, ok := a.nilComparisonRefinement(expr); ok {
+func (a *analysisState) conditionRefinement(tree syntaxTree, expr expression) conditionRefinement {
+	if refinement, ok := a.nilComparisonRefinement(tree, expr); ok {
 		return refinement
 	}
-	if refinement, ok := a.singletonComparisonRefinement(expr); ok {
+	if refinement, ok := a.singletonComparisonRefinement(tree, expr); ok {
 		return refinement
 	}
-	if refinement, ok := a.typeGuardRefinement(expr); ok {
+	if refinement, ok := a.typeGuardRefinement(tree, expr); ok {
 		return refinement
 	}
-	value, ok := expressionSingleTerm(expr)
-	if !ok || value.name == "" {
-		if ok && value.unaryNot != nil && len(value.selectors) == 0 {
-			return a.negatedConditionRefinement(*value.unaryNot)
+	value, ok := refinementSingleTerm(tree, expr)
+	if !ok || tree.termName(&value) == "" {
+		if ok && tree.termUnaryNot(&value) != nil && len(tree.termSelectors(&value)) == 0 {
+			return a.negatedConditionRefinement(tree, *tree.termUnaryNot(&value))
 		}
 		return conditionRefinement{}
 	}
-	place, ok := refinablePlaceFromTerm(value)
+	place, ok := refinablePlaceFromTerm(tree, value)
 	if !ok {
 		return conditionRefinement{}
 	}
@@ -165,38 +170,41 @@ func (a *analysisState) conditionRefinement(expr expression) conditionRefinement
 	}
 }
 
-func refinementField(value term) string {
-	field, ok := stableFieldSelector(value)
+func refinementField(tree syntaxTree, value term) string {
+	field, ok := stableFieldSelector(tree, value)
 	if !ok {
 		return ""
 	}
 	return field
 }
 
-func stableFieldSelector(value term) (string, bool) {
-	if len(value.selectors) != 1 {
+func stableFieldSelector(tree syntaxTree, value term) (string, bool) {
+	selectors := tree.termSelectors(&value)
+	if len(selectors) != 1 {
 		return "", false
 	}
-	selector := value.selectors[0]
-	if selector.field != "" && selector.index == nil {
-		return selector.field, true
+	selector := &selectors[0]
+	field := tree.selectorField(selector)
+	index := tree.selectorIndex(selector)
+	if field != "" && index == nil {
+		return field, true
 	}
-	if selector.index == nil {
+	if index == nil {
 		return "", false
 	}
-	field, ok := expressionStringLiteral(*selector.index)
-	return field, ok
+	return refinementStringLiteral(tree, *index)
 }
 
-func (a *analysisState) negatedConditionRefinement(value term) conditionRefinement {
+func (a *analysisState) negatedConditionRefinement(tree syntaxTree, value term) conditionRefinement {
 	value = termWithoutCasts(value)
 	var expr expression
-	if value.group != nil && len(value.selectors) == 0 {
-		expr = *value.group
+	group := tree.termGroup(&value)
+	if group != nil && len(tree.termSelectors(&value)) == 0 {
+		expr = *group
 	} else {
 		expr = expressionFromTerm(value)
 	}
-	refinement := a.conditionRefinement(expr)
+	refinement := a.conditionRefinement(tree, expr)
 	if !refinement.place.valid() {
 		return conditionRefinement{}
 	}
@@ -204,15 +212,16 @@ func (a *analysisState) negatedConditionRefinement(value term) conditionRefineme
 	return refinement
 }
 
-func (a *analysisState) nilComparisonRefinement(expr expression) (conditionRefinement, bool) {
-	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+func (a *analysisState) nilComparisonRefinement(tree syntaxTree, expr expression) (conditionRefinement, bool) {
+	terms := tree.expressionTerms(&expr)
+	if len(terms) != 1 || len(tree.andTerms(&terms[0])) != 1 {
 		return conditionRefinement{}, false
 	}
-	comparison := expr.terms[0].terms[0]
-	if comparison.right == nil || (comparison.op != comparisonEqual && comparison.op != comparisonNotEqual) {
+	comparison := tree.andTerms(&terms[0])[0]
+	if tree.comparisonRight(&comparison) == nil || (tree.comparisonOperator(&comparison) != comparisonEqual && tree.comparisonOperator(&comparison) != comparisonNotEqual) {
 		return conditionRefinement{}, false
 	}
-	place, ok := nilComparisonPlace(comparison)
+	place, ok := nilComparisonPlace(tree, comparison)
 	if !ok {
 		return conditionRefinement{}, false
 	}
@@ -225,34 +234,37 @@ func (a *analysisState) nilComparisonRefinement(expr expression) (conditionRefin
 		trueType:  simpleTypeNil,
 		falseType: truthyType(current),
 	}
-	if comparison.op == comparisonNotEqual {
+	if tree.comparisonOperator(&comparison) == comparisonNotEqual {
 		refinement.trueType, refinement.falseType = refinement.falseType, refinement.trueType
 	}
 	return refinement, true
 }
 
-func nilComparisonPlace(comparison comparisonExpression) (refinablePlace, bool) {
-	if comparison.right == nil {
+func nilComparisonPlace(tree syntaxTree, comparison comparisonExpression) (refinablePlace, bool) {
+	right := tree.comparisonRight(&comparison)
+	if right == nil {
 		return refinablePlace{}, false
 	}
-	if place, ok := concatSinglePlace(comparison.left); ok && concatSingleNil(*comparison.right) {
+	left := tree.comparisonLeft(&comparison)
+	if place, ok := concatSinglePlace(tree, left); ok && concatSingleNil(tree, *right) {
 		return place, true
 	}
-	if concatSingleNil(comparison.left) {
-		return concatSinglePlace(*comparison.right)
+	if concatSingleNil(tree, left) {
+		return concatSinglePlace(tree, *right)
 	}
 	return refinablePlace{}, false
 }
 
-func (a *analysisState) singletonComparisonRefinement(expr expression) (conditionRefinement, bool) {
-	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+func (a *analysisState) singletonComparisonRefinement(tree syntaxTree, expr expression) (conditionRefinement, bool) {
+	terms := tree.expressionTerms(&expr)
+	if len(terms) != 1 || len(tree.andTerms(&terms[0])) != 1 {
 		return conditionRefinement{}, false
 	}
-	comparison := expr.terms[0].terms[0]
-	if comparison.right == nil || (comparison.op != comparisonEqual && comparison.op != comparisonNotEqual) {
+	comparison := tree.andTerms(&terms[0])[0]
+	if tree.comparisonRight(&comparison) == nil || (tree.comparisonOperator(&comparison) != comparisonEqual && tree.comparisonOperator(&comparison) != comparisonNotEqual) {
 		return conditionRefinement{}, false
 	}
-	place, typ, ok := singletonComparisonPlace(comparison)
+	place, typ, ok := singletonComparisonPlace(tree, comparison)
 	if !ok {
 		return conditionRefinement{}, false
 	}
@@ -265,45 +277,49 @@ func (a *analysisState) singletonComparisonRefinement(expr expression) (conditio
 		trueType:  typ,
 		falseType: simpleTypeUnknown,
 	}
-	if comparison.op == comparisonNotEqual {
+	if tree.comparisonOperator(&comparison) == comparisonNotEqual {
 		refinement.trueType, refinement.falseType = refinement.falseType, refinement.trueType
 	}
 	return refinement, true
 }
 
-func singletonComparisonPlace(comparison comparisonExpression) (refinablePlace, simpleType, bool) {
-	if comparison.right == nil {
+func singletonComparisonPlace(tree syntaxTree, comparison comparisonExpression) (refinablePlace, simpleType, bool) {
+	right := tree.comparisonRight(&comparison)
+	if right == nil {
 		return refinablePlace{}, simpleTypeUnknown, false
 	}
-	if place, ok := concatSinglePlace(comparison.left); ok {
-		if typ, ok := concatSingleSingletonType(*comparison.right); ok {
+	left := tree.comparisonLeft(&comparison)
+	if place, ok := concatSinglePlace(tree, left); ok {
+		if typ, ok := concatSingleSingletonType(tree, *right); ok {
 			return place, typ, true
 		}
 	}
-	if typ, ok := concatSingleSingletonType(comparison.left); ok {
-		place, ok := concatSinglePlace(*comparison.right)
+	if typ, ok := concatSingleSingletonType(tree, left); ok {
+		place, ok := concatSinglePlace(tree, *right)
 		return place, typ, ok
 	}
 	return refinablePlace{}, simpleTypeUnknown, false
 }
 
-func (a *analysisState) typeGuardRefinement(expr expression) (conditionRefinement, bool) {
-	if len(expr.terms) != 1 || len(expr.terms[0].terms) != 1 {
+func (a *analysisState) typeGuardRefinement(tree syntaxTree, expr expression) (conditionRefinement, bool) {
+	terms := tree.expressionTerms(&expr)
+	if len(terms) != 1 || len(tree.andTerms(&terms[0])) != 1 {
 		return conditionRefinement{}, false
 	}
-	comparison := expr.terms[0].terms[0]
-	if comparison.right == nil || (comparison.op != comparisonEqual && comparison.op != comparisonNotEqual) {
+	comparison := tree.andTerms(&terms[0])[0]
+	right := tree.comparisonRight(&comparison)
+	if right == nil || (tree.comparisonOperator(&comparison) != comparisonEqual && tree.comparisonOperator(&comparison) != comparisonNotEqual) {
 		return conditionRefinement{}, false
 	}
-	leftCall, ok := concatSingleCall(comparison.left)
+	leftCall, ok := concatSingleCall(tree, tree.comparisonLeft(&comparison))
 	if !ok {
 		return conditionRefinement{}, false
 	}
-	place, ok := typeCallPlace(leftCall)
+	place, ok := typeCallPlace(tree, leftCall)
 	if !ok {
 		return conditionRefinement{}, false
 	}
-	kind, ok := concatSingleString(*comparison.right)
+	kind, ok := concatSingleString(tree, *right)
 	if !ok {
 		return conditionRefinement{}, false
 	}
@@ -317,51 +333,78 @@ func (a *analysisState) typeGuardRefinement(expr expression) (conditionRefinemen
 		trueType:  typ,
 		falseType: typeWithout(current, typ),
 	}
-	if comparison.op == comparisonNotEqual {
+	if tree.comparisonOperator(&comparison) == comparisonNotEqual {
 		refinement.trueType, refinement.falseType = refinement.falseType, refinement.trueType
 	}
 	return refinement, true
 }
 
-func concatSinglePlace(expr concatExpression) (refinablePlace, bool) {
-	if len(expr.rest) != 0 || len(expr.first.rest) != 0 || len(expr.first.first.rest) != 0 {
+func concatSinglePlace(tree syntaxTree, expr concatExpression) (refinablePlace, bool) {
+	if len(tree.concatRest(&expr)) != 0 {
 		return refinablePlace{}, false
 	}
-	value := termWithoutCastsAndGroups(expr.first.first.first)
-	return refinablePlaceFromTerm(value)
+	first := tree.concatFirst(&expr)
+	if len(tree.additiveRest(&first)) != 0 {
+		return refinablePlace{}, false
+	}
+	additiveFirst := tree.additiveFirst(&first)
+	if len(tree.multiplicativeRest(&additiveFirst)) != 0 {
+		return refinablePlace{}, false
+	}
+	value := refinementTermWithoutCastsAndGroups(tree, tree.multiplicativeFirst(&additiveFirst))
+	return refinablePlaceFromTerm(tree, value)
 }
 
-func refinablePlaceFromTerm(value term) (refinablePlace, bool) {
-	if value.name == "" {
+func refinablePlaceFromTerm(tree syntaxTree, value term) (refinablePlace, bool) {
+	name := tree.termName(&value)
+	if name == "" {
 		return refinablePlace{}, false
 	}
-	field := refinementField(value)
-	if field == "" && len(value.selectors) != 0 {
+	field := refinementField(tree, value)
+	if field == "" && len(tree.termSelectors(&value)) != 0 {
 		return refinablePlace{}, false
 	}
-	return refinablePlace{name: value.name, field: field}, true
+	return refinablePlace{name: name, field: field}, true
 }
 
-func concatSingleNil(expr concatExpression) bool {
-	if len(expr.rest) != 0 || len(expr.first.rest) != 0 || len(expr.first.first.rest) != 0 {
+func concatSingleNil(tree syntaxTree, expr concatExpression) bool {
+	if len(tree.concatRest(&expr)) != 0 {
 		return false
 	}
-	value := termWithoutCastsAndGroups(expr.first.first.first)
-	if value.lit == nil {
+	first := tree.concatFirst(&expr)
+	if len(tree.additiveRest(&first)) != 0 {
 		return false
 	}
-	return value.lit.Kind() == NilKind
+	additiveFirst := tree.additiveFirst(&first)
+	if len(tree.multiplicativeRest(&additiveFirst)) != 0 {
+		return false
+	}
+	value := refinementTermWithoutCastsAndGroups(tree, tree.multiplicativeFirst(&additiveFirst))
+	literal := tree.termLiteral(&value)
+	if literal == nil {
+		return false
+	}
+	return literal.Kind() == NilKind
 }
 
-func concatSingleSingletonType(expr concatExpression) (simpleType, bool) {
-	if len(expr.rest) != 0 || len(expr.first.rest) != 0 || len(expr.first.first.rest) != 0 {
+func concatSingleSingletonType(tree syntaxTree, expr concatExpression) (simpleType, bool) {
+	if len(tree.concatRest(&expr)) != 0 {
 		return simpleTypeUnknown, false
 	}
-	value := termWithoutCastsAndGroups(expr.first.first.first)
-	if value.lit == nil {
+	first := tree.concatFirst(&expr)
+	if len(tree.additiveRest(&first)) != 0 {
 		return simpleTypeUnknown, false
 	}
-	switch value.lit.Kind() {
+	additiveFirst := tree.additiveFirst(&first)
+	if len(tree.multiplicativeRest(&additiveFirst)) != 0 {
+		return simpleTypeUnknown, false
+	}
+	value := refinementTermWithoutCastsAndGroups(tree, tree.multiplicativeFirst(&additiveFirst))
+	literal := tree.termLiteral(&value)
+	if literal == nil {
+		return simpleTypeUnknown, false
+	}
+	switch literal.Kind() {
 	case BoolKind:
 		return simpleTypeBoolean, true
 	case StringKind:
@@ -371,38 +414,118 @@ func concatSingleSingletonType(expr concatExpression) (simpleType, bool) {
 	}
 }
 
-func concatSingleCall(expr concatExpression) (callExpression, bool) {
-	if len(expr.rest) != 0 || len(expr.first.rest) != 0 || len(expr.first.first.rest) != 0 {
+func concatSingleCall(tree syntaxTree, expr concatExpression) (callExpression, bool) {
+	if len(tree.concatRest(&expr)) != 0 {
 		return callExpression{}, false
 	}
-	value := termWithoutCastsAndGroups(expr.first.first.first)
-	if value.call == nil || len(value.selectors) != 0 {
+	first := tree.concatFirst(&expr)
+	if len(tree.additiveRest(&first)) != 0 {
 		return callExpression{}, false
 	}
-	return *value.call, true
+	additiveFirst := tree.additiveFirst(&first)
+	if len(tree.multiplicativeRest(&additiveFirst)) != 0 {
+		return callExpression{}, false
+	}
+	value := refinementTermWithoutCastsAndGroups(tree, tree.multiplicativeFirst(&additiveFirst))
+	call := tree.termCall(&value)
+	if call == nil || len(tree.termSelectors(&value)) != 0 {
+		return callExpression{}, false
+	}
+	return *call, true
 }
 
-func typeCallPlace(call callExpression) (refinablePlace, bool) {
-	target := termWithoutCastsAndGroups(call.target)
-	if target.name != "type" || len(call.args) != 1 {
+func typeCallPlace(tree syntaxTree, call callExpression) (refinablePlace, bool) {
+	targetNode := tree.callTarget(&call)
+	if targetNode == nil {
 		return refinablePlace{}, false
 	}
-	arg, ok := expressionSingleTerm(call.args[0])
-	if !ok || arg.name == "" {
+	target := refinementTermWithoutCastsAndGroups(tree, *targetNode)
+	args := tree.callArgs(&call)
+	if tree.termName(&target) != "type" || len(args) != 1 {
 		return refinablePlace{}, false
 	}
-	return refinablePlaceFromTerm(arg)
+	arg, ok := refinementSingleTerm(tree, args[0])
+	if !ok || tree.termName(&arg) == "" {
+		return refinablePlace{}, false
+	}
+	return refinablePlaceFromTerm(tree, arg)
 }
 
-func concatSingleString(expr concatExpression) (string, bool) {
-	if len(expr.rest) != 0 || len(expr.first.rest) != 0 || len(expr.first.first.rest) != 0 {
+func concatSingleString(tree syntaxTree, expr concatExpression) (string, bool) {
+	if len(tree.concatRest(&expr)) != 0 {
 		return "", false
 	}
-	value := termWithoutCastsAndGroups(expr.first.first.first)
-	if value.lit == nil {
+	first := tree.concatFirst(&expr)
+	if len(tree.additiveRest(&first)) != 0 {
 		return "", false
 	}
-	return value.lit.String()
+	additiveFirst := tree.additiveFirst(&first)
+	if len(tree.multiplicativeRest(&additiveFirst)) != 0 {
+		return "", false
+	}
+	value := refinementTermWithoutCastsAndGroups(tree, tree.multiplicativeFirst(&additiveFirst))
+	literal := tree.termLiteral(&value)
+	if literal == nil {
+		return "", false
+	}
+	return literal.String()
+}
+
+// refinementSingleTerm extracts a plain term while keeping all parser-tree
+// traversal behind the syntaxTree facade used by the analyzer.
+func refinementSingleTerm(tree syntaxTree, expr expression) (term, bool) {
+	terms := tree.expressionTerms(&expr)
+	if len(terms) != 1 {
+		return term{}, false
+	}
+	andTerms := tree.andTerms(&terms[0])
+	if len(andTerms) != 1 {
+		return term{}, false
+	}
+	comparison := andTerms[0]
+	if tree.comparisonOperator(&comparison) != "" || tree.comparisonRight(&comparison) != nil {
+		return term{}, false
+	}
+	concat := tree.comparisonLeft(&comparison)
+	if len(tree.concatRest(&concat)) != 0 {
+		return term{}, false
+	}
+	additive := tree.concatFirst(&concat)
+	if len(tree.additiveRest(&additive)) != 0 {
+		return term{}, false
+	}
+	multiplicative := tree.additiveFirst(&additive)
+	if len(tree.multiplicativeRest(&multiplicative)) != 0 {
+		return term{}, false
+	}
+	return refinementTermWithoutCastsAndGroups(tree, tree.multiplicativeFirst(&multiplicative)), true
+}
+
+func refinementTermWithoutCastsAndGroups(tree syntaxTree, value term) term {
+	for {
+		value = termWithoutCasts(value)
+		group := tree.termGroup(&value)
+		if group == nil || len(tree.termSelectors(&value)) != 0 {
+			return value
+		}
+		inner, ok := refinementSingleTerm(tree, *group)
+		if !ok {
+			return value
+		}
+		value = inner
+	}
+}
+
+func refinementStringLiteral(tree syntaxTree, expr expression) (string, bool) {
+	value, ok := refinementSingleTerm(tree, expr)
+	if !ok {
+		return "", false
+	}
+	literal := tree.termLiteral(&value)
+	if literal == nil {
+		return "", false
+	}
+	return literal.String()
 }
 
 func truthyType(typ simpleType) simpleType {

@@ -409,11 +409,11 @@ func (p *parser) parse() (program, error) {
 	if !p.done() {
 		return program{}, p.errorf("unexpected input %q", p.source[p.pos:])
 	}
-	prog := program{statements: statements, mode: p.mode}
-	if err := assignProgramSyntaxIDsWithLimit(&prog, p.limits.MaxSyntaxNodes); err != nil {
+	tree := newSyntaxTree(program{statements: statements, mode: p.mode})
+	if err := assignSyntaxTreeIDsWithLimit(&tree, p.limits.MaxSyntaxNodes); err != nil {
 		return program{}, err
 	}
-	return prog, nil
+	return tree.root, nil
 }
 
 func (p *parser) parseBlock(stopKeywords ...string) ([]statement, error) {

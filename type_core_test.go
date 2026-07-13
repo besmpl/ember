@@ -15,8 +15,8 @@ return 1
 		t.Fatalf("parseSource returned error: %v", err)
 	}
 
-	store := newTypeStore()
-	exports := lowerExportedTypeAliases(store, artifact.program.statements)
+	store := newTypeStoreTree(artifact.tree)
+	exports := lowerExportedTypeAliases(store, artifact.tree.statements())
 	if len(exports) != 1 {
 		t.Fatalf("lowered %d exports, want 1", len(exports))
 	}
@@ -56,8 +56,8 @@ return 1
 		t.Fatalf("parseSource returned error: %v", err)
 	}
 
-	store := newTypeStore()
-	exports := lowerExportedTypeAliases(store, artifact.program.statements)
+	store := newTypeStoreTree(artifact.tree)
+	exports := lowerExportedTypeAliases(store, artifact.tree.statements())
 	if len(exports) != 1 {
 		t.Fatalf("lowered %d exports, want 1", len(exports))
 	}
@@ -97,8 +97,8 @@ func TestTypeStoreKeepsGenericFunctionParameters(t *testing.T) {
 		t.Fatalf("parseSource returned error: %v", err)
 	}
 
-	store := newTypeStore()
-	exports := lowerExportedTypeAliases(store, artifact.program.statements)
+	store := newTypeStoreTree(artifact.tree)
+	exports := lowerExportedTypeAliases(store, artifact.tree.statements())
 	if len(exports) != 1 {
 		t.Fatalf("lowered %d exports, want 1", len(exports))
 	}
@@ -126,7 +126,11 @@ func TestTypeStoreKeepsGenericFunctionParameters(t *testing.T) {
 }
 
 func TestTypeStoreSummarizesTableMetatable(t *testing.T) {
-	store := newTypeStore()
+	artifact, err := parseSource(Source{Text: "return 1"})
+	if err != nil {
+		t.Fatalf("parseSource returned error: %v", err)
+	}
+	store := newTypeStoreTree(artifact.tree)
 	stringRef := store.lowerType(&typeExpression{kind: typeKindName, name: []string{"string"}})
 	indexRef := store.addType(typeNode{
 		kind:    TypeSummaryTable,
@@ -164,8 +168,8 @@ return 1
 		t.Fatalf("parseSource returned error: %v", err)
 	}
 
-	store := newTypeStore()
-	exports := lowerExportedTypeAliases(store, artifact.program.statements)
+	store := newTypeStoreTree(artifact.tree)
+	exports := lowerExportedTypeAliases(store, artifact.tree.statements())
 	if len(exports) != 1 {
 		t.Fatalf("lowered %d exports, want 1", len(exports))
 	}

@@ -21,7 +21,7 @@ func TestCompileLimitsExactBoundaries(t *testing.T) {
 	}{
 		{name: "source bytes", limits: CompileLimits{MaxSourceBytes: uint64(len(source) - 1)}, want: LimitSourceBytes},
 		{name: "tokens", limits: CompileLimits{MaxTokens: 1}, want: LimitTokens},
-		{name: "syntax nodes", limits: CompileLimits{MaxSyntaxNodes: uint64(artifact.program.nodeCount - 1)}, want: LimitSyntaxNodes},
+		{name: "syntax nodes", limits: CompileLimits{MaxSyntaxNodes: uint64(artifact.tree.nodeCount() - 1)}, want: LimitSyntaxNodes},
 	}
 	for _, test := range tests {
 		t.Run(test.name+" rejects", func(t *testing.T) {
@@ -33,7 +33,7 @@ func TestCompileLimitsExactBoundaries(t *testing.T) {
 	if _, err := CompileWithOptions(source, CompileOptions{Limits: CompileLimits{
 		MaxSourceBytes: uint64(len(source)),
 		MaxTokens:      artifact.metrics.tokens,
-		MaxSyntaxNodes: uint64(artifact.program.nodeCount),
+		MaxSyntaxNodes: uint64(artifact.tree.nodeCount()),
 	}}); err != nil {
 		t.Fatalf("exact compile limits rejected valid source: %v", err)
 	}
@@ -99,10 +99,10 @@ func TestCompileSyntaxNodeLimitReportsCrossing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSource() error = %v", err)
 	}
-	_, err = CompileWithOptions(source, CompileOptions{Limits: CompileLimits{MaxSyntaxNodes: uint64(artifact.program.nodeCount - 1)}})
+	_, err = CompileWithOptions(source, CompileOptions{Limits: CompileLimits{MaxSyntaxNodes: uint64(artifact.tree.nodeCount() - 1)}})
 	assertCompileLimitKind(t, err, LimitSyntaxNodes)
-	if artifact.program.nodeCount <= 1 {
-		t.Fatalf("fixture node count = %d, want multiple nodes", artifact.program.nodeCount)
+	if artifact.tree.nodeCount() <= 1 {
+		t.Fatalf("fixture node count = %d, want multiple nodes", artifact.tree.nodeCount())
 	}
 }
 

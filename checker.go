@@ -190,9 +190,9 @@ type Analyzer struct {
 type checkResult = checkArtifact
 
 type checkArtifact struct {
-	result  CheckResult
-	program program
-	bind    bindResult
+	result CheckResult
+	tree   syntaxTree
+	bind   bindResult
 }
 
 type typedArtifactFacts struct {
@@ -277,7 +277,7 @@ func Check(source string) error {
 	if err != nil {
 		return err
 	}
-	if err := requireCheckMode(sourceArtifact.program); err != nil {
+	if err := requireCheckMode(sourceArtifact.tree); err != nil {
 		return err
 	}
 	artifact, err := buildCheckArtifact(sourceArtifact)
@@ -307,10 +307,10 @@ func buildCheckArtifact(artifact sourceArtifact) (checkArtifact, error) {
 }
 
 func buildCheckArtifactWithEnv(artifact sourceArtifact, env typeEnv, summaries moduleSummaryEnv) (checkArtifact, error) {
-	prog := artifact.program
-	mode := sourceModePublic(prog.mode)
-	diagnostics := analyzeProgramWithMode(artifact.source, prog, artifact.bind, mode, env, summaries)
-	facts := buildTypedArtifactFacts(prog, diagnostics)
+	tree := artifact.tree
+	mode := sourceModePublic(tree.mode())
+	diagnostics := analyzeSyntaxTreeWithMode(artifact.source, tree, artifact.bind, mode, env, summaries)
+	facts := buildTypedArtifactFactsTree(tree, diagnostics)
 	return checkArtifact{
 		result: CheckResult{
 			Mode:        mode,
@@ -318,20 +318,24 @@ func buildCheckArtifactWithEnv(artifact sourceArtifact, env typeEnv, summaries m
 			Summary:     buildModuleSummary(artifact.source, mode, diagnostics, facts.exports),
 			Facts:       facts.tooling,
 		},
-		program: prog,
-		bind:    artifact.bind,
+		tree: tree,
+		bind: artifact.bind,
 	}, nil
 }
 
 func analyzeProgramWithMode(source Source, prog program, bind bindResult, mode SourceMode, env typeEnv, summaries moduleSummaryEnv) []Diagnostic {
+	return analyzeSyntaxTreeWithMode(source, newSyntaxTree(prog), bind, mode, env, summaries)
+}
+
+func analyzeSyntaxTreeWithMode(source Source, tree syntaxTree, bind bindResult, mode SourceMode, env typeEnv, summaries moduleSummaryEnv) []Diagnostic {
 	if !policyForMode(mode).analyzesTypes() {
 		return nil
 	}
-	return analyzeProgram(source, prog, bind, mode, env, summaries)
+	return analyzeSyntaxTree(source, tree, bind, mode, env, summaries)
 }
 
-func requireCheckMode(prog program) error {
-	switch prog.mode {
+func requireCheckMode(tree syntaxTree) error {
+	switch tree.mode() {
 	case sourceModeStrict, sourceModeNonStrict, sourceModeNoCheck:
 		return nil
 	default:

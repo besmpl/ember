@@ -168,7 +168,7 @@ func benchmarkCompilerStageParse(b *testing.B, fixture compilerStageFixture) {
 	}
 	b.StopTimer()
 	reportCompilerStageMetrics(b, fixture, compilerStageMetrics{
-		syntaxNodes: fixture.artifact.program.nodeCount,
+		syntaxNodes: fixture.artifact.tree.nodeCount(),
 	})
 }
 
@@ -177,12 +177,12 @@ func benchmarkCompilerStageBind(b *testing.B, fixture compilerStageFixture) {
 	b.SetBytes(int64(len(fixture.source)))
 	b.ResetTimer()
 	for range b.N {
-		bound := bindProgram(fixture.artifact.program)
+		bound := bindSyntaxTree(fixture.artifact.tree)
 		compilerStageBindSink = bound
 	}
 	b.StopTimer()
 	reportCompilerStageMetrics(b, fixture, compilerStageMetrics{
-		syntaxNodes: fixture.artifact.program.nodeCount,
+		syntaxNodes: fixture.artifact.tree.nodeCount(),
 	})
 }
 
@@ -199,7 +199,7 @@ func benchmarkCompilerStageEmit(b *testing.B, fixture compilerStageFixture) {
 	}
 	b.StopTimer()
 	reportCompilerStageMetrics(b, fixture, compilerStageMetrics{
-		syntaxNodes:    fixture.artifact.program.nodeCount,
+		syntaxNodes:    fixture.artifact.tree.nodeCount(),
 		irInstructions: len(fixture.emission.ir),
 		cfgBlocks:      len(bytecodeIRBlockOrder(fixture.emission.ir)),
 		peakRegisters:  fixture.emission.allocatedRegisters,
@@ -216,7 +216,7 @@ func benchmarkCompilerStageOptimize(b *testing.B, fixture compilerStageFixture) 
 	}
 	b.StopTimer()
 	reportCompilerStageMetrics(b, fixture, compilerStageMetrics{
-		syntaxNodes:    fixture.artifact.program.nodeCount,
+		syntaxNodes:    fixture.artifact.tree.nodeCount(),
 		irInstructions: len(fixture.optimized.ir),
 		cfgBlocks:      len(bytecodeIRBlockOrder(fixture.optimized.ir)),
 		peakRegisters:  compilerStagePeakRegisters(fixture.optimized.ir, fixture.emission.allocatedRegisters),
@@ -236,7 +236,7 @@ func benchmarkCompilerStageAssembleSeal(b *testing.B, fixture compilerStageFixtu
 	}
 	b.StopTimer()
 	reportCompilerStageMetrics(b, fixture, compilerStageMetrics{
-		syntaxNodes:         fixture.artifact.program.nodeCount,
+		syntaxNodes:         fixture.artifact.tree.nodeCount(),
 		irInstructions:      len(fixture.optimized.ir),
 		cfgBlocks:           len(bytecodeIRBlockOrder(fixture.optimized.ir)),
 		peakRegisters:       fixture.stageMetrics.RegisterSlots,
@@ -259,7 +259,7 @@ func benchmarkCompilerStageCompile(b *testing.B, fixture compilerStageFixture) {
 	}
 	b.StopTimer()
 	reportCompilerStageMetrics(b, fixture, compilerStageMetrics{
-		syntaxNodes:         fixture.artifact.program.nodeCount,
+		syntaxNodes:         fixture.artifact.tree.nodeCount(),
 		irInstructions:      fixture.outputMetrics.Instructions,
 		cfgBlocks:           len(bytecodeIRBlockOrder(fixture.optimized.ir)),
 		peakRegisters:       fixture.outputMetrics.RegisterSlots,
@@ -293,7 +293,7 @@ func benchmarkCompilerStageLoadProgram(b *testing.B, fixture compilerStageFixtur
 	}
 	b.StopTimer()
 	reportCompilerStageMetrics(b, fixture, compilerStageMetrics{
-		syntaxNodes:         fixture.artifact.program.nodeCount,
+		syntaxNodes:         fixture.artifact.tree.nodeCount(),
 		irInstructions:      fixture.outputMetrics.Instructions,
 		cfgBlocks:           len(bytecodeIRBlockOrder(fixture.optimized.ir)),
 		peakRegisters:       fixture.outputMetrics.RegisterSlots,
@@ -372,7 +372,7 @@ func compilerStageSource(size int) string {
 }
 
 func emitCompilerStage(artifact sourceArtifact) (compilerStageEmission, error) {
-	return emitCompilerStageWithCapacity(artifact, estimatedIRCapacity(artifact.program.nodeCount, len(artifact.program.statements)))
+	return emitCompilerStageWithCapacity(artifact, estimatedIRCapacity(artifact.tree.nodeCount(), len(artifact.tree.statements())))
 }
 
 func emitCompilerStageWithCapacity(artifact sourceArtifact, capacity int) (compilerStageEmission, error) {
@@ -387,10 +387,10 @@ func emitCompilerStageWithCapacity(artifact sourceArtifact, capacity int) (compi
 		functionName:       "<module>",
 	}
 	c.sourceText = artifact.source.Text
-	if err := c.compileStatements(artifact.program.statements); err != nil {
+	if err := c.compileStatements(artifact.tree.statements()); err != nil {
 		return compilerStageEmission{}, err
 	}
-	if !statementsHaveReturn(artifact.program.statements) {
+	if !statementsHaveReturn(artifact.tree.statements()) {
 		c.emit(instruction{op: opReturn})
 	}
 	if c.conversionErr != nil {
@@ -527,7 +527,7 @@ func BenchmarkSourceArtifactStoreHits(b *testing.B) {
 					if err != nil {
 						b.Fatal(err)
 					}
-					compilerStageProgramSink = artifact.program
+					compilerStageProgramSink = artifact.tree.root
 				case "compile":
 					proto, err := store.compile(source, identity)
 					if err != nil {

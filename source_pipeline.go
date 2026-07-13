@@ -8,7 +8,7 @@ import (
 type sourceArtifact struct {
 	source  Source
 	metrics sourceMetrics
-	program program
+	tree    syntaxTree
 	bind    bindResult
 	proto   *Proto
 	check   *checkArtifact
@@ -79,16 +79,17 @@ func parseSourceWithLimits(source Source, limits CompileLimits) (sourceArtifact,
 	if err != nil {
 		return sourceArtifact{}, err
 	}
+	tree := newSyntaxTree(prog)
 	return sourceArtifact{
 		source: source,
 		metrics: sourceMetrics{
 			sourceBytes: uint64(len(source.Text)),
 			tokens:      uint64(len(p.tokens)),
 			nesting:     p.maxNesting,
-			syntaxNodes: uint64(prog.nodeCount),
+			syntaxNodes: uint64(tree.nodeCount()),
 		},
-		program: prog,
-		bind:    bindProgram(prog),
+		tree: tree,
+		bind: bindSyntaxTree(tree),
 	}, nil
 }
 

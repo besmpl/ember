@@ -97,10 +97,12 @@ func (a *analysisState) hasTableFact(name string) bool {
 }
 
 func (a *analysisState) defineTypeAlias(stmt typeAliasStatement) {
-	a.currentAliasScope()[stmt.name] = typeAliasFact{
-		typeParams: append([]string(nil), stmt.typeParams...),
-		typePacks:  append([]string(nil), stmt.typePacks...),
-		value:      stmt.value,
+	tree := a.tree
+	name := tree.typeAliasName(&stmt)
+	a.currentAliasScope()[name] = typeAliasFact{
+		typeParams: append([]string(nil), tree.typeAliasTypeParams(&stmt)...),
+		typePacks:  append([]string(nil), tree.typeAliasTypePacks(&stmt)...),
+		value:      tree.typeAliasValue(&stmt),
 	}
 }
 
