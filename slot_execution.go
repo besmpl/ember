@@ -663,12 +663,15 @@ func runNumericSlotExecutionWordsWithController(proto *Proto, registers []float6
 	words := proto.words
 	constants := proto.constantNumbers
 	window := newExecutionWindow(controller)
+	pc := 0
 	defer func() {
+		if err != nil {
+			err = newRuntimeErrorWithController(err, numericRuntimeFrames(proto, pc), controller)
+		}
 		if ok || err != nil {
 			window.commit()
 		}
 	}()
-	pc := 0
 	for uint(pc) < uint(len(words)) {
 		if err := window.stepInstruction(); err != nil {
 			return 0, 0, false, err
@@ -842,6 +845,14 @@ func runNumericSlotExecutionWordsWithController(proto *Proto, registers []float6
 		pc = next
 	}
 	return 0, 0, true, nil
+}
+
+func numericRuntimeFrames(proto *Proto, pc int) []ScriptFrame {
+	frame, ok := runtimeScriptFrame(proto, pc)
+	if !ok {
+		return nil
+	}
+	return []ScriptFrame{frame}
 }
 
 func runSlotExecutionState(proto *Proto, args []Value, state *slotExecutionState, trackTransients bool) (values []Value, handled bool, err error) {
@@ -1055,12 +1066,15 @@ func runSlotExecutionWordsWithController(proto *Proto, state *slotExecutionState
 	registers := state.registers
 	constants := state.constants
 	window := newExecutionWindow(controller)
+	pc := 0
 	defer func() {
+		if err != nil {
+			err = newRuntimeErrorWithController(err, numericRuntimeFrames(proto, pc), controller)
+		}
 		if handled || err != nil {
 			window.commit()
 		}
 	}()
-	pc := 0
 	for uint(pc) < uint(len(words)) {
 		if err := window.stepInstruction(); err != nil {
 			return 0, false, err

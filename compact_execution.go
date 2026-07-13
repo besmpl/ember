@@ -604,7 +604,7 @@ func runCompactCallProgram(proto *Proto, args []Value, state *slotExecutionState
 func runCompactCallProgramWithController(proto *Proto, args []Value, state *slotExecutionState, controller *executionController) ([]Value, bool, error) {
 	if controller != nil {
 		if err := controller.enterCall(); err != nil {
-			return nil, true, err
+			return nil, true, newRuntimeErrorWithController(err, numericRuntimeFrames(proto, 0), controller)
 		}
 		entryDepth := controller.callDepth - 1
 		defer func() {
@@ -668,6 +668,9 @@ func runCompactCallProgramWordsWithController(program *compactProgram, state *sl
 	constants := function.proto.constantNumbers
 	window := newExecutionWindow(controller)
 	defer func() {
+		if windowErr != nil {
+			windowErr = newRuntimeErrorWithController(windowErr, compactRuntimeFrames(program, functionID, pc, frames), controller)
+		}
 		if ok || windowErr != nil {
 			window.commit()
 		}
@@ -941,6 +944,31 @@ func runCompactCallProgramWordsWithController(program *compactProgram, state *sl
 		}
 		pc = next
 	}
+}
+
+func compactRuntimeFrames(program *compactProgram, functionID uint16, pc int, callers []compactCallFrame) []ScriptFrame {
+	if program == nil || int(functionID) >= len(program.functions) {
+		return nil
+	}
+	frames := make([]ScriptFrame, 0, len(callers)+1)
+	appendFunction := func(id uint16, wordPC int) {
+		if int(id) >= len(program.functions) {
+			return
+		}
+		proto := program.functions[id].proto
+		if frame, ok := runtimeScriptFrame(proto, wordPC); ok {
+			frames = append(frames, frame)
+		}
+	}
+	appendFunction(functionID, pc)
+	for index := len(callers) - 1; index >= 0; index-- {
+		record := callers[index]
+		if int(record.callerFunction) >= len(program.functions) {
+			continue
+		}
+		appendFunction(record.callerFunction, previousWordcodeInstruction(program.functions[record.callerFunction].proto, int(record.returnPC)))
+	}
+	return frames
 }
 
 func growCompactNumericStack(state *slotExecutionState, stack []float64, count int) []float64 {

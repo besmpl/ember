@@ -1815,7 +1815,7 @@ func (thread *vmThread) runWithUpvalues(proto *Proto, args []Value, upvalues []*
 func (thread *vmThread) runScriptWithUpvalues(proto *Proto, args []Value, upvalues []*cell, upvalueValues []Value, upvalueValueOK []bool) ([]Value, error) {
 	if thread.controller != nil {
 		if err := thread.controller.enterCall(); err != nil {
-			return nil, err
+			return nil, newRuntimeErrorWithController(err, numericRuntimeFrames(proto, 0), thread.controller)
 		}
 	}
 	baseDepth := len(thread.frames)
@@ -1973,7 +1973,14 @@ func (thread *vmThread) continueSuspended(args []Value) ([]Value, error) {
 	if thread.resumeCallDepthErr != nil {
 		err := thread.resumeCallDepthErr
 		thread.resumeCallDepthErr = nil
-		return nil, err
+		if thread.recoverProtectedError(err) {
+			return thread.runUntilDepth(0)
+		}
+		var frame *vmFrame
+		if len(thread.frames) != 0 {
+			frame = thread.frames[len(thread.frames)-1]
+		}
+		return nil, thread.captureRuntimeError(err, frame, 0)
 	}
 	frame := thread.frames[len(thread.frames)-1]
 	if !frame.hasPendingCall {
@@ -2008,7 +2015,9 @@ func (thread *vmThread) continueHostCall(frame *vmFrame, args []Value) ([]Value,
 		if thread.recoverProtectedError(err) {
 			return thread.runUntilDepth(0)
 		}
-		return nil, err
+		callSite := *frame
+		callSite.pc = previousWordcodeInstruction(callSite.proto, callSite.pc)
+		return nil, thread.captureRuntimeError(err, &callSite, 0)
 	}
 	frame.applyCallResults(thread, results)
 	return thread.runUntilDepth(0)
@@ -2017,7 +2026,7 @@ func (thread *vmThread) continueHostCall(frame *vmFrame, args []Value) ([]Value,
 func (thread *vmThread) runScript(proto *Proto, args []Value, upvalues []*cell) ([]Value, error) {
 	if thread.controller != nil {
 		if err := thread.controller.enterCall(); err != nil {
-			return nil, err
+			return nil, newRuntimeErrorWithController(err, numericRuntimeFrames(proto, 0), thread.controller)
 		}
 	}
 	baseDepth := len(thread.frames)
@@ -2096,7 +2105,11 @@ func (thread *vmThread) runUntilDepthResult(baseDepth int) (vmFrameResult, error
 			if thread.recoverProtectedError(err) {
 				continue
 			}
-			return vmFrameResult{}, err
+			active := frame
+			if len(thread.frames) > baseDepth {
+				active = thread.frames[len(thread.frames)-1]
+			}
+			return vmFrameResult{}, thread.captureRuntimeError(err, active, baseDepth)
 		}
 		if result.state == vmCallStateScriptCall {
 			call := result.scriptCall
@@ -2106,7 +2119,14 @@ func (thread *vmThread) runUntilDepthResult(baseDepth int) (vmFrameResult, error
 			}
 			frame = thread.newScriptCallFrame(caller, call)
 			if frame.callDepthErr != nil {
-				return vmFrameResult{}, frame.callDepthErr
+				if thread.recoverProtectedError(frame.callDepthErr) {
+					continue
+				}
+				// The callee could not become active, so report the call-site
+				// instruction in the still-live caller as the failing frame.
+				callSite := *caller
+				callSite.pc = previousWordcodeInstruction(callSite.proto, callSite.pc)
+				return vmFrameResult{}, thread.captureRuntimeError(frame.callDepthErr, &callSite, baseDepth)
 			}
 			thread.pushFrame(frame)
 			thread.directFramePICCounts.addFixedCallTrampolineEntry()
@@ -2115,7 +2135,7 @@ func (thread *vmThread) runUntilDepthResult(baseDepth int) (vmFrameResult, error
 					if thread.recoverProtectedError(err) {
 						continue
 					}
-					return vmFrameResult{}, err
+					return vmFrameResult{}, thread.captureRuntimeError(err, frame, baseDepth)
 				}
 			}
 			continue
@@ -2132,7 +2152,7 @@ func (thread *vmThread) runUntilDepthResult(baseDepth int) (vmFrameResult, error
 				if thread.recoverProtectedError(err) {
 					continue
 				}
-				return vmFrameResult{}, err
+				return vmFrameResult{}, thread.captureRuntimeError(err, frame, baseDepth)
 			}
 		}
 		result = stabilizeFrameResultBeforeRelease(frame, result)

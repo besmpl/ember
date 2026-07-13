@@ -97,6 +97,18 @@ type executionController struct {
 	moduleInitializations uint32
 	generatedStringBytes  uint64
 	runtimeObjects        uint64
+	inheritedScriptFrames []ScriptFrame
+}
+
+func (controller *executionController) pushInheritedScriptFrames(frames []ScriptFrame) func() {
+	if controller == nil {
+		return func() {}
+	}
+	previous := controller.inheritedScriptFrames
+	controller.inheritedScriptFrames = append([]ScriptFrame(nil), frames...)
+	return func() {
+		controller.inheritedScriptFrames = previous
+	}
 }
 
 func (controller *executionController) enterCall() error {

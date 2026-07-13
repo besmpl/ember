@@ -36,7 +36,7 @@ func (call runtimeCallContext) envWithRequire() *globalEnv {
 	return env
 }
 
-func (call runtimeCallContext) require(_ *globalEnv, args []Value) ([]Value, error) {
+func (call runtimeCallContext) require(globals *globalEnv, args []Value) ([]Value, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("require: missing module path")
 	}
@@ -47,6 +47,22 @@ func (call runtimeCallContext) require(_ *globalEnv, args []Value) ([]Value, err
 	required, err := normalizeRequireKey(call.from, request)
 	if err != nil {
 		return nil, err
+	}
+	controller := call.controller
+	if controller == nil && globals != nil && globals.thread != nil {
+		controller = globals.thread.controller
+	}
+	if controller != nil {
+		parentFrames := make([]ScriptFrame, 0)
+		if globals != nil && globals.thread != nil && len(globals.thread.frames) != 0 && globals.thread.frames[len(globals.thread.frames)-1] != nil {
+			thread := globals.thread
+			current := *thread.frames[len(thread.frames)-1]
+			current.pc = previousWordcodeInstruction(current.proto, current.pc)
+			parentFrames = thread.captureScriptFrames(&current, 0)
+		}
+		parentFrames = append(parentFrames, controller.inheritedScriptFrames...)
+		restore := controller.pushInheritedScriptFrames(parentFrames)
+		defer restore()
 	}
 	results, err := call.runModule(required)
 	if err != nil {
