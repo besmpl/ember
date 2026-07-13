@@ -838,6 +838,107 @@ type bytecodeIRInstruction struct {
 	source   sourceRange
 }
 
+type bytecodeIROperandSlot uint8
+
+const (
+	bytecodeIROperandSlotA bytecodeIROperandSlot = iota
+	bytecodeIROperandSlotB
+	bytecodeIROperandSlotC
+	bytecodeIROperandSlotD
+)
+
+// bytecodeIROperandIterator walks the used operands without exposing the IR
+// storage layout or allocating a temporary slice.
+type bytecodeIROperandIterator struct {
+	instruction bytecodeIRInstruction
+	slot        bytecodeIROperandSlot
+}
+
+func (ins bytecodeIRInstruction) opcodeValue() opcode {
+	return ins.op
+}
+
+func (ins bytecodeIRInstruction) sourceSpan() sourceRange {
+	return ins.source
+}
+
+func (ins bytecodeIRInstruction) operandKind(slot bytecodeIROperandSlot) bytecodeOperandKind {
+	switch slot {
+	case bytecodeIROperandSlotA:
+		return ins.operands.a.kind
+	case bytecodeIROperandSlotB:
+		return ins.operands.b.kind
+	case bytecodeIROperandSlotC:
+		return ins.operands.c.kind
+	case bytecodeIROperandSlotD:
+		return ins.operands.d.kind
+	default:
+		panic("invalid bytecode IR operand slot")
+	}
+}
+
+func (ins bytecodeIRInstruction) operandValue(slot bytecodeIROperandSlot) int {
+	switch slot {
+	case bytecodeIROperandSlotA:
+		return ins.operands.a.value
+	case bytecodeIROperandSlotB:
+		return ins.operands.b.value
+	case bytecodeIROperandSlotC:
+		return ins.operands.c.value
+	case bytecodeIROperandSlotD:
+		return ins.operands.d.value
+	default:
+		panic("invalid bytecode IR operand slot")
+	}
+}
+
+func (ins *bytecodeIRInstruction) setOperandValue(slot bytecodeIROperandSlot, value int) bool {
+	if ins == nil {
+		return false
+	}
+	switch slot {
+	case bytecodeIROperandSlotA:
+		if ins.operands.a.kind == bytecodeOperandUnused {
+			return false
+		}
+		ins.operands.a.value = value
+	case bytecodeIROperandSlotB:
+		if ins.operands.b.kind == bytecodeOperandUnused {
+			return false
+		}
+		ins.operands.b.value = value
+	case bytecodeIROperandSlotC:
+		if ins.operands.c.kind == bytecodeOperandUnused {
+			return false
+		}
+		ins.operands.c.value = value
+	case bytecodeIROperandSlotD:
+		if ins.operands.d.kind == bytecodeOperandUnused {
+			return false
+		}
+		ins.operands.d.value = value
+	default:
+		return false
+	}
+	return true
+}
+
+func (ins bytecodeIRInstruction) operandsIter() bytecodeIROperandIterator {
+	return bytecodeIROperandIterator{instruction: ins}
+}
+
+func (iterator *bytecodeIROperandIterator) next() (bytecodeIROperandSlot, bytecodeOperandKind, int, bool) {
+	for iterator != nil && iterator.slot <= bytecodeIROperandSlotD {
+		slot := iterator.slot
+		iterator.slot++
+		kind := iterator.instruction.operandKind(slot)
+		if kind != bytecodeOperandUnused {
+			return slot, kind, iterator.instruction.operandValue(slot), true
+		}
+	}
+	return 0, bytecodeOperandUnused, 0, false
+}
+
 type bytecodeIRBlock struct {
 	id    int
 	start int

@@ -3711,17 +3711,17 @@ func TestBytecodeBuilderRecordsExplicitIROperands(t *testing.T) {
 		t.Fatalf("builder recorded %d IR instructions, want %d", got, want)
 	}
 	load := builder.ir[0]
-	if load.operands.a.kind != bytecodeOperandRegister || load.operands.a.value != 0 {
-		t.Fatalf("load const target operand is %#v, want register 0", load.operands.a)
+	if load.operandKind(bytecodeIROperandSlotA) != bytecodeOperandRegister || load.operandValue(bytecodeIROperandSlotA) != 0 {
+		t.Fatalf("load const target operand is kind=%v value=%d, want register 0", load.operandKind(bytecodeIROperandSlotA), load.operandValue(bytecodeIROperandSlotA))
 	}
-	if load.operands.b.kind != bytecodeOperandConstant || load.operands.b.value != 0 {
-		t.Fatalf("load const value operand is %#v, want constant 0", load.operands.b)
+	if load.operandKind(bytecodeIROperandSlotB) != bytecodeOperandConstant || load.operandValue(bytecodeIROperandSlotB) != 0 {
+		t.Fatalf("load const value operand is kind=%v value=%d, want constant 0", load.operandKind(bytecodeIROperandSlotB), load.operandValue(bytecodeIROperandSlotB))
 	}
 	add := builder.ir[1]
-	if add.operands.a.kind != bytecodeOperandRegister ||
-		add.operands.b.kind != bytecodeOperandRegister ||
-		add.operands.c.kind != bytecodeOperandRegister {
-		t.Fatalf("add operands are %#v, want register operands", add.operands)
+	if add.operandKind(bytecodeIROperandSlotA) != bytecodeOperandRegister ||
+		add.operandKind(bytecodeIROperandSlotB) != bytecodeOperandRegister ||
+		add.operandKind(bytecodeIROperandSlotC) != bytecodeOperandRegister {
+		t.Fatalf("add operands are kind=(%v,%v,%v), want register operands", add.operandKind(bytecodeIROperandSlotA), add.operandKind(bytecodeIROperandSlotB), add.operandKind(bytecodeIROperandSlotC))
 	}
 }
 
@@ -3731,8 +3731,8 @@ func TestBytecodeBuilderPatchesIRJumpTargets(t *testing.T) {
 	builder.emitLoadConst(1, NumberValue(2))
 	builder.patchJump(jump, builder.pc())
 
-	if got := builder.ir[jump].operands.b; got.kind != bytecodeOperandJumpTarget || got.value != 2 {
-		t.Fatalf("jump target operand is %#v, want jump target 2", got)
+	if got := builder.ir[jump]; got.operandKind(bytecodeIROperandSlotB) != bytecodeOperandJumpTarget || got.operandValue(bytecodeIROperandSlotB) != 2 {
+		t.Fatalf("jump target operand is kind=%v value=%d, want jump target 2", got.operandKind(bytecodeIROperandSlotB), got.operandValue(bytecodeIROperandSlotB))
 	}
 	proto := builder.proto(nil, 2, 0, false)
 	got := disassembleProto(proto)
@@ -3806,7 +3806,7 @@ func TestBytecodeIRRecordsSourceMetadata(t *testing.T) {
 	var builder bytecodeBuilder
 	builder.emitWithSource(instruction{op: opReturn, a: 0, b: 1}, sourceRange{start: 7, end: 13})
 
-	got := builder.ir[0].source
+	got := builder.ir[0].sourceSpan()
 	if got.start != 7 || got.end != 13 {
 		t.Fatalf("IR source range is [%d,%d), want [7,13)", got.start, got.end)
 	}
@@ -3838,7 +3838,8 @@ func TestCompilerAttachesExpressionSourceMetadataToBytecodeIR(t *testing.T) {
 	if !ok {
 		t.Fatalf("compiled IR is missing ADD instruction: %#v", disassembleBytecodeIR(compiler.constants, compiler.ir))
 	}
-	if got := source[add.source.start:add.source.end]; got != "12 + 3" {
+	span := add.sourceSpan()
+	if got := source[span.start:span.end]; got != "12 + 3" {
 		t.Fatalf("ADD source range points at %q, want %q", got, "12 + 3")
 	}
 }
@@ -9712,7 +9713,7 @@ func compilerForBytecodeIRTest(artifact sourceArtifact, options compilerOptions)
 
 func findBytecodeIRInstruction(ir []bytecodeIRInstruction, op opcode) (bytecodeIRInstruction, bool) {
 	for _, ins := range ir {
-		if ins.op == op {
+		if ins.opcodeValue() == op {
 			return ins, true
 		}
 	}

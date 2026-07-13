@@ -39,7 +39,7 @@ func TestControlFlowSimplificationAllocationBudget(t *testing.T) {
 
 	allocs := testing.AllocsPerRun(25, func() {
 		optimized := simplifyBytecodeIRControlFlow(ir, bytecodeIROptimizationFacts{})
-		if len(optimized) != 1 || optimized[0].op != opReturn {
+		if len(optimized) != 1 || optimized[0].opcodeValue() != opReturn {
 			t.Fatalf("simplified %d-jump chain to %#v, want one RETURN", jumps, optimized)
 		}
 	})

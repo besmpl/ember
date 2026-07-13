@@ -52,10 +52,10 @@ func (function *functionIR) currentFeatures() bytecodeIRFeatures {
 	if !function.featuresValid {
 		features := bytecodeIRFeatures{}
 		for pc, instruction := range function.instructions {
-			if instruction.op == opMove {
+			if instruction.opcodeValue() == opMove {
 				features.hasMove = true
 			}
-			meta, known := opcodeMetadata(instruction.op)
+			meta, known := opcodeMetadata(instruction.opcodeValue())
 			if known && meta.effects.invokesScriptOrHostCode {
 				features.hasCall = true
 			}
@@ -74,9 +74,9 @@ func (function *functionIR) currentFeatures() bytecodeIRFeatures {
 				hasTarget := false
 				switch meta.jumpTarget {
 				case opcodeJumpTargetB:
-					target, hasTarget = instruction.operands.b.value, instruction.operands.b.kind == bytecodeOperandJumpTarget
+					target, hasTarget = instruction.operandValue(bytecodeIROperandSlotB), instruction.operandKind(bytecodeIROperandSlotB) == bytecodeOperandJumpTarget
 				case opcodeJumpTargetD:
-					target, hasTarget = instruction.operands.d.value, instruction.operands.d.kind == bytecodeOperandJumpTarget
+					target, hasTarget = instruction.operandValue(bytecodeIROperandSlotD), instruction.operandKind(bytecodeIROperandSlotD) == bytecodeOperandJumpTarget
 				}
 				if hasTarget && target >= 0 && target <= pc && target < len(function.instructions) {
 					features.hasBackedge = true
@@ -132,7 +132,7 @@ func analyzeBytecodeIR(ir []bytecodeIRInstruction, revision uint64) *functionAna
 		analysis.def[block] = liveness[block].def
 	}
 	for pc, ins := range ir {
-		analysis.effects[pc] = opcodeEffect(ins.op)
+		analysis.effects[pc] = opcodeEffect(ins.opcodeValue())
 	}
 	return analysis
 }

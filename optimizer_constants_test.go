@@ -55,8 +55,8 @@ func TestOptimizationConstantPoolDeduplicatesPendingStringsWhenMaterialized(t *t
 		{op: opLoadConst, a: 1, b: second},
 	})
 	materialized, values := compactOptimizationConstantPool(ir, pool, nil)
-	if materialized[0].operands.b.value != materialized[1].operands.b.value {
-		t.Fatalf("pending equal strings materialized at %d and %d", materialized[0].operands.b.value, materialized[1].operands.b.value)
+	if materialized[0].operandValue(bytecodeIROperandSlotB) != materialized[1].operandValue(bytecodeIROperandSlotB) {
+		t.Fatalf("pending equal strings materialized at %d and %d", materialized[0].operandValue(bytecodeIROperandSlotB), materialized[1].operandValue(bytecodeIROperandSlotB))
 	}
 	if got, want := len(values), 1; got != want {
 		t.Fatalf("materialized string count = %d, want %d", got, want)
@@ -74,7 +74,7 @@ func TestOptimizationConstantPoolMaterializesAllPendingSurvivors(t *testing.T) {
 		{op: opLoadConst, a: 2, b: duplicate},
 	})
 	materialized, values := compactOptimizationConstantPool(ir, pool, nil)
-	got := []int{materialized[0].operands.b.value, materialized[1].operands.b.value, materialized[2].operands.b.value}
+	got := []int{materialized[0].operandValue(bytecodeIROperandSlotB), materialized[1].operandValue(bytecodeIROperandSlotB), materialized[2].operandValue(bytecodeIROperandSlotB)}
 	if want := []int{0, 1, 0}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("materialized pending indices = %v, want %v", got, want)
 	}
@@ -104,7 +104,7 @@ func TestOptimizationConstantPoolMaterializesDistinctFloatBits(t *testing.T) {
 		if got, want := math.Float64bits(valueNumber(value)), math.Float64bits(valueNumber(values[index])); got != want {
 			t.Fatalf("constant %d bits = %#x, want %#x", index, got, want)
 		}
-		if got, want := optimized[index].operands.b.value, index; got != want {
+		if got, want := optimized[index].operandValue(bytecodeIROperandSlotB), index; got != want {
 			t.Fatalf("constant %d remapped to %d, want %d", index, got, want)
 		}
 	}
@@ -118,15 +118,15 @@ func TestOptimizationWithoutDurablePoolDoesNotCreateUnmaterializedIndices(t *tes
 		{op: opReturnOne, a: 2},
 	})
 	optimized := optimizeBytecodeIRWithConstants(ir, []Value{NumberValue(1), NumberValue(2)}, optimizationOptions{})
-	if optimized[2].op != opAdd {
-		t.Fatalf("optimization without durable pool folded op to %v, want ADD", optimized[2].op)
+	if optimized[2].opcodeValue() != opAdd {
+		t.Fatalf("optimization without durable pool folded op to %v, want ADD", optimized[2].opcodeValue())
 	}
 	for pc, raw := range optimized {
-		if raw.op != opLoadConst {
+		if raw.opcodeValue() != opLoadConst {
 			continue
 		}
-		if raw.operands.b.kind != bytecodeOperandConstant || raw.operands.b.value < 0 || raw.operands.b.value >= 2 {
-			t.Fatalf("load-constant at pc %d has unmaterialized index %d", pc, raw.operands.b.value)
+		if raw.operandKind(bytecodeIROperandSlotB) != bytecodeOperandConstant || raw.operandValue(bytecodeIROperandSlotB) < 0 || raw.operandValue(bytecodeIROperandSlotB) >= 2 {
+			t.Fatalf("load-constant at pc %d has unmaterialized index %d", pc, raw.operandValue(bytecodeIROperandSlotB))
 		}
 	}
 }

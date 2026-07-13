@@ -28,7 +28,9 @@ func TestFunctionIRCachesAnalysisUntilInstructionsChange(t *testing.T) {
 	}
 
 	changed := append([]bytecodeIRInstruction(nil), ir...)
-	changed[0].operands.a.value = 1
+	if !changed[0].setOperandValue(bytecodeIROperandSlotA, 1) {
+		t.Fatal("set IR operand failed")
+	}
 	function.replace(changed)
 	if function.revision != 1 {
 		t.Fatalf("changed replacement advanced revision to %d, want 1", function.revision)

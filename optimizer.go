@@ -104,9 +104,13 @@ func compactOptimizationConstantPool(ir []bytecodeIRInstruction, pool *optimizat
 	total := len(pool.seed) + len(pool.pending)
 	used := make([]bool, total)
 	for _, instruction := range ir {
-		for _, operand := range [...]bytecodeOperand{instruction.operands.a, instruction.operands.b, instruction.operands.c, instruction.operands.d} {
-			if operand.kind == bytecodeOperandConstant && operand.value >= 0 && operand.value < total {
-				used[operand.value] = true
+		for iterator := instruction.operandsIter(); ; {
+			_, kind, value, ok := iterator.next()
+			if !ok {
+				break
+			}
+			if kind == bytecodeOperandConstant && value >= 0 && value < total {
+				used[value] = true
 			}
 		}
 	}
@@ -135,22 +139,22 @@ func compactOptimizationConstantPool(ir []bytecodeIRInstruction, pool *optimizat
 	optimized := ir
 	changed := false
 	for instructionIndex, instruction := range ir {
-		rewrite := func(operand bytecodeOperand, assign func(int)) {
-			if operand.kind != bytecodeOperandConstant || operand.value < 0 || operand.value >= len(oldToNew) || oldToNew[operand.value] < 0 {
+		rewrite := func(kind bytecodeOperandKind, value int, assign func(int)) {
+			if kind != bytecodeOperandConstant || value < 0 || value >= len(oldToNew) || oldToNew[value] < 0 {
 				return
 			}
-			if operand.value != oldToNew[operand.value] {
+			if value != oldToNew[value] {
 				if !changed {
 					optimized = append([]bytecodeIRInstruction(nil), ir...)
 					changed = true
 				}
-				assign(oldToNew[operand.value])
+				assign(oldToNew[value])
 			}
 		}
-		rewrite(instruction.operands.a, func(value int) { optimized[instructionIndex].operands.a.value = value })
-		rewrite(instruction.operands.b, func(value int) { optimized[instructionIndex].operands.b.value = value })
-		rewrite(instruction.operands.c, func(value int) { optimized[instructionIndex].operands.c.value = value })
-		rewrite(instruction.operands.d, func(value int) { optimized[instructionIndex].operands.d.value = value })
+		rewrite(instruction.operandKind(bytecodeIROperandSlotA), instruction.operandValue(bytecodeIROperandSlotA), func(value int) { optimized[instructionIndex].setOperandValue(bytecodeIROperandSlotA, value) })
+		rewrite(instruction.operandKind(bytecodeIROperandSlotB), instruction.operandValue(bytecodeIROperandSlotB), func(value int) { optimized[instructionIndex].setOperandValue(bytecodeIROperandSlotB, value) })
+		rewrite(instruction.operandKind(bytecodeIROperandSlotC), instruction.operandValue(bytecodeIROperandSlotC), func(value int) { optimized[instructionIndex].setOperandValue(bytecodeIROperandSlotC, value) })
+		rewrite(instruction.operandKind(bytecodeIROperandSlotD), instruction.operandValue(bytecodeIROperandSlotD), func(value int) { optimized[instructionIndex].setOperandValue(bytecodeIROperandSlotD, value) })
 	}
 	return optimized, durable.constants
 }
@@ -256,9 +260,13 @@ func compactBytecodeIRConstants(ir []bytecodeIRInstruction, constants []Value) (
 	}
 	used := make([]bool, len(constants))
 	for _, ins := range ir {
-		for _, operand := range [...]bytecodeOperand{ins.operands.a, ins.operands.b, ins.operands.c, ins.operands.d} {
-			if operand.kind == bytecodeOperandConstant && operand.value >= 0 && operand.value < len(used) {
-				used[operand.value] = true
+		for iterator := ins.operandsIter(); ; {
+			_, kind, value, ok := iterator.next()
+			if !ok {
+				break
+			}
+			if kind == bytecodeOperandConstant && value >= 0 && value < len(used) {
+				used[value] = true
 			}
 		}
 	}
@@ -276,15 +284,11 @@ func compactBytecodeIRConstants(ir []bytecodeIRInstruction, constants []Value) (
 	}
 	optimized := append([]bytecodeIRInstruction(nil), ir...)
 	for index := range optimized {
-		operands := []*bytecodeOperand{
-			&optimized[index].operands.a,
-			&optimized[index].operands.b,
-			&optimized[index].operands.c,
-			&optimized[index].operands.d,
-		}
-		for _, operand := range operands {
-			if operand.kind == bytecodeOperandConstant && operand.value >= 0 && operand.value < len(oldToNew) {
-				operand.value = oldToNew[operand.value]
+		for slot := bytecodeIROperandSlotA; slot <= bytecodeIROperandSlotD; slot++ {
+			kind := optimized[index].operandKind(slot)
+			value := optimized[index].operandValue(slot)
+			if kind == bytecodeOperandConstant && value >= 0 && value < len(oldToNew) {
+				optimized[index].setOperandValue(slot, oldToNew[value])
 			}
 		}
 	}
@@ -502,7 +506,7 @@ func simplifyBytecodeIRControlFlow(ir []bytecodeIRInstruction, facts bytecodeIRO
 
 func bytecodeIRHasControlFlowSimplificationWork(ir []bytecodeIRInstruction) bool {
 	for pc, ins := range ir {
-		switch opcodeControlFlow(ins.op) {
+		switch opcodeControlFlow(ins.opcodeValue()) {
 		case opcodeControlJump, opcodeControlBranch:
 			return true
 		case opcodeControlReturn:
@@ -553,7 +557,7 @@ func (resolver *bytecodeIRJumpResolver) resolve(pc int) (int, bool) {
 	resolver.state[pc] = 1
 	target := pc
 	valid := true
-	if resolver.ir[pc].op == opJump {
+	if resolver.ir[pc].opcodeValue() == opJump {
 		next, ok := bytecodeIRJumpTarget(resolver.ir[pc])
 		if !ok {
 			valid = false
@@ -574,10 +578,10 @@ func foldBytecodeIRConstantBranches(ir []bytecodeIRInstruction, facts bytecodeIR
 	constantFacts := bytecodeIRConstantFactsBefore(ir, facts)
 	changed := false
 	for pc, ins := range ir {
-		if ins.op != opJumpIfFalse {
+		if ins.opcodeValue() != opJumpIfFalse {
 			continue
 		}
-		constant, ok := constantFacts[pc][ins.operands.a.value]
+		constant, ok := constantFacts[pc][ins.operandValue(bytecodeIROperandSlotA)]
 		value, valid := facts.scalarConstantAt(constant)
 		if !ok || !valid {
 			continue
@@ -589,7 +593,7 @@ func foldBytecodeIRConstantBranches(ir []bytecodeIRInstruction, facts bytecodeIR
 		if value.truthy() {
 			target = pc + 1
 		}
-		ir[pc] = lowerInstructionToBytecodeIR(instruction{op: opJump, b: target}, ins.source)
+		ir[pc] = lowerInstructionToBytecodeIR(instruction{op: opJump, b: target}, ins.sourceSpan())
 		changed = true
 	}
 	return changed
@@ -597,7 +601,7 @@ func foldBytecodeIRConstantBranches(ir []bytecodeIRInstruction, facts bytecodeIR
 
 func bytecodeIRHasJumpIfFalse(ir []bytecodeIRInstruction) bool {
 	for _, ins := range ir {
-		if ins.op == opJumpIfFalse {
+		if ins.opcodeValue() == opJumpIfFalse {
 			return true
 		}
 	}
@@ -741,7 +745,7 @@ func propagateBytecodeIRScalarConstants(ir []bytecodeIRInstruction, facts byteco
 					if !changed {
 						optimized = append([]bytecodeIRInstruction(nil), ir...)
 					}
-					optimized[pc] = lowerInstructionToBytecodeIR(instruction{op: opLoadConst, a: ins.a, b: constant}, ir[pc].source)
+					optimized[pc] = lowerInstructionToBytecodeIR(instruction{op: opLoadConst, a: ins.a, b: constant}, ir[pc].sourceSpan())
 					changed = true
 				}
 			} else if taken, ok := bytecodeIRScalarBranchDecision(ins, rewriteState, facts); ok {
@@ -754,7 +758,7 @@ func propagateBytecodeIRScalarConstants(ir []bytecodeIRInstruction, facts byteco
 						target = jumpTarget
 					}
 				}
-				optimized[pc] = lowerInstructionToBytecodeIR(instruction{op: opJump, b: target}, ir[pc].source)
+				optimized[pc] = lowerInstructionToBytecodeIR(instruction{op: opJump, b: target}, ir[pc].sourceSpan())
 				changed = true
 			}
 			applyBytecodeIRScalarTransfer(rewriteState, ins, facts)
@@ -819,7 +823,7 @@ func straightLineBytecodeIRMayFoldScalarConstants(ir []bytecodeIRInstruction, fa
 
 func bytecodeIRHasScalarControlFlow(ir []bytecodeIRInstruction) bool {
 	for _, ins := range ir {
-		switch opcodeControlFlow(ins.op) {
+		switch opcodeControlFlow(ins.opcodeValue()) {
 		case opcodeControlJump, opcodeControlBranch:
 			return true
 		}
@@ -841,7 +845,7 @@ func propagateStraightLineBytecodeIRScalarConstants(ir []bytecodeIRInstruction, 
 				if !changed {
 					optimized = append([]bytecodeIRInstruction(nil), ir...)
 				}
-				optimized[pc] = lowerInstructionToBytecodeIR(instruction{op: opLoadConst, a: ins.a, b: constant}, raw.source)
+				optimized[pc] = lowerInstructionToBytecodeIR(instruction{op: opLoadConst, a: ins.a, b: constant}, raw.sourceSpan())
 				changed = true
 			}
 		}
@@ -1220,7 +1224,7 @@ func bytecodeIRReachabilityRemovalSet(ir []bytecodeIRInstruction) []bool {
 		remove[pc] = false
 		ins := ir[pc]
 		target, hasTarget := bytecodeIRJumpTarget(ins)
-		switch opcodeControlFlow(ins.op) {
+		switch opcodeControlFlow(ins.opcodeValue()) {
 		case opcodeControlJump:
 			if hasTarget {
 				worklist = append(worklist, target)
@@ -1244,7 +1248,7 @@ func markBytecodeIRJumpsToNextSurvivor(ir []bytecodeIRInstruction, remove []bool
 	}
 	oldToNew := oldPCToNewPC(remove)
 	for pc, ins := range ir {
-		if remove[pc] || ins.op != opJump {
+		if remove[pc] || ins.opcodeValue() != opJump {
 			continue
 		}
 		target, ok := bytecodeIRJumpTarget(ins)
@@ -1258,19 +1262,17 @@ func markBytecodeIRJumpsToNextSurvivor(ir []bytecodeIRInstruction, remove []bool
 }
 
 func setBytecodeIRJumpTarget(ins *bytecodeIRInstruction, target int) bool {
-	switch opcodeJumpTarget(ins.op) {
+	switch opcodeJumpTarget(ins.opcodeValue()) {
 	case opcodeJumpTargetB:
-		if ins.operands.b.kind != bytecodeOperandJumpTarget {
+		if ins.operandKind(bytecodeIROperandSlotB) != bytecodeOperandJumpTarget {
 			return false
 		}
-		ins.operands.b.value = target
-		return true
+		return ins.setOperandValue(bytecodeIROperandSlotB, target)
 	case opcodeJumpTargetD:
-		if ins.operands.d.kind != bytecodeOperandJumpTarget {
+		if ins.operandKind(bytecodeIROperandSlotD) != bytecodeOperandJumpTarget {
 			return false
 		}
-		ins.operands.d.value = target
-		return true
+		return ins.setOperandValue(bytecodeIROperandSlotD, target)
 	default:
 		return false
 	}
@@ -1299,7 +1301,7 @@ func propagateBytecodeIRSingleUseMoves(ir []bytecodeIRInstruction, analysis *fun
 				continue
 			}
 			code[usePC] = rewritten
-			optimized[usePC] = lowerInstructionToBytecodeIR(rewritten, optimized[usePC].source)
+			optimized[usePC] = lowerInstructionToBytecodeIR(rewritten, optimized[usePC].sourceSpan())
 			remove[pc] = true
 		}
 	}
@@ -1402,7 +1404,7 @@ func coalesceBytecodeIRMoveProducers(ir []bytecodeIRInstruction, capturedRegiste
 				continue
 			}
 			code[producerPC] = rewritten
-			optimized[producerPC] = lowerInstructionToBytecodeIR(rewritten, optimized[producerPC].source)
+			optimized[producerPC] = lowerInstructionToBytecodeIR(rewritten, optimized[producerPC].sourceSpan())
 			remove[pc] = true
 		}
 	}
@@ -1475,7 +1477,7 @@ func hoistBytecodeIRLoopInvariantHeaderLoads(ir []bytecodeIRInstruction) []bytec
 			continue
 		}
 		code[loopEnd] = rewritten
-		optimized[loopEnd] = lowerInstructionToBytecodeIR(rewritten, optimized[loopEnd].source)
+		optimized[loopEnd] = lowerInstructionToBytecodeIR(rewritten, optimized[loopEnd].sourceSpan())
 	}
 	return optimized
 }
@@ -1550,16 +1552,20 @@ func oldPCToNewPC(remove []bool) []int {
 
 func remapBytecodeIRJumpTargets(ir []bytecodeIRInstruction, oldToNew []int) {
 	for i := range ir {
-		switch opcodeJumpTarget(ir[i].op) {
+		switch opcodeJumpTarget(ir[i].opcodeValue()) {
 		case opcodeJumpTargetB:
-			target := ir[i].operands.b
-			if target.kind == bytecodeOperandJumpTarget && target.value >= 0 && target.value < len(oldToNew) {
-				ir[i].operands.b.value = oldToNew[target.value]
+			if ir[i].operandKind(bytecodeIROperandSlotB) == bytecodeOperandJumpTarget {
+				target := ir[i].operandValue(bytecodeIROperandSlotB)
+				if target >= 0 && target < len(oldToNew) {
+					ir[i].setOperandValue(bytecodeIROperandSlotB, oldToNew[target])
+				}
 			}
 		case opcodeJumpTargetD:
-			target := ir[i].operands.d
-			if target.kind == bytecodeOperandJumpTarget && target.value >= 0 && target.value < len(oldToNew) {
-				ir[i].operands.d.value = oldToNew[target.value]
+			if ir[i].operandKind(bytecodeIROperandSlotD) == bytecodeOperandJumpTarget {
+				target := ir[i].operandValue(bytecodeIROperandSlotD)
+				if target >= 0 && target < len(oldToNew) {
+					ir[i].setOperandValue(bytecodeIROperandSlotD, oldToNew[target])
+				}
 			}
 		}
 	}

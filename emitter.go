@@ -153,7 +153,7 @@ func (c *compiler) shrinkCompiledFrameRegisters(params int, variadic bool) {
 		return
 	}
 	for i := range c.ir {
-		remapBytecodeIRRegisterOperands(&c.ir[i].operands, remap)
+		remapBytecodeIRRegisterOperands(&c.ir[i], remap)
 	}
 }
 
@@ -272,17 +272,15 @@ func liveIntervalsActiveAt(active []*registerLiveInterval, pc int) []*registerLi
 	return kept
 }
 
-func remapBytecodeIRRegisterOperands(operands *bytecodeOperands, remap []int) {
-	remapOperand := func(operand *bytecodeOperand) {
-		if operand.kind != bytecodeOperandRegister || operand.value < 0 || operand.value >= len(remap) {
-			return
+func remapBytecodeIRRegisterOperands(instruction *bytecodeIRInstruction, remap []int) {
+	for slot := bytecodeIROperandSlotA; slot <= bytecodeIROperandSlotD; slot++ {
+		kind := instruction.operandKind(slot)
+		value := instruction.operandValue(slot)
+		if kind != bytecodeOperandRegister || value < 0 || value >= len(remap) {
+			continue
 		}
-		operand.value = remap[operand.value]
+		instruction.setOperandValue(slot, remap[value])
 	}
-	remapOperand(&operands.a)
-	remapOperand(&operands.b)
-	remapOperand(&operands.c)
-	remapOperand(&operands.d)
 }
 
 func compactedCompiledRegisterCount(code []instruction, children []*functionDraft, allocated int, params int) int {
