@@ -313,6 +313,8 @@ type tableHashEntry struct {
 	state uint8
 }
 
+const tableHashInitialCapacity = 8
+
 type tableStringField struct {
 	// key is retained for the VM's existing string-key fast paths and for
 	// host-facing raw string adapters.  box preserves the original String
@@ -570,7 +572,7 @@ func (fields *tableHashFields) delete(key tableKey) bool {
 }
 
 func (fields *tableHashFields) grow() {
-	next := 8
+	next := tableHashInitialCapacity
 	if len(fields.entries) > 0 {
 		next = len(fields.entries) * 2
 	}
