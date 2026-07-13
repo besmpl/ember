@@ -1,0 +1,216 @@
+#!/bin/sh
+set -eu
+
+usage() {
+	cat >&2 <<'EOF'
+usage: scripts/performance-audit --output DIR [--profiles] [--allow-dirty]
+
+Run five benchmark samples for the required Ember performance families and
+write metadata and summaries under a new, non-existing output directory.
+
+BENCHTIME overrides the benchmark duration (default: 500ms). --allow-dirty is
+required when the worktree has tracked or untracked changes. --profiles adds
+one CPU and allocation profile for each family without overwriting captures.
+EOF
+}
+
+output=
+profiles=0
+allow_dirty=0
+audit_output_created=0
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+	--output)
+		[ "$#" -ge 2 ] || { usage; exit 2; }
+		output=$2
+		shift 2
+		;;
+	--profiles)
+		profiles=1
+		shift
+		;;
+	--allow-dirty)
+		allow_dirty=1
+		shift
+		;;
+	-h|--help)
+		usage
+		exit 0
+		;;
+	*)
+		usage
+		exit 2
+		;;
+	esac
+done
+
+[ -n "$output" ] || { usage; exit 2; }
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+	printf '%s\n' 'performance-audit: must run inside a Git worktree' >&2
+	exit 1
+}
+cd "$repo_root"
+
+if [ "$allow_dirty" -eq 0 ] && [ -n "$(git status --porcelain)" ]; then
+	printf '%s\n' 'performance-audit: worktree is dirty; pass --allow-dirty to continue' >&2
+	exit 1
+fi
+
+if [ -e "$output" ]; then
+	printf 'performance-audit: output already exists: %s\n' "$output" >&2
+	exit 1
+fi
+
+mkdir -p "$(dirname "$output")"
+if ! mkdir "$output"; then
+	printf 'performance-audit: cannot create exclusive output directory: %s\n' "$output" >&2
+	exit 1
+fi
+audit_output_created=1
+
+audit_exit() {
+	audit_status=$?
+	if [ "$audit_output_created" -eq 1 ] && [ "$audit_status" -ne 0 ]; then
+		printf 'audit did not complete successfully\n' >"$output/INCOMPLETE"
+	fi
+	exit "$audit_status"
+}
+trap audit_exit EXIT
+
+benchtime=${BENCHTIME:-500ms}
+samples=5
+pkg=.
+
+source_fingerprint=$(
+	{
+		git diff --binary HEAD
+		git ls-files --others --exclude-standard |
+		while IFS= read -r path; do
+			printf 'untracked:%s\n' "$path"
+			shasum -a 256 -- "$path"
+		done
+	} | shasum -a 256 | awk '{print $1}'
+)
+
+{
+	printf 'commit=%s\n' "$(git rev-parse HEAD)"
+	printf 'source_fingerprint=%s\n' "$source_fingerprint"
+	printf 'go_version=%s\n' "$(go version)"
+	printf 'goos=%s\n' "$(go env GOOS)"
+	printf 'goarch=%s\n' "$(go env GOARCH)"
+	printf 'gomaxprocs=%s\n' "${GOMAXPROCS-}"
+	printf 'goflags=%s\n' "${GOFLAGS-}"
+	printf 'godebug=%s\n' "${GODEBUG-}"
+	printf 'luau_bin=%s\n' "${LUAU_BIN-}"
+	printf 'benchtime=%s\n' "$benchtime"
+	printf 'samples=%s\n' "$samples"
+	printf 'allow_dirty=%s\n' "$allow_dirty"
+	printf 'profiles=%s\n' "$profiles"
+} >"$output/metadata.txt"
+
+run_summary() {
+	run_name=$1
+	run_bench=$2
+	run_summary_path=$output/$run_name.summary.md
+	run_summary_tmp=$run_summary_path.tmp.$$
+	[ ! -e "$run_summary_path" ] || {
+		printf 'performance-audit: refusing to overwrite %s\n' "$run_summary_path" >&2
+		exit 1
+	}
+	printf 'summary %s: BENCH=%s BENCHTIME=%s COUNT=%s PKG=%s\n' "$run_name" "$run_bench" "$benchtime" "$samples" "$pkg" >>"$output/commands.txt"
+	if ! BENCH="$run_bench" BENCHTIME="$benchtime" COUNT="$samples" PKG="$pkg" scripts/bench-summary >"$run_summary_tmp"; then
+		rm -f "$run_summary_tmp"
+		printf 'performance-audit: benchmark family failed: %s\n' "$run_name" >&2
+		exit 1
+	fi
+	if ! grep -q '^| Benchmark' "$run_summary_tmp"; then
+		rm -f "$run_summary_tmp"
+		printf 'performance-audit: benchmark family produced no rows: %s\n' "$run_name" >&2
+		exit 1
+	fi
+	if ! ln "$run_summary_tmp" "$run_summary_path"; then
+		rm -f "$run_summary_tmp"
+		printf 'performance-audit: refusing to overwrite %s\n' "$run_summary_path" >&2
+		exit 1
+	fi
+	rm "$run_summary_tmp"
+}
+
+run_raw() {
+	run_name=$1
+	run_bench=$2
+	run_raw_path=$output/$run_name.raw.txt
+	run_raw_tmp=$run_raw_path.tmp.$$
+	[ ! -e "$run_raw_path" ] || {
+		printf 'performance-audit: refusing to overwrite %s\n' "$run_raw_path" >&2
+		exit 1
+	}
+	printf 'raw %s: BENCH=%s BENCHTIME=%s COUNT=%s PKG=%s\n' "$run_name" "$run_bench" "$benchtime" "$samples" "$pkg" >>"$output/commands.txt"
+	if ! BENCH="$run_bench" go test -run '^$' -bench "$run_bench" -benchmem -benchtime="$benchtime" -count="$samples" "$pkg" >"$run_raw_tmp"; then
+		rm -f "$run_raw_tmp"
+		printf 'performance-audit: benchmark family failed: %s\n' "$run_name" >&2
+		exit 1
+	fi
+	if ! grep -q '^Benchmark' "$run_raw_tmp"; then
+		rm -f "$run_raw_tmp"
+		printf 'performance-audit: benchmark family produced no rows: %s\n' "$run_name" >&2
+		exit 1
+	fi
+	if ! ln "$run_raw_tmp" "$run_raw_path"; then
+		rm -f "$run_raw_tmp"
+		printf 'performance-audit: refusing to overwrite %s\n' "$run_raw_path" >&2
+		exit 1
+	fi
+	rm "$run_raw_tmp"
+}
+
+run_profiles() {
+	run_name=$1
+	run_bench=$2
+	run_cpu=$output/$run_name.cpu.pprof
+	run_mem=$output/$run_name.alloc.pprof
+	run_log=$output/$run_name.profile.log
+	run_cpu_tmp=$run_cpu.tmp.$$
+	run_mem_tmp=$run_mem.tmp.$$
+	run_log_tmp=$run_log.tmp.$$
+	[ ! -e "$run_cpu" ] && [ ! -e "$run_mem" ] && [ ! -e "$run_log" ] || {
+		printf 'performance-audit: refusing to overwrite profile output for %s\n' "$run_name" >&2
+		exit 1
+	}
+	printf 'profile %s: go test -run ^$ -bench %s -benchmem -benchtime=%s -count=1\n' "$run_name" "$run_bench" "$benchtime" >>"$output/commands.txt"
+	if ! go test -run '^$' -bench "$run_bench" -benchmem -benchtime="$benchtime" -count=1 -cpuprofile="$run_cpu_tmp" -memprofile="$run_mem_tmp" "$pkg" >"$run_log_tmp"; then
+		rm -f "$run_cpu_tmp" "$run_mem_tmp" "$run_log_tmp"
+		printf 'performance-audit: profile capture failed: %s\n' "$run_name" >&2
+		exit 1
+	fi
+	if [ ! -s "$run_cpu_tmp" ] || [ ! -s "$run_mem_tmp" ]; then
+		rm -f "$run_cpu_tmp" "$run_mem_tmp" "$run_log_tmp"
+		printf 'performance-audit: profile capture produced an empty profile: %s\n' "$run_name" >&2
+		exit 1
+	fi
+	if ! ln "$run_cpu_tmp" "$run_cpu" || ! ln "$run_mem_tmp" "$run_mem" || ! ln "$run_log_tmp" "$run_log"; then
+		rm -f "$run_cpu_tmp" "$run_mem_tmp" "$run_log_tmp"
+		printf 'performance-audit: refusing to overwrite profile output for %s\n' "$run_name" >&2
+		exit 1
+	fi
+	rm "$run_cpu_tmp" "$run_mem_tmp" "$run_log_tmp"
+}
+
+: >"$output/commands.txt"
+run_summary scenario_ember_run '^BenchmarkScenarioLuau/.*/ember_run$'
+run_summary recursive_fibonacci '^BenchmarkClassicLuau/recursive_fibonacci/ember_run$'
+run_summary sparse_grid_neighbors '^BenchmarkScenarioLuau/sparse_grid_neighbors/ember_run$'
+run_raw compiler_256kib '^BenchmarkCompilerStageMatrix/256KiB/.*$'
+run_summary runtime_modes '^BenchmarkRuntimeLane(StatelessRun|PersistentRuntimeRunHook|BoundedRuntimeRunHook|CancelableRuntimeRunHook)/.*$'
+
+if [ "$profiles" -eq 1 ]; then
+	run_profiles scenario_ember_run '^BenchmarkScenarioLuau/.*/ember_run$'
+	run_profiles recursive_fibonacci '^BenchmarkClassicLuau/recursive_fibonacci/ember_run$'
+	run_profiles sparse_grid_neighbors '^BenchmarkScenarioLuau/sparse_grid_neighbors/ember_run$'
+	run_profiles compiler_256kib '^BenchmarkCompilerStageMatrix/256KiB/.*$'
+	run_profiles runtime_modes '^BenchmarkRuntimeLane(StatelessRun|PersistentRuntimeRunHook|BoundedRuntimeRunHook|CancelableRuntimeRunHook)/.*$'
+fi
+
+printf 'performance audit written to %s\n' "$output"

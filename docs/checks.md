@@ -19,6 +19,25 @@ scripts/check-fast
 
 It runs the current fast repository check.
 
+## Performance Audit
+
+Use the repeatable audit runner for five-sample comparisons across the
+Scenario Ember, recursive Fibonacci, sparse-grid, 256 KiB compiler-stage, and
+runtime-mode benchmark families:
+
+```sh
+scripts/performance-audit --output /tmp/ember-audit-before
+scripts/performance-audit --output /tmp/ember-audit-after --profiles
+```
+
+The output directory must not already exist. The runner requires a clean
+worktree; pass `--allow-dirty` when the current changes are intentionally part
+of the capture. Set `BENCHTIME` to shorten exploratory runs. `--profiles`
+writes unique CPU and allocation profiles for each family and never overwrites
+an existing capture. The compiler-stage family is retained as raw `go test`
+output because `scripts/bench-summary` only formats runtime and parity rows.
+Failed runs leave an `INCOMPLETE` marker in the newly created directory.
+
 ## Lane Helper
 
 ```sh
