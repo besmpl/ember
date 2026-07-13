@@ -79,7 +79,7 @@ func executeProtoWithOwner(ctx context.Context, proto *Proto, globals *globalEnv
 	// and the context cannot be cancelled. The owner activity counter keeps
 	// close from racing this VM-thread-free path; the slot runner itself keeps
 	// using its pooled ephemeral heap until collector/root integration lands.
-	if proto != nil && proto.slotExecutionEligible && globals.thread == nil && options.maxInstructions < 0 &&
+	if proto != nil && (proto.slotExecutionEligible || proto.compact != nil) && globals.thread == nil && options.maxInstructions < 0 &&
 		len(options.upvalues) == 0 && len(options.upvalueValues) == 0 &&
 		len(options.upvalueValueOK) == 0 &&
 		(ctx == nil || (ctx.Done() == nil && ctx.Err() == nil)) {

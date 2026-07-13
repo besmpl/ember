@@ -1727,6 +1727,7 @@ type Proto struct {
 	// execute over an untagged float64 register file.
 	slotExecutionEligible bool
 	slotExecutionNumeric  bool
+	compact               *compactProgram
 	verifyErr             error
 }
 
@@ -1942,6 +1943,7 @@ func encodeProtoWords(proto *Proto, code []instruction) error {
 	}
 	proto.slotExecutionEligible = slotExecutionEligible(proto, code)
 	proto.slotExecutionNumeric = proto.slotExecutionEligible && slotExecutionNumericEligible(proto, code)
+	proto.compact = buildCompactProgram(proto, code)
 	return nil
 }
 

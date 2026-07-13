@@ -30,6 +30,7 @@ func TestProtoFieldClassificationBudget(t *testing.T) {
 		"reuseZeroCaptureClosure": {},
 		"slotExecutionEligible":   {},
 		"slotExecutionNumeric":    {},
+		"compact":                 {},
 		"verifyErr":               {},
 	}
 	runtimeSideTables := map[string]struct{}{

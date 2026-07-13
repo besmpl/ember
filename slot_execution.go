@@ -496,20 +496,26 @@ func slotExecutionNumberNeedsBox(value float64) bool {
 // the caller-provided parameter slice; extra values are ignored by the
 // fixed-parameter ABI, matching the established VM.
 func runSlotExecution(proto *Proto, args []Value) (values []Value, handled bool, err error) {
-	if proto == nil || !proto.slotExecutionEligible {
+	if proto == nil || (!proto.slotExecutionEligible && proto.compact == nil) {
 		return nil, false, nil
 	}
-	if proto.slotExecutionNumeric {
-		state := acquireSlotExecutionState(0, 0)
-		values, handled, err := runNumericSlotExecution(proto, args, state)
-		releaseSlotExecutionState(state)
-		if handled || err != nil {
-			return values, handled, err
+	if proto.slotExecutionEligible {
+		if proto.slotExecutionNumeric {
+			state := acquireSlotExecutionState(0, 0)
+			values, handled, err := runNumericSlotExecution(proto, args, state)
+			releaseSlotExecutionState(state)
+			if handled || err != nil {
+				return values, handled, err
+			}
 		}
+		state := acquireSlotExecutionState(proto.registers, len(proto.constants))
+		defer releaseSlotExecutionState(state)
+		return runSlotExecutionState(proto, args, state, false)
 	}
-	state := acquireSlotExecutionState(proto.registers, len(proto.constants))
-	defer releaseSlotExecutionState(state)
-	return runSlotExecutionState(proto, args, state, false)
+	state := acquireCompactExecutionState()
+	values, handled, err = runCompactNumericExecution(proto, args, state)
+	releaseCompactExecutionState(state)
+	return values, handled, err
 }
 
 // runSlotExecutionWithHeap executes an eligible prototype against a heap
@@ -517,8 +523,14 @@ func runSlotExecution(proto *Proto, args []Value) (values []Value, handled bool,
 // Values created by this run are released when it ends; preexisting owner
 // roots and pins are left untouched.
 func runSlotExecutionWithHeap(proto *Proto, args []Value, heap *runtimeHeap) (values []Value, handled bool, err error) {
-	if proto == nil || !proto.slotExecutionEligible || heap == nil {
+	if proto == nil || heap == nil || (!proto.slotExecutionEligible && proto.compact == nil) {
 		return nil, false, nil
+	}
+	if !proto.slotExecutionEligible {
+		state := acquireCompactExecutionState()
+		values, handled, err := runCompactNumericExecution(proto, args, state)
+		releaseCompactExecutionState(state)
+		return values, handled, err
 	}
 	if proto.slotExecutionNumeric {
 		state := acquireSlotExecutionState(0, 0)
