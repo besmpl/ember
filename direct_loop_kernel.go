@@ -194,7 +194,7 @@ func buildDirectLoopKernels(code []instruction, boundaries []int, words []wordco
 // region through a predecoded production-only dispatcher. These case bodies
 // are the canonical production implementations, including PIC, metatable,
 // nil, open-result, and type-check behavior.
-func runDirectLoopKernel(thread *vmThread, frame *vmFrame, kernel *directLoopKernel) directFrameSideExit {
+func runDirectLoopKernel(thread *vmThread, frame *vmFrame, kernel *directLoopKernel, window *executionWindow) directFrameSideExit {
 	proto := frame.proto
 	constants := proto.constants
 	constantKeys := proto.constantKeys
@@ -205,6 +205,7 @@ func runDirectLoopKernel(thread *vmThread, frame *vmFrame, kernel *directLoopKer
 	var functionInstance *vmFunctionInstance
 	pc := kernel.entryPC
 	opIndex := int32(0)
+	entryCharged := false
 
 	for {
 		if opIndex < 0 {
@@ -219,6 +220,13 @@ func runDirectLoopKernel(thread *vmThread, frame *vmFrame, kernel *directLoopKer
 		op := ins.op
 		a, b, c, d := ins.a, ins.b, ins.c, ins.d
 		nextWord := ins.nextOriginalPC
+		if entryCharged {
+			if err := window.stepInstruction(); err != nil {
+				return directFrameExitAt(frame, pc, directFrameFail(err))
+			}
+		} else {
+			entryCharged = true
+		}
 		switch op {
 		case opLoadConst:
 			registers[a] = constants[b]

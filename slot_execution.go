@@ -505,12 +505,16 @@ func slotExecutionNumberNeedsBox(value float64) bool {
 // the caller-provided parameter slice; extra values are ignored by the
 // fixed-parameter ABI, matching the established VM.
 func runSlotExecution(proto *Proto, args []Value) (values []Value, handled bool, err error) {
+	return runSlotExecutionWithController(proto, args, nil)
+}
+
+func runSlotExecutionWithController(proto *Proto, args []Value, controller *executionController) (values []Value, handled bool, err error) {
 	if proto == nil {
 		return nil, false, nil
 	}
 	if proto.slotExecutionNumeric {
 		state := acquireSlotExecutionState(0, 0)
-		values, handled, err := runNumericSlotExecution(proto, args, state)
+		values, handled, err := runNumericSlotExecutionWithController(proto, args, state, controller)
 		releaseSlotExecutionState(state)
 		if handled || err != nil {
 			return values, handled, err
@@ -518,7 +522,7 @@ func runSlotExecution(proto *Proto, args []Value) (values []Value, handled bool,
 	}
 	if proto.compact != nil {
 		state := acquireSlotExecutionState(0, 0)
-		values, handled, err := runCompactCallProgram(proto, args, state)
+		values, handled, err := runCompactCallProgramWithController(proto, args, state, controller)
 		releaseSlotExecutionState(state)
 		if handled || err != nil {
 			return values, handled, err
@@ -529,7 +533,7 @@ func runSlotExecution(proto *Proto, args []Value) (values []Value, handled bool,
 	}
 	state := acquireSlotExecutionState(proto.registers, len(proto.constants))
 	defer releaseSlotExecutionState(state)
-	return runSlotExecutionState(proto, args, state, false)
+	return runSlotExecutionStateWithController(proto, args, state, false, controller)
 }
 
 // runSlotExecutionWithHeap executes an eligible prototype against a heap
@@ -537,12 +541,16 @@ func runSlotExecution(proto *Proto, args []Value) (values []Value, handled bool,
 // Values created by this run are released when it ends; preexisting owner
 // roots and pins are left untouched.
 func runSlotExecutionWithHeap(proto *Proto, args []Value, heap *runtimeHeap) (values []Value, handled bool, err error) {
+	return runSlotExecutionWithHeapController(proto, args, heap, nil)
+}
+
+func runSlotExecutionWithHeapController(proto *Proto, args []Value, heap *runtimeHeap, controller *executionController) (values []Value, handled bool, err error) {
 	if proto == nil || heap == nil {
 		return nil, false, nil
 	}
 	if proto.slotExecutionNumeric {
 		state := acquireSlotExecutionState(0, 0)
-		values, handled, err := runNumericSlotExecution(proto, args, state)
+		values, handled, err := runNumericSlotExecutionWithController(proto, args, state, controller)
 		releaseSlotExecutionState(state)
 		if handled || err != nil {
 			return values, handled, err
@@ -550,7 +558,7 @@ func runSlotExecutionWithHeap(proto *Proto, args []Value, heap *runtimeHeap) (va
 	}
 	if proto.compact != nil {
 		state := acquireSlotExecutionState(0, 0)
-		values, handled, err := runCompactCallProgram(proto, args, state)
+		values, handled, err := runCompactCallProgramWithController(proto, args, state, controller)
 		releaseSlotExecutionState(state)
 		if handled || err != nil {
 			return values, handled, err
@@ -569,7 +577,7 @@ func runSlotExecutionWithHeap(proto *Proto, args []Value, heap *runtimeHeap) (va
 		return nil, false, nil
 	}
 	if !needsHeap {
-		values, handled, err = runSlotExecutionPrepared(proto, state)
+		values, handled, err = runSlotExecutionPreparedWithController(proto, state, controller)
 		releaseSlotExecutionState(state)
 		return values, handled, err
 	}
@@ -583,7 +591,7 @@ func runSlotExecutionWithHeap(proto *Proto, args []Value, heap *runtimeHeap) (va
 	state.heap = heap
 	state.heapActive = true
 	if slotExecutionImportAll(state, proto.constants, args, params, true) {
-		values, handled, err = runSlotExecutionPrepared(proto, state)
+		values, handled, err = runSlotExecutionPreparedWithController(proto, state, controller)
 	}
 	state.releaseTransients(heap)
 	// Borrowed owner heaps must never be reset by the pooled state. Restore the
@@ -599,17 +607,28 @@ func runSlotExecutionWithHeap(proto *Proto, args []Value, heap *runtimeHeap) (va
 // raw float64 register file. Constants remain in immutable prototype storage;
 // only fixed arguments cross the Value boundary before dispatch.
 func runNumericSlotExecution(proto *Proto, args []Value, state *slotExecutionState) ([]Value, bool, error) {
+	return runNumericSlotExecutionWithController(proto, args, state, nil)
+}
+
+func runNumericSlotExecutionWithController(proto *Proto, args []Value, state *slotExecutionState, controller *executionController) ([]Value, bool, error) {
 	if proto == nil || state == nil || !proto.slotExecutionNumeric || len(args) < proto.params {
 		return nil, false, nil
 	}
 	registers := state.prepareNumericRegisters(proto.registers)
+	initialRemaining := int64(0)
+	if controller != nil {
+		initialRemaining = controller.remaining
+	}
 	for index := 0; index < proto.params; index++ {
 		if valueKind(args[index]) != NumberKind {
 			return nil, false, nil
 		}
 		registers[index] = valueNumber(args[index])
 	}
-	start, count, ok := runNumericSlotExecutionWords(proto, registers)
+	start, count, ok, err := runNumericSlotExecutionWordsWithController(proto, registers, controller)
+	if err != nil {
+		return nil, true, err
+	}
 	if !ok {
 		return nil, false, nil
 	}
@@ -622,6 +641,9 @@ func runNumericSlotExecution(proto *Proto, args []Value, state *slotExecutionSta
 		// Preserve the tagged runner's safe-fallback contract for the rare
 		// quiet-NaN payloads that overlap the slot tag prefix.
 		if slotExecutionNumberNeedsBox(number) {
+			if controller != nil {
+				controller.remaining = initialRemaining
+			}
 			return nil, false, nil
 		}
 		values[index] = NumberValue(number)
@@ -633,10 +655,24 @@ func runNumericSlotExecution(proto *Proto, args []Value, state *slotExecutionSta
 // wordcode verification happen once at compilation, so dispatch performs one
 // opcode switch with no Value-kind or tagged-slot checks.
 func runNumericSlotExecutionWords(proto *Proto, registers []float64) (int, int, bool) {
+	start, count, ok, _ := runNumericSlotExecutionWordsWithController(proto, registers, nil)
+	return start, count, ok
+}
+
+func runNumericSlotExecutionWordsWithController(proto *Proto, registers []float64, controller *executionController) (start int, count int, ok bool, err error) {
 	words := proto.words
 	constants := proto.constantNumbers
+	window := newExecutionWindow(controller)
+	defer func() {
+		if ok || err != nil {
+			window.commit()
+		}
+	}()
 	pc := 0
 	for uint(pc) < uint(len(words)) {
+		if err := window.stepInstruction(); err != nil {
+			return 0, 0, false, err
+		}
 		raw := words[pc]
 		op := opcode(uint8(raw) & uint8(wordcodeOpcodeMask))
 		a := int(uint8(raw >> 8))
@@ -649,7 +685,7 @@ func runNumericSlotExecutionWords(proto *Proto, registers []float64) (int, int, 
 			b = int(uint16(raw >> 16))
 			if raw&wordcodeAuxBit != 0 {
 				if next >= len(words) {
-					return 0, 0, false
+					return 0, 0, false, nil
 				}
 				b = int(int32(words[next]))
 				next++
@@ -680,7 +716,7 @@ func runNumericSlotExecutionWords(proto *Proto, registers []float64) (int, int, 
 		case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
 			if raw&wordcodeAuxBit != 0 {
 				if next >= len(words) {
-					return 0, 0, false
+					return 0, 0, false, nil
 				}
 				c = int(int32(words[next]))
 				next++
@@ -703,14 +739,14 @@ func runNumericSlotExecutionWords(proto *Proto, registers []float64) (int, int, 
 
 		case opNumericForCheck:
 			if next >= len(words) {
-				return 0, 0, false
+				return 0, 0, false, nil
 			}
 			target := int(int32(words[next]))
 			next++
 			target += next
 			loopValue, limitValue, stepValue := registers[a], registers[b], registers[c]
 			if math.IsNaN(loopValue) || math.IsNaN(limitValue) || math.IsNaN(stepValue) {
-				return 0, 0, false
+				return 0, 0, false, nil
 			}
 			if (stepValue > 0 && loopValue > limitValue) || (stepValue <= 0 && loopValue < limitValue) {
 				pc = target
@@ -719,7 +755,7 @@ func runNumericSlotExecutionWords(proto *Proto, registers []float64) (int, int, 
 
 		case opNumericForLoop:
 			if next >= len(words) {
-				return 0, 0, false
+				return 0, 0, false, nil
 			}
 			target := int(int32(words[next]))
 			next++
@@ -730,7 +766,7 @@ func runNumericSlotExecutionWords(proto *Proto, registers []float64) (int, int, 
 
 		case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
 			if next >= len(words) {
-				return 0, 0, false
+				return 0, 0, false, nil
 			}
 			b = int(uint16(raw >> 16))
 			target := int(int32(words[next]))
@@ -743,7 +779,7 @@ func runNumericSlotExecutionWords(proto *Proto, registers []float64) (int, int, 
 				jump = left != right
 			default:
 				if math.IsNaN(left) || math.IsNaN(right) {
-					return 0, 0, false
+					return 0, 0, false, nil
 				}
 				switch op {
 				case opJumpIfNotLessK:
@@ -763,14 +799,14 @@ func runNumericSlotExecutionWords(proto *Proto, registers []float64) (int, int, 
 
 		case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
 			if next >= len(words) {
-				return 0, 0, false
+				return 0, 0, false, nil
 			}
 			target := int(int32(words[next]))
 			next++
 			target += next
 			left, right := registers[a], registers[b]
 			if math.IsNaN(left) || math.IsNaN(right) {
-				return 0, 0, false
+				return 0, 0, false, nil
 			}
 			jump := false
 			switch op {
@@ -793,33 +829,48 @@ func runNumericSlotExecutionWords(proto *Proto, registers []float64) (int, int, 
 			continue
 
 		case opReturnOne:
-			return a, 1, true
+			return a, 1, true, nil
 		case opReturn:
 			b = int(int16(uint16(raw >> 16)))
 			if b < 0 || a < 0 || a+b > len(registers) {
-				return 0, 0, false
+				return 0, 0, false, nil
 			}
-			return a, b, true
+			return a, b, true, nil
 		default:
-			return 0, 0, false
+			return 0, 0, false, nil
 		}
 		pc = next
 	}
-	return 0, 0, true
+	return 0, 0, true, nil
 }
 
 func runSlotExecutionState(proto *Proto, args []Value, state *slotExecutionState, trackTransients bool) (values []Value, handled bool, err error) {
+	return runSlotExecutionStateWithController(proto, args, state, trackTransients, nil)
+}
+
+func runSlotExecutionStateWithController(proto *Proto, args []Value, state *slotExecutionState, trackTransients bool, controller *executionController) (values []Value, handled bool, err error) {
 	for index := range state.registers {
 		state.registers[index] = slotNil
 	}
 	if !slotExecutionImportConstantsAndArgsTracked(state, proto.constants, args, proto.params, trackTransients) {
 		return nil, false, nil
 	}
-	return runSlotExecutionPrepared(proto, state)
+	return runSlotExecutionPreparedWithController(proto, state, controller)
 }
 
 func runSlotExecutionPrepared(proto *Proto, state *slotExecutionState) (values []Value, handled bool, err error) {
-	count, ok := runSlotExecutionWords(proto, state)
+	return runSlotExecutionPreparedWithController(proto, state, nil)
+}
+
+func runSlotExecutionPreparedWithController(proto *Proto, state *slotExecutionState, controller *executionController) (values []Value, handled bool, err error) {
+	initialRemaining := int64(0)
+	if controller != nil {
+		initialRemaining = controller.remaining
+	}
+	count, ok, err := runSlotExecutionWordsWithController(proto, state, controller)
+	if err != nil {
+		return nil, true, err
+	}
 	if !ok {
 		return nil, false, nil
 	}
@@ -830,6 +881,9 @@ func runSlotExecutionPrepared(proto *Proto, state *slotExecutionState) (values [
 	for index := range values {
 		value, ok := slotExecutionExport(state, state.results[index])
 		if !ok {
+			if controller != nil {
+				controller.remaining = initialRemaining
+			}
 			return nil, false, nil
 		}
 		values[index] = value
@@ -992,11 +1046,25 @@ func slotExecutionExport(state *slotExecutionState, value slot) (Value, bool) {
 }
 
 func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) {
+	count, ok, _ := runSlotExecutionWordsWithController(proto, state, nil)
+	return count, ok
+}
+
+func runSlotExecutionWordsWithController(proto *Proto, state *slotExecutionState, controller *executionController) (count int, handled bool, err error) {
 	words := proto.words
 	registers := state.registers
 	constants := state.constants
+	window := newExecutionWindow(controller)
+	defer func() {
+		if handled || err != nil {
+			window.commit()
+		}
+	}()
 	pc := 0
 	for uint(pc) < uint(len(words)) {
+		if err := window.stepInstruction(); err != nil {
+			return 0, false, err
+		}
 		raw := words[pc]
 		op := opcode(uint8(raw) & uint8(wordcodeOpcodeMask))
 		a := int(uint8(raw >> 8))
@@ -1009,7 +1077,7 @@ func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) 
 			b = int(uint16(raw >> 16))
 			if raw&wordcodeAuxBit != 0 {
 				if next >= len(words) {
-					return 0, false
+					return 0, false, nil
 				}
 				b = int(int32(words[next]))
 				next++
@@ -1023,7 +1091,7 @@ func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) 
 			left, leftOK := slotExecutionNumber(registers[b])
 			right, rightOK := slotExecutionNumber(registers[c])
 			if !leftOK || !rightOK {
-				return 0, false
+				return
 			}
 			var result float64
 			switch op {
@@ -1043,19 +1111,19 @@ func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) 
 				result = math.Pow(left, right)
 			}
 			if !slotExecutionStoreNumber(registers, a, result) {
-				return 0, false
+				return
 			}
 
 		case opNeg:
 			operand, ok := slotExecutionNumber(registers[b])
 			if !ok || !slotExecutionStoreNumber(registers, a, -operand) {
-				return 0, false
+				return
 			}
 
 		case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
 			if raw&wordcodeAuxBit != 0 {
 				if next >= len(words) {
-					return 0, false
+					return
 				}
 				c = int(int32(words[next]))
 				next++
@@ -1063,7 +1131,7 @@ func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) 
 			left, leftOK := slotExecutionNumber(registers[b])
 			right, rightOK := slotExecutionNumber(constants[c])
 			if !leftOK || !rightOK {
-				return 0, false
+				return
 			}
 			var result float64
 			switch op {
@@ -1081,13 +1149,13 @@ func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) 
 				result = math.Floor(left / right)
 			}
 			if !slotExecutionStoreNumber(registers, a, result) {
-				return 0, false
+				return
 			}
 
 		case opEqual, opNotEqual:
 			equal, ok := slotExecutionEqual(state, registers[b], registers[c])
 			if !ok {
-				return 0, false
+				return
 			}
 			if op == opNotEqual {
 				equal = !equal
@@ -1101,13 +1169,13 @@ func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) 
 			}
 			result, ok := slotExecutionLess(state, left, right, op == opLessEqual || op == opGreaterEqual)
 			if !ok {
-				return 0, false
+				return
 			}
 			registers[a] = slotBool(result)
 
 		case opNumericForCheck:
 			if next >= len(words) {
-				return 0, false
+				return
 			}
 			target := int(int32(words[next]))
 			next++
@@ -1116,7 +1184,7 @@ func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) 
 			limitValue, limitOK := slotExecutionNumber(registers[b])
 			stepValue, stepOK := slotExecutionNumber(registers[c])
 			if !loopOK || !limitOK || !stepOK || math.IsNaN(loopValue) || math.IsNaN(limitValue) || math.IsNaN(stepValue) {
-				return 0, false
+				return
 			}
 			if (stepValue > 0 && loopValue > limitValue) || (stepValue <= 0 && loopValue < limitValue) {
 				pc = target
@@ -1125,7 +1193,7 @@ func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) 
 
 		case opNumericForLoop:
 			if next >= len(words) {
-				return 0, false
+				return
 			}
 			target := int(int32(words[next]))
 			next++
@@ -1133,14 +1201,14 @@ func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) 
 			loopValue, loopOK := slotExecutionNumber(registers[a])
 			stepValue, stepOK := slotExecutionNumber(registers[b])
 			if !loopOK || !stepOK || !slotExecutionStoreNumber(registers, a, loopValue+stepValue) {
-				return 0, false
+				return
 			}
 			pc = target
 			continue
 
 		case opJumpIfNotEqualK:
 			if next >= len(words) {
-				return 0, false
+				return
 			}
 			b = int(uint16(raw >> 16))
 			target := int(int32(words[next]))
@@ -1148,7 +1216,7 @@ func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) 
 			target += next
 			equal, ok := slotExecutionEqual(state, registers[a], constants[b])
 			if !ok {
-				return 0, false
+				return
 			}
 			if !equal {
 				pc = target
@@ -1157,7 +1225,7 @@ func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) 
 
 		case opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
 			if next >= len(words) {
-				return 0, false
+				return
 			}
 			b = int(uint16(raw >> 16))
 			target := int(int32(words[next]))
@@ -1169,7 +1237,7 @@ func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) 
 			}
 			less, ok := slotExecutionLess(state, left, right, false)
 			if !ok {
-				return 0, false
+				return
 			}
 			jump := less
 			if op == opJumpIfNotLessK || op == opJumpIfNotGreaterK {
@@ -1182,7 +1250,7 @@ func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) 
 
 		case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
 			if next >= len(words) {
-				return 0, false
+				return
 			}
 			target := int(int32(words[next]))
 			next++
@@ -1193,7 +1261,7 @@ func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) 
 			}
 			less, ok := slotExecutionLess(state, left, right, false)
 			if !ok {
-				return 0, false
+				return
 			}
 			jump := less
 			if op == opJumpIfNotLess || op == opJumpIfNotGreater {
@@ -1208,7 +1276,7 @@ func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) 
 			b = int(int16(uint16(raw >> 16)))
 			if raw&wordcodeAuxBit != 0 {
 				if next >= len(words) {
-					return 0, false
+					return
 				}
 				b = int(int32(words[next]))
 				next++
@@ -1216,7 +1284,7 @@ func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) 
 			target := b + next
 			truthy, ok := slotExecutionTruthy(registers[a])
 			if !ok {
-				return 0, false
+				return
 			}
 			if !truthy {
 				pc = target
@@ -1229,23 +1297,23 @@ func runSlotExecutionWords(proto *Proto, state *slotExecutionState) (int, bool) 
 
 		case opReturnOne:
 			state.results = append(state.results[:0], registers[a])
-			return 1, true
+			return 1, true, nil
 		case opReturn:
 			b = int(int16(uint16(raw >> 16)))
 			if b < 0 || a < 0 || a+b > len(registers) {
-				return 0, false
+				return
 			}
 			if b == 0 {
-				return 0, true
+				return 0, true, nil
 			}
 			state.results = append(state.results[:0], registers[a:a+b]...)
-			return b, true
+			return b, true, nil
 		default:
-			return 0, false
+			return
 		}
 		pc = next
 	}
-	return 0, true
+	return 0, true, nil
 }
 
 func slotExecutionTruthy(value slot) (bool, bool) {

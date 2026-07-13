@@ -598,6 +598,10 @@ func (program *compactProgram) callSite(functionID uint16, pc int) (compactCallS
 }
 
 func runCompactCallProgram(proto *Proto, args []Value, state *slotExecutionState) ([]Value, bool, error) {
+	return runCompactCallProgramWithController(proto, args, state, nil)
+}
+
+func runCompactCallProgramWithController(proto *Proto, args []Value, state *slotExecutionState, controller *executionController) ([]Value, bool, error) {
 	if proto == nil || proto.compact == nil || state == nil || int(proto.compact.entry) >= len(proto.compact.functions) {
 		return nil, false, nil
 	}
@@ -606,6 +610,10 @@ func runCompactCallProgram(proto *Proto, args []Value, state *slotExecutionState
 		return nil, false, nil
 	}
 	stack := state.prepareNumericRegisters(entry.registers)
+	initialRemaining := int64(0)
+	if controller != nil {
+		initialRemaining = controller.remaining
+	}
 	for index := 0; index < entry.params; index++ {
 		if valueKind(args[index]) != NumberKind {
 			return nil, false, nil
@@ -613,21 +621,32 @@ func runCompactCallProgram(proto *Proto, args []Value, state *slotExecutionState
 		stack[index] = valueNumber(args[index])
 	}
 	state.compactFrames = state.compactFrames[:0]
-	result, ok := runCompactCallProgramWords(proto.compact, state)
+	result, ok, windowErr := runCompactCallProgramWordsWithController(proto.compact, state, controller)
+	if windowErr != nil {
+		return nil, true, windowErr
+	}
 	if !ok || slotExecutionNumberNeedsBox(result) {
+		if controller != nil && ok {
+			controller.remaining = initialRemaining
+		}
 		return nil, false, nil
 	}
 	return []Value{NumberValue(result)}, true, nil
 }
 
 func runCompactCallProgramWords(program *compactProgram, state *slotExecutionState) (float64, bool) {
+	result, ok, _ := runCompactCallProgramWordsWithController(program, state, nil)
+	return result, ok
+}
+
+func runCompactCallProgramWordsWithController(program *compactProgram, state *slotExecutionState, controller *executionController) (result float64, ok bool, windowErr error) {
 	if program == nil || state == nil || int(program.entry) >= len(program.functions) {
-		return 0, false
+		return 0, false, nil
 	}
 	functionID := program.entry
 	function := program.functions[functionID]
 	if function.proto == nil {
-		return 0, false
+		return 0, false, nil
 	}
 	stack := state.numericRegisters
 	frames := state.compactFrames[:0]
@@ -636,12 +655,21 @@ func runCompactCallProgramWords(program *compactProgram, state *slotExecutionSta
 	pc := 0
 	words := function.proto.words
 	constants := function.proto.constantNumbers
+	window := newExecutionWindow(controller)
+	defer func() {
+		if ok || windowErr != nil {
+			window.commit()
+		}
+	}()
 
 	for {
 		if uint(pc) >= uint(len(words)) {
 			state.numericRegisters = stack
 			state.compactFrames = frames
-			return 0, false
+			return 0, false, nil
+		}
+		if err := window.stepInstruction(); err != nil {
+			return 0, false, err
 		}
 		raw := words[pc]
 		op := opcode(uint8(raw) & uint8(wordcodeOpcodeMask))
@@ -654,7 +682,7 @@ func runCompactCallProgramWords(program *compactProgram, state *slotExecutionSta
 		case opClosure:
 			if raw&wordcodeAuxBit != 0 {
 				if next >= len(words) {
-					return 0, false
+					return 0, false, nil
 				}
 				next++
 			}
@@ -663,7 +691,7 @@ func runCompactCallProgramWords(program *compactProgram, state *slotExecutionSta
 			b = int(uint16(raw >> 16))
 			if raw&wordcodeAuxBit != 0 {
 				if next >= len(words) {
-					return 0, false
+					return 0, false, nil
 				}
 				b = int(int32(words[next]))
 				next++
@@ -694,7 +722,7 @@ func runCompactCallProgramWords(program *compactProgram, state *slotExecutionSta
 		case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
 			if raw&wordcodeAuxBit != 0 {
 				if next >= len(words) {
-					return 0, false
+					return 0, false, nil
 				}
 				c = int(int32(words[next]))
 				next++
@@ -717,14 +745,14 @@ func runCompactCallProgramWords(program *compactProgram, state *slotExecutionSta
 
 		case opNumericForCheck:
 			if next >= len(words) {
-				return 0, false
+				return 0, false, nil
 			}
 			target := int(int32(words[next]))
 			next++
 			target += next
 			loopValue, limitValue, stepValue := stack[base+a], stack[base+b], stack[base+c]
 			if math.IsNaN(loopValue) || math.IsNaN(limitValue) || math.IsNaN(stepValue) {
-				return 0, false
+				return 0, false, nil
 			}
 			if (stepValue > 0 && loopValue > limitValue) || (stepValue <= 0 && loopValue < limitValue) {
 				pc = target
@@ -733,7 +761,7 @@ func runCompactCallProgramWords(program *compactProgram, state *slotExecutionSta
 
 		case opNumericForLoop:
 			if next >= len(words) {
-				return 0, false
+				return 0, false, nil
 			}
 			target := int(int32(words[next]))
 			next++
@@ -744,7 +772,7 @@ func runCompactCallProgramWords(program *compactProgram, state *slotExecutionSta
 
 		case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
 			if next >= len(words) {
-				return 0, false
+				return 0, false, nil
 			}
 			b = int(uint16(raw >> 16))
 			target := int(int32(words[next]))
@@ -757,7 +785,7 @@ func runCompactCallProgramWords(program *compactProgram, state *slotExecutionSta
 				jump = left != right
 			default:
 				if math.IsNaN(left) || math.IsNaN(right) {
-					return 0, false
+					return 0, false, nil
 				}
 				switch op {
 				case opJumpIfNotLessK:
@@ -777,14 +805,14 @@ func runCompactCallProgramWords(program *compactProgram, state *slotExecutionSta
 
 		case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
 			if next >= len(words) {
-				return 0, false
+				return 0, false, nil
 			}
 			target := int(int32(words[next]))
 			next++
 			target += next
 			left, right := stack[base+a], stack[base+b]
 			if math.IsNaN(left) || math.IsNaN(right) {
-				return 0, false
+				return 0, false, nil
 			}
 			jump := false
 			switch op {
@@ -809,17 +837,17 @@ func runCompactCallProgramWords(program *compactProgram, state *slotExecutionSta
 		case opCall, opCallOne, opCallLocalOne, opCallUpvalueOne:
 			if raw&wordcodeAuxBit != 0 {
 				if next >= len(words) {
-					return 0, false
+					return 0, false, nil
 				}
 				next++
 			}
 			site, ok := program.callSite(functionID, pc)
 			if !ok || int(site.target) >= len(program.functions) {
-				return 0, false
+				return 0, false, nil
 			}
 			callee := program.functions[site.target]
 			if callee.proto == nil || int(site.argumentCount) != callee.proto.params {
-				return 0, false
+				return 0, false, nil
 			}
 			callerTop := top
 			calleeBase := top
@@ -828,17 +856,17 @@ func runCompactCallProgramWords(program *compactProgram, state *slotExecutionSta
 			}
 			need := calleeBase + callee.proto.registers
 			if calleeBase < 0 || need < calleeBase || uint64(need) > math.MaxUint32 {
-				return 0, false
+				return 0, false, nil
 			}
 			stack = growCompactNumericStack(state, stack, need)
 			if stack == nil {
-				return 0, false
+				return 0, false, nil
 			}
 			if site.flags&compactCallBorrowed == 0 {
 				argumentStart := base + int(site.argumentStart)
 				argumentEnd := argumentStart + int(site.argumentCount)
 				if argumentStart < 0 || argumentEnd > len(stack) {
-					return 0, false
+					return 0, false, nil
 				}
 				copy(stack[calleeBase:calleeBase+int(site.argumentCount)], stack[argumentStart:argumentEnd])
 			}
@@ -864,20 +892,20 @@ func runCompactCallProgramWords(program *compactProgram, state *slotExecutionSta
 		case opReturnOne, opReturn:
 			resultIndex := base + a
 			if resultIndex < 0 || resultIndex >= len(stack) {
-				return 0, false
+				return 0, false, nil
 			}
 			result := stack[resultIndex]
 			if len(frames) == 0 {
 				state.numericRegisters = stack
 				state.compactFrames = frames
-				return result, true
+				return result, true, nil
 			}
 			last := len(frames) - 1
 			record := frames[last]
 			frames[last] = compactCallFrame{}
 			frames = frames[:last]
 			if int(record.callerFunction) >= len(program.functions) || int(record.resultBase) >= len(stack) {
-				return 0, false
+				return 0, false, nil
 			}
 			functionID = record.callerFunction
 			function = program.functions[functionID]
@@ -890,7 +918,7 @@ func runCompactCallProgramWords(program *compactProgram, state *slotExecutionSta
 			continue
 
 		default:
-			return 0, false
+			return 0, false, nil
 		}
 		pc = next
 	}

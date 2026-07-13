@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"reflect"
 	"sync"
 	"testing"
 )
@@ -93,8 +92,8 @@ func TestOwnerSlotExecutionGuardsLifecycleAndCancellation(t *testing.T) {
 	if values, err := executeProto(cancelled, proto, globals, executeOptions{
 		args:       []Value{NumberValue(7)},
 		controller: nil,
-	}); err != nil || !reflect.DeepEqual(values, []Value{NumberValue(7)}) {
-		t.Fatalf("cancelled owner execution = (%#v, %v), want established VM result [7]", values, err)
+	}); !errors.Is(err, context.Canceled) || values != nil {
+		t.Fatalf("cancelled owner execution = (%#v, %v), want context cancellation", values, err)
 	}
 	if values, err := executeProto(context.Background(), proto, globals, executeOptions{
 		args:       []Value{NumberValue(7)},

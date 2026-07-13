@@ -121,6 +121,13 @@ func baseCoroutineResume(globals *globalEnv, args []Value) ([]Value, error) {
 		coroutine.yieldedValues = append(coroutine.yieldedValues[:0], yield.values...)
 		coroutine.thread.coroutine = coroutine
 		coroutine.suspended = coroutine.thread.suspendFrames()
+		// A yielded coroutine must not retain the invocation's spent budget or
+		// cancellation context. Public resume attaches the new invocation
+		// controller before restoring these frames.
+		coroutine.suspended.ctx = context.Background()
+		coroutine.suspended.controller = nil
+		coroutine.thread.ctx = context.Background()
+		coroutine.thread.controller = nil
 		return coroutine.resumeResult(true, yield.values), nil
 	}
 	if err != nil {

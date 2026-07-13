@@ -135,8 +135,11 @@ func (a tableAccess) protectedMetatable(table *Table) (Value, error) {
 func (a tableAccess) callIndex(fn Value, table *Table, key Value) (Value, error) {
 	if a.globals != nil && a.globals.thread != nil {
 		if closure, ok := fn.scriptFunction(); ok {
-			restore := a.globals.thread.enterNonYieldable()
-			value, err := a.globals.thread.runInlineScriptCallFixedOneNoHook(closure, TableValue(table), key, NilValue(), 2)
+			thread := a.globals.thread
+			restore := thread.enterNonYieldable()
+			thread.executionWindow.commit()
+			value, err := thread.runInlineScriptCallFixedOneNoHook(closure, TableValue(table), key, NilValue(), 2)
+			thread.executionWindow.refresh()
 			restore()
 			return value, err
 		}
@@ -151,8 +154,11 @@ func (a tableAccess) callIndex(fn Value, table *Table, key Value) (Value, error)
 func (a tableAccess) callNewIndex(fn Value, table *Table, key Value, value Value) error {
 	if a.globals != nil && a.globals.thread != nil {
 		if closure, ok := fn.scriptFunction(); ok {
-			restore := a.globals.thread.enterNonYieldable()
-			_, err := a.globals.thread.runInlineScriptCallFixedOneNoHook(closure, TableValue(table), key, value, 3)
+			thread := a.globals.thread
+			restore := thread.enterNonYieldable()
+			thread.executionWindow.commit()
+			_, err := thread.runInlineScriptCallFixedOneNoHook(closure, TableValue(table), key, value, 3)
+			thread.executionWindow.refresh()
 			restore()
 			return err
 		}

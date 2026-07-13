@@ -53,14 +53,20 @@ type executeOptions struct {
 }
 
 func executeProto(ctx context.Context, proto *Proto, globals *globalEnv, options executeOptions) ([]Value, error) {
+	if options.controller == nil && ctx != nil && (ctx.Done() != nil || ctx.Err() != nil) {
+		controller, err := newExecutionController(ctx, ExecutionLimits{})
+		if err != nil {
+			return nil, err
+		}
+		options.controller = controller
+	}
 	// The canonical scalar runner has no owner, globals, upvalues, or
 	// suspension state. Fixed arguments are imported into its per-run slot
 	// state; everything else stays on the established VM until the
 	// corresponding slot ABI slice is proven.
 	if globals == nil && len(options.upvalues) == 0 &&
-		len(options.upvalueValues) == 0 && len(options.upvalueValueOK) == 0 &&
-		!options.controller.requiresChecks() {
-		if values, handled, err := runSlotExecution(proto, options.args); handled || err != nil {
+		len(options.upvalueValues) == 0 && len(options.upvalueValueOK) == 0 {
+		if values, handled, err := runSlotExecutionWithController(proto, options.args, options.controller); handled || err != nil {
 			return values, err
 		}
 	}
@@ -75,15 +81,15 @@ func executeProto(ctx context.Context, proto *Proto, globals *globalEnv, options
 
 func executeProtoWithOwner(ctx context.Context, proto *Proto, globals *globalEnv, options executeOptions) ([]Value, error) {
 	// A pure prototype does not need the VM thread or global environment. Route
-	// it through the compact slot runner when there is no budget/upvalue state
-	// and the context cannot be cancelled. The owner activity counter keeps
-	// close from racing this VM-thread-free path; the slot runner itself keeps
-	// using its pooled ephemeral heap until collector/root integration lands.
-	if proto != nil && (proto.slotExecutionEligible || proto.compact != nil) && globals.thread == nil && !options.controller.requiresChecks() &&
+	// it through the compact slot runner when its shape permits; the runner
+	// carries the invocation controller so limits and cancellation remain
+	// shared. The owner activity counter keeps close from racing this
+	// VM-thread-free path; the slot runner itself keeps using its pooled
+	// ephemeral heap until collector/root integration lands.
+	if proto != nil && (proto.slotExecutionEligible || proto.compact != nil) && globals.thread == nil &&
 		len(options.upvalues) == 0 && len(options.upvalueValues) == 0 &&
-		len(options.upvalueValueOK) == 0 &&
-		(ctx == nil || (ctx.Done() == nil && ctx.Err() == nil)) {
-		values, handled, err := runOwnerSlotExecution(globals.owner, proto, options.args)
+		len(options.upvalueValueOK) == 0 {
+		values, handled, err := runOwnerSlotExecutionWithController(globals.owner, proto, options.args, options.controller)
 		if handled || err != nil {
 			return values, err
 		}
@@ -101,6 +107,10 @@ func executeProtoWithOwner(ctx context.Context, proto *Proto, globals *globalEnv
 }
 
 func runOwnerSlotExecution(owner *runtimeOwner, proto *Proto, args []Value) (values []Value, handled bool, err error) {
+	return runOwnerSlotExecutionWithController(owner, proto, args, nil)
+}
+
+func runOwnerSlotExecutionWithController(owner *runtimeOwner, proto *Proto, args []Value, controller *executionController) (values []Value, handled bool, err error) {
 	if err := owner.beginSlotRun(); err != nil {
 		return nil, false, err
 	}
@@ -108,7 +118,7 @@ func runOwnerSlotExecution(owner *runtimeOwner, proto *Proto, args []Value) (val
 	if owner.heap == nil {
 		return nil, false, errRuntimeOwnerReleased
 	}
-	return runSlotExecutionWithHeap(proto, args, owner.heap)
+	return runSlotExecutionWithHeapController(proto, args, owner.heap, controller)
 }
 
 var vmThreadPool = sync.Pool{
@@ -152,14 +162,19 @@ type vmThread struct {
 	protectedRecoveryScans   uint64
 	protectedRecoveryErrors  uint64
 	controller               *executionController
-	coroutine                *vmCoroutine
-	nonYieldableDepth        int
-	debugHook                vmDebugHook
-	debugCountInterval       int
-	debugInstructionCount    int
-	debugLineHook            bool
-	debugCallHook            bool
-	debugReturnHook          bool
+	// executionWindow is owned by the currently executing direct frame. It is
+	// a value on the thread (rather than a pointer to a loop-local) so
+	// reentrant calls can save/restore it without forcing the hot loop window
+	// onto the heap.
+	executionWindow       executionWindow
+	coroutine             *vmCoroutine
+	nonYieldableDepth     int
+	debugHook             vmDebugHook
+	debugCountInterval    int
+	debugInstructionCount int
+	debugLineHook         bool
+	debugCallHook         bool
+	debugReturnHook       bool
 
 	maxFrames               int
 	directFrameInstrumented bool
@@ -535,6 +550,7 @@ func runWithDirectFrameMechanismCounters(proto *Proto, globals map[string]Value)
 
 	thread := newVMThreadWithContext(context.Background(), runtimeGlobals(globals))
 	thread.controller = nil
+	thread.executionWindow = executionWindow{}
 	thread.directFrameInstrumented = true
 	thread.directFrameOpcodeCounts = &snapshot.opcodeCounts
 	thread.directFramePICCounts = &snapshot.picCounts
@@ -1324,6 +1340,7 @@ func (thread *vmThread) resetForRun(ctx context.Context, globals *globalEnv) {
 	thread.protectedRecoveryScans = 0
 	thread.protectedRecoveryErrors = 0
 	thread.controller = nil
+	thread.executionWindow = executionWindow{}
 	thread.coroutine = nil
 	thread.nonYieldableDepth = 0
 	thread.debugHook = nil
@@ -1374,6 +1391,7 @@ func (thread *vmThread) resetForPool() {
 	thread.globals = nil
 	thread.baseGlobals = globalEnv{}
 	thread.controller = nil
+	thread.executionWindow = executionWindow{}
 	thread.coroutine = nil
 	thread.nonYieldableDepth = 0
 	thread.debugHook = nil
@@ -1759,7 +1777,12 @@ func (thread *vmThread) suspendFrames() vmSuspendedFrames {
 }
 
 func (thread *vmThread) resumeFrames(suspended vmSuspendedFrames) {
+	invocationContext := thread.ctx
+	invocationController := thread.controller
 	thread.ctx = suspended.ctx
+	if invocationContext != nil {
+		thread.ctx = invocationContext
+	}
 	thread.globals = suspended.globals
 	thread.frames = suspended.frames
 	thread.frameRecords = suspended.frameRecords
@@ -1778,6 +1801,9 @@ func (thread *vmThread) resumeFrames(suspended vmSuspendedFrames) {
 	thread.nearestProtectedFrame = suspended.nearestProtectedFrame
 	thread.rebindFrameWindows()
 	thread.controller = suspended.controller
+	if invocationController != nil {
+		thread.controller = invocationController
+	}
 	thread.coroutine = suspended.coroutine
 	thread.nonYieldableDepth = suspended.nonYieldableDepth
 	thread.debugHook = suspended.debugHook
@@ -2308,7 +2334,7 @@ func (thread *vmThread) newBorrowedClosureCallFrame(closure *closure, caller *vm
 		return nil, false
 	}
 	proto := closure.proto
-	if proto.variadic || thread.debugHook != nil || (thread.controller != nil && thread.controller.remaining >= 0) ||
+	if proto.variadic || thread.debugHook != nil ||
 		thread.coroutine != nil || thread.nonYieldableDepth != 0 ||
 		thread.nearestProtectedFrame != noProtectedFrame ||
 		caller.hasPendingCall || caller.openResultStart >= 0 || len(proto.capturedLocals) != 0 {
@@ -2457,7 +2483,7 @@ func (thread *vmThread) enterRecordOnlyFixedCall(
 	}
 	proto := closure.proto
 	if frame.varargCount != 0 ||
-		thread.debugHook != nil || (thread.controller != nil && thread.controller.remaining >= 0) || thread.coroutine != nil ||
+		thread.debugHook != nil || thread.coroutine != nil ||
 		thread.nonYieldableDepth != 0 || thread.nearestProtectedFrame != noProtectedFrame ||
 		frame.hasPendingCall || frame.openResultStart >= 0 {
 		return vmFrameRecord{}, false
@@ -2624,7 +2650,7 @@ func (thread *vmThread) maybeEnterRecordOnlyOpenArgumentCall(
 	// record does not currently encode. They stay on the established cold
 	// materialized path until that ABI is widened.
 	if proto.variadic || frame.varargCount != 0 ||
-		thread.debugHook != nil || (thread.controller != nil && thread.controller.remaining >= 0) || thread.coroutine != nil ||
+		thread.debugHook != nil || thread.coroutine != nil ||
 		thread.nonYieldableDepth != 0 || thread.nearestProtectedFrame != noProtectedFrame ||
 		frame.hasPendingCall || frame.openResultStart < 0 || len(proto.capturedLocals) != 0 {
 		return vmFrameRecord{}, false
@@ -3870,7 +3896,7 @@ func (frame *vmFrame) applyInlineResultDestination(destination vmResultDestinati
 }
 
 func (thread *vmThread) runFrame(frame *vmFrame) (vmFrameResult, error) {
-	instrumented := thread.directFrameInstrumented || thread.debugHook != nil || thread.controller.requiresChecks()
+	instrumented := thread.directFrameInstrumented || thread.debugHook != nil
 	for {
 		var exit directFrameSideExit
 		if instrumented {
@@ -5615,6 +5641,13 @@ func vmFrameRecordUint32ToInt(value uint32) (int, bool) {
 }
 
 func runDirectFrameInstrumentedLoop(thread *vmThread, frameRef **vmFrame) directFrameSideExit {
+	previousWindow := thread.executionWindow
+	thread.executionWindow = newExecutionWindow(thread.controller)
+	window := &thread.executionWindow
+	defer func() {
+		window.commit()
+		thread.executionWindow = previousWindow
+	}()
 	frame := *frameRef
 	var pc int
 	defer func() { frame.pc = pc }()
@@ -5659,14 +5692,14 @@ reload:
 	picCounts = thread.directFramePICCounts
 	runLineHook = thread.debugHook != nil && thread.debugLineHook
 	runCountHook = thread.debugCountInterval > 0 && thread.debugHook != nil
-	runController = thread.controller.requiresChecks()
+	runController = thread.controller != nil
 
 	for uint(pc) < uint(len(words)) {
 		if runController || runLineHook || runCountHook {
 			frame.pc = pc
 		}
 		if runController {
-			if err := thread.controller.stepInstruction(); err != nil {
+			if err := window.stepInstruction(); err != nil {
 				return directFrameFail(err)
 			}
 		}
@@ -7126,7 +7159,9 @@ reload:
 				args := registers[b+1 : b+1+c]
 				pc = nextWord
 				frame.pc = pc
+				window.commit()
 				result, err := thread.runInlineScriptCall(closure, args)
+				window.refresh()
 				if err != nil {
 					if yield, ok := err.(vmYieldRequest); ok {
 						thread.installPendingCall(frame, vmPendingCall{
@@ -7232,6 +7267,7 @@ reload:
 			}
 			var value Value
 			var callErr error
+			window.commit()
 			if argCount <= 3 {
 				first, second, third := fixedRegisterArgs(registers, c, argCount)
 				value, callErr = thread.runInlineScriptCallFixedOneNoHook(closure, first, second, third, argCount)
@@ -7239,6 +7275,7 @@ reload:
 				args := registers[c : c+argCount]
 				value, callErr = thread.runInlineScriptCallOneNoHook(closure, args)
 			}
+			window.refresh()
 			if callErr != nil {
 				if yield, ok := callErr.(vmYieldRequest); ok {
 					thread.installPendingCall(frame, vmPendingCall{
@@ -7292,11 +7329,14 @@ reload:
 			}
 			if argCount <= 3 {
 				first, second, third := fixedRegisterArgs(registers, c, argCount)
+				window.commit()
 				value, callErr = thread.runInlineScriptCallFixedOneNoHook(closure, first, second, third, argCount)
 			} else {
 				args := registers[c : c+argCount]
+				window.commit()
 				value, callErr = thread.runInlineScriptCallOneNoHook(closure, args)
 			}
+			window.refresh()
 			if callErr != nil {
 				if yield, ok := callErr.(vmYieldRequest); ok {
 					thread.installPendingCall(frame, vmPendingCall{
@@ -7365,11 +7405,14 @@ reload:
 			}
 			if argCount <= 3 {
 				first, second, third := fixedRegisterArgs(registers, a+1, argCount)
+				window.commit()
 				value, err = thread.runInlineScriptCallFixedOneNoHook(closure, first, second, third, argCount)
 			} else {
 				args := registers[a+1 : a+1+argCount]
+				window.commit()
 				value, err = thread.runInlineScriptCallOneNoHook(closure, args)
 			}
+			window.refresh()
 			if err != nil {
 				if yield, ok := err.(vmYieldRequest); ok {
 					thread.installPendingCall(frame, vmPendingCall{
@@ -7507,6 +7550,13 @@ reload:
 }
 
 func runDirectFrameProductionLoop(thread *vmThread, frameRef **vmFrame) directFrameSideExit {
+	previousWindow := thread.executionWindow
+	thread.executionWindow = newExecutionWindow(thread.controller)
+	window := &thread.executionWindow
+	defer func() {
+		window.commit()
+		thread.executionWindow = previousWindow
+	}()
 	frame := *frameRef
 	var pc int
 	rootDepth := len(thread.frames) - 1
@@ -7545,6 +7595,9 @@ reload:
 	pc = frame.pc
 
 	for uint(pc) < uint(len(words)) {
+		if err := window.stepInstruction(); err != nil {
+			return directFrameFail(err)
+		}
 		raw := words[pc]
 		op := opcode(uint8(raw) & uint8(wordcodeOpcodeMask))
 		// Verified wordcode lets the production loop decode the common primary
@@ -8117,7 +8170,7 @@ reload:
 			d += nextWord
 			if proto.directLoopKernels != nil {
 				if kernel := proto.directLoopKernels.kernelAt(pc); kernel != nil {
-					exit := runDirectLoopKernel(thread, frame, kernel)
+					exit := runDirectLoopKernel(thread, frame, kernel, window)
 					if !exit.resumesDirectFrame() {
 						return exit
 					}
@@ -8976,7 +9029,9 @@ reload:
 				args := registers[b+1 : b+1+c]
 				pc = nextWord
 				frame.pc = pc
+				window.commit()
 				result, err := thread.runInlineScriptCall(closure, args)
+				window.refresh()
 				if err != nil {
 					if yield, ok := err.(vmYieldRequest); ok {
 						thread.installPendingCall(frame, vmPendingCall{
@@ -9083,6 +9138,7 @@ reload:
 			}
 			var value Value
 			var callErr error
+			window.commit()
 			if argCount <= 3 {
 				first, second, third := fixedRegisterArgs(registers, c, argCount)
 				value, callErr = thread.runInlineScriptCallFixedOneNoHook(closure, first, second, third, argCount)
@@ -9090,6 +9146,7 @@ reload:
 				args := registers[c : c+argCount]
 				value, callErr = thread.runInlineScriptCallOneNoHook(closure, args)
 			}
+			window.refresh()
 			if callErr != nil {
 				if yield, ok := callErr.(vmYieldRequest); ok {
 					thread.installPendingCall(frame, vmPendingCall{
@@ -9143,11 +9200,14 @@ reload:
 			}
 			if argCount <= 3 {
 				first, second, third := fixedRegisterArgs(registers, c, argCount)
+				window.commit()
 				value, callErr = thread.runInlineScriptCallFixedOneNoHook(closure, first, second, third, argCount)
 			} else {
 				args := registers[c : c+argCount]
+				window.commit()
 				value, callErr = thread.runInlineScriptCallOneNoHook(closure, args)
 			}
+			window.refresh()
 			if callErr != nil {
 				if yield, ok := callErr.(vmYieldRequest); ok {
 					thread.installPendingCall(frame, vmPendingCall{
@@ -9217,11 +9277,14 @@ reload:
 			}
 			if argCount <= 3 {
 				first, second, third := fixedRegisterArgs(registers, a+1, argCount)
+				window.commit()
 				value, err = thread.runInlineScriptCallFixedOneNoHook(closure, first, second, third, argCount)
 			} else {
 				args := registers[a+1 : a+1+argCount]
+				window.commit()
 				value, err = thread.runInlineScriptCallOneNoHook(closure, args)
 			}
+			window.refresh()
 			if err != nil {
 				if yield, ok := err.(vmYieldRequest); ok {
 					thread.installPendingCall(frame, vmPendingCall{
@@ -9958,8 +10021,11 @@ func callRuntimeMetamethod(fn Value, globals *globalEnv, args []Value) ([]Value,
 func callRuntimeMetamethodWindow(fn Value, globals *globalEnv, args []Value) (vmResultWindow, error) {
 	if globals != nil && globals.thread != nil {
 		if closure, ok := fn.scriptFunction(); ok {
-			restore := globals.thread.enterNonYieldable()
-			result, err := globals.thread.runInlineScriptCall(closure, args)
+			thread := globals.thread
+			restore := thread.enterNonYieldable()
+			thread.executionWindow.commit()
+			result, err := thread.runInlineScriptCall(closure, args)
+			thread.executionWindow.refresh()
 			restore()
 			if err != nil {
 				return vmResultWindow{}, err
@@ -9977,8 +10043,11 @@ func callRuntimeMetamethodWindow(fn Value, globals *globalEnv, args []Value) (vm
 func callRuntimeMetamethodWindow1(fn Value, globals *globalEnv, first Value) (vmResultWindow, error) {
 	if globals != nil && globals.thread != nil {
 		if closure, ok := fn.scriptFunction(); ok {
-			restore := globals.thread.enterNonYieldable()
-			result, err := globals.thread.runInlineScriptCallFixed(closure, first, NilValue(), NilValue(), 1)
+			thread := globals.thread
+			restore := thread.enterNonYieldable()
+			thread.executionWindow.commit()
+			result, err := thread.runInlineScriptCallFixed(closure, first, NilValue(), NilValue(), 1)
+			thread.executionWindow.refresh()
 			restore()
 			if err != nil {
 				return vmResultWindow{}, err
@@ -9993,8 +10062,11 @@ func callRuntimeMetamethodWindow1(fn Value, globals *globalEnv, first Value) (vm
 func callRuntimeMetamethodWindow2(fn Value, globals *globalEnv, first Value, second Value) (vmResultWindow, error) {
 	if globals != nil && globals.thread != nil {
 		if closure, ok := fn.scriptFunction(); ok {
-			restore := globals.thread.enterNonYieldable()
-			result, err := globals.thread.runInlineScriptCallFixed(closure, first, second, NilValue(), 2)
+			thread := globals.thread
+			restore := thread.enterNonYieldable()
+			thread.executionWindow.commit()
+			result, err := thread.runInlineScriptCallFixed(closure, first, second, NilValue(), 2)
+			thread.executionWindow.refresh()
 			restore()
 			if err != nil {
 				return vmResultWindow{}, err
@@ -10009,8 +10081,11 @@ func callRuntimeMetamethodWindow2(fn Value, globals *globalEnv, first Value, sec
 func callRuntimeMetamethodWindow3(fn Value, globals *globalEnv, first Value, second Value, third Value) (vmResultWindow, error) {
 	if globals != nil && globals.thread != nil {
 		if closure, ok := fn.scriptFunction(); ok {
-			restore := globals.thread.enterNonYieldable()
-			result, err := globals.thread.runInlineScriptCallFixed(closure, first, second, third, 3)
+			thread := globals.thread
+			restore := thread.enterNonYieldable()
+			thread.executionWindow.commit()
+			result, err := thread.runInlineScriptCallFixed(closure, first, second, third, 3)
+			thread.executionWindow.refresh()
 			restore()
 			if err != nil {
 				return vmResultWindow{}, err
