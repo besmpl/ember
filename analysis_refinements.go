@@ -34,6 +34,17 @@ func (a *analysisState) trueConditionRefinements(tree syntaxTree, expr expressio
 	if !ok {
 		return nil
 	}
+	// A single comparison may be a plain value, a nil/singleton comparison,
+	// a type guard, or a negated/grouped condition. Use the expression-level
+	// resolver here so unary `not` keeps its inverted refinement on the true
+	// branch; the per-comparison path below is for conjunctions.
+	if len(andTerms) == 1 {
+		refinement := a.conditionRefinement(tree, expr)
+		if refinement.place.valid() && refinement.trueType != simpleTypeUnknown {
+			return []conditionRefinement{refinement}
+		}
+		return nil
+	}
 	for _, term := range andTerms {
 		refinement := a.conditionRefinementForComparison(tree, term)
 		if !refinement.place.valid() || refinement.trueType == simpleTypeUnknown {
