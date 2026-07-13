@@ -1,13 +1,17 @@
 package ember
 
 type globalEnv struct {
-	values  map[string]Value
-	host    map[string]Value
-	slots   []globalSlot
-	thread  *vmThread
-	owner   *runtimeOwner
-	version uint64
-	pooled  bool
+	values map[string]Value
+	host   map[string]Value
+	slots  []globalSlot
+	thread *vmThread
+	// controller is the active invocation capability for native/base callbacks.
+	// It is installed only for the duration of an execution and is never a
+	// table-owned policy.
+	controller *executionController
+	owner      *runtimeOwner
+	version    uint64
+	pooled     bool
 }
 
 type globalSlot struct {

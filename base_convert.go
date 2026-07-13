@@ -60,11 +60,34 @@ func baseToString(globals *globalEnv, args []Value) ([]Value, error) {
 }
 
 func baseToStringValue(globals *globalEnv, value Value) (Value, error) {
+	if _, ok := value.String(); ok {
+		return value, nil
+	}
+	if metamethod, ok, err := valueMetamethod(value, "__tostring"); err != nil {
+		return NilValue(), err
+	} else if ok {
+		results, err := callRuntimeMetamethodWindow1(metamethod, globals, value)
+		if err != nil {
+			return NilValue(), err
+		}
+		result := results.at(0)
+		if _, ok := result.String(); !ok {
+			return NilValue(), fmt.Errorf("__tostring returned %s, want string", result.Kind())
+		}
+		return result, nil
+	}
 	text, err := stringValue(value, globals)
 	if err != nil {
 		return NilValue(), err
 	}
-	return stringValueInGlobalEnv(globals, text), nil
+	if value.Kind() != NumberKind {
+		return StringValue(text), nil
+	}
+	var thread *vmThread
+	if globals != nil {
+		thread = globals.thread
+	}
+	return generatedStringValueWithController(thread, executionControllerForGlobals(globals), text)
 }
 
 func stringValue(value Value, globals *globalEnv) (string, error) {

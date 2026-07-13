@@ -95,9 +95,11 @@ func (thread *vmThread) runColdInstruction(frame *vmFrame) (action coldInstructi
 			key := proto.constants[b]
 			var err error
 			if valueKind(key) == StringKind {
-				table.setRawStringFieldBox(key.stringText(), key.stringBox(), frame.register(c))
+				if err = table.setRawStringFieldBoxWithController(thread.controller, key.stringText(), key.stringBox(), frame.register(c)); err != nil {
+					return coldInstructionError(fmt.Errorf("run: set field failed: %w", err))
+				}
 			} else {
-				err = table.rawSetKey(proto.constantKeys[b], frame.register(c))
+				err = table.rawSetKeyWithController(thread.controller, proto.constantKeys[b], frame.register(c))
 			}
 			if err != nil {
 				return coldInstructionError(fmt.Errorf("run: set field failed: %w", err))
@@ -116,7 +118,9 @@ func (thread *vmThread) runColdInstruction(frame *vmFrame) (action coldInstructi
 		}
 		key := proto.constants[b]
 		if table.metatable == nil {
-			table.setRawStringFieldBox(key.stringText(), key.stringBox(), frame.register(c))
+			if err := table.setRawStringFieldBoxWithController(thread.controller, key.stringText(), key.stringBox(), frame.register(c)); err != nil {
+				return coldInstructionError(fmt.Errorf("run: set field failed: %w", err))
+			}
 			return coldInstructionResume(frame)
 		}
 		if err := runtimeTableAccess(globals).set(table, key, frame.register(c)); err != nil {

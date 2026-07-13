@@ -271,11 +271,11 @@ func baseINext(args []Value) ([]Value, error) {
 
 func baseTable() *Table {
 	table := newTableWithCapacity(0, 8)
-	_ = table.Set(StringValue("pack"), HostFuncValue(baseTablePack))
+	_ = table.Set(StringValue("pack"), nativeFuncValue(baseTablePackNative))
 	_ = table.Set(StringValue("unpack"), HostFuncValue(baseTableUnpack))
 	_ = table.Set(StringValue("insert"), nativeFuncValueWithID(baseTableInsertNative, nativeFuncTableInsert))
 	_ = table.Set(StringValue("remove"), nativeFuncValueWithID(baseTableRemoveNative, nativeFuncTableRemove))
-	_ = table.Set(StringValue("concat"), HostFuncValue(baseTableConcat))
+	_ = table.Set(StringValue("concat"), nativeFuncValue(baseTableConcatNative))
 	_ = table.Set(StringValue("find"), HostFuncValue(baseTableFind))
 	_ = table.Set(StringValue("clear"), HostFuncValue(baseTableClear))
 	_ = table.Set(StringValue("sort"), nativeFuncValue(baseTableSort))
@@ -283,12 +283,25 @@ func baseTable() *Table {
 }
 
 func baseTablePack(args []Value) ([]Value, error) {
+	return baseTablePackWithController(nil, args)
+}
+
+func baseTablePackNative(globals *globalEnv, args []Value) ([]Value, error) {
+	return baseTablePackWithController(executionControllerForGlobals(globals), args)
+}
+
+func baseTablePackWithController(controller *executionController, args []Value) ([]Value, error) {
+	if controller != nil {
+		if err := controller.chargeRuntimeObject(); err != nil {
+			return nil, err
+		}
+	}
 	table := NewTable()
-	seq := newRawSequence("table.pack", table)
+	seq := newRawSequenceWithController("table.pack", table, controller)
 	if err := seq.writeValues(args); err != nil {
 		return nil, err
 	}
-	if err := table.rawSet(StringValue("n"), NumberValue(float64(len(args)))); err != nil {
+	if err := table.rawSetWithController(controller, StringValue("n"), NumberValue(float64(len(args)))); err != nil {
 		return nil, fmt.Errorf("table.pack: %w", err)
 	}
 	return []Value{TableValue(table)}, nil
@@ -324,6 +337,10 @@ func baseTableUnpack(args []Value) ([]Value, error) {
 }
 
 func baseTableInsert(args []Value) ([]Value, error) {
+	return baseTableInsertWithController(nil, args)
+}
+
+func baseTableInsertWithController(controller *executionController, args []Value) ([]Value, error) {
 	table, err := tableArg("table.insert", args, 0)
 	if err != nil {
 		return nil, err
@@ -332,10 +349,12 @@ func baseTableInsert(args []Value) ([]Value, error) {
 		return nil, fmt.Errorf("table.insert: argument #2 is nil, want value")
 	}
 	if len(args) == 2 && table.canAppendFastArray() {
-		table.fastArrayAppend(args[1])
+		if err := table.fastArrayAppendWithController(controller, args[1]); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
-	seq := newRawSequence("table.insert", table)
+	seq := newRawSequenceWithController("table.insert", table, controller)
 	length, err := seq.len()
 	if err != nil {
 		return nil, err
@@ -353,7 +372,9 @@ func baseTableInsert(args []Value) ([]Value, error) {
 		return nil, fmt.Errorf("table.insert: position %d out of range", position)
 	}
 	if table.canUseFastArraySequence(length) {
-		table.fastArrayInsert(position, value)
+		if err := table.fastArrayInsertWithController(controller, position, value); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
 	for index := length; index >= position; index-- {
@@ -371,12 +392,12 @@ func baseTableInsert(args []Value) ([]Value, error) {
 	return nil, nil
 }
 
-func baseTableInsertNative(_ *globalEnv, args []Value) ([]Value, error) {
-	return baseTableInsert(args)
+func baseTableInsertNative(globals *globalEnv, args []Value) ([]Value, error) {
+	return baseTableInsertWithController(executionControllerForGlobals(globals), args)
 }
 
 func baseTableRemove(args []Value) ([]Value, error) {
-	removed, err := baseTableRemoveValue(args)
+	removed, err := baseTableRemoveValueWithController(nil, args)
 	if err != nil {
 		return nil, err
 	}
@@ -384,6 +405,10 @@ func baseTableRemove(args []Value) ([]Value, error) {
 }
 
 func baseTableRemoveValue(args []Value) (Value, error) {
+	return baseTableRemoveValueWithController(nil, args)
+}
+
+func baseTableRemoveValueWithController(controller *executionController, args []Value) (Value, error) {
 	table, err := tableArg("table.remove", args, 0)
 	if err != nil {
 		return NilValue(), err
@@ -403,9 +428,13 @@ func baseTableRemoveValue(args []Value) (Value, error) {
 		if position < 1 || position > length {
 			return NilValue(), nil
 		}
-		return table.fastArrayRemove(position), nil
+		removed := table.fastArrayRemove(position)
+		if !removed.IsNil() && table.entryCount > 0 {
+			table.entryCount--
+		}
+		return removed, nil
 	}
-	seq := newRawSequence("table.remove", table)
+	seq := newRawSequenceWithController("table.remove", table, controller)
 	length, err := seq.len()
 	if err != nil {
 		return NilValue(), err
@@ -424,7 +453,11 @@ func baseTableRemoveValue(args []Value) (Value, error) {
 		return NilValue(), nil
 	}
 	if table.canUseFastArraySequence(length) {
-		return table.fastArrayRemove(position), nil
+		removed := table.fastArrayRemove(position)
+		if !removed.IsNil() && table.entryCount > 0 {
+			table.entryCount--
+		}
+		return removed, nil
 	}
 	removed, err := seq.get(position)
 	if err != nil {
@@ -468,14 +501,34 @@ func baseTableRemoveFastArrayValue(tableValue Value, positionValue Value, argCou
 	if position < 1 || position > length {
 		return NilValue(), true, nil
 	}
-	return table.fastArrayRemove(position), true, nil
+	removed := table.fastArrayRemove(position)
+	if !removed.IsNil() && table.entryCount > 0 {
+		table.entryCount--
+	}
+	return removed, true, nil
 }
 
-func baseTableRemoveNative(_ *globalEnv, args []Value) ([]Value, error) {
-	return baseTableRemove(args)
+func baseTableRemoveNative(globals *globalEnv, args []Value) ([]Value, error) {
+	removed, err := baseTableRemoveValueWithController(executionControllerForGlobals(globals), args)
+	if err != nil {
+		return nil, err
+	}
+	return []Value{removed}, nil
 }
 
 func baseTableConcat(args []Value) ([]Value, error) {
+	return baseTableConcatWithThread(nil, nil, args)
+}
+
+func baseTableConcatNative(globals *globalEnv, args []Value) ([]Value, error) {
+	var thread *vmThread
+	if globals != nil {
+		thread = globals.thread
+	}
+	return baseTableConcatWithThread(thread, executionControllerForGlobals(globals), args)
+}
+
+func baseTableConcatWithThread(thread *vmThread, controller *executionController, args []Value) ([]Value, error) {
 	table, err := tableArg("table.concat", args, 0)
 	if err != nil {
 		return nil, err
@@ -510,7 +563,8 @@ func baseTableConcat(args []Value) ([]Value, error) {
 		end = length
 	}
 	if end < start {
-		return []Value{StringValue("")}, nil
+		value, err := generatedStringValueWithController(thread, controller, "")
+		return []Value{value}, err
 	}
 	parts := make([]string, 0, end-start+1)
 	for index := start; index <= end; index++ {
@@ -524,7 +578,9 @@ func baseTableConcat(args []Value) ([]Value, error) {
 		}
 		parts = append(parts, part)
 	}
-	return []Value{StringValue(strings.Join(parts, separator))}, nil
+	text := strings.Join(parts, separator)
+	value, err := generatedStringValueWithController(thread, controller, text)
+	return []Value{value}, err
 }
 
 func baseTableFind(args []Value) ([]Value, error) {

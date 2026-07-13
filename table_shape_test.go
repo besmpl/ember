@@ -67,7 +67,7 @@ func TestPropertyICReusesObservedAppendTransition(t *testing.T) {
 	}
 
 	second := NewTable()
-	if !cache.resolveWrite(second, keyBox.text, keyBox, NumberValue(2)) {
+	if !cache.resolveWrite(second, keyBox.text, keyBox, NumberValue(2), nil) {
 		t.Fatal("warmed cache did not apply the observed append transition")
 	}
 	if second.currentShape() != childShape {
@@ -80,7 +80,7 @@ func TestPropertyICReusesObservedAppendTransition(t *testing.T) {
 
 	withMetatable := NewTable()
 	withMetatable.metatable = NewTable()
-	if cache.resolveWrite(withMetatable, keyBox.text, keyBox, NumberValue(3)) {
+	if cache.resolveWrite(withMetatable, keyBox.text, keyBox, NumberValue(3), nil) {
 		t.Fatal("cached append bypassed __newindex-capable metatable semantics")
 	}
 	if _, ok := withMetatable.rawStringFieldBox(keyBox); ok {

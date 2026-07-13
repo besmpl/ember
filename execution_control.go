@@ -95,6 +95,8 @@ type executionController struct {
 	onStep                func()
 	callDepth             uint32
 	moduleInitializations uint32
+	generatedStringBytes  uint64
+	runtimeObjects        uint64
 }
 
 func (controller *executionController) enterCall() error {
@@ -134,6 +136,53 @@ func (controller *executionController) chargeModuleInitialization() error {
 	}
 	controller.moduleInitializations++
 	return nil
+}
+
+func (controller *executionController) chargeGeneratedStringBytes(count uint64) error {
+	if controller == nil || count == 0 {
+		return nil
+	}
+	used := controller.generatedStringBytes
+	if count > ^uint64(0)-used {
+		used = ^uint64(0)
+	} else {
+		used += count
+	}
+	if controller.limits.MaxGeneratedStringBytes != 0 && used > controller.limits.MaxGeneratedStringBytes {
+		return &LimitError{Kind: LimitGeneratedStringBytes, Limit: controller.limits.MaxGeneratedStringBytes, Used: used}
+	}
+	controller.generatedStringBytes = used
+	return nil
+}
+
+func (controller *executionController) chargeRuntimeObject() error {
+	return controller.chargeRuntimeObjects(1)
+}
+
+func (controller *executionController) chargeRuntimeObjects(count uint64) error {
+	if controller == nil {
+		return nil
+	}
+	if count == 0 {
+		return nil
+	}
+	used := controller.runtimeObjects
+	if count > ^uint64(0)-used {
+		used = ^uint64(0)
+	} else {
+		used += count
+	}
+	if controller.limits.MaxRuntimeObjects != 0 && used > controller.limits.MaxRuntimeObjects {
+		return &LimitError{Kind: LimitRuntimeObjects, Limit: controller.limits.MaxRuntimeObjects, Used: used}
+	}
+	controller.runtimeObjects = used
+	return nil
+}
+
+func (controller *executionController) releaseRuntimeObjects(count uint64) {
+	if controller != nil && count <= controller.runtimeObjects {
+		controller.runtimeObjects -= count
+	}
 }
 
 func newExecutionController(ctx context.Context, limits ExecutionLimits) (*executionController, error) {

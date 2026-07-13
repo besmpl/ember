@@ -125,15 +125,23 @@ func (cache *propertyIC) resolveExistingWrite(table *Table, key string, box *str
 	return true
 }
 
-func (cache *propertyIC) resolveWrite(table *Table, key string, box *stringBox, value Value) bool {
+func (cache *propertyIC) resolveWrite(table *Table, key string, box *stringBox, value Value, controller *executionController) bool {
+	if table == nil || table.checkEntryQuotaWithController(controller, StringValue(key), value) != nil {
+		return false
+	}
 	if cache.append(table, key, box, value) {
+		table.noteEntryMutation(StringValue(key), value, false)
 		return true
 	}
 	return cache.resolveExistingWrite(table, key, box, value)
 }
 
-func (cache *propertyIC) resolveWriteCounted(table *Table, key string, box *stringBox, value Value, counts *directFramePICCounts) bool {
+func (cache *propertyIC) resolveWriteCounted(table *Table, key string, box *stringBox, value Value, counts *directFramePICCounts, controller *executionController) bool {
+	if table == nil || table.checkEntryQuotaWithController(controller, StringValue(key), value) != nil {
+		return false
+	}
 	if cache.append(table, key, box, value) {
+		table.noteEntryMutation(StringValue(key), value, false)
 		counts.addPointerHit()
 		counts.addHit(0)
 		return true

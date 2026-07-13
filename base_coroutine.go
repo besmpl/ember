@@ -62,6 +62,12 @@ func newVMCoroutine(globals *globalEnv, root *closure) *vmCoroutine {
 }
 
 func newVMCoroutineChecked(globals *globalEnv, root *closure) (*vmCoroutine, error) {
+	controller := executionControllerForGlobals(globals)
+	if controller != nil {
+		if err := controller.chargeRuntimeObjects(2); err != nil {
+			return nil, err
+		}
+	}
 	owner := runtimeOwnerFromGlobals(globals)
 	coroutineGlobals := globals
 	if globals != nil && globals.pooled {
@@ -82,6 +88,9 @@ func newVMCoroutineChecked(globals *globalEnv, root *closure) (*vmCoroutine, err
 	coroutine.userdata = NewUserData(coroutine)
 	if owner != nil {
 		if err := owner.retainCoroutine(coroutine); err != nil {
+			if controller != nil {
+				controller.releaseRuntimeObjects(2)
+			}
 			coroutine.disposeFrames()
 			return nil, err
 		}

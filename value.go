@@ -177,9 +177,10 @@ type vmStackOwner struct {
 }
 
 type cell struct {
-	value Value
-	owner *vmStackOwner
-	index int
+	value                Value
+	owner                *vmStackOwner
+	index                int
+	runtimeObjectCharged bool
 }
 
 func (c *cell) get() Value {
@@ -264,6 +265,7 @@ type Table struct {
 	arrayValueVersion   uint32
 	genericVersion      uint32
 	genericValueVersion uint32
+	entryCount          uint64
 }
 
 type tableStorage struct {
@@ -1188,47 +1190,142 @@ func (t *Table) Set(key Value, value Value) error {
 }
 
 func (t *Table) rawSet(key Value, value Value) error {
+	return t.rawSetWithController(nil, key, value)
+}
+
+func (t *Table) rawSetWithController(controller *executionController, key Value, value Value) error {
 	if t == nil {
 		return fmt.Errorf("table: nil table")
 	}
+	if err := t.checkEntryQuotaWithController(controller, key, value); err != nil {
+		return err
+	}
+	existed := false
+	if current, err := t.rawGet(key); err == nil {
+		existed = !current.IsNil()
+	}
 	if index, ok := tableArrayIndexFromValue(key); ok {
-		return t.rawSetArrayIndex(index, value)
+		err := t.rawSetArrayIndex(index, value)
+		t.noteEntryMutation(key, value, existed)
+		return err
 	}
 	storedKey, ok := tableKeyFromValue(key)
 	if err := validateTableKey(key, ok); err != nil {
 		return err
 	}
 	if storedKey.kind == StringKind {
-		return t.rawSetStringKey(storedKey, value)
+		return t.rawSetStringKeyWithController(controller, storedKey, value)
 	}
 	t.setRawGenericField(storedKey, value)
+	t.noteEntryMutation(key, value, existed)
 	return nil
+}
+
+func (t *Table) checkEntryQuotaWithController(controller *executionController, key Value, value Value) error {
+	if t == nil || controller == nil || controller.limits.MaxTableEntriesPerTable == 0 || value.IsNil() {
+		return nil
+	}
+	limit := controller.limits.MaxTableEntriesPerTable
+	current, err := t.rawGet(key)
+	if err != nil {
+		return err
+	}
+	if !current.IsNil() || t.entryCount < limit {
+		return nil
+	}
+	return &LimitError{Kind: LimitTableEntriesPerTable, Limit: limit, Used: t.entryCount + 1}
+}
+
+func (t *Table) checkEntryQuota(key Value, value Value) error {
+	return t.checkEntryQuotaWithController(nil, key, value)
+}
+
+func (t *Table) noteEntryMutation(key Value, value Value, existed bool) {
+	if t == nil {
+		return
+	}
+	if !existed && !value.IsNil() {
+		t.entryCount++
+	} else if existed && value.IsNil() && t.entryCount > 0 {
+		t.entryCount--
+	}
 }
 
 func (t *Table) rawSetString(key string, value Value) error {
 	if t == nil {
 		return fmt.Errorf("table: nil table")
 	}
+	old, _ := t.rawGetString(key)
 	t.setRawStringField(key, value)
+	t.noteEntryMutation(StringValue(key), value, !old.IsNil())
+	return nil
+}
+
+func (t *Table) setRawStringFieldBoxWithController(controller *executionController, key string, box *stringBox, value Value) error {
+	if t == nil {
+		return fmt.Errorf("table: nil table")
+	}
+	if err := t.checkEntryQuotaWithController(controller, StringValue(key), value); err != nil {
+		return err
+	}
+	old, _ := t.rawGetString(key)
+	t.setRawStringFieldBox(key, box, value)
+	t.noteEntryMutation(StringValue(key), value, !old.IsNil())
 	return nil
 }
 
 func (t *Table) rawSetStringKey(key tableKey, value Value) error {
+	return t.rawSetStringKeyWithController(nil, key, value)
+}
+
+func (t *Table) rawSetStringKeyWithController(controller *executionController, key tableKey, value Value) error {
 	if t == nil {
 		return fmt.Errorf("table: nil table")
 	}
+	if err := t.checkEntryQuotaWithController(controller, StringValue(key.str), value); err != nil {
+		return err
+	}
+	old, _ := t.rawGetStringKey(key)
 	t.setRawStringFieldBox(key.str, key.strBox, value)
+	t.noteEntryMutation(StringValue(key.str), value, !old.IsNil())
 	return nil
 }
 
 func (t *Table) rawSetKey(storedKey tableKey, value Value) error {
+	return t.rawSetKeyWithController(nil, storedKey, value)
+}
+
+func tableKeyValue(key tableKey) Value {
+	switch key.kind {
+	case StringKind:
+		return StringValue(key.str)
+	case NumberKind:
+		return NumberValue(key.number)
+	case BoolKind:
+		return BoolValue(key.bool)
+	case TableKind:
+		return TableValue(key.table)
+	case UserDataKind:
+		return UserDataValue(key.userdata)
+	default:
+		return NilValue()
+	}
+}
+
+func (t *Table) rawSetKeyWithController(controller *executionController, storedKey tableKey, value Value) error {
 	if t == nil {
 		return fmt.Errorf("table: nil table")
 	}
 	if storedKey.kind == StringKind {
-		return t.rawSetStringKey(storedKey, value)
+		return t.rawSetStringKeyWithController(controller, storedKey, value)
 	}
+	key := tableKeyValue(storedKey)
+	if err := t.checkEntryQuotaWithController(controller, key, value); err != nil {
+		return err
+	}
+	old, _ := t.rawGenericField(storedKey)
 	t.setRawGenericField(storedKey, value)
+	t.noteEntryMutation(key, value, !old.IsNil())
 	return nil
 }
 
@@ -1363,6 +1460,7 @@ func (t *Table) clearRawStorage() {
 	if t == nil {
 		return
 	}
+	t.entryCount = 0
 
 	clear(t.array)
 	t.array = nil

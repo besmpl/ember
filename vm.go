@@ -60,6 +60,11 @@ func executeProto(ctx context.Context, proto *Proto, globals *globalEnv, options
 		}
 		options.controller = controller
 	}
+	if globals != nil {
+		previousController := globals.controller
+		globals.controller = options.controller
+		defer func() { globals.controller = previousController }()
+	}
 	// The canonical scalar runner has no owner, globals, upvalues, or
 	// suspension state. Fixed arguments are imported into its per-run slot
 	// state; everything else stays on the established VM until the
@@ -1183,18 +1188,47 @@ func directFrameFail(err error) directFrameSideExit {
 	return directFrameSideExit{kind: directFrameSideExitFail, reason: directFrameSideExitReasonError, err: err}
 }
 
-func (thread *vmThread) functionValueWithCapturedUpvalues(proto *Proto, captured capturedUpvalueSet) Value {
+func (thread *vmThread) functionValueWithCapturedUpvalues(proto *Proto, captured capturedUpvalueSet) (Value, error) {
+	if thread != nil && captured.count > 0 {
+		for i := 0; i < captured.count; i++ {
+			var candidate *cell
+			if captured.count <= len(captured.cells) {
+				candidate = captured.cells[i]
+			} else {
+				candidate = captured.cellSpill[i]
+			}
+			if candidate == nil {
+				continue
+			}
+			if candidate.runtimeObjectCharged {
+				continue
+			}
+			if err := thread.chargeRuntimeObject(); err != nil {
+				return NilValue(), err
+			}
+			candidate.runtimeObjectCharged = true
+		}
+	}
 	if captured.count == 0 {
 		if proto != nil && proto.reuseZeroCaptureClosure {
 			instance := thread.functionInstance(proto)
 			if instance != nil {
 				if instance.canonicalClosure == nil {
+					if err := thread.chargeRuntimeObject(); err != nil {
+						return NilValue(), err
+					}
 					instance.canonicalClosure = &closure{proto: proto}
 				}
-				return closureFunctionValue(instance.canonicalClosure)
+				return closureFunctionValue(instance.canonicalClosure), nil
 			}
 		}
-		return functionValue(proto, nil)
+		if err := thread.chargeRuntimeObject(); err != nil {
+			return NilValue(), err
+		}
+		return functionValue(proto, nil), nil
+	}
+	if err := thread.chargeRuntimeObject(); err != nil {
+		return NilValue(), err
 	}
 	closure := &closure{proto: proto}
 	if captured.count <= len(closure.inlineUpvalues) {
@@ -1206,12 +1240,12 @@ func (thread *vmThread) functionValueWithCapturedUpvalues(proto *Proto, captured
 			closure.upvalueValues = closure.inlineUpvalueValues[:captured.count]
 			closure.upvalueValueOK = closure.inlineUpvalueOK[:captured.count]
 		}
-		return closureFunctionValue(closure)
+		return closureFunctionValue(closure), nil
 	}
 	closure.upvalues = captured.cellSpill
 	closure.upvalueValues = captured.valueSpill
 	closure.upvalueValueOK = captured.valueOKSpill
-	return closureFunctionValue(closure)
+	return closureFunctionValue(closure), nil
 }
 
 func (exit directFrameSideExit) resumesDirectFrame() bool {
@@ -1660,15 +1694,44 @@ func (thread *vmThread) internStringValue(text string) Value {
 	return stringValueFromBox(box)
 }
 
-func (thread *vmThread) internStringConcatValues(values []Value) (Value, bool) {
+func (thread *vmThread) generatedStringValue(text string) (Value, error) {
+	if thread == nil {
+		return StringValue(text), nil
+	}
+	if thread != nil && thread.stringIntern != nil {
+		if box, ok := thread.stringIntern[text]; ok {
+			return stringValueFromBox(box), nil
+		}
+	}
+	if thread != nil && thread.controller != nil {
+		if err := thread.controller.chargeGeneratedStringBytes(uint64(len(text))); err != nil {
+			return NilValue(), err
+		}
+	}
+	return thread.internStringValue(text), nil
+}
+
+func generatedStringValueWithController(thread *vmThread, controller *executionController, text string) (Value, error) {
+	if thread != nil {
+		return thread.generatedStringValue(text)
+	}
+	if controller != nil {
+		if err := controller.chargeGeneratedStringBytes(uint64(len(text))); err != nil {
+			return NilValue(), err
+		}
+	}
+	return StringValue(text), nil
+}
+
+func (thread *vmThread) internStringConcatValues(values []Value) (Value, bool, error) {
 	if thread == nil || len(values) == 0 || len(values) > len(stringConcatKey{}.values) {
-		return NilValue(), false
+		return NilValue(), false, nil
 	}
 	var key stringConcatKey
 	key.count = uint8(len(values))
 	for i, value := range values {
 		if valueKind(value) != StringKind {
-			return NilValue(), false
+			return NilValue(), false, nil
 		}
 		key.values[i] = value.stringBox()
 	}
@@ -1676,7 +1739,7 @@ func (thread *vmThread) internStringConcatValues(values []Value) (Value, bool) {
 		thread.stringConcatIntern = make(map[stringConcatKey]*stringBox, 64)
 	}
 	if box, ok := thread.stringConcatIntern[key]; ok {
-		return stringValueFromBox(box), true
+		return stringValueFromBox(box), true, nil
 	}
 	if len(thread.stringConcatIntern) >= 2048 {
 		thread.stringConcatIntern = make(map[stringConcatKey]*stringBox, 64)
@@ -1692,6 +1755,11 @@ func (thread *vmThread) internStringConcatValues(values []Value) (Value, bool) {
 		box = thread.stringIntern[text]
 	}
 	if box == nil {
+		if thread.controller != nil {
+			if err := thread.controller.chargeGeneratedStringBytes(uint64(len(text))); err != nil {
+				return NilValue(), true, err
+			}
+		}
 		box = newStringBox(text)
 		if thread.stringIntern == nil {
 			thread.stringIntern = make(map[string]*stringBox, 64)
@@ -1699,7 +1767,7 @@ func (thread *vmThread) internStringConcatValues(values []Value) (Value, bool) {
 		thread.stringIntern[text] = box
 	}
 	thread.stringConcatIntern[key] = box
-	return stringValueFromBox(box), true
+	return stringValueFromBox(box), true, nil
 }
 
 func (thread *vmThread) concatRawChainString(values []Value) (string, bool, error) {
@@ -1792,9 +1860,12 @@ func (thread *vmThread) runScriptProtectedWithUpvalues(proto *Proto, args []Valu
 
 func (thread *vmThread) activate() func() {
 	previousThread := thread.globals.thread
+	previousController := thread.globals.controller
 	thread.globals.thread = thread
+	thread.globals.controller = thread.controller
 	return func() {
 		thread.globals.thread = previousThread
+		thread.globals.controller = previousController
 	}
 }
 
@@ -3132,6 +3203,23 @@ func (thread *vmThread) ensureStackOwner() *vmStackOwner {
 	return thread.stackOwner
 }
 
+func (thread *vmThread) newScriptTable(arrayCapacity, fieldCapacity int) (*Table, error) {
+	if thread != nil && thread.controller != nil {
+		if err := thread.controller.chargeRuntimeObject(); err != nil {
+			return nil, err
+		}
+	}
+	table := newTableWithCapacity(arrayCapacity, fieldCapacity)
+	return table, nil
+}
+
+func (thread *vmThread) chargeRuntimeObject() error {
+	if thread == nil || thread.controller == nil {
+		return nil
+	}
+	return thread.controller.chargeRuntimeObject()
+}
+
 // openUpvalue returns the unique live cell for an absolute stack slot on this
 // thread. Keeping the index on the thread makes captures from the same slot
 // share one cell even when multiple closures observe it.
@@ -3856,8 +3944,13 @@ func (frame *vmFrame) registerCell(index int) *cell {
 }
 
 func (thread *vmThread) registerCell(frame *vmFrame, index int) *cell {
+	cell, _ := thread.registerCellWithError(frame, index)
+	return cell
+}
+
+func (thread *vmThread) registerCellWithError(frame *vmFrame, index int) (*cell, error) {
 	if thread == nil || frame == nil {
-		return nil
+		return nil, nil
 	}
 	if len(frame.cells) < len(frame.registers) {
 		cells := make([]*cell, len(frame.registers))
@@ -3872,7 +3965,7 @@ func (thread *vmThread) registerCell(frame *vmFrame, index int) *cell {
 		}
 		frame.cells[index] = thread.openUpvalue(owner, frame.registerBase+index)
 	}
-	return frame.cells[index]
+	return frame.cells[index], nil
 }
 
 func (frame *vmFrame) closeCells() {
@@ -4326,7 +4419,7 @@ func directFrameTableSetIsland(globals *globalEnv, table *Table, key Value, valu
 			return true, err
 		}
 		if !current.IsNil() || table == nil || table.metatable == nil {
-			return true, table.rawSet(key, value)
+			return true, runtimeTableAccess(globals).rawSet(table, key, value)
 		}
 		if seen != nil {
 			if seen[table] {
@@ -4343,7 +4436,7 @@ func directFrameTableSetIsland(globals *globalEnv, table *Table, key Value, valu
 			return true, err
 		}
 		if !ok {
-			return true, table.rawSet(key, value)
+			return true, runtimeTableAccess(globals).rawSet(table, key, value)
 		}
 		if newIndexTable, ok := newIndex.Table(); ok {
 			table = newIndexTable
@@ -5986,7 +6079,11 @@ reload:
 			thread.globals.setSlot(proto.globalSlot(c, name), name, registers[b])
 
 		case opNewTable:
-			registers[a] = TableValue(newTableWithCapacity(b, c))
+			table, err := thread.newScriptTable(b, c)
+			if err != nil {
+				return directFrameFail(err)
+			}
+			registers[a] = TableValue(table)
 
 		case opMove:
 			registers[a] = registers[b]
@@ -6049,16 +6146,18 @@ reload:
 				keyValue := constants[b]
 				var err error
 				if valueKind(keyValue) == StringKind {
-					table.setRawStringFieldBox(keyValue.stringText(), keyValue.stringBox(), registers[c])
+					if err := table.setRawStringFieldBoxWithController(thread.controller, keyValue.stringText(), keyValue.stringBox(), registers[c]); err != nil {
+						return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field failed: %w", err)))
+					}
 				} else {
-					err = table.rawSetKey(constantKeys[b], registers[c])
+					err = table.rawSetKeyWithController(thread.controller, constantKeys[b], registers[c])
 				}
 				if err != nil {
 					return directFrameFail(fmt.Errorf("run: set field failed: %w", err))
 				}
 				break
 			}
-			if err := table.rawSet(constants[b], registers[c]); err != nil {
+			if err := table.rawSetWithController(thread.controller, constants[b], registers[c]); err != nil {
 				return directFrameFail(fmt.Errorf("run: set field failed: %w", err))
 			}
 
@@ -6083,7 +6182,7 @@ reload:
 				}
 				fieldCache = functionInstance.fieldCacheAt(cacheID)
 				if fieldCache.writeCounted(table, value, picCounts) ||
-					fieldCache.resolveWriteCounted(table, key, keyValue.stringBox(), value, picCounts) {
+					fieldCache.resolveWriteCounted(table, key, keyValue.stringBox(), value, picCounts, thread.controller) {
 					break
 				}
 				// Overflow and unshapeable layouts retain the existing dynamic
@@ -6124,7 +6223,9 @@ reload:
 			}
 			// The boxed constant is retained for new keys and for the nil/delete
 			// path; host-facing raw-string adapters remain text-only.
-			table.setRawStringFieldBox(key, keyValue.stringBox(), value)
+			if err := table.setRawStringFieldBoxWithController(thread.controller, key, keyValue.stringBox(), value); err != nil {
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field failed: %w", err)))
+			}
 			fieldCache.observe(table, key, keyValue.stringBox())
 
 		case opSetStringFieldIndex:
@@ -6183,7 +6284,7 @@ reload:
 			} else {
 				picCounts.addInvalidKeyFallback()
 			}
-			if err := nextTable.rawSet(key, registers[d]); err != nil {
+			if err := nextTable.rawSetWithController(thread.controller, key, registers[d]); err != nil {
 				return directFrameFail(fmt.Errorf("run: set index failed: %w", err))
 			}
 
@@ -6358,7 +6459,7 @@ reload:
 			} else {
 				picCounts.addInvalidKeyFallback()
 			}
-			if err := table.rawSet(registers[b], registers[c]); err != nil {
+			if err := table.rawSetWithController(thread.controller, registers[b], registers[c]); err != nil {
 				return directFrameFail(fmt.Errorf("run: set index failed: %w", err))
 			}
 
@@ -6423,8 +6524,15 @@ reload:
 
 		case opClosure:
 			child := proto.prototypes[b]
-			captured := thread.captureUpvalues(child, frame)
-			registers[a] = thread.functionValueWithCapturedUpvalues(child, captured)
+			captured, err := thread.captureUpvalues(child, frame)
+			if err != nil {
+				return directFrameFail(err)
+			}
+			value, err := thread.functionValueWithCapturedUpvalues(child, captured)
+			if err != nil {
+				return directFrameFail(err)
+			}
+			registers[a] = value
 
 		case opPrepareIter:
 			iterValue := registers[a]
@@ -6909,7 +7017,9 @@ reload:
 				break
 			}
 			concatValues := [2]Value{left, right}
-			if value, ok := thread.internStringConcatValues(concatValues[:]); ok {
+			if value, ok, err := thread.internStringConcatValues(concatValues[:]); err != nil {
+				return directFrameFail(err)
+			} else if ok {
 				registers[a] = value
 				break
 			}
@@ -6921,10 +7031,16 @@ reload:
 			if err != nil {
 				return directFrameFail(fmt.Errorf("run: concat failed: %w", err))
 			}
-			registers[a] = thread.internStringValue(leftText + rightText)
+			value, err := thread.generatedStringValue(leftText + rightText)
+			if err != nil {
+				return directFrameFail(err)
+			}
+			registers[a] = value
 
 		case opConcatChain:
-			if value, ok := thread.internStringConcatValues(registers[b : b+c]); ok {
+			if value, ok, err := thread.internStringConcatValues(registers[b : b+c]); err != nil {
+				return directFrameFail(err)
+			} else if ok {
 				registers[a] = value
 				break
 			}
@@ -7801,7 +7917,11 @@ reload:
 				c = int(uint16(aux >> 16))
 				nextWord++
 			}
-			registers[a] = TableValue(newTableWithCapacity(b, c))
+			table, err := thread.newScriptTable(b, c)
+			if err != nil {
+				return directFrameExitAt(frame, pc, directFrameFail(err))
+			}
+			registers[a] = TableValue(table)
 
 		case opMove:
 			registers[a] = registers[b]
@@ -7876,16 +7996,18 @@ reload:
 				keyValue := constants[b]
 				var err error
 				if valueKind(keyValue) == StringKind {
-					table.setRawStringFieldBox(keyValue.stringText(), keyValue.stringBox(), registers[c])
+					if err := table.setRawStringFieldBoxWithController(thread.controller, keyValue.stringText(), keyValue.stringBox(), registers[c]); err != nil {
+						return directFrameFail(fmt.Errorf("run: set field failed: %w", err))
+					}
 				} else {
-					err = table.rawSetKey(constantKeys[b], registers[c])
+					err = table.rawSetKeyWithController(thread.controller, constantKeys[b], registers[c])
 				}
 				if err != nil {
 					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field failed: %w", err)))
 				}
 				break
 			}
-			if err := table.rawSet(constants[b], registers[c]); err != nil {
+			if err := table.rawSetWithController(thread.controller, constants[b], registers[c]); err != nil {
 				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field failed: %w", err)))
 			}
 
@@ -7909,7 +8031,7 @@ reload:
 					functionInstance = thread.functionInstance(proto)
 				}
 				fieldCache = functionInstance.fieldCacheAt(cacheID)
-				if fieldCache.write(table, value) || fieldCache.resolveWrite(table, key, keyValue.stringBox(), value) {
+				if fieldCache.write(table, value) || fieldCache.resolveWrite(table, key, keyValue.stringBox(), value, thread.controller) {
 					break
 				}
 				if table.needsDynamicStringFieldCache() {
@@ -7947,7 +8069,9 @@ reload:
 			}
 			// The boxed constant is retained for new keys and for the nil/delete
 			// path; host-facing raw-string adapters remain text-only.
-			table.setRawStringFieldBox(key, keyValue.stringBox(), value)
+			if err := table.setRawStringFieldBoxWithController(thread.controller, key, keyValue.stringBox(), value); err != nil {
+				return directFrameFail(fmt.Errorf("run: set field failed: %w", err))
+			}
 			fieldCache.observe(table, key, keyValue.stringBox())
 
 		case opSetStringFieldIndex:
@@ -8004,7 +8128,7 @@ reload:
 					break
 				}
 			}
-			if err := nextTable.rawSet(key, registers[d]); err != nil {
+			if err := nextTable.rawSetWithController(thread.controller, key, registers[d]); err != nil {
 				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set index failed: %w", err)))
 			}
 
@@ -8169,7 +8293,7 @@ reload:
 					break
 				}
 			}
-			if err := table.rawSet(registers[b], registers[c]); err != nil {
+			if err := table.rawSetWithController(thread.controller, registers[b], registers[c]); err != nil {
 				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set index failed: %w", err)))
 			}
 
@@ -8231,8 +8355,15 @@ reload:
 				nextWord++
 			}
 			child := proto.prototypes[b]
-			captured := thread.captureUpvalues(child, frame)
-			registers[a] = thread.functionValueWithCapturedUpvalues(child, captured)
+			captured, err := thread.captureUpvalues(child, frame)
+			if err != nil {
+				return directFrameExitAt(frame, pc, directFrameFail(err))
+			}
+			value, err := thread.functionValueWithCapturedUpvalues(child, captured)
+			if err != nil {
+				return directFrameExitAt(frame, pc, directFrameFail(err))
+			}
+			registers[a] = value
 
 		case opPrepareIter:
 			iterValue := registers[a]
@@ -8734,7 +8865,9 @@ reload:
 				break
 			}
 			concatValues := [2]Value{left, right}
-			if value, ok := thread.internStringConcatValues(concatValues[:]); ok {
+			if value, ok, err := thread.internStringConcatValues(concatValues[:]); err != nil {
+				return directFrameExitAt(frame, pc, directFrameFail(err))
+			} else if ok {
 				registers[a] = value
 				break
 			}
@@ -8746,14 +8879,20 @@ reload:
 			if err != nil {
 				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: concat failed: %w", err)))
 			}
-			registers[a] = thread.internStringValue(leftText + rightText)
+			value, err := thread.generatedStringValue(leftText + rightText)
+			if err != nil {
+				return directFrameExitAt(frame, pc, directFrameFail(err))
+			}
+			registers[a] = value
 
 		case opConcatChain:
 			if raw&wordcodeAuxBit != 0 {
 				c = int(int32(words[nextWord]))
 				nextWord++
 			}
-			if value, ok := thread.internStringConcatValues(registers[b : b+c]); ok {
+			if value, ok, err := thread.internStringConcatValues(registers[b : b+c]); err != nil {
+				return directFrameExitAt(frame, pc, directFrameFail(err))
+			} else if ok {
 				registers[a] = value
 				break
 			}
@@ -9971,7 +10110,10 @@ func binaryArithmeticValue(
 func concatValue(left Value, right Value, globals *globalEnv) (Value, error) {
 	text, err := valuesConcat(left, right)
 	if err == nil {
-		return stringValueInGlobalEnv(globals, text), nil
+		if thread := activeThread(globals); thread != nil {
+			return thread.generatedStringValue(text)
+		}
+		return StringValue(text), nil
 	}
 	if value, ok, metamethodErr := callBinaryMetamethod("__concat", left, right, globals); ok || metamethodErr != nil {
 		return value, metamethodErr
@@ -9985,10 +10127,16 @@ func concatChainValue(operands []Value, globals *globalEnv) (Value, error) {
 		return NilValue(), err
 	}
 	if ok {
-		return stringValueInGlobalEnv(globals, text), nil
+		if thread := activeThread(globals); thread != nil {
+			return thread.generatedStringValue(text)
+		}
+		return StringValue(text), nil
 	}
 	if len(operands) == 0 {
-		return stringValueInGlobalEnv(globals, ""), nil
+		if thread := activeThread(globals); thread != nil {
+			return thread.generatedStringValue("")
+		}
+		return StringValue(""), nil
 	}
 	result := operands[0]
 	for _, operand := range operands[1:] {
@@ -10597,9 +10745,9 @@ func hasCallMetamethod(value Value) (bool, error) {
 	return !metamethod.IsNil(), nil
 }
 
-func (thread *vmThread) captureUpvalues(proto *Proto, frame *vmFrame) capturedUpvalueSet {
+func (thread *vmThread) captureUpvalues(proto *Proto, frame *vmFrame) (capturedUpvalueSet, error) {
 	if len(proto.upvalues) == 0 {
-		return capturedUpvalueSet{}
+		return capturedUpvalueSet{}, nil
 	}
 
 	captured := capturedUpvalueSet{count: len(proto.upvalues)}
@@ -10614,7 +10762,11 @@ func (thread *vmThread) captureUpvalues(proto *Proto, frame *vmFrame) capturedUp
 				captured.setValue(i, frame.register(desc.index))
 				continue
 			}
-			captured.setCell(i, thread.registerCell(frame, desc.index))
+			cell, err := thread.registerCellWithError(frame, desc.index)
+			if err != nil {
+				return capturedUpvalueSet{}, err
+			}
+			captured.setCell(i, cell)
 			continue
 		}
 
@@ -10624,7 +10776,7 @@ func (thread *vmThread) captureUpvalues(proto *Proto, frame *vmFrame) capturedUp
 		}
 		captured.setCell(i, frame.upvalues[desc.index])
 	}
-	return captured
+	return captured, nil
 }
 
 func (set *capturedUpvalueSet) setCell(index int, cell *cell) {

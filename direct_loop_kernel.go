@@ -252,16 +252,18 @@ func runDirectLoopKernel(thread *vmThread, frame *vmFrame, kernel *directLoopKer
 				keyValue := constants[b]
 				var err error
 				if valueKind(keyValue) == StringKind {
-					table.setRawStringFieldBox(keyValue.stringText(), keyValue.stringBox(), registers[c])
+					if err := table.setRawStringFieldBoxWithController(executionControllerForGlobals(thread.globals), keyValue.stringText(), keyValue.stringBox(), registers[c]); err != nil {
+						return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field failed: %w", err)))
+					}
 				} else {
-					err = table.rawSetKey(constantKeys[b], registers[c])
+					err = table.rawSetKeyWithController(executionControllerForGlobals(thread.globals), constantKeys[b], registers[c])
 				}
 				if err != nil {
 					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field failed: %w", err)))
 				}
 				break
 			}
-			if err := table.rawSet(constants[b], registers[c]); err != nil {
+			if err := table.rawSetWithController(executionControllerForGlobals(thread.globals), constants[b], registers[c]); err != nil {
 				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field failed: %w", err)))
 			}
 		case opSetStringField:
@@ -280,7 +282,7 @@ func runDirectLoopKernel(thread *vmThread, frame *vmFrame, kernel *directLoopKer
 					functionInstance = thread.functionInstance(proto)
 				}
 				fieldCache = functionInstance.fieldCacheAt(cacheID)
-				if fieldCache.write(table, value) || fieldCache.resolveWrite(table, key, keyValue.stringBox(), value) {
+				if fieldCache.write(table, value) || fieldCache.resolveWrite(table, key, keyValue.stringBox(), value, executionControllerForGlobals(thread.globals)) {
 					break
 				}
 				if table.needsDynamicStringFieldCache() {
@@ -318,7 +320,9 @@ func runDirectLoopKernel(thread *vmThread, frame *vmFrame, kernel *directLoopKer
 			}
 			// The boxed constant is retained for new keys and for the nil/delete
 			// path; host-facing raw-string adapters remain text-only.
-			table.setRawStringFieldBox(key, keyValue.stringBox(), value)
+			if err := table.setRawStringFieldBoxWithController(executionControllerForGlobals(thread.globals), key, keyValue.stringBox(), value); err != nil {
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set field failed: %w", err)))
+			}
 			fieldCache.observe(table, key, keyValue.stringBox())
 		case opSetStringFieldIndex:
 			cacheID := ins.cacheID
@@ -368,7 +372,7 @@ func runDirectLoopKernel(thread *vmThread, frame *vmFrame, kernel *directLoopKer
 					break
 				}
 			}
-			if err := nextTable.rawSet(key, registers[d]); err != nil {
+			if err := nextTable.rawSetWithController(executionControllerForGlobals(thread.globals), key, registers[d]); err != nil {
 				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set index failed: %w", err)))
 			}
 		case opGetStringField:
@@ -518,7 +522,7 @@ func runDirectLoopKernel(thread *vmThread, frame *vmFrame, kernel *directLoopKer
 					break
 				}
 			}
-			if err := table.rawSet(registers[b], registers[c]); err != nil {
+			if err := table.rawSetWithController(executionControllerForGlobals(thread.globals), registers[b], registers[c]); err != nil {
 				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: set index failed: %w", err)))
 			}
 		case opGetIndex:

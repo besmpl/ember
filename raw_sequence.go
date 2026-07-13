@@ -3,8 +3,13 @@ package ember
 import "fmt"
 
 type rawSequence struct {
-	table *Table
-	label string
+	table      *Table
+	label      string
+	controller *executionController
+}
+
+func newRawSequenceWithController(label string, table *Table, controller *executionController) rawSequence {
+	return rawSequence{table: table, label: label, controller: controller}
 }
 
 func newRawSequence(label string, table *Table) rawSequence {
@@ -31,7 +36,7 @@ func (s rawSequence) get(index int) (Value, error) {
 }
 
 func (s rawSequence) set(index int, value Value) error {
-	if err := s.table.rawSet(NumberValue(float64(index)), value); err != nil {
+	if err := s.table.rawSetWithController(s.controller, NumberValue(float64(index)), value); err != nil {
 		return fmt.Errorf("%s: %w", s.label, err)
 	}
 	return nil
@@ -61,7 +66,13 @@ func (s rawSequence) insert(position int, value Value) error {
 		return fmt.Errorf("%s: position %d out of range", s.label, position)
 	}
 	if s.table.canUseFastArraySequence(length) {
+		if err := s.table.checkEntryQuotaWithController(s.controller, NumberValue(float64(position)), value); err != nil {
+			return err
+		}
 		s.table.fastArrayInsert(position, value)
+		if !value.IsNil() {
+			s.table.entryCount++
+		}
 		return nil
 	}
 	for index := length; index >= position; index-- {
@@ -88,7 +99,11 @@ func (s rawSequence) remove(position int) (Value, error) {
 		return NilValue(), nil
 	}
 	if s.table.canUseFastArraySequence(length) {
-		return s.table.fastArrayRemove(position), nil
+		removed := s.table.fastArrayRemove(position)
+		if !removed.IsNil() && s.table.entryCount > 0 {
+			s.table.entryCount--
+		}
+		return removed, nil
 	}
 	removed, err := s.get(position)
 	if err != nil {
@@ -142,6 +157,15 @@ func (t *Table) fastArrayAppend(value Value) {
 	}
 }
 
+func (t *Table) fastArrayAppendWithController(controller *executionController, value Value) error {
+	if err := t.checkEntryQuotaWithController(controller, NumberValue(float64(len(t.array)+1)), value); err != nil {
+		return err
+	}
+	t.fastArrayAppend(value)
+	t.noteEntryMutation(NumberValue(float64(len(t.array))), value, false)
+	return nil
+}
+
 func (t *Table) fastArrayInsert(position int, value Value) {
 	index := position - 1
 	t.growFastArray(1)
@@ -150,6 +174,17 @@ func (t *Table) fastArrayInsert(position int, value Value) {
 	if value.IsNil() {
 		t.arrayHasNil = true
 	}
+}
+
+func (t *Table) fastArrayInsertWithController(controller *executionController, position int, value Value) error {
+	if err := t.checkEntryQuotaWithController(controller, NumberValue(float64(position)), value); err != nil {
+		return err
+	}
+	t.fastArrayInsert(position, value)
+	if !value.IsNil() {
+		t.entryCount++
+	}
+	return nil
 }
 
 func (t *Table) growFastArray(extra int) {

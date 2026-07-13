@@ -29,6 +29,12 @@ const (
 	LimitModuleInitializations LimitKind = "module-initializations"
 	// LimitCoroutines identifies the live runtime-owned coroutine limit.
 	LimitCoroutines LimitKind = "coroutines"
+	// LimitGeneratedStringBytes identifies dynamically generated UTF-8 bytes.
+	LimitGeneratedStringBytes LimitKind = "generated-string-bytes"
+	// LimitTableEntriesPerTable identifies active entries in one table.
+	LimitTableEntriesPerTable LimitKind = "table-entries-per-table"
+	// LimitRuntimeObjects identifies script-created runtime objects.
+	LimitRuntimeObjects LimitKind = "runtime-objects"
 )
 
 // ErrLimitExceeded reports that a configured execution or compilation
@@ -62,6 +68,9 @@ type ExecutionLimits struct {
 	MaxCallDepth             uint32
 	MaxModuleInitializations uint32
 	MaxCoroutines            uint32
+	MaxGeneratedStringBytes  uint64
+	MaxTableEntriesPerTable  uint64
+	MaxRuntimeObjects        uint64
 }
 
 func normalizeExecutionLimits(legacy uint64, limits ExecutionLimits) (ExecutionLimits, error) {

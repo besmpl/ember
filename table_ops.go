@@ -9,6 +9,26 @@ type tableAccess struct {
 	functionMetamethods bool
 }
 
+func executionControllerForGlobals(globals *globalEnv) *executionController {
+	if globals == nil {
+		return nil
+	}
+	if globals.thread != nil {
+		return globals.thread.controller
+	}
+	return globals.controller
+}
+
+func (a tableAccess) rawSet(table *Table, key, value Value) error {
+	if a.globals != nil {
+		if a.globals.thread != nil {
+			return table.rawSetWithController(a.globals.thread.controller, key, value)
+		}
+		return table.rawSetWithController(a.globals.controller, key, value)
+	}
+	return table.rawSet(key, value)
+}
+
 func publicTableAccess() tableAccess {
 	return tableAccess{}
 }
@@ -91,7 +111,7 @@ func (a tableAccess) setSeen(table *Table, key Value, value Value, seen map[*Tab
 			return err
 		}
 		if !current.IsNil() || table == nil || table.metatable == nil {
-			return table.rawSet(key, value)
+			return a.rawSet(table, key, value)
 		}
 		if seen != nil {
 			if seen[table] {
@@ -108,7 +128,7 @@ func (a tableAccess) setSeen(table *Table, key Value, value Value, seen map[*Tab
 			return err
 		}
 		if !ok {
-			return table.rawSet(key, value)
+			return a.rawSet(table, key, value)
 		}
 		if newIndexTable, ok := newIndex.Table(); ok {
 			table = newIndexTable
