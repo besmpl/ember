@@ -41,6 +41,118 @@ type bytecodeIROptimizationFacts struct {
 	constants         []Value
 	capturedRegisters []bool
 	constantPool      *bytecodeBuilder
+	optimizationPool  *optimizationConstantPool
+}
+
+// optimizationConstantPool tracks constants created while folding IR. Its
+// seed aliases the durable builder pool so existing operand indices remain
+// valid, while new values stay local until the final compaction step.
+type optimizationConstantPool struct {
+	seed        []Value
+	pending     []Value
+	pendingBase int
+	pendingCap  int
+}
+
+func newOptimizationConstantPool(seed []Value, pendingCapacity int) *optimizationConstantPool {
+	pool := &optimizationConstantPool{
+		seed:        seed,
+		pendingBase: len(seed),
+		pendingCap:  pendingCapacity,
+	}
+	return pool
+}
+
+func (pool *optimizationConstantPool) intern(value Value) int {
+	if pool == nil {
+		return -1
+	}
+	if !isScalarConstant(value) {
+		return -1
+	}
+	for index, existing := range pool.seed {
+		if scalarConstantsEqual(existing, value) {
+			return index
+		}
+	}
+	index := pool.pendingBase + len(pool.pending)
+	if pool.pending == nil && pool.pendingCap > 0 {
+		pool.pending = make([]Value, 0, pool.pendingCap)
+	}
+	pool.pending = append(pool.pending, value)
+	return index
+}
+
+func (pool *optimizationConstantPool) valueAt(index int) (Value, bool) {
+	if pool == nil || index < 0 {
+		return Value{}, false
+	}
+	if index < len(pool.seed) {
+		return pool.seed[index], true
+	}
+	pending := index - pool.pendingBase
+	if pending < 0 || pending >= len(pool.pending) {
+		return Value{}, false
+	}
+	return pool.pending[pending], true
+}
+
+func compactOptimizationConstantPool(ir []bytecodeIRInstruction, pool *optimizationConstantPool, durable *bytecodeBuilder) ([]bytecodeIRInstruction, []Value) {
+	if pool == nil {
+		return ir, nil
+	}
+	total := len(pool.seed) + len(pool.pending)
+	used := make([]bool, total)
+	for _, instruction := range ir {
+		for _, operand := range [...]bytecodeOperand{instruction.operands.a, instruction.operands.b, instruction.operands.c, instruction.operands.d} {
+			if operand.kind == bytecodeOperandConstant && operand.value >= 0 && operand.value < total {
+				used[operand.value] = true
+			}
+		}
+	}
+	oldToNew := make([]int, total)
+	for index := range oldToNew {
+		oldToNew[index] = -1
+	}
+	if durable != nil {
+		durable.resetConstants(nil)
+	}
+	canonical := bytecodeBuilder{}
+	if durable == nil {
+		durable = &canonical
+	}
+	for oldIndex := 0; oldIndex < total; oldIndex++ {
+		if !used[oldIndex] {
+			continue
+		}
+		value, ok := pool.valueAt(oldIndex)
+		if !ok {
+			continue
+		}
+		canonicalIndex := durable.addConstant(value)
+		oldToNew[oldIndex] = canonicalIndex
+	}
+	optimized := ir
+	changed := false
+	for instructionIndex, instruction := range ir {
+		rewrite := func(operand bytecodeOperand, assign func(int)) {
+			if operand.kind != bytecodeOperandConstant || operand.value < 0 || operand.value >= len(oldToNew) || oldToNew[operand.value] < 0 {
+				return
+			}
+			if operand.value != oldToNew[operand.value] {
+				if !changed {
+					optimized = append([]bytecodeIRInstruction(nil), ir...)
+					changed = true
+				}
+				assign(oldToNew[operand.value])
+			}
+		}
+		rewrite(instruction.operands.a, func(value int) { optimized[instructionIndex].operands.a.value = value })
+		rewrite(instruction.operands.b, func(value int) { optimized[instructionIndex].operands.b.value = value })
+		rewrite(instruction.operands.c, func(value int) { optimized[instructionIndex].operands.c.value = value })
+		rewrite(instruction.operands.d, func(value int) { optimized[instructionIndex].operands.d.value = value })
+	}
+	return optimized, durable.constants
 }
 
 type bytecodeIROptimizerPlan struct {
@@ -66,6 +178,9 @@ func optimizeBytecodeIRWithFacts(ir []bytecodeIRInstruction, facts bytecodeIROpt
 	if !options.enabled(optimizationBytecodePeephole) {
 		return append([]bytecodeIRInstruction(nil), ir...)
 	}
+	if facts.constantPool != nil {
+		facts.optimizationPool = newOptimizationConstantPool(facts.constants, len(ir))
+	}
 	function := newFunctionIR(append([]bytecodeIRInstruction(nil), ir...))
 	// The optional passes only remove or rewrite their corresponding opcode
 	// families; they do not introduce a family that was absent at the start of
@@ -82,6 +197,15 @@ func optimizeBytecodeIRWithFacts(ir []bytecodeIRInstruction, facts bytecodeIROpt
 		function.replace(simplifyBytecodeIRControlFlow(function.instructions, bytecodeIROptimizationFacts{}))
 	}
 	function.replace(propagateBytecodeIRScalarConstants(function.instructions, facts))
+	// Folding can turn a long straight-line chain into independent loads. Drop
+	// those dead producers before move/coalescing inspect it, but pay for this
+	// extra analysis only when folding actually created pending constants.
+	if facts.optimizationPool != nil && len(facts.optimizationPool.pending) != 0 && len(function.instructions) > 256 {
+		function.replace(applyBytecodeIRRemovalSet(
+			function.instructions,
+			bytecodeIRDeadCodeRemovalSet(function.instructions, facts, function.currentAnalysis()),
+		))
+	}
 	if plan.runMoves {
 		function.replace(propagateBytecodeIRSingleUseMoves(function.instructions, function.currentAnalysis()))
 		function.replace(coalesceBytecodeIRMoveProducers(function.instructions, facts.capturedRegisters, function.currentAnalysis()))
@@ -96,15 +220,34 @@ func optimizeBytecodeIRWithFacts(ir []bytecodeIRInstruction, facts bytecodeIROpt
 	if plan.runControlFlow {
 		function.replace(simplifyBytecodeIRControlFlow(function.instructions, bytecodeIROptimizationFacts{}))
 	}
-	if facts.constantPool != nil {
-		constants := facts.scalarConstants()
-		compactedIR, compactedConstants := compactBytecodeIRConstants(function.instructions, constants)
-		function.replace(compactedIR)
-		if len(compactedConstants) != len(constants) {
-			facts.constantPool.resetConstants(compactedConstants)
+	if facts.optimizationPool != nil {
+		if len(facts.optimizationPool.pending) != 0 {
+			compactedIR, compactedConstants := compactOptimizationConstantPool(function.instructions, facts.optimizationPool, facts.constantPool)
+			function.replace(compactedIR)
+			if facts.constantPool != nil {
+				facts.constantPool.constants = compactedConstants
+			}
+		} else if facts.constantPool != nil {
+			compactedIR, compactedConstants := compactBytecodeIRConstants(function.instructions, facts.optimizationPool.seed)
+			function.replace(compactedIR)
+			if !sameValueSlices(compactedConstants, facts.optimizationPool.seed) {
+				facts.constantPool.resetConstants(compactedConstants)
+			}
 		}
 	}
 	return function.instructions
+}
+
+func sameValueSlices(left, right []Value) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func compactBytecodeIRConstants(ir []bytecodeIRInstruction, constants []Value) ([]bytecodeIRInstruction, []Value) {
@@ -315,7 +458,8 @@ func instructionProducesNumber(ins instruction, numberFacts registerSet, facts b
 }
 
 func constantIsNumber(facts bytecodeIROptimizationFacts, index int) bool {
-	return index >= 0 && index < len(facts.constants) && valueKind(facts.constants[index]) == NumberKind
+	value, ok := facts.scalarConstantAt(index)
+	return ok && valueKind(value) == NumberKind
 }
 
 func bytecodeIRPeepholeRemovalSet(ir []bytecodeIRInstruction, code []instruction, analysis *functionAnalysis) []bool {
@@ -424,7 +568,7 @@ func (resolver *bytecodeIRJumpResolver) resolve(pc int) (int, bool) {
 }
 
 func foldBytecodeIRConstantBranches(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts) bool {
-	if len(facts.constants) == 0 || !bytecodeIRHasJumpIfFalse(ir) {
+	if len(facts.scalarConstants()) == 0 || !bytecodeIRHasJumpIfFalse(ir) {
 		return false
 	}
 	constantFacts := bytecodeIRConstantFactsBefore(ir, facts)
@@ -434,14 +578,15 @@ func foldBytecodeIRConstantBranches(ir []bytecodeIRInstruction, facts bytecodeIR
 			continue
 		}
 		constant, ok := constantFacts[pc][ins.operands.a.value]
-		if !ok || constant < 0 || constant >= len(facts.constants) {
+		value, valid := facts.scalarConstantAt(constant)
+		if !ok || !valid {
 			continue
 		}
 		target, ok := bytecodeIRJumpTarget(ins)
 		if !ok {
 			continue
 		}
-		if facts.constants[constant].truthy() {
+		if value.truthy() {
 			target = pc + 1
 		}
 		ir[pc] = lowerInstructionToBytecodeIR(instruction{op: opJump, b: target}, ins.source)
@@ -714,6 +859,9 @@ func bytecodeIRScalarBlockState(states []scalarLatticeValue, block int, register
 }
 
 func (facts bytecodeIROptimizationFacts) scalarConstants() []Value {
+	if facts.optimizationPool != nil {
+		return facts.optimizationPool.seed
+	}
 	if facts.constantPool != nil {
 		return facts.constantPool.constants
 	}
@@ -721,6 +869,9 @@ func (facts bytecodeIROptimizationFacts) scalarConstants() []Value {
 }
 
 func (facts bytecodeIROptimizationFacts) scalarConstantAt(index int) (Value, bool) {
+	if facts.optimizationPool != nil {
+		return facts.optimizationPool.valueAt(index)
+	}
 	constants := facts.scalarConstants()
 	if index < 0 || index >= len(constants) || !isScalarConstant(constants[index]) {
 		return Value{}, false
@@ -732,8 +883,8 @@ func (facts bytecodeIROptimizationFacts) internScalarConstant(value Value) (int,
 	if !isScalarConstant(value) {
 		return 0, false
 	}
-	if facts.constantPool != nil {
-		return facts.constantPool.addConstant(value), true
+	if facts.optimizationPool != nil {
+		return facts.optimizationPool.intern(value), true
 	}
 	for index, constant := range facts.constants {
 		if scalarConstantsEqual(constant, value) {

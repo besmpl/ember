@@ -605,6 +605,7 @@ func legacyOptimizeCompilerStageIR(emission compilerStageEmission) compilerStage
 			constants:         constantPool.constants,
 			capturedRegisters: functionDraftCapturedRegisters(emission.children),
 			constantPool:      &constantPool,
+			optimizationPool:  newOptimizationConstantPool(constantPool.constants, 0),
 		},
 		defaultCompilerOptions().optimizations,
 	)
@@ -631,12 +632,9 @@ func legacyOptimizeBytecodeIRWithFacts(ir []bytecodeIRInstruction, facts bytecod
 	))
 	function.replace(simplifyBytecodeIRControlFlow(function.instructions, bytecodeIROptimizationFacts{}))
 	if facts.constantPool != nil {
-		constants := facts.scalarConstants()
-		compactedIR, compactedConstants := compactBytecodeIRConstants(function.instructions, constants)
+		compactedIR, compactedConstants := compactOptimizationConstantPool(function.instructions, facts.optimizationPool, facts.constantPool)
 		function.replace(compactedIR)
-		if len(compactedConstants) != len(constants) {
-			facts.constantPool.resetConstants(compactedConstants)
-		}
+		facts.constantPool.constants = compactedConstants
 	}
 	return function.instructions
 }
