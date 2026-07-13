@@ -20,6 +20,8 @@ type top10LuauCase struct {
 	want   string
 }
 
+var benchmarkEmberResultsSink []ember.Value
+
 var top10LuauCases = []top10LuauCase{
 	{
 		name: "arithmetic_for",
@@ -1286,6 +1288,28 @@ func TestScenarioLuauBenchmarksMatchExpectedResults(t *testing.T) {
 	testLuauCasesMatchExpectedResults(t, scenarioLuauCases)
 }
 
+func TestBenchmarkCaseValidation(t *testing.T) {
+	for _, group := range []struct {
+		name  string
+		cases []top10LuauCase
+	}{
+		{name: "top10", cases: top10LuauCases},
+		{name: "classic", cases: classicLuauCases},
+		{name: "scenario", cases: scenarioLuauCases},
+	} {
+		for _, tc := range group.cases {
+			t.Run(group.name+"/"+tc.name, func(t *testing.T) {
+				proto := benchmarkCompile(t, tc.source)
+				results, err := ember.Run(proto)
+				if err != nil {
+					t.Fatal(err)
+				}
+				validateTop10EmberResult(t, results, tc.want)
+			})
+		}
+	}
+}
+
 func TestTop10EmberRunAllocationBudgets(t *testing.T) {
 	if allocationInstrumentedTest() {
 		t.Skip("allocation budgets run only with the normal compiler/runtime instrumentation")
@@ -1305,6 +1329,12 @@ func TestTop10EmberRunAllocationBudgets(t *testing.T) {
 		}
 		t.Run(tc.name, func(t *testing.T) {
 			proto := benchmarkCompile(t, tc.source)
+			preflightResults, err := ember.Run(proto)
+			if err != nil {
+				t.Fatal(err)
+			}
+			validateTop10EmberResult(t, preflightResults, tc.want)
+			benchmarkEmberResultsSink = preflightResults
 			result := testing.Benchmark(func(b *testing.B) {
 				b.ReportAllocs()
 				for b.Loop() {
@@ -1312,11 +1342,10 @@ func TestTop10EmberRunAllocationBudgets(t *testing.T) {
 					if err != nil {
 						b.Fatal(err)
 					}
-					if got := top10EmberResultString(b, results); got != tc.want {
-						b.Fatalf("Ember result is %q, want %q", got, tc.want)
-					}
+					benchmarkEmberResultsSink = results
 				}
 			})
+			validateTop10EmberResult(t, benchmarkEmberResultsSink, tc.want)
 			bytesPerOp := uint64(result.AllocedBytesPerOp())
 			allocsPerOp := uint64(result.AllocsPerOp())
 			if bytesPerOp > budget.maxBytesPerOp {
@@ -1348,6 +1377,12 @@ func TestClassicEmberRunAllocationBudgets(t *testing.T) {
 		}
 		t.Run(tc.name, func(t *testing.T) {
 			proto := benchmarkCompile(t, tc.source)
+			preflightResults, err := ember.Run(proto)
+			if err != nil {
+				t.Fatal(err)
+			}
+			validateTop10EmberResult(t, preflightResults, tc.want)
+			benchmarkEmberResultsSink = preflightResults
 			result := testing.Benchmark(func(b *testing.B) {
 				b.ReportAllocs()
 				for b.Loop() {
@@ -1355,11 +1390,10 @@ func TestClassicEmberRunAllocationBudgets(t *testing.T) {
 					if err != nil {
 						b.Fatal(err)
 					}
-					if got := top10EmberResultString(b, results); got != tc.want {
-						b.Fatalf("Ember result is %q, want %q", got, tc.want)
-					}
+					benchmarkEmberResultsSink = results
 				}
 			})
+			validateTop10EmberResult(t, benchmarkEmberResultsSink, tc.want)
 			bytesPerOp := uint64(result.AllocedBytesPerOp())
 			allocsPerOp := uint64(result.AllocsPerOp())
 			if bytesPerOp > budget.maxBytesPerOp {
@@ -1437,6 +1471,12 @@ func TestScenarioEmberRunAllocationBudgets(t *testing.T) {
 		}
 		t.Run(tc.name, func(t *testing.T) {
 			proto := benchmarkCompile(t, tc.source)
+			preflightResults, err := ember.Run(proto)
+			if err != nil {
+				t.Fatal(err)
+			}
+			validateTop10EmberResult(t, preflightResults, tc.want)
+			benchmarkEmberResultsSink = preflightResults
 			result := testing.Benchmark(func(b *testing.B) {
 				b.ReportAllocs()
 				for b.Loop() {
@@ -1444,11 +1484,10 @@ func TestScenarioEmberRunAllocationBudgets(t *testing.T) {
 					if err != nil {
 						b.Fatal(err)
 					}
-					if got := top10EmberResultString(b, results); got != tc.want {
-						b.Fatalf("Ember result is %q, want %q", got, tc.want)
-					}
+					benchmarkEmberResultsSink = results
 				}
 			})
+			validateTop10EmberResult(t, benchmarkEmberResultsSink, tc.want)
 			bytesPerOp := uint64(result.AllocedBytesPerOp())
 			allocsPerOp := uint64(result.AllocsPerOp())
 			if bytesPerOp > budget.maxBytesPerOp {
@@ -1479,6 +1518,12 @@ func benchmarkLuauCases(b *testing.B, cases []top10LuauCase) {
 	for _, tc := range cases {
 		b.Run(tc.name+"/ember_run", func(b *testing.B) {
 			proto := benchmarkCompile(b, tc.source)
+			preflightResults, err := ember.Run(proto)
+			if err != nil {
+				b.Fatal(err)
+			}
+			validateTop10EmberResult(b, preflightResults, tc.want)
+			lastResults := preflightResults
 			b.ReportAllocs()
 			b.ResetTimer()
 
@@ -1487,21 +1532,37 @@ func benchmarkLuauCases(b *testing.B, cases []top10LuauCase) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				if got := top10EmberResultString(b, results); got != tc.want {
-					b.Fatalf("Ember result is %q, want %q", got, tc.want)
-				}
+				lastResults = results
+				benchmarkEmberResultsSink = results
 			}
+			b.StopTimer()
+			validateTop10EmberResult(b, lastResults, tc.want)
 		})
 
 		b.Run(tc.name+"/ember_compile_run", func(b *testing.B) {
+			preflightProto := benchmarkCompile(b, tc.source)
+			preflightResults, err := ember.Run(preflightProto)
+			if err != nil {
+				b.Fatal(err)
+			}
+			validateTop10EmberResult(b, preflightResults, tc.want)
 			b.ReportAllocs()
+			benchmarkEmberResultsSink = preflightResults
+			b.ResetTimer()
 
 			for b.Loop() {
-				got := runTop10EmberCase(b, tc)
-				if got != tc.want {
-					b.Fatalf("Ember result is %q, want %q", got, tc.want)
+				proto, err := ember.Compile(tc.source)
+				if err != nil {
+					b.Fatal(err)
 				}
+				results, err := ember.Run(proto)
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkEmberResultsSink = results
 			}
+			b.StopTimer()
+			validateTop10EmberResult(b, benchmarkEmberResultsSink, tc.want)
 		})
 
 		b.Run(tc.name+"/luau_cli_process", func(b *testing.B) {
@@ -1583,6 +1644,13 @@ func top10EmberResultString(tb testing.TB, results []ember.Value) string {
 	}
 	tb.Fatalf("Ember returned %s, want scalar benchmark result", result.Kind())
 	return ""
+}
+
+func validateTop10EmberResult(tb testing.TB, results []ember.Value, want string) {
+	tb.Helper()
+	if got := top10EmberResultString(tb, results); got != want {
+		tb.Fatalf("Ember result is %q, want %q", got, want)
+	}
 }
 
 func runTop10LuauCase(tb testing.TB, luauBin string, tc top10LuauCase) string {
