@@ -2722,7 +2722,7 @@ func appendConcatRawChain(dst []byte, values []Value) ([]byte, error) {
 }
 
 func formatLuauNumber(number float64) string {
-	if text, ok := smallNonNegativeIntegerString(number); ok {
+	if text, ok := smallIntegerString(number); ok {
 		return text
 	}
 	if number == math.Trunc(number) &&
@@ -2740,7 +2740,7 @@ func formatLuauNumber(number float64) string {
 }
 
 func appendLuauNumber(dst []byte, number float64) []byte {
-	if text, ok := smallNonNegativeIntegerString(number); ok {
+	if text, ok := smallIntegerString(number); ok {
 		return append(dst, text...)
 	}
 	if number == math.Trunc(number) &&
@@ -2757,21 +2757,23 @@ func appendLuauNumber(dst []byte, number float64) []byte {
 	return strconv.AppendFloat(dst, number, 'g', -1, 64)
 }
 
-func smallNonNegativeIntegerString(number float64) (string, bool) {
-	if number != math.Trunc(number) || math.Signbit(number) {
+func smallIntegerString(number float64) (string, bool) {
+	if number != math.Trunc(number) ||
+		(math.Signbit(number) && number == 0) ||
+		number < -999 || number > 999 {
 		return "", false
 	}
-	index := int(number)
-	if index < 0 || index >= len(smallNonNegativeIntegerStrings) || float64(index) != number {
+	index := int(number) + 999
+	if index < 0 || index >= len(smallIntegerStrings) || float64(index-999) != number {
 		return "", false
 	}
-	return smallNonNegativeIntegerStrings[index], true
+	return smallIntegerStrings[index], true
 }
 
-var smallNonNegativeIntegerStrings = func() [1000]string {
-	var values [1000]string
+var smallIntegerStrings = func() [1999]string {
+	var values [1999]string
 	for i := range values {
-		values[i] = strconv.Itoa(i)
+		values[i] = strconv.Itoa(i - 999)
 	}
 	return values
 }()
