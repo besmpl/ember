@@ -7,6 +7,7 @@ import (
 
 var (
 	errRuntimeOwnerActive   = errors.New("runtime owner is active")
+	errRuntimeOwnerBusy     = errors.New("runtime owner run is busy")
 	errRuntimeOwnerClosed   = errors.New("runtime owner is closed")
 	errRuntimeOwnerReleased = errors.New("runtime owner token is released")
 	errRuntimeOwnerInvalid  = errors.New("runtime owner argument is invalid")
@@ -73,8 +74,23 @@ func (owner *runtimeOwner) beginRun() (*runtimeRunLease, error) {
 	if owner.state == runtimeOwnerClosed {
 		return nil, errRuntimeOwnerClosed
 	}
+	if owner.activeRuns != 0 {
+		return nil, errRuntimeOwnerBusy
+	}
 	owner.activeRuns++
 	return &runtimeRunLease{owner: owner}, nil
+}
+
+func (owner *runtimeOwner) checkOpen() error {
+	if owner == nil {
+		return errRuntimeOwnerReleased
+	}
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if owner.state == runtimeOwnerClosed {
+		return errRuntimeOwnerClosed
+	}
+	return nil
 }
 
 func (lease *runtimeRunLease) end() {

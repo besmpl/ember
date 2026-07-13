@@ -244,6 +244,9 @@ func (r *Runtime) RunHook(ctx context.Context, hook string, args ...Value) (Hook
 	if err == errRuntimeOwnerClosed {
 		return report, fmt.Errorf("runtime: closed")
 	}
+	if err == errRuntimeOwnerBusy {
+		return report, fmt.Errorf("runtime: begin run: %w", ErrRuntimeBusy)
+	}
 	if err != nil {
 		return report, fmt.Errorf("runtime: begin run: %w", err)
 	}

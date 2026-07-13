@@ -30,14 +30,11 @@ func CaptureCallback(ctx context.Context, value Value) (Callback, error) {
 	if !ok || call.runtime == nil {
 		return Callback{}, fmt.Errorf("callback: missing runtime context")
 	}
-	lease, err := call.runtime.beginRun()
-	if err == errRuntimeOwnerClosed {
+	if err := call.runtime.owner.checkOpen(); err == errRuntimeOwnerClosed {
 		return Callback{}, fmt.Errorf("callback: runtime is closed")
-	}
-	if err != nil {
+	} else if err != nil {
 		return Callback{}, fmt.Errorf("callback: capture runtime: %w", err)
 	}
-	lease.end()
 	if _, ok := value.scriptFunction(); !ok {
 		return Callback{}, fmt.Errorf("callback: value is %s, want script function", value.Kind())
 	}
@@ -70,6 +67,9 @@ func (cb Callback) Call(ctx context.Context, args ...Value) ([]Value, error) {
 	lease, err := cb.call.runtime.beginRun()
 	if err == errRuntimeOwnerClosed {
 		return nil, fmt.Errorf("callback: runtime is closed")
+	}
+	if err == errRuntimeOwnerBusy {
+		return nil, fmt.Errorf("callback: begin call: %w", ErrRuntimeBusy)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("callback: begin call: %w", err)

@@ -6,9 +6,10 @@ import (
 	"testing"
 )
 
-func TestRuntimeCloseRejectsActiveRunWithoutTearingItDown(t *testing.T) {
+func TestRuntimeCloseStillReportsActiveRun(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	unblock := closeOnce(release)
 	runtime := newRuntimeOwnerIntegrationRuntime(t, RuntimeHostFunc(func(context.Context, HostCall) (map[string]Value, error) {
 		select {
 		case <-entered:
@@ -18,6 +19,8 @@ func TestRuntimeCloseRejectsActiveRunWithoutTearingItDown(t *testing.T) {
 		<-release
 		return nil, nil
 	}))
+	defer unblock()
+	defer runtime.Close()
 	if runtime.owner == nil {
 		t.Fatal("NewRuntime did not create a runtime owner")
 	}
@@ -32,7 +35,7 @@ func TestRuntimeCloseRejectsActiveRunWithoutTearingItDown(t *testing.T) {
 	if err := runtime.Close(); err == nil || !strings.Contains(err.Error(), "active") {
 		t.Fatalf("Close during RunHook returned %v, want active error", err)
 	}
-	close(release)
+	unblock()
 	if err := <-runDone; err != nil {
 		t.Fatalf("RunHook after rejected Close returned error: %v", err)
 	}
@@ -63,6 +66,7 @@ func TestZeroRuntimeCloseRemainsRepeatSafe(t *testing.T) {
 func TestRuntimeCloseRejectsActiveCapturedCallback(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	unblock := closeOnce(release)
 	var callback Callback
 	runtime := newRuntimeOwnerIntegrationRuntimeSource(t, `
 return {
@@ -93,6 +97,8 @@ return {
 			}),
 		}, nil
 	}))
+	defer unblock()
+	defer runtime.Close()
 	if _, err := runtime.RunHook(context.Background(), "startup"); err != nil {
 		t.Fatalf("RunHook returned error: %v", err)
 	}
@@ -106,7 +112,7 @@ return {
 	if err := runtime.Close(); err == nil || !strings.Contains(err.Error(), "active") {
 		t.Fatalf("Close during Callback.Call returned %v, want active error", err)
 	}
-	close(release)
+	unblock()
 	if err := <-callDone; err != nil {
 		t.Fatalf("Callback.Call after rejected Close returned error: %v", err)
 	}

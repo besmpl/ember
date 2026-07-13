@@ -222,6 +222,9 @@ func TestRuntimeOwnerConcurrentLifecycle(t *testing.T) {
 			for j := 0; j < iterations; j++ {
 				lease, err := owner.beginRun()
 				if err != nil {
+					if errors.Is(err, errRuntimeOwnerBusy) {
+						continue
+					}
 					if !errors.Is(err, errRuntimeOwnerClosed) {
 						errs <- err
 					}
