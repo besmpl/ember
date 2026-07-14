@@ -141,16 +141,17 @@ type HostCall struct {
 // captured Callback calls must not overlap. Close may run concurrently; it
 // reports an active runtime without tearing down the in-flight call.
 type Runtime struct {
-	closeMu     sync.Mutex
-	owner       *runtimeOwner
-	program     *Program
-	host        RuntimeHost
-	entrypoints map[moduleKey]Value
-	loaded      map[moduleKey]Value
-	active      map[moduleKey]bool
-	limits      ExecutionLimits
-	stack       []moduleKey
-	closed      bool
+	closeMu         sync.Mutex
+	owner           *runtimeOwner
+	program         *Program
+	host            RuntimeHost
+	entrypoints     map[moduleKey]Value
+	loaded          map[moduleKey]Value
+	requireAdapters map[moduleKey]Value
+	active          map[moduleKey]bool
+	limits          ExecutionLimits
+	stack           []moduleKey
+	closed          bool
 }
 
 // HookReport describes one RunHook call.
@@ -245,13 +246,14 @@ func (p *Program) NewRuntime(options RuntimeOptions) (*Runtime, error) {
 	owner := newRuntimeOwner()
 	owner.coroutineLimit = limits.MaxCoroutines
 	return &Runtime{
-		owner:       owner,
-		program:     p,
-		host:        options.Host,
-		entrypoints: make(map[moduleKey]Value),
-		loaded:      make(map[moduleKey]Value),
-		active:      make(map[moduleKey]bool),
-		limits:      limits,
+		owner:           owner,
+		program:         p,
+		host:            options.Host,
+		entrypoints:     make(map[moduleKey]Value),
+		loaded:          make(map[moduleKey]Value),
+		requireAdapters: make(map[moduleKey]Value),
+		active:          make(map[moduleKey]bool),
+		limits:          limits,
 	}, nil
 }
 
@@ -397,6 +399,7 @@ func (r *Runtime) Close() error {
 	r.host = nil
 	r.entrypoints = nil
 	r.loaded = nil
+	r.requireAdapters = nil
 	r.active = nil
 	r.stack = nil
 	return nil
@@ -422,6 +425,9 @@ func (r *Runtime) collect() (runtimeHeapStats, error) {
 			collector.scanValue(value)
 		}
 		for _, value := range r.loaded {
+			collector.scanValue(value)
+		}
+		for _, value := range r.requireAdapters {
 			collector.scanValue(value)
 		}
 		if r.program != nil {

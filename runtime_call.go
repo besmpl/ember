@@ -17,6 +17,57 @@ type invocationScope struct {
 	controller *executionController
 }
 
+// runtimeRequireAdapter is the stable per-runtime/module identity behind a
+// require value. It deliberately contains no invocation context, controller,
+// or host-global snapshot; those capabilities are read from the active scope
+// when the value is called.
+type runtimeRequireAdapter struct {
+	runtime *Runtime
+	from    moduleKey
+}
+
+func (adapter *runtimeRequireAdapter) call(globals *globalEnv, args []Value) ([]Value, error) {
+	if adapter == nil || adapter.runtime == nil {
+		return nil, fmt.Errorf("require: nil runtime")
+	}
+	if err := adapter.runtime.owner.checkOpen(); err != nil {
+		if err == errRuntimeOwnerClosed {
+			return nil, fmt.Errorf("require: runtime is closed")
+		}
+		return nil, fmt.Errorf("require: runtime unavailable: %w", err)
+	}
+	scope, ok := invocationScopeFromGlobalEnv(globals)
+	if !ok {
+		return nil, fmt.Errorf("require: missing invocation scope")
+	}
+	if scope.runtime != nil && scope.runtime != adapter.runtime {
+		return nil, fmt.Errorf("require: runtime mismatch")
+	}
+	scope.runtime = adapter.runtime
+	scope.from = adapter.from
+	return scope.require(globals, args)
+}
+
+func (r *Runtime) requireAdapter(from moduleKey) Value {
+	if r == nil {
+		return Value{}
+	}
+	if r.requireAdapters == nil {
+		r.requireAdapters = make(map[moduleKey]Value)
+	}
+	if value, ok := r.requireAdapters[from]; ok {
+		return value
+	}
+	adapter := &runtimeRequireAdapter{runtime: r, from: from}
+	value := nativeFuncValue(adapter.call)
+	r.requireAdapters[from] = value
+	return value
+}
+
+func missingRuntimeRequire(*globalEnv, []Value) ([]Value, error) {
+	return nil, fmt.Errorf("require: nil runtime")
+}
+
 func (r *Runtime) newInvocationScope(ctx context.Context, from moduleKey, globals map[string]Value, controller *executionController) invocationScope {
 	if ctx == nil {
 		ctx = context.Background()
@@ -36,7 +87,11 @@ func (call invocationScope) envWithRequire() *globalEnv {
 		owner = call.runtime.owner
 	}
 	env := runtimeGlobalsWithInvocation(call.globals, owner, call)
-	env.set("require", nativeFuncValue(call.require))
+	if call.runtime != nil {
+		env.set("require", call.runtime.requireAdapter(call.from))
+	} else {
+		env.set("require", nativeFuncValue(missingRuntimeRequire))
+	}
 	return env
 }
 
