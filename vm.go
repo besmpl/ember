@@ -726,33 +726,161 @@ type vmFrame struct {
 	owner           *vmStackOwner
 	registers       []Value
 	cells           []*cell
-	upvalues        []*cell
-	upvalueValues   []Value
-	upvalueValueOK  []bool
 	varargOwner     *vmStackOwner
 	varargBase      int
 	varargCount     int
 	pc              int
-	debugLine       int
 	openResultStart int
-	openResults     vmResultWindow
-	// openRangeOwner/base/count describe a contiguous, owner-backed open
-	// result range.  openRangeLogicalTop is the owner length before the range
-	// was published; it lets the range be cleared and the shared stack be
-	// rebound without retaining a separate result slice.  The owner pointer is
-	// the existing frame/thread stack owner, never a newly allocated object.
-	openRangeOwner      *vmStackOwner
-	openRangeBase       int
-	openRangeCount      int
-	openRangeLogicalTop int
-	pendingCall         vmPendingCall
-	hasPendingCall      bool
+	openRangeOwner  *vmStackOwner
+	pendingCall     vmPendingCall
+	hasPendingCall  bool
 	// recordBaseDepth is the compact continuation depth owned by this physical
 	// frame. It survives direct-loop side exits so a resumed logical callee can
 	// still unwind record-only callers.
 	recordBaseDepth  int
 	callDepthCharged bool
-	callDepthErr     error
+	cold             *vmFrameCold
+}
+
+// vmFrameCold holds frame state that is only needed by variadic, open-result,
+// closure-capture, debug, or controller-error paths. It is allocated lazily so
+// ordinary fixed calls retain the compact frame footprint and allocation path.
+type vmFrameCold struct {
+	upvalues       []*cell
+	upvalueValues  []Value
+	upvalueValueOK []bool
+	debugLine      int
+	openResults    vmResultWindow
+	// openRangeOwner/base/count describe a contiguous, owner-backed open result
+	// range. openRangeLogicalTop restores the shared stack's prior logical top.
+	openRangeBase       int
+	openRangeCount      int
+	openRangeLogicalTop int
+	callDepthErr        error
+}
+
+func (frame *vmFrame) ensureCold() *vmFrameCold {
+	if frame.cold == nil {
+		frame.cold = &vmFrameCold{
+			debugLine:           -1,
+			openRangeBase:       -1,
+			openRangeLogicalTop: -1,
+		}
+	}
+	return frame.cold
+}
+
+func (frame *vmFrame) resetColdState() {
+	if frame == nil || frame.cold == nil {
+		return
+	}
+	cold := frame.cold
+	cold.upvalues = nil
+	cold.upvalueValues = nil
+	cold.upvalueValueOK = nil
+	cold.debugLine = -1
+	cold.openResults = vmResultWindow{}
+	cold.openRangeBase = -1
+	cold.openRangeCount = 0
+	cold.openRangeLogicalTop = -1
+	cold.callDepthErr = nil
+}
+
+func (frame *vmFrame) openResultValues() []Value {
+	if frame == nil || frame.cold == nil {
+		return nil
+	}
+	return frame.cold.openResults.values
+}
+
+func (frame *vmFrame) openResultBorrowed() bool {
+	return frame != nil && frame.cold != nil && frame.cold.openResults.borrowed
+}
+
+func (frame *vmFrame) setOpenResultWindow(window vmResultWindow) {
+	if frame == nil {
+		return
+	}
+	frame.ensureCold().openResults = window
+}
+
+func (frame *vmFrame) clearOpenResultWindow() {
+	if frame != nil && frame.cold != nil {
+		frame.cold.openResults = vmResultWindow{}
+	}
+}
+
+func (frame *vmFrame) openRangeState() (owner *vmStackOwner, base, count, logicalTop int) {
+	if frame == nil || frame.cold == nil {
+		return nil, -1, 0, -1
+	}
+	cold := frame.cold
+	return frame.openRangeOwner, cold.openRangeBase, cold.openRangeCount, cold.openRangeLogicalTop
+}
+
+func (frame *vmFrame) hasOpenRange() bool {
+	return frame != nil && frame.openRangeOwner != nil
+}
+
+func (frame *vmFrame) setOpenRange(owner *vmStackOwner, base, count, logicalTop int) {
+	if frame == nil {
+		return
+	}
+	cold := frame.ensureCold()
+	frame.openRangeOwner = owner
+	cold.openRangeBase = base
+	cold.openRangeCount = count
+	cold.openRangeLogicalTop = logicalTop
+}
+
+// detachOpenResultRange drops the frame metadata without clearing the owner
+// slots. Record-only open-argument transitions transfer those slots to the
+// callee and the compact record owns their eventual cleanup.
+func (frame *vmFrame) detachOpenResultRange() {
+	if frame == nil || frame.cold == nil {
+		return
+	}
+	frame.openRangeOwner = nil
+	frame.cold.openRangeBase = -1
+	frame.cold.openRangeCount = 0
+	frame.cold.openRangeLogicalTop = -1
+}
+
+func (frame *vmFrame) debugLine() int {
+	if frame == nil || frame.cold == nil {
+		return -1
+	}
+	return frame.cold.debugLine
+}
+
+func (frame *vmFrame) setDebugLine(line int) {
+	if frame == nil {
+		return
+	}
+	if line == -1 && frame.cold == nil {
+		return
+	}
+	frame.ensureCold().debugLine = line
+}
+
+func (frame *vmFrame) callDepthError() error {
+	if frame == nil || frame.cold == nil {
+		return nil
+	}
+	return frame.cold.callDepthErr
+}
+
+func (frame *vmFrame) setCallDepthError(err error) {
+	if frame == nil {
+		return
+	}
+	if err == nil {
+		if frame.cold != nil {
+			frame.cold.callDepthErr = nil
+		}
+		return
+	}
+	frame.ensureCold().callDepthErr = err
 }
 
 // vmRegisterWindow describes one frame's view into the thread stack.  The
@@ -2094,8 +2222,8 @@ func (thread *vmThread) runUntilDepthResult(baseDepth int) (vmFrameResult, error
 				caller = call.caller
 			}
 			frame = thread.newScriptCallFrame(caller, call)
-			if frame.callDepthErr != nil {
-				if recovered, escapeErr := thread.recoverProtectedError(frame.callDepthErr); recovered {
+			if callDepthErr := frame.callDepthError(); callDepthErr != nil {
+				if recovered, escapeErr := thread.recoverProtectedError(callDepthErr); recovered {
 					continue
 				} else if escapeErr != nil {
 					return vmFrameResult{}, escapeErr
@@ -2104,7 +2232,7 @@ func (thread *vmThread) runUntilDepthResult(baseDepth int) (vmFrameResult, error
 				// instruction in the still-live caller as the failing frame.
 				callSite := *caller
 				callSite.pc = previousWordcodeInstruction(callSite.proto, callSite.pc)
-				return vmFrameResult{}, thread.captureRuntimeError(frame.callDepthErr, &callSite, baseDepth)
+				return vmFrameResult{}, thread.captureRuntimeError(callDepthErr, &callSite, baseDepth)
 			}
 			thread.pushFrame(frame)
 			thread.directFramePICCounts.addFixedCallTrampolineEntry()
@@ -2220,9 +2348,9 @@ func (thread *vmThread) runInlineScriptFrame(calleeFrame *vmFrame, baseDepth int
 	if result.state == vmCallStateScriptCall {
 		call := result.scriptCall
 		frame := thread.newScriptCallFrame(calleeFrame, call)
-		if frame.callDepthErr != nil {
+		if callDepthErr := frame.callDepthError(); callDepthErr != nil {
 			thread.popFrame()
-			return vmFrameResult{}, frame.callDepthErr
+			return vmFrameResult{}, callDepthErr
 		}
 		thread.pushFrame(frame)
 		thread.directFramePICCounts.addFixedCallTrampolineEntry()
@@ -2310,9 +2438,9 @@ func (thread *vmThread) runInlineScriptCallOneNoHook(closure *closure, args []Va
 	if result.state == vmCallStateScriptCall {
 		call := result.scriptCall
 		frame := thread.newScriptCallFrame(calleeFrame, call)
-		if frame.callDepthErr != nil {
+		if callDepthErr := frame.callDepthError(); callDepthErr != nil {
 			thread.popFrame()
-			return NilValue(), frame.callDepthErr
+			return NilValue(), callDepthErr
 		}
 		thread.pushFrame(frame)
 		result, err = thread.runUntilDepthResult(baseDepth)
@@ -2366,9 +2494,9 @@ func (thread *vmThread) runInlineScriptCallFixedOneNoHook(closure *closure, firs
 	if result.state == vmCallStateScriptCall {
 		call := result.scriptCall
 		frame := thread.newScriptCallFrame(calleeFrame, call)
-		if frame.callDepthErr != nil {
+		if callDepthErr := frame.callDepthError(); callDepthErr != nil {
 			thread.popFrame()
-			return NilValue(), frame.callDepthErr
+			return NilValue(), callDepthErr
 		}
 		thread.pushFrame(frame)
 		result, err = thread.runUntilDepthResult(baseDepth)
@@ -2911,9 +3039,8 @@ func (thread *vmThread) maybeEnterRecordOnlyOpenArgumentCall(
 	if owner == nil || owner != thread.stackOwner || frame.registerBase < 0 {
 		return vmFrameRecord{}, false
 	}
-	openBase := frame.openRangeBase
-	openCount := frame.openRangeCount
-	if frame.openRangeOwner != owner || openBase < 0 || openCount <= 0 ||
+	openRangeOwner, openBase, openCount, _ := frame.openRangeState()
+	if openRangeOwner != owner || openBase < 0 || openCount <= 0 ||
 		openBase != frame.registerBase+frame.registerCount ||
 		openBase > len(owner.values) || openCount > len(owner.values)-openBase {
 		return vmFrameRecord{}, false
@@ -2989,11 +3116,8 @@ func (thread *vmThread) maybeEnterRecordOnlyOpenArgumentCall(
 	// child window on return. resetFrameIntoRegisters aliases the contiguous
 	// owner range for parameter initialization, so no dynamic-tail copy occurs.
 	frame.openResultStart = -1
-	frame.openResults = vmResultWindow{}
-	frame.openRangeOwner = nil
-	frame.openRangeBase = -1
-	frame.openRangeCount = 0
-	frame.openRangeLogicalTop = -1
+	frame.clearOpenResultWindow()
+	frame.detachOpenResultRange()
 	copyCount := proto.params
 	if copyCount > proto.registers {
 		copyCount = proto.registers
@@ -3109,7 +3233,7 @@ func (thread *vmThread) newScriptCallFrame(caller *vmFrame, call vmScriptCall) *
 	}
 	if controller := thread.controller; controller != nil {
 		if err := controller.enterCall(); err != nil {
-			frame.callDepthErr = err
+			frame.setCallDepthError(err)
 		} else {
 			frame.callDepthCharged = true
 		}
@@ -3177,7 +3301,10 @@ func (thread *vmThread) currentClosureForFrame(frame *vmFrame) *closure {
 	if frame.currentClosure != nil {
 		return frame.currentClosure
 	}
-	return thread.rootClosureSlot(frame.depth, frame.proto, frame.upvalues, frame.upvalueValues, frame.upvalueValueOK)
+	if frame.cold == nil {
+		return thread.rootClosureSlot(frame.depth, frame.proto, nil, nil, nil)
+	}
+	return thread.rootClosureSlot(frame.depth, frame.proto, frame.cold.upvalues, frame.cold.upvalueValues, frame.cold.upvalueValueOK)
 }
 
 func (thread *vmThread) resetFrame(frame *vmFrame, proto *Proto, args []Value, upvalues []*cell, upvalueValues []Value, upvalueValueOK []bool) {
@@ -3594,6 +3721,7 @@ func (frame *vmFrame) resetFrameIntoRegistersWithVarargSource(
 	varargSourceCount int,
 ) {
 	frame.clearOpenResultRange()
+	frame.resetColdState()
 	frame.currentClosure = nil
 	varargCount := varargSourceCount
 	if varargCount < 0 {
@@ -3657,24 +3785,28 @@ func (frame *vmFrame) resetFrameIntoRegistersWithVarargSource(
 	frame.owner = owner
 	frame.registers = registers
 	frame.cells = cells
-	frame.upvalues = upvalues
-	frame.upvalueValues = upvalueValues
-	frame.upvalueValueOK = upvalueValueOK
-	frame.varargOwner = owner
+	frame.varargOwner = nil
+	if len(upvalues) != 0 || len(upvalueValues) != 0 || len(upvalueValueOK) != 0 {
+		cold := frame.ensureCold()
+		cold.upvalues = upvalues
+		cold.upvalueValues = upvalueValues
+		cold.upvalueValueOK = upvalueValueOK
+	}
+	if varargCount > 0 {
+		frame.varargOwner = owner
+	}
 	frame.varargBase = varargBase
 	frame.varargCount = varargCount
 	frame.pc = 0
-	frame.debugLine = -1
+	if frame.cold != nil {
+		frame.cold.debugLine = -1
+	}
 	frame.openResultStart = -1
-	frame.openResults = vmResultWindow{}
 	frame.openRangeOwner = nil
-	frame.openRangeBase = -1
-	frame.openRangeCount = 0
-	frame.openRangeLogicalTop = -1
 	frame.resetPendingCallState()
 	frame.recordBaseDepth = -1
 	frame.callDepthCharged = false
-	frame.callDepthErr = nil
+	frame.setCallDepthError(nil)
 }
 
 func (frame *vmFrame) resetForReuse() {
@@ -3687,32 +3819,24 @@ func (frame *vmFrame) resetForReuse() {
 	frame.registerBase = 0
 	frame.registerCount = 0
 	frame.owner = nil
-	frame.upvalues = nil
-	frame.upvalueValues = nil
-	frame.upvalueValueOK = nil
 	frame.varargOwner = nil
 	frame.varargBase = 0
 	frame.varargCount = 0
 	frame.pc = 0
-	frame.debugLine = -1
 	frame.openResultStart = -1
-	frame.openResults = vmResultWindow{}
 	frame.openRangeOwner = nil
-	frame.openRangeBase = -1
-	frame.openRangeCount = 0
-	frame.openRangeLogicalTop = -1
 	frame.resetPendingCallState()
 	frame.recordBaseDepth = -1
 	frame.callDepthCharged = false
-	frame.callDepthErr = nil
+	frame.resetColdState()
 }
 
 func (frame *vmFrame) resetForPool() {
 	clear(frame.registers)
 	clear(frame.cells)
 	frame.clearVarargStorage()
-	if cap(frame.openResults.values) > 0 {
-		clear(frame.openResults.values[:cap(frame.openResults.values)])
+	if values := frame.openResultValues(); cap(values) > 0 {
+		clear(values[:cap(values)])
 	}
 	frame.resetForReuse()
 	frame.registers = nil
@@ -3747,30 +3871,32 @@ func (frame *vmFrame) setRegister(index int, value Value) {
 }
 
 func (frame *vmFrame) varargLen() int {
-	if frame == nil || frame.varargCount <= 0 || frame.varargOwner == nil {
+	owner := frame.varargOwner
+	if frame == nil || frame.varargCount <= 0 || owner == nil {
 		return 0
 	}
 	start := frame.varargBase
 	end := start + frame.varargCount
-	if start < 0 || end < start || end > len(frame.varargOwner.values) {
+	if start < 0 || end < start || end > len(owner.values) {
 		return 0
 	}
 	return frame.varargCount
 }
 
 func (frame *vmFrame) clearVarargStorage() {
-	if frame == nil || frame.varargOwner == nil || frame.varargCount <= 0 {
+	owner := frame.varargOwner
+	if frame == nil || owner == nil || frame.varargCount <= 0 {
 		return
 	}
 	start := frame.varargBase
 	end := start + frame.varargCount
-	if start < 0 || end < start || start >= len(frame.varargOwner.values) {
+	if start < 0 || end < start || start >= len(owner.values) {
 		return
 	}
-	if end > len(frame.varargOwner.values) {
-		end = len(frame.varargOwner.values)
+	if end > len(owner.values) {
+		end = len(owner.values)
 	}
-	clear(frame.varargOwner.values[start:end])
+	clear(owner.values[start:end])
 }
 
 func (frame *vmFrame) varargAt(index int) Value {
@@ -3795,10 +3921,7 @@ func (frame *vmFrame) clearOpenResultRange() {
 	if frame == nil {
 		return
 	}
-	owner := frame.openRangeOwner
-	base := frame.openRangeBase
-	count := frame.openRangeCount
-	logicalTop := frame.openRangeLogicalTop
+	owner, base, count, logicalTop := frame.openRangeState()
 	if owner != nil && base >= 0 && count > 0 && base <= len(owner.values) {
 		end := base + count
 		if end > len(owner.values) {
@@ -3815,9 +3938,11 @@ func (frame *vmFrame) clearOpenResultRange() {
 		}
 	}
 	frame.openRangeOwner = nil
-	frame.openRangeBase = -1
-	frame.openRangeCount = 0
-	frame.openRangeLogicalTop = -1
+	if frame.cold != nil {
+		frame.cold.openRangeBase = -1
+		frame.cold.openRangeCount = 0
+		frame.cold.openRangeLogicalTop = -1
+	}
 }
 
 // clearOpenResultState clears either open-result representation. Keeping range
@@ -3829,11 +3954,11 @@ func (frame *vmFrame) clearOpenResultState() {
 	}
 	// Fixed-result paths call this frequently. Avoid the slower owner cleanup
 	// unless a stack-backed range is actually live.
-	if frame.openRangeOwner != nil {
+	if frame.hasOpenRange() {
 		frame.clearOpenResultRange()
 	}
 	frame.openResultStart = -1
-	frame.openResults = vmResultWindow{}
+	frame.clearOpenResultWindow()
 }
 
 // publishOpenResultRange copies values into the existing stack owner and
@@ -3873,10 +3998,7 @@ func (frame *vmFrame) publishOpenResultRange(thread *vmThread, values []Value) b
 	if len(values) == 0 {
 		owner.values[logicalTop] = NilValue()
 	}
-	frame.openRangeOwner = owner
-	frame.openRangeBase = logicalTop
-	frame.openRangeCount = count
-	frame.openRangeLogicalTop = logicalTop
+	frame.setOpenRange(owner, logicalTop, count, logicalTop)
 	return true
 }
 
@@ -3890,6 +4012,10 @@ func (frame *vmFrame) publishOpenVarargRange(thread *vmThread) bool {
 	sourceOwner := frame.varargOwner
 	sourceBase := frame.varargBase
 	count := frame.varargLen()
+	if sourceOwner == nil && frame.varargCount == 0 {
+		sourceOwner = frame.owner
+		sourceBase = frame.registerBase + frame.registerCount
+	}
 	if sourceOwner == nil || sourceBase < 0 {
 		return false
 	}
@@ -3920,23 +4046,23 @@ func (frame *vmFrame) publishOpenVarargRange(thread *vmThread) bool {
 			destinationOwner.values[logicalTop+index] = sourceOwner.values[sourceBase+index]
 		}
 	}
-	frame.openRangeOwner = destinationOwner
-	frame.openRangeBase = logicalTop
-	frame.openRangeCount = count
-	frame.openRangeLogicalTop = logicalTop
+	frame.setOpenRange(destinationOwner, logicalTop, count, logicalTop)
 	return true
 }
 
 func (frame *vmFrame) openResultRangeValues() []Value {
-	if frame == nil || frame.openResultStart < 0 || frame.openRangeOwner == nil || frame.openRangeBase < 0 || frame.openRangeCount <= 0 {
+	if frame == nil || frame.openResultStart < 0 {
 		return nil
 	}
-	start := frame.openRangeBase
-	end := start + frame.openRangeCount
-	if start > len(frame.openRangeOwner.values) || end > len(frame.openRangeOwner.values) || end < start {
+	owner, start, count, _ := frame.openRangeState()
+	if owner == nil || start < 0 || count <= 0 {
 		return nil
 	}
-	return frame.openRangeOwner.values[start:end]
+	end := start + count
+	if start > len(owner.values) || end > len(owner.values) || end < start {
+		return nil
+	}
+	return owner.values[start:end]
 }
 
 func (frame *vmFrame) openResultAt(index int) Value {
@@ -3946,14 +4072,20 @@ func (frame *vmFrame) openResultAt(index int) Value {
 		}
 		return values[index]
 	}
-	return frame.openResults.at(index)
+	if frame.cold == nil {
+		return NilValue()
+	}
+	return frame.cold.openResults.at(index)
 }
 
 func (frame *vmFrame) openResultWindow() vmResultWindow {
 	if values := frame.openResultRangeValues(); values != nil {
 		return vmBorrowedResultWindow(values)
 	}
-	return frame.openResults
+	if frame.cold == nil {
+		return vmEmptyResultWindow()
+	}
+	return frame.cold.openResults
 }
 
 func (frame *vmFrame) registerCell(index int) *cell {
@@ -4011,29 +4143,29 @@ func (frame *vmFrame) closeCells() {
 }
 
 func (frame *vmFrame) upvalue(index int) (Value, error) {
-	if index < 0 {
+	if frame == nil || frame.cold == nil || index < 0 {
 		return NilValue(), fmt.Errorf("run: upvalue index %d out of range", index)
 	}
-	if index < len(frame.upvalueValueOK) && frame.upvalueValueOK[index] {
-		return frame.upvalueValues[index], nil
+	if index < len(frame.cold.upvalueValueOK) && frame.cold.upvalueValueOK[index] {
+		return frame.cold.upvalueValues[index], nil
 	}
-	if index >= len(frame.upvalues) || frame.upvalues[index] == nil {
+	if index >= len(frame.cold.upvalues) || frame.cold.upvalues[index] == nil {
 		return NilValue(), fmt.Errorf("run: upvalue index %d out of range", index)
 	}
-	return frame.upvalues[index].get(), nil
+	return frame.cold.upvalues[index].get(), nil
 }
 
 func (frame *vmFrame) setUpvalue(index int, value Value) error {
-	if index < 0 {
+	if frame == nil || frame.cold == nil || index < 0 {
 		return fmt.Errorf("run: upvalue index %d out of range", index)
 	}
-	if index < len(frame.upvalueValueOK) && frame.upvalueValueOK[index] {
+	if index < len(frame.cold.upvalueValueOK) && frame.cold.upvalueValueOK[index] {
 		return fmt.Errorf("run: immutable upvalue index %d cannot be assigned", index)
 	}
-	if index >= len(frame.upvalues) || frame.upvalues[index] == nil {
+	if index >= len(frame.cold.upvalues) || frame.cold.upvalues[index] == nil {
 		return fmt.Errorf("run: upvalue index %d out of range", index)
 	}
-	frame.upvalues[index].set(value)
+	frame.cold.upvalues[index].set(value)
 	return nil
 }
 
@@ -4157,12 +4289,12 @@ func (frame *vmFrame) applyValueListDestination(destination vmResultDestination,
 	resultCount := destination.count
 	if resultCount < 0 {
 		frame.openResultStart = destination.register
-		reuse := frame.openResults.values
-		if frame.openResults.borrowed {
+		reuse := frame.openResultValues()
+		if frame.openResultBorrowed() {
 			reuse = nil
 		}
-		frame.openResults = results.retainedAdjustedWindow(reuse)
-		frame.setRegister(destination.register, frame.openResults.at(0))
+		frame.setOpenResultWindow(results.retainedAdjustedWindow(reuse))
+		frame.setRegister(destination.register, frame.openResultWindow().at(0))
 		return
 	}
 
@@ -4509,15 +4641,15 @@ func directFrameNonYieldingCallIsland(callee Value, globals *globalEnv, args []V
 }
 
 func directFrameApplyCallIslandResults(frame *vmFrame, registers []Value, start int, count int, results []Value) {
-	reuse := frame.openResults.values
-	if frame.openResults.borrowed {
+	reuse := frame.openResultValues()
+	if frame.openResultBorrowed() {
 		reuse = nil
 	}
 	frame.clearOpenResultState()
 	if count < 0 {
 		frame.openResultStart = start
-		frame.openResults = vmBorrowedResultWindow(results).retainedAdjustedWindow(reuse)
-		registers[start] = frame.openResults.at(0)
+		frame.setOpenResultWindow(vmBorrowedResultWindow(results).retainedAdjustedWindow(reuse))
+		registers[start] = frame.openResultWindow().at(0)
 		return
 	}
 	if count == 0 {
@@ -4536,7 +4668,7 @@ func directFrameApplySingleCallIslandResult(frame *vmFrame, registers []Value, s
 	frame.clearOpenResultState()
 	if count < 0 {
 		frame.openResultStart = start
-		frame.openResults = vmSingleResultWindow(result)
+		frame.setOpenResultWindow(vmSingleResultWindow(result))
 		registers[start] = result
 		return
 	}
@@ -5574,20 +5706,20 @@ func (thread *vmThread) resumeRecordOnlyFixedCallOne(rootRecordDepth int, frame 
 	current.owner = owner
 	current.registers = owner.values[base:top]
 	current.cells = thread.restoreFrameCells(current, record.closure.proto, owner, base)
-	current.upvalues = record.closure.upvalues
-	current.upvalueValues = record.closure.upvalueValues
-	current.upvalueValueOK = record.closure.upvalueValueOK
-	current.varargOwner = nil
+	current.resetColdState()
+	if len(record.closure.upvalues) != 0 || len(record.closure.upvalueValues) != 0 || len(record.closure.upvalueValueOK) != 0 {
+		cold := current.ensureCold()
+		cold.upvalues = record.closure.upvalues
+		cold.upvalueValues = record.closure.upvalueValues
+		cold.upvalueValueOK = record.closure.upvalueValueOK
+	}
 	current.varargBase = 0
 	current.varargCount = 0
 	current.pc = returnPC
-	current.debugLine = -1
+	current.setDebugLine(-1)
 	current.openResultStart = -1
-	current.openResults = vmResultWindow{}
-	current.openRangeOwner = nil
-	current.openRangeBase = -1
-	current.openRangeCount = 0
-	current.openRangeLogicalTop = -1
+	current.clearOpenResultWindow()
+	current.clearOpenResultRange()
 	current.resetPendingCallState()
 	current.window = vmRegisterWindow{
 		owner:               owner,
@@ -5652,8 +5784,9 @@ func (thread *vmThread) resumeRecordOnlyOpenCall(rootRecordDepth int, frame **vm
 	}
 	openCount := window.len()
 	openBase := -1
-	if openResults != nil && current.openRangeOwner == owner && current.openRangeBase >= 0 && current.openRangeCount == openCount && current.openRangeBase <= len(owner.values)-openCount {
-		openBase = current.openRangeBase
+	currentRangeOwner, currentRangeBase, currentRangeCount, _ := current.openRangeState()
+	if openResults != nil && currentRangeOwner == owner && currentRangeBase >= 0 && currentRangeCount == openCount && currentRangeBase <= len(owner.values)-openCount {
+		openBase = currentRangeBase
 	}
 	total := sourceCount + openCount
 	if total < sourceCount {
@@ -5743,20 +5876,20 @@ func (thread *vmThread) resumeRecordOnlyOpenCall(rootRecordDepth int, frame **vm
 	current.owner = owner
 	current.registers = owner.values[base:top]
 	current.cells = thread.restoreFrameCells(current, record.closure.proto, owner, base)
-	current.upvalues = record.closure.upvalues
-	current.upvalueValues = record.closure.upvalueValues
-	current.upvalueValueOK = record.closure.upvalueValueOK
-	current.varargOwner = nil
+	current.resetColdState()
+	if len(record.closure.upvalues) != 0 || len(record.closure.upvalueValues) != 0 || len(record.closure.upvalueValueOK) != 0 {
+		cold := current.ensureCold()
+		cold.upvalues = record.closure.upvalues
+		cold.upvalueValues = record.closure.upvalueValues
+		cold.upvalueValueOK = record.closure.upvalueValueOK
+	}
 	current.varargBase = 0
 	current.varargCount = 0
 	current.pc = returnPC
-	current.debugLine = -1
+	current.setDebugLine(-1)
 	current.openResultStart = destination - base
-	current.openResults = vmResultWindow{}
-	current.openRangeOwner = owner
-	current.openRangeBase = targetBase
-	current.openRangeCount = total
-	current.openRangeLogicalTop = targetBase
+	current.clearOpenResultWindow()
+	current.setOpenRange(owner, targetBase, total, targetBase)
 	current.resetPendingCallState()
 	current.window = vmRegisterWindow{owner: owner, base: base, length: top - base, previousStackLength: previousStackLength, borrowed: record.flags&vmFrameRecordFlagCallerBorrowed != 0}
 	if current.recordBaseDepth >= 0 && len(thread.frameRecords) == current.recordBaseDepth {
@@ -5851,20 +5984,20 @@ func (thread *vmThread) resumeRecordOnlyFixedCall(rootRecordDepth int, frame **v
 	current.owner = owner
 	current.registers = owner.values[base:top]
 	current.cells = thread.restoreFrameCells(current, record.closure.proto, owner, base)
-	current.upvalues = record.closure.upvalues
-	current.upvalueValues = record.closure.upvalueValues
-	current.upvalueValueOK = record.closure.upvalueValueOK
-	current.varargOwner = nil
+	current.resetColdState()
+	if len(record.closure.upvalues) != 0 || len(record.closure.upvalueValues) != 0 || len(record.closure.upvalueValueOK) != 0 {
+		cold := current.ensureCold()
+		cold.upvalues = record.closure.upvalues
+		cold.upvalueValues = record.closure.upvalueValues
+		cold.upvalueValueOK = record.closure.upvalueValueOK
+	}
 	current.varargBase = 0
 	current.varargCount = 0
 	current.pc = returnPC
-	current.debugLine = -1
+	current.setDebugLine(-1)
 	current.openResultStart = -1
-	current.openResults = vmResultWindow{}
-	current.openRangeOwner = nil
-	current.openRangeBase = -1
-	current.openRangeCount = 0
-	current.openRangeLogicalTop = -1
+	current.clearOpenResultWindow()
+	current.clearOpenResultRange()
 	current.resetPendingCallState()
 	current.window = vmRegisterWindow{
 		owner:               owner,
@@ -5933,7 +6066,7 @@ func (thread *vmThread) runDebugCountHook(frame *vmFrame) error {
 		kind:  vmDebugEventCount,
 		frame: frame,
 		pc:    frame.pc,
-		line:  frame.debugLine,
+		line:  frame.debugLine(),
 	})
 }
 
@@ -5942,10 +6075,10 @@ func (thread *vmThread) runDebugLineHook(frame *vmFrame) error {
 		return nil
 	}
 	line := frame.protoLine(frame.pc)
-	if line <= 0 || line == frame.debugLine {
+	if line <= 0 || line == frame.debugLine() {
 		return nil
 	}
-	frame.debugLine = line
+	frame.setDebugLine(line)
 	return thread.runDebugHook(vmDebugEvent{
 		kind:  vmDebugEventLine,
 		frame: frame,
@@ -5974,7 +6107,7 @@ func (thread *vmThread) runDebugReturnHook(frame *vmFrame) error {
 		kind:  vmDebugEventReturn,
 		frame: frame,
 		pc:    frame.pc,
-		line:  frame.debugLine,
+		line:  frame.debugLine(),
 	})
 }
 
@@ -6968,11 +7101,14 @@ func (thread *vmThread) captureUpvalues(proto *Proto, frame *vmFrame) (capturedU
 			continue
 		}
 
-		if desc.index < len(frame.upvalueValueOK) && frame.upvalueValueOK[desc.index] {
-			captured.setValue(i, frame.upvalueValues[desc.index])
+		if frame.cold != nil && desc.index < len(frame.cold.upvalueValueOK) && frame.cold.upvalueValueOK[desc.index] {
+			captured.setValue(i, frame.cold.upvalueValues[desc.index])
 			continue
 		}
-		captured.setCell(i, frame.upvalues[desc.index])
+		if frame.cold == nil || desc.index >= len(frame.cold.upvalues) {
+			return captured, fmt.Errorf("run: upvalue index %d out of range", desc.index)
+		}
+		captured.setCell(i, frame.cold.upvalues[desc.index])
 	}
 	return captured, nil
 }

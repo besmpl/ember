@@ -1146,17 +1146,11 @@ func (collector *runtimeHeapCollector) clearInactiveFrameSlots(thread *vmThread,
 		frame.owner = nil
 		frame.registers = nil
 		frame.cells = nil
-		frame.upvalues = nil
-		frame.upvalueValues = nil
-		frame.upvalueValueOK = nil
 		frame.varargOwner = nil
 		frame.varargBase = 0
 		frame.varargCount = 0
-		frame.openResults = vmResultWindow{}
 		frame.openRangeOwner = nil
-		frame.openRangeBase = -1
-		frame.openRangeCount = 0
-		frame.openRangeLogicalTop = -1
+		frame.resetColdState()
 		frame.pendingCall = vmPendingCall{}
 		frame.hasPendingCall = false
 	}
@@ -1234,15 +1228,17 @@ func (collector *runtimeHeapCollector) scanFrame(value *vmFrame) {
 	for _, cell := range value.cells {
 		collector.markCell(cell)
 	}
-	for _, cell := range value.upvalues {
-		collector.markCell(cell)
-	}
-	for index, item := range value.upvalueValues {
-		if index < len(value.upvalueValueOK) && value.upvalueValueOK[index] {
-			collector.scanValue(item)
+	if value.cold != nil {
+		for _, cell := range value.cold.upvalues {
+			collector.markCell(cell)
 		}
+		for index, item := range value.cold.upvalueValues {
+			if index < len(value.cold.upvalueValueOK) && value.cold.upvalueValueOK[index] {
+				collector.scanValue(item)
+			}
+		}
+		collector.scanResultWindow(value.cold.openResults)
 	}
-	collector.scanResultWindow(value.openResults)
 	if value.hasPendingCall && value.pendingCall.protected != nil && value.pendingCall.protected.hasHandler {
 		collector.scanValue(value.pendingCall.protected.handler)
 	}

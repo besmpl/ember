@@ -255,23 +255,27 @@ func TestRuntimeHeapCollectClearsOnlyInactiveCoroutineFrameSlots(t *testing.T) {
 	}
 	activeOwner := &vmStackOwner{values: []Value{TableValue(liveTable)}}
 	active := &vmFrame{
-		registers:           []Value{NilValue()},
-		openResultStart:     0,
-		openRangeOwner:      activeOwner,
-		openRangeBase:       0,
-		openRangeCount:      1,
-		openRangeLogicalTop: 0,
+		registers:       []Value{NilValue()},
+		openResultStart: 0,
+		openRangeOwner:  activeOwner,
+		cold: &vmFrameCold{
+			openRangeBase:       0,
+			openRangeCount:      1,
+			openRangeLogicalTop: 0,
+		},
 	}
 	staleOwner := &vmStackOwner{values: []Value{NilValue(), TableValue(deadTable)}}
 	stale := &vmFrame{
-		registers:           []Value{TableValue(deadTable)},
-		cells:               []*cell{{value: TableValue(deadTable)}},
-		openResults:         vmOwnedResultWindow([]Value{TableValue(deadTable)}),
-		openResultStart:     0,
-		openRangeOwner:      staleOwner,
-		openRangeBase:       1,
-		openRangeCount:      1,
-		openRangeLogicalTop: 1,
+		registers:       []Value{TableValue(deadTable)},
+		cells:           []*cell{{value: TableValue(deadTable)}},
+		openResultStart: 0,
+		openRangeOwner:  staleOwner,
+		cold: &vmFrameCold{
+			openResults:         vmOwnedResultWindow([]Value{TableValue(deadTable)}),
+			openRangeBase:       1,
+			openRangeCount:      1,
+			openRangeLogicalTop: 1,
+		},
 	}
 	coroutine := &vmCoroutine{
 		thread:    vmThread{frameSlots: []*vmFrame{active, stale}},
@@ -294,7 +298,7 @@ func TestRuntimeHeapCollectClearsOnlyInactiveCoroutineFrameSlots(t *testing.T) {
 	if len(active.registers) != 1 || len(activeOwner.values) != 1 || activeOwner.values[0].tableRef() != liveTable {
 		t.Fatalf("active frame range was cleared: registers=%#v owner=%#v", active.registers, activeOwner.values)
 	}
-	if stale.registers != nil || stale.cells != nil || stale.openResults.values != nil {
+	if stale.registers != nil || stale.cells != nil || stale.openResultValues() != nil {
 		t.Fatalf("inactive frame retained references: %#v", stale)
 	}
 	if len(staleOwner.values) != 1 {

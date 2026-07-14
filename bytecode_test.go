@@ -3683,8 +3683,8 @@ func TestVMFrameRecordsCallMetadataForFutureControlFlow(t *testing.T) {
 	if parent.registerCount != 3 {
 		t.Fatalf("parent register count is %d, want 3", parent.registerCount)
 	}
-	if parent.debugLine != -1 {
-		t.Fatalf("parent debug line is %d, want -1 placeholder", parent.debugLine)
+	if parent.debugLine() != -1 {
+		t.Fatalf("parent debug line is %d, want -1 placeholder", parent.debugLine())
 	}
 	if len(thread.frames) != 2 || thread.frames[0] != parent || thread.frames[1] != child {
 		t.Fatal("thread frame stack did not preserve parent/child order")

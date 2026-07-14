@@ -185,7 +185,7 @@ reload:
 				frame.clearOpenResultState()
 				frame.openResultStart = a
 				if !frame.publishOpenVarargRange(thread) {
-					frame.openResults = vmAdjustedBorrowedResultWindow(frame.varargValues())
+					frame.setOpenResultWindow(vmAdjustedBorrowedResultWindow(frame.varargValues()))
 				}
 				registers = frame.registers
 				registers[a] = frame.openResultAt(0)
@@ -769,11 +769,11 @@ reload:
 						return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: array iterator: index is %s, want integer", controlValue.Kind())))
 					}
 				}
-				if frame.openRangeOwner != nil {
+				if frame.hasOpenRange() {
 					frame.clearOpenResultRange()
 				}
 				frame.openResultStart = -1
-				frame.openResults = vmResultWindow{}
+				frame.clearOpenResultWindow()
 				next := index + 1
 				if next < 1 || next > len(table.array) {
 					registers[a] = NilValue()
@@ -795,11 +795,11 @@ reload:
 			if err != nil {
 				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
 			}
-			if frame.openRangeOwner != nil {
+			if frame.hasOpenRange() {
 				frame.clearOpenResultRange()
 			}
 			frame.openResultStart = -1
-			frame.openResults = vmResultWindow{}
+			frame.clearOpenResultWindow()
 			if count < 1 || first.IsNil() {
 				registers[a] = NilValue()
 				registers[a+1] = NilValue()
@@ -1587,11 +1587,11 @@ reload:
 					if err != nil {
 						return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
 					}
-					if frame.openRangeOwner != nil {
+					if frame.hasOpenRange() {
 						frame.clearOpenResultRange()
 					}
 					frame.openResultStart = -1
-					frame.openResults = vmResultWindow{}
+					frame.clearOpenResultWindow()
 					for i := 0; i < resultCount; i++ {
 						if i >= count {
 							registers[a+i] = NilValue()
@@ -1609,11 +1609,11 @@ reload:
 				if err != nil {
 					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
 				}
-				if frame.openRangeOwner != nil {
+				if frame.hasOpenRange() {
 					frame.clearOpenResultRange()
 				}
 				frame.openResultStart = -1
-				frame.openResults = vmResultWindow{}
+				frame.clearOpenResultWindow()
 				registers[a] = value
 				break
 			}
@@ -1626,11 +1626,11 @@ reload:
 				if err != nil {
 					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
 				}
-				if frame.openRangeOwner != nil {
+				if frame.hasOpenRange() {
 					frame.clearOpenResultRange()
 				}
 				frame.openResultStart = -1
-				frame.openResults = vmResultWindow{}
+				frame.clearOpenResultWindow()
 				registers[a] = result
 				break
 			}
@@ -1696,11 +1696,11 @@ reload:
 				if err != nil {
 					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
 				}
-				if frame.openRangeOwner != nil {
+				if frame.hasOpenRange() {
 					frame.clearOpenResultRange()
 				}
 				frame.openResultStart = -1
-				frame.openResults = vmResultWindow{}
+				frame.clearOpenResultWindow()
 				registers[a] = value
 				break
 			}
@@ -1713,11 +1713,11 @@ reload:
 				if err != nil {
 					return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err)))
 				}
-				if frame.openRangeOwner != nil {
+				if frame.hasOpenRange() {
 					frame.clearOpenResultRange()
 				}
 				frame.openResultStart = -1
-				frame.openResults = vmResultWindow{}
+				frame.clearOpenResultWindow()
 				registers[a] = result
 				break
 			}
@@ -1790,11 +1790,11 @@ reload:
 				}
 				return directFrameExitAt(frame, pc, directFrameFail(callErr))
 			}
-			if frame.openRangeOwner != nil {
+			if frame.hasOpenRange() {
 				frame.clearOpenResultRange()
 			}
 			frame.openResultStart = -1
-			frame.openResults = vmResultWindow{}
+			frame.clearOpenResultWindow()
 			registers = frame.registers
 			registers[a] = value
 			continue
@@ -1851,11 +1851,11 @@ reload:
 				}
 				return directFrameExitAt(frame, pc, directFrameFail(callErr))
 			}
-			if frame.openRangeOwner != nil {
+			if frame.hasOpenRange() {
 				frame.clearOpenResultRange()
 			}
 			frame.openResultStart = -1
-			frame.openResults = vmResultWindow{}
+			frame.clearOpenResultWindow()
 			registers = frame.registers
 			registers[a] = value
 			continue
@@ -1932,11 +1932,11 @@ reload:
 				}
 				return directFrameExitAt(frame, pc, directFrameFail(err))
 			}
-			if frame.openRangeOwner != nil {
+			if frame.hasOpenRange() {
 				frame.clearOpenResultRange()
 			}
 			frame.openResultStart = -1
-			frame.openResults = vmResultWindow{}
+			frame.clearOpenResultWindow()
 			registers = frame.registers
 			registers[a] = value
 			continue

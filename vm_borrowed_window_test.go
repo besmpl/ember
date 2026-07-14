@@ -13,10 +13,12 @@ func TestOpenResultRangeUsesSharedOwnerAndClearsLogicalTop(t *testing.T) {
 	if !frame.publishOpenVarargRange(&thread) {
 		t.Fatal("publishOpenVarargRange returned false")
 	}
-	if got, want := frame.openRangeBase, logicalTop; got != want {
+	_, gotBase, _, _ := frame.openRangeState()
+	if got, want := gotBase, logicalTop; got != want {
 		t.Fatalf("open range base = %d, want logical top %d", got, want)
 	}
-	if got, want := frame.openRangeCount, 1; got != want {
+	_, _, gotCount, _ := frame.openRangeState()
+	if got, want := gotCount, 1; got != want {
 		t.Fatalf("empty open range count = %d, want adjusted count %d", got, want)
 	}
 	if !frame.openResultAt(0).IsNil() {
@@ -70,7 +72,7 @@ func TestFixedResultOverwriteClearsOwnerBackedOpenRange(t *testing.T) {
 	if !frame.publishOpenResultRange(&thread, []Value{NumberValue(1), NumberValue(2)}) {
 		t.Fatal("publishOpenResultRange returned false")
 	}
-	rangeBase, rangeCount := frame.openRangeBase, frame.openRangeCount
+	_, rangeBase, rangeCount, _ := frame.openRangeState()
 	if got := len(owner.values); got <= logicalTop {
 		t.Fatalf("owner length = %d, want range above logical top %d", got, logicalTop)
 	}
@@ -84,8 +86,9 @@ func TestFixedResultOverwriteClearsOwnerBackedOpenRange(t *testing.T) {
 			t.Fatalf("cleared owner range slot %d = %v, want nil", rangeBase+index, backing[rangeBase+index])
 		}
 	}
-	if frame.openResultStart != -1 || frame.openRangeOwner != nil || frame.openRangeBase != -1 || frame.openRangeCount != 0 || frame.openRangeLogicalTop != -1 {
-		t.Fatalf("fixed result left stale open state: start=%d owner=%p base=%d count=%d top=%d", frame.openResultStart, frame.openRangeOwner, frame.openRangeBase, frame.openRangeCount, frame.openRangeLogicalTop)
+	owner, base, count, top := frame.openRangeState()
+	if frame.openResultStart != -1 || owner != nil || base != -1 || count != 0 || top != -1 {
+		t.Fatalf("fixed result left stale open state: start=%d owner=%p base=%d count=%d top=%d", frame.openResultStart, owner, base, count, top)
 	}
 	if got, ok := frame.register(0).Number(); !ok || got != 9 {
 		t.Fatalf("fixed result register = %v (%t), want 9", frame.register(0), ok)

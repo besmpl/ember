@@ -297,7 +297,8 @@ func (thread *vmThread) runColdInstruction(frame *vmFrame) (action coldInstructi
 					if values := frame.openResultRangeValues(); values != nil {
 						args = values
 					} else {
-						args = frame.openResults.borrowedValues()
+						openWindow := frame.openResultWindow()
+						args = openWindow.borrowedValues()
 					}
 				} else {
 					openResults := frame.openResultWindow()
