@@ -79,12 +79,19 @@ func newRuntimeError(err error, frames []ScriptFrame) error {
 }
 
 func newRuntimeErrorWithController(err error, frames []ScriptFrame, controller *executionController) error {
-	if controller == nil || len(controller.inheritedScriptFrames) == 0 {
+	if controller == nil {
 		return newRuntimeError(err, frames)
 	}
-	combined := make([]ScriptFrame, 0, len(frames)+len(controller.inheritedScriptFrames))
+	return newRuntimeErrorWithInheritedFrames(err, frames, controller.inheritedScriptFrames)
+}
+
+func newRuntimeErrorWithInheritedFrames(err error, frames, inherited []ScriptFrame) error {
+	if len(inherited) == 0 {
+		return newRuntimeError(err, frames)
+	}
+	combined := make([]ScriptFrame, 0, len(frames)+len(inherited))
 	combined = append(combined, frames...)
-	combined = append(combined, controller.inheritedScriptFrames...)
+	combined = append(combined, inherited...)
 	return newRuntimeError(err, combined)
 }
 
@@ -170,7 +177,11 @@ func (thread *vmThread) captureRuntimeError(err error, current *vmFrame, baseDep
 		return err
 	}
 	frames := thread.captureScriptFrames(current, baseDepth)
-	return newRuntimeErrorWithController(err, frames, thread.controller)
+	inherited := thread.inheritedScriptFrames
+	if len(inherited) == 0 && thread.controller != nil {
+		inherited = thread.controller.inheritedScriptFrames
+	}
+	return newRuntimeErrorWithInheritedFrames(err, frames, inherited)
 }
 
 func (thread *vmThread) captureScriptFrames(current *vmFrame, baseDepth int) []ScriptFrame {

@@ -74,6 +74,9 @@ func newVMCoroutineChecked(globals *globalEnv, root *closure) (*vmCoroutine, err
 		detached := *globals
 		detached.thread = nil
 		detached.pooled = false
+		detached.scope = invocationScope{}
+		detached.hasScope = false
+		detached.controller = nil
 		coroutineGlobals = &detached
 	}
 	coroutine := &vmCoroutine{
@@ -83,7 +86,10 @@ func newVMCoroutineChecked(globals *globalEnv, root *closure) (*vmCoroutine, err
 		root:   root,
 	}
 	if globals != nil {
-		coroutine.thread.inheritRuntimeState(globals.thread)
+		if globals.thread != nil {
+			coroutine.thread.owner = globals.thread.owner
+			coroutine.thread.inheritDebugConfig(globals.thread)
+		}
 	}
 	coroutine.userdata = NewUserData(coroutine)
 	if owner != nil {
@@ -134,6 +140,9 @@ func baseCoroutineResume(globals *globalEnv, args []Value) ([]Value, error) {
 	if parentThread != nil {
 		coroutine.thread.ctx = parentThread.ctx
 		coroutine.thread.controller = parentThread.controller
+		coroutine.thread.scope = parentThread.scope
+		coroutine.thread.hasScope = parentThread.hasScope
+		coroutine.thread.inheritedScriptFrames = parentThread.inheritedScriptFrames
 	}
 	results, err := resumeCoroutine(coroutine, globals, args[1:])
 	if yield, ok := err.(vmYieldRequest); ok {
@@ -146,8 +155,14 @@ func baseCoroutineResume(globals *globalEnv, args []Value) ([]Value, error) {
 		// controller before restoring these frames.
 		coroutine.suspended.ctx = context.Background()
 		coroutine.suspended.controller = nil
+		coroutine.suspended.scope = invocationScope{}
+		coroutine.suspended.hasScope = false
+		coroutine.suspended.inheritedScriptFrames = nil
 		coroutine.thread.ctx = context.Background()
 		coroutine.thread.controller = nil
+		coroutine.thread.scope = invocationScope{}
+		coroutine.thread.hasScope = false
+		coroutine.thread.inheritedScriptFrames = nil
 		return coroutine.resumeResult(true, yield.values), nil
 	}
 	if err != nil {
@@ -206,6 +221,9 @@ func (coroutine *vmCoroutine) disposeFrames() {
 	coroutine.thread.stack = nil
 	coroutine.thread.stackOwner = nil
 	coroutine.thread.globals = nil
+	coroutine.thread.scope = invocationScope{}
+	coroutine.thread.hasScope = false
+	coroutine.thread.inheritedScriptFrames = nil
 	coroutine.thread.baseGlobals = globalEnv{}
 	coroutine.thread.ctx = context.Background()
 	coroutine.thread.controller = nil

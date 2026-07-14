@@ -45,12 +45,14 @@ func RunWithGlobals(proto *Proto, globals map[string]Value) ([]Value, error) {
 }
 
 type executeOptions struct {
-	args           []Value
-	upvalues       []*cell
-	upvalueValues  []Value
-	upvalueValueOK []bool
-	controller     *executionController
-	instrumented   bool
+	args                  []Value
+	upvalues              []*cell
+	upvalueValues         []Value
+	upvalueValueOK        []bool
+	controller            *executionController
+	scope                 *invocationScope
+	inheritedScriptFrames []ScriptFrame
+	instrumented          bool
 }
 
 func executeProto(ctx context.Context, proto *Proto, globals *globalEnv, options executeOptions) ([]Value, error) {
@@ -78,12 +80,22 @@ func executeProto(ctx context.Context, proto *Proto, globals *globalEnv, options
 	thread := acquireVMThread(ctx, globals)
 	defer releaseVMThread(thread)
 	thread.controller = options.controller
+	thread.setInvocationScope(options.scope, globals)
+	thread.setInheritedScriptFrames(options.inheritedScriptFrames)
+	if globals != nil {
+		globals.clearInvocationScope()
+	}
 	thread.directFrameInstrumented = options.instrumented
 	return thread.runWithUpvalues(proto, options.args, options.upvalues, options.upvalueValues, options.upvalueValueOK)
 }
 
 func executeProtoWithOwner(ctx context.Context, proto *Proto, globals *globalEnv, options executeOptions) ([]Value, error) {
 	thread := acquireVMThread(ctx, globals)
+	thread.setInvocationScope(options.scope, globals)
+	thread.setInheritedScriptFrames(options.inheritedScriptFrames)
+	if globals != nil {
+		globals.clearInvocationScope()
+	}
 	if err := thread.bindOwner(globals.owner); err != nil {
 		thread.owner = nil
 		thread.resetForPool()
@@ -104,13 +116,16 @@ var vmThreadPool = sync.Pool{
 }
 
 type vmThread struct {
-	ctx         context.Context
-	globals     *globalEnv
-	baseGlobals globalEnv
-	owner       *runtimeOwner
-	ownerBound  bool
-	frames      []*vmFrame
-	frameSlots  []*vmFrame
+	ctx                   context.Context
+	globals               *globalEnv
+	scope                 invocationScope
+	hasScope              bool
+	inheritedScriptFrames []ScriptFrame
+	baseGlobals           globalEnv
+	owner                 *runtimeOwner
+	ownerBound            bool
+	frames                []*vmFrame
+	frameSlots            []*vmFrame
 	// frameRecords is the compact continuation stack used by the borrowed
 	// fixed-result call bridge. The vmFrame remains the execution bridge until
 	// the rest of the call ABI moves onto records.
@@ -959,6 +974,9 @@ func (instance *vmFunctionInstance) cacheAt(cacheID uint32) *dynamicStringIndexC
 type vmSuspendedFrames struct {
 	ctx                   context.Context
 	globals               *globalEnv
+	scope                 invocationScope
+	hasScope              bool
+	inheritedScriptFrames []ScriptFrame
 	frames                []*vmFrame
 	frameRecords          []vmFrameRecord
 	rootClosureSlots      []*closure
@@ -1422,6 +1440,7 @@ func newVMThreadWithContext(ctx context.Context, globals *globalEnv) vmThread {
 		nearestProtectedFrame: noProtectedFrame,
 		controller:            nil,
 	}
+	thread.setInvocationScope(nil, globals)
 	if globals != nil {
 		thread.owner = globals.owner
 	}
@@ -1483,6 +1502,7 @@ func (thread *vmThread) resetForRun(ctx context.Context, globals *globalEnv) {
 	}
 	thread.ctx = ctx
 	thread.globals = globals
+	thread.setInvocationScope(nil, globals)
 	thread.owner = nil
 	if globals != nil {
 		thread.owner = globals.owner
@@ -1552,6 +1572,9 @@ func (thread *vmThread) resetForPool() {
 	}
 	thread.ctx = context.Background()
 	thread.globals = nil
+	thread.scope = invocationScope{}
+	thread.hasScope = false
+	thread.inheritedScriptFrames = nil
 	thread.baseGlobals = globalEnv{}
 	thread.controller = nil
 	thread.resumeCallDepthErr = nil
@@ -1657,7 +1680,33 @@ func (thread *vmThread) inheritRuntimeState(parent *vmThread) {
 	thread.ctx = parent.ctx
 	thread.controller = parent.controller
 	thread.owner = parent.owner
+	thread.scope = parent.scope
+	thread.hasScope = parent.hasScope
+	thread.inheritedScriptFrames = parent.inheritedScriptFrames
 	thread.inheritDebugConfig(parent)
+}
+
+func (thread *vmThread) setInvocationScope(scope *invocationScope, globals *globalEnv) {
+	if scope != nil {
+		thread.scope = *scope
+		thread.hasScope = true
+		return
+	}
+	if globals != nil && globals.hasScope {
+		thread.scope = globals.scope
+		thread.hasScope = true
+		return
+	}
+	thread.scope = invocationScope{}
+	thread.hasScope = false
+}
+
+func (thread *vmThread) setInheritedScriptFrames(frames []ScriptFrame) {
+	if len(frames) == 0 {
+		thread.inheritedScriptFrames = nil
+		return
+	}
+	thread.inheritedScriptFrames = append(thread.inheritedScriptFrames[:0], frames...)
 }
 
 // installPendingCall is the single transition that records a frame's pending
@@ -1966,6 +2015,9 @@ func (thread *vmThread) suspendFrames() vmSuspendedFrames {
 	suspended := vmSuspendedFrames{
 		ctx:                   thread.ctx,
 		globals:               thread.globals,
+		scope:                 thread.scope,
+		hasScope:              thread.hasScope,
+		inheritedScriptFrames: append([]ScriptFrame(nil), thread.inheritedScriptFrames...),
 		frames:                thread.frames,
 		frameRecords:          thread.frameRecords,
 		rootClosureSlots:      thread.rootClosureSlots,
@@ -1992,6 +2044,9 @@ func (thread *vmThread) suspendFrames() vmSuspendedFrames {
 	thread.stackOwner = nil
 	thread.stack = nil
 	thread.openUpvalues = nil
+	thread.scope = invocationScope{}
+	thread.hasScope = false
+	thread.inheritedScriptFrames = nil
 	thread.nearestProtectedFrame = noProtectedFrame
 	return suspended
 }
@@ -1999,11 +2054,17 @@ func (thread *vmThread) suspendFrames() vmSuspendedFrames {
 func (thread *vmThread) resumeFrames(suspended vmSuspendedFrames) {
 	invocationContext := thread.ctx
 	invocationController := thread.controller
+	invocationScope := thread.scope
+	hasInvocationScope := thread.hasScope
+	invocationInherited := thread.inheritedScriptFrames
 	thread.ctx = suspended.ctx
 	if invocationContext != nil {
 		thread.ctx = invocationContext
 	}
 	thread.globals = suspended.globals
+	thread.scope = suspended.scope
+	thread.hasScope = suspended.hasScope
+	thread.inheritedScriptFrames = suspended.inheritedScriptFrames
 	thread.frames = suspended.frames
 	thread.frameRecords = suspended.frameRecords
 	thread.rootClosureSlots = suspended.rootClosureSlots
@@ -2021,6 +2082,13 @@ func (thread *vmThread) resumeFrames(suspended vmSuspendedFrames) {
 	thread.nearestProtectedFrame = suspended.nearestProtectedFrame
 	thread.rebindFrameWindows()
 	thread.controller = suspended.controller
+	if hasInvocationScope {
+		thread.scope = invocationScope
+		thread.hasScope = true
+	}
+	if len(invocationInherited) != 0 {
+		thread.inheritedScriptFrames = invocationInherited
+	}
 	if invocationController != nil {
 		thread.controller = invocationController
 		if err := invocationController.enterCalls(suspended.callDepth); err != nil {
@@ -6625,12 +6693,18 @@ func callValueWithContextController(ctx context.Context, fn Value, globals *glob
 			controller:     controller,
 		})
 	}
+	if globals != nil {
+		defer globals.clearInvocationScope()
+	}
 	return callValue(fn, globals, args)
 }
 
 func contextFromGlobalEnv(globals *globalEnv) context.Context {
 	if globals != nil && globals.thread != nil && globals.thread.ctx != nil {
 		return globals.thread.ctx
+	}
+	if globals != nil && globals.hasScope && globals.scope.ctx != nil {
+		return globals.scope.ctx
 	}
 	return context.Background()
 }

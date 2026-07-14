@@ -849,7 +849,11 @@ func HostFuncValue(fn HostFunc) Value {
 // active runtime context when called.
 func ContextHostFuncValue(fn ContextHostFunc) Value {
 	return nativeFuncValue(func(globals *globalEnv, args []Value) ([]Value, error) {
-		return fn(contextFromGlobalEnv(globals), ownedHostArgs(args))
+		ctx := contextFromGlobalEnv(globals)
+		if scope, ok := invocationScopeFromGlobalEnv(globals); ok {
+			ctx = contextWithInvocationScope(ctx, scope)
+		}
+		return fn(ctx, ownedHostArgs(args))
 	})
 }
 

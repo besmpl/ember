@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCapturedCallbackRootsEscapedValuesUntilClose(t *testing.T) {
@@ -11,12 +12,12 @@ func TestCapturedCallbackRootsEscapedValuesUntilClose(t *testing.T) {
 	runtime := &Runtime{owner: owner, program: &Program{}}
 	closure := &closure{proto: &Proto{}}
 	globalTable := NewTable()
-	call := runtimeCallContext{
+	call := invocationScope{
 		runtime: runtime,
 		ctx:     context.Background(),
 		globals: map[string]Value{"state": TableValue(globalTable)},
 	}
-	callback, err := CaptureCallback(contextWithRuntimeCallContext(context.Background(), call), closureFunctionValue(closure))
+	callback, err := CaptureCallback(contextWithInvocationScope(context.Background(), call), closureFunctionValue(closure))
 	if err != nil {
 		t.Fatalf("capture callback: %v", err)
 	}
@@ -56,5 +57,44 @@ func TestCapturedCallbackRootsEscapedValuesUntilClose(t *testing.T) {
 	}
 	if _, err := callback.Call(context.Background()); err == nil || !strings.Contains(err.Error(), "released") {
 		t.Fatalf("call released callback = %v, want released error", err)
+	}
+}
+
+func TestCallbackCallContextHostReceivesCallerContext(t *testing.T) {
+	type contextKey struct{}
+	key := contextKey{}
+	var observed any
+	var observedDeadline bool
+	var callbackContextDeadline time.Time
+	proto, err := Compile("check()\nreturn 7")
+	if err != nil {
+		t.Fatalf("compile callback: %v", err)
+	}
+	runtime := &Runtime{owner: newRuntimeOwner()}
+	globals := map[string]Value{
+		"check": ContextHostFuncValue(func(ctx context.Context, _ []Value) ([]Value, error) {
+			observed = ctx.Value(key)
+			deadline, ok := ctx.Deadline()
+			observedDeadline = ok && deadline.Equal(callbackContextDeadline)
+			return nil, nil
+		}),
+	}
+	scope := invocationScope{runtime: runtime, ctx: context.Background(), globals: globals}
+	callback, err := CaptureCallback(contextWithInvocationScope(context.Background(), scope), closureFunctionValue(&closure{proto: proto}))
+	if err != nil {
+		t.Fatalf("capture callback: %v", err)
+	}
+	defer callback.Close()
+	callbackContextDeadline = time.Now().Add(time.Minute)
+	ctxWithDeadline, cancel := context.WithDeadline(context.WithValue(context.Background(), key, "callback"), callbackContextDeadline)
+	defer cancel()
+	if _, err := callback.Call(ctxWithDeadline); err != nil {
+		t.Fatalf("callback call: %v", err)
+	}
+	if observed != "callback" {
+		t.Fatalf("context value = %#v, want callback", observed)
+	}
+	if !observedDeadline {
+		t.Fatal("callback context did not preserve deadline")
 	}
 }

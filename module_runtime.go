@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-func (r *Runtime) runModuleWithContextGlobalsController(ctx context.Context, key moduleKey, globals map[string]Value, controller *executionController) ([]Value, error) {
+func (r *Runtime) runModuleWithContextGlobalsController(ctx context.Context, key moduleKey, globals map[string]Value, controller *executionController, inherited []ScriptFrame) ([]Value, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -34,11 +34,11 @@ func (r *Runtime) runModuleWithContextGlobalsController(ctx context.Context, key
 		r.stack = r.stack[:len(r.stack)-1]
 	}()
 
-	call := r.newRuntimeCallContext(ctx, key, globals, controller)
-	callCtx := contextWithRuntimeCallContext(ctx, call)
-
-	results, err := executeProto(callCtx, proto, call.envWithRequire(), executeOptions{
-		controller: controller,
+	call := r.newInvocationScope(ctx, key, globals, controller)
+	results, err := executeProto(ctx, proto, call.envWithRequire(), executeOptions{
+		controller:            controller,
+		scope:                 &call,
+		inheritedScriptFrames: inherited,
 	})
 	if err != nil {
 		return nil, err

@@ -11,7 +11,7 @@ import (
 // A Callback shares mutable state with its owning Runtime; hosts should
 // serialize calls with other work on that Runtime.
 type Callback struct {
-	call  runtimeCallContext
+	call  invocationScope
 	value Value
 	state *callbackState
 }
@@ -26,7 +26,7 @@ type callbackState struct {
 // runtime call scope from ctx. Pass the context received by a
 // ContextHostFuncValue while Ember is executing script code.
 func CaptureCallback(ctx context.Context, value Value) (Callback, error) {
-	call, ok := runtimeCallContextFromContext(ctx)
+	call, ok := invocationScopeFromContext(ctx)
 	if !ok || call.runtime == nil {
 		return Callback{}, fmt.Errorf("callback: missing runtime context")
 	}
@@ -99,8 +99,7 @@ func (cb Callback) Call(ctx context.Context, args ...Value) ([]Value, error) {
 		return nil, fmt.Errorf("callback: create execution controller: %w", err)
 	}
 	call.controller = controller
-	callCtx := contextWithRuntimeCallContext(ctx, call)
-	return callValueWithContextController(callCtx, cb.value, call.envWithRequire(), args, controller)
+	return callValueWithContextController(ctx, cb.value, call.envWithRequire(), args, controller)
 }
 
 // Close releases the callback's collector roots. Callback copies share the
@@ -124,19 +123,19 @@ func (cb Callback) Close() error {
 	return nil
 }
 
-type runtimeCallContextKey struct{}
+type invocationScopeContextKey struct{}
 
-func contextWithRuntimeCallContext(ctx context.Context, call runtimeCallContext) context.Context {
+func contextWithInvocationScope(ctx context.Context, scope invocationScope) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return context.WithValue(ctx, runtimeCallContextKey{}, call)
+	return context.WithValue(ctx, invocationScopeContextKey{}, scope)
 }
 
-func runtimeCallContextFromContext(ctx context.Context) (runtimeCallContext, bool) {
+func invocationScopeFromContext(ctx context.Context) (invocationScope, bool) {
 	if ctx == nil {
-		return runtimeCallContext{}, false
+		return invocationScope{}, false
 	}
-	call, ok := ctx.Value(runtimeCallContextKey{}).(runtimeCallContext)
-	return call, ok
+	scope, ok := ctx.Value(invocationScopeContextKey{}).(invocationScope)
+	return scope, ok
 }

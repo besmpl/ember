@@ -5,6 +5,11 @@ type globalEnv struct {
 	host   map[string]Value
 	slots  []globalSlot
 	thread *vmThread
+	// scope carries the private invocation capability into a VM entry. The
+	// active thread owns the dynamic copy used by host adapters, so yielded
+	// coroutines can replace context and controller state on resume.
+	scope    invocationScope
+	hasScope bool
 	// controller is the active invocation capability for native/base callbacks.
 	// It is installed only for the duration of an execution and is never a
 	// table-owned policy.
@@ -36,6 +41,41 @@ func runtimeGlobalsWithOwner(globals map[string]Value, owner *runtimeOwner) *glo
 	env := runtimeGlobals(globals)
 	env.owner = owner
 	return env
+}
+
+func runtimeGlobalsWithInvocation(globals map[string]Value, owner *runtimeOwner, scope invocationScope) *globalEnv {
+	env := runtimeGlobalsWithOwner(globals, owner)
+	env.scope = scope
+	env.hasScope = true
+	return env
+}
+
+func (env *globalEnv) invocationScope() (invocationScope, bool) {
+	if env == nil {
+		return invocationScope{}, false
+	}
+	if env.thread != nil && env.thread.hasScope {
+		return env.thread.scope, true
+	}
+	if !env.hasScope {
+		return invocationScope{}, false
+	}
+	return env.scope, true
+}
+
+func (env *globalEnv) clearInvocationScope() {
+	if env == nil {
+		return
+	}
+	env.scope = invocationScope{}
+	env.hasScope = false
+}
+
+func invocationScopeFromGlobalEnv(env *globalEnv) (invocationScope, bool) {
+	if env == nil {
+		return invocationScope{}, false
+	}
+	return env.invocationScope()
 }
 
 func (env *globalEnv) getSlot(slot int, name string) (Value, bool, bool) {

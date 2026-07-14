@@ -343,9 +343,8 @@ func (r *Runtime) runHook(ctx context.Context, hook string, args []Value, report
 		if !callableValue(hookValue) {
 			return fmt.Errorf("runtime: hook %s.%s is %s, want function", entrypoint.name, hook, hookValue.Kind())
 		}
-		callContext := r.newRuntimeCallContext(ctx, entrypoint.key, hookGlobals, controller)
-		callCtx := contextWithRuntimeCallContext(ctx, callContext)
-		if _, err := callValueWithContextController(callCtx, hookValue, callContext.envWithRequire(), args, controller); err != nil {
+		callContext := r.newInvocationScope(ctx, entrypoint.key, hookGlobals, controller)
+		if _, err := callValueWithContextController(ctx, hookValue, callContext.envWithRequire(), args, controller); err != nil {
 			return fmt.Errorf("runtime: call hook %s.%s: %w", entrypoint.name, hook, err)
 		}
 		call.Called = true
@@ -440,7 +439,7 @@ func (r *Runtime) loadEntrypoint(ctx context.Context, entrypoint programEntrypoi
 	if err := ctx.Err(); err != nil {
 		return NilValue(), false, err
 	}
-	results, err := r.runModuleWithContextGlobalsController(ctx, entrypoint.key, globals, controller)
+	results, err := r.runModuleWithContextGlobalsController(ctx, entrypoint.key, globals, controller, nil)
 	if err != nil {
 		return NilValue(), false, err
 	}
