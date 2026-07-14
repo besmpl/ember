@@ -6,7 +6,7 @@ cleanup() { rm -rf "$root"; }
 trap cleanup EXIT HUP INT TERM
 families='scenario_ember_run recursive_fibonacci sparse_grid_neighbors runtime_modes compiler_256kib'
 write_capture() {
-	dir=$1; env_fingerprint=$2; source_fingerprint=$3; ns=$4; bytes=$5; allocs=$6; wide_ns=${7:-10000}
+	dir=$1; env_fingerprint=$2; source_fingerprint=$3; ns=$4; bytes=$5; allocs=$6; wide_ns=${7:-10000}; first_ns=${8:-100}
 	rm -rf "$dir"; mkdir -p "$dir"
 	{
 		printf 'commit=commit-baseline\n'
@@ -19,7 +19,7 @@ write_capture() {
 	for family in $families; do
 		name="BenchmarkShared/row/ember_run-8"
 		[ "$family" = compiler_256kib ] && name='BenchmarkCompilerStageMatrix/256KiB/emit-8'
-		printf '%s\n' "$name 100 ns/op $bytes B/op $allocs allocs/op" >"$dir/$family.raw.txt"
+		printf '%s\n' "$name $first_ns ns/op $bytes B/op $allocs allocs/op" >"$dir/$family.raw.txt"
 		printf '%s\n' "$name $ns ns/op $bytes B/op $allocs allocs/op" >>"$dir/$family.raw.txt"
 		if [ "$family" = scenario_ember_run ]; then
 			printf '%s\n' 'BenchmarkScenarioLuau/wide/ember_run-8 10000 ns/op 10 B/op 1 allocs/op' >>"$dir/$family.raw.txt"
@@ -54,6 +54,12 @@ grep -F 'row	family	name	ns_max_ratio	bytes_max	allocs_max' "$root/gates.tsv" >/
 scripts/performance-audit-compare --before "$root/base1" --after "$root/base2" --manifest "$root/gates.tsv" >"$root/slower-baseline"
 grep -F 'result: PASS' "$root/slower-baseline" >/dev/null
 run_fail 'refusing to overwrite' scripts/performance-audit-derive-manifest --before "$root/base1" --after "$root/base2" --output "$root/gates.tsv"
+
+write_capture "$root/precision-base1" env source 3080499 10 1 10000 3080499
+write_capture "$root/precision-base2" env source 3262773 10 1 10000 3262773
+scripts/performance-audit-derive-manifest --before "$root/precision-base1" --after "$root/precision-base2" --output "$root/precision-gates.tsv" >/dev/null
+scripts/performance-audit-compare --before "$root/precision-base1" --after "$root/precision-base2" --manifest "$root/precision-gates.tsv" >"$root/precision-pass"
+grep -F 'result: PASS' "$root/precision-pass" >/dev/null
 
 shared_gate=$(awk -F '\t' '$1 == "row" && $2 == "scenario_ember_run" && $3 == "BenchmarkShared/row/ember_run" { print $4 }' "$root/gates.tsv")
 wide_gate=$(awk -F '\t' '$1 == "row" && $2 == "scenario_ember_run" && $3 == "BenchmarkScenarioLuau/wide/ember_run" { print $4 }' "$root/gates.tsv")

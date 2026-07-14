@@ -129,7 +129,7 @@ END {
         if (noise < 100) noise = 100
 		ratio = 1 + noise / baseline_median
         if (set_name == "scenario_ember_run" && ratio < 1.05) ratio = 1.05
-		printf "row\t%s\t%s\t%.9g\t%.17g\t%.17g\n", family, row, ratio, bytes_max, allocs_max
+		printf "row\t%s\t%s\t%.17g\t%.17g\t%.17g\n", family, row, ratio, bytes_max, allocs_max
     }
 }
 ' "$tmp_dir/$family.before.tsv" "$tmp_dir/$family.after.tsv" >>"$out_tmp" || { rm -f "$out_tmp"; exit 1; }
