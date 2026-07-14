@@ -83,6 +83,9 @@ func TestCompilerE8OptimizerAllocationBudget(t *testing.T) {
 		compilerE8IRSink = optimized.ir
 	}
 	optimize()
+	if checkptrInstrumentedTest() {
+		t.Skip("allocation budgets run only with the normal compiler/runtime instrumentation")
+	}
 	runtime.GC()
 	sample := measureCompilerE8Runs(optimize)
 	t.Logf("source=%d bytes, optimizer alloc=%d B/op, %d allocs/op", len(source), sample.bytes, sample.allocs)
@@ -138,6 +141,20 @@ func TestCompilerE8AllocationBudgets(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			// Always exercise the fixture's observable compiler behavior before
+			// deciding whether its allocation measurement is meaningful. The
+			// checkptr lane deliberately skips only the measurement and budget
+			// assertions below; parse, compile, and expected-error checks remain
+			// active in every instrumentation mode.
+			if tc.parse {
+				probeCompilerE8Parse(t, tc.source, tc.options, tc.wantError)
+			} else {
+				probeCompilerE8Compile(t, tc.source, tc.options, tc.wantError)
+			}
+			if checkptrInstrumentedTest() {
+				t.Skip("allocation budgets run only with the normal compiler/runtime instrumentation")
+			}
+
 			var sample compilerE8AllocationSample
 			if tc.parse {
 				sample = measureCompilerE8Parse(t, tc.source, tc.options, tc.wantError)
@@ -158,20 +175,8 @@ func TestCompilerE8AllocationBudgets(t *testing.T) {
 func measureCompilerE8Parse(t *testing.T, source string, options CompileOptions, wantError bool) compilerE8AllocationSample {
 	t.Helper()
 	parse := func() {
-		parsed, err := (&parser{source: source, limits: options.Limits}).parse()
-		if wantError {
-			if err == nil || !errors.Is(err, ErrLimitExceeded) {
-				t.Fatalf("parse error = %v, want a limit error", err)
-			}
-			compilerE8ErrorSink = err
-			return
-		}
-		if err != nil {
-			t.Fatalf("parse returned error: %v", err)
-		}
-		compilerE8TreeSink = parsed
+		probeCompilerE8Parse(t, source, options, wantError)
 	}
-	parse()
 	runtime.GC()
 	return measureCompilerE8Runs(parse)
 }
@@ -179,22 +184,42 @@ func measureCompilerE8Parse(t *testing.T, source string, options CompileOptions,
 func measureCompilerE8Compile(t *testing.T, source string, options CompileOptions, wantError bool) compilerE8AllocationSample {
 	t.Helper()
 	compile := func() {
-		proto, err := CompileWithOptions(source, options)
-		if wantError {
-			if err == nil || !errors.Is(err, ErrLimitExceeded) {
-				t.Fatalf("compile error = %v, want a limit error", err)
-			}
-			compilerE8ErrorSink = err
-			return
-		}
-		if err != nil {
-			t.Fatalf("CompileWithOptions returned error: %v", err)
-		}
-		compilerE8ProtoSink = proto
+		probeCompilerE8Compile(t, source, options, wantError)
 	}
-	compile()
 	runtime.GC()
 	return measureCompilerE8Runs(compile)
+}
+
+func probeCompilerE8Parse(t *testing.T, source string, options CompileOptions, wantError bool) {
+	t.Helper()
+	parsed, err := (&parser{source: source, limits: options.Limits}).parse()
+	if wantError {
+		if err == nil || !errors.Is(err, ErrLimitExceeded) {
+			t.Fatalf("parse error = %v, want a limit error", err)
+		}
+		compilerE8ErrorSink = err
+		return
+	}
+	if err != nil {
+		t.Fatalf("parse returned error: %v", err)
+	}
+	compilerE8TreeSink = parsed
+}
+
+func probeCompilerE8Compile(t *testing.T, source string, options CompileOptions, wantError bool) {
+	t.Helper()
+	proto, err := CompileWithOptions(source, options)
+	if wantError {
+		if err == nil || !errors.Is(err, ErrLimitExceeded) {
+			t.Fatalf("compile error = %v, want a limit error", err)
+		}
+		compilerE8ErrorSink = err
+		return
+	}
+	if err != nil {
+		t.Fatalf("CompileWithOptions returned error: %v", err)
+	}
+	compilerE8ProtoSink = proto
 }
 
 func measureCompilerE8Runs(run func()) compilerE8AllocationSample {

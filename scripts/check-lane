@@ -11,7 +11,7 @@ fi
 lane="${1:-}"
 case "$lane" in
     root)
-        go test -vet=off -count=1 ./...
+        go test -count=1 ./...
         ;;
     "")
         printf 'usage: scripts/check-lane <lane>\nvalid lanes:\n  root\n' >&2

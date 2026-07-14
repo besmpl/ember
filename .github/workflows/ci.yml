@@ -31,3 +31,54 @@ jobs:
 
       - name: Build packages
         run: go build ./...
+
+  vet:
+    name: vet
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run vet
+        run: go vet ./...
+
+  race:
+    name: race
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run race tests
+        run: go test -race -count=1 ./...
+
+  checkptr:
+    name: checkptr
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run checkptr tests
+        run: go test -gcflags=all=-d=checkptr=2 -count=1 ./...

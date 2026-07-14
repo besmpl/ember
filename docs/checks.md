@@ -56,8 +56,20 @@ It runs:
 
 - non-writing `gofmt`;
 - shell syntax checks for scripts;
-- `go test -vet=off -count=1 ./...`;
+- `go test -count=1 ./...` (including the default vet pass);
 - `git diff --check` when the directory is inside a Git worktree.
+
+The standard CI workflow also runs these required lanes independently:
+
+```sh
+go vet ./...
+go test -race -count=1 ./...
+go test -gcflags=all=-d=checkptr=2 -count=1 ./...
+```
+
+Allocation-budget tests that cannot produce meaningful numbers under pointer
+instrumentation skip only their measurement section; semantic checks remain
+active.
 
 ## Full Helper
 
@@ -65,8 +77,7 @@ It runs:
 scripts/check-full
 ```
 
-For now this aliases `scripts/check`. Expand it only when the repository has
-real slower checks to run.
+It runs `scripts/check` and then the vet, race, and checkptr lanes above.
 
 ## Documentation-Only Changes
 

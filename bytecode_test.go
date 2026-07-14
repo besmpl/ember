@@ -1699,6 +1699,9 @@ return total
 func TestFrameResetNoLongerScalesWithCodeLength(t *testing.T) {
 	shortProto := compileDynamicIndexProgram(t, 4)
 	longProto := compileDynamicIndexProgram(t, 160)
+	if checkptrInstrumentedTest() {
+		t.Skip("allocation budgets run only with the normal compiler/runtime instrumentation")
+	}
 
 	shortBytes := measuredFreshThreadRunAllocBytes(t, shortProto, 4, 40)
 	longBytes := measuredFreshThreadRunAllocBytes(t, longProto, 160, 40)
