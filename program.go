@@ -258,32 +258,40 @@ func (p *Program) NewRuntime(options RuntimeOptions) (*Runtime, error) {
 // RunHook loads entrypoints lazily and calls hook in entrypoint order.
 func (r *Runtime) RunHook(ctx context.Context, hook string, args ...Value) (HookReport, error) {
 	report := HookReport{Hook: hook}
+	err := r.runHook(ctx, hook, args, &report)
+	return report, err
+}
+
+// runHook executes one hook invocation. A nil report keeps the same execution
+// and error semantics while allowing private callers that only need success
+// or failure to discard per-entrypoint outcomes.
+func (r *Runtime) runHook(ctx context.Context, hook string, args []Value, report *HookReport) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if r == nil {
-		return report, fmt.Errorf("runtime: nil runtime")
+		return fmt.Errorf("runtime: nil runtime")
 	}
 	lease, err := r.beginRun()
 	if err == errRuntimeOwnerClosed {
-		return report, fmt.Errorf("runtime: closed")
+		return fmt.Errorf("runtime: closed")
 	}
 	if err == errRuntimeOwnerBusy {
-		return report, fmt.Errorf("runtime: begin run: %w", ErrRuntimeBusy)
+		return fmt.Errorf("runtime: begin run: %w", ErrRuntimeBusy)
 	}
 	if err != nil {
-		return report, fmt.Errorf("runtime: begin run: %w", err)
+		return fmt.Errorf("runtime: begin run: %w", err)
 	}
 	defer lease.end()
 	if hook == "" {
-		return report, fmt.Errorf("runtime: empty hook")
+		return fmt.Errorf("runtime: empty hook")
 	}
 	if err := ctx.Err(); err != nil {
-		return report, err
+		return err
 	}
 	controller, err := newExecutionController(ctx, r.limits)
 	if err != nil {
-		return report, fmt.Errorf("runtime: create execution controller: %w", err)
+		return fmt.Errorf("runtime: create execution controller: %w", err)
 	}
 
 	for _, entrypoint := range r.program.entrypoints {
@@ -297,11 +305,11 @@ func (r *Runtime) RunHook(ctx context.Context, hook string, args ...Value) (Hook
 			Module:     moduleIDFromKey(entrypoint.key),
 		})
 		if err != nil {
-			return report, fmt.Errorf("runtime: host globals for %s load: %w", entrypoint.name, err)
+			return fmt.Errorf("runtime: host globals for %s load: %w", entrypoint.name, err)
 		}
 		export, loaded, err := r.loadEntrypoint(ctx, entrypoint, loadGlobals, controller)
 		if err != nil {
-			return report, fmt.Errorf("runtime: load entrypoint %s: %w", entrypoint.name, err)
+			return fmt.Errorf("runtime: load entrypoint %s: %w", entrypoint.name, err)
 		}
 		call.Loaded = loaded
 
@@ -311,39 +319,45 @@ func (r *Runtime) RunHook(ctx context.Context, hook string, args ...Value) (Hook
 			Hook:       hook,
 		})
 		if err != nil {
-			return report, fmt.Errorf("runtime: host globals for %s.%s: %w", entrypoint.name, hook, err)
+			return fmt.Errorf("runtime: host globals for %s.%s: %w", entrypoint.name, hook, err)
 		}
 
 		table, ok := export.Table()
 		if export.IsNil() {
 			call.Skipped = true
-			report.Calls = append(report.Calls, call)
+			appendHookCallReport(report, call)
 			continue
 		}
 		if !ok {
-			return report, fmt.Errorf("runtime: entrypoint %s returned %s, want table or nil", entrypoint.name, export.Kind())
+			return fmt.Errorf("runtime: entrypoint %s returned %s, want table or nil", entrypoint.name, export.Kind())
 		}
 		hookValue, err := runtimeTableAccess(runtimeGlobalsWithOwner(hookGlobals, r.owner)).get(table, StringValue(hook))
 		if err != nil {
-			return report, fmt.Errorf("runtime: get hook %s.%s: %w", entrypoint.name, hook, err)
+			return fmt.Errorf("runtime: get hook %s.%s: %w", entrypoint.name, hook, err)
 		}
 		if hookValue.IsNil() {
 			call.Skipped = true
-			report.Calls = append(report.Calls, call)
+			appendHookCallReport(report, call)
 			continue
 		}
 		if !callableValue(hookValue) {
-			return report, fmt.Errorf("runtime: hook %s.%s is %s, want function", entrypoint.name, hook, hookValue.Kind())
+			return fmt.Errorf("runtime: hook %s.%s is %s, want function", entrypoint.name, hook, hookValue.Kind())
 		}
 		callContext := r.newRuntimeCallContext(ctx, entrypoint.key, hookGlobals, controller)
 		callCtx := contextWithRuntimeCallContext(ctx, callContext)
 		if _, err := callValueWithContextController(callCtx, hookValue, callContext.envWithRequire(), args, controller); err != nil {
-			return report, fmt.Errorf("runtime: call hook %s.%s: %w", entrypoint.name, hook, err)
+			return fmt.Errorf("runtime: call hook %s.%s: %w", entrypoint.name, hook, err)
 		}
 		call.Called = true
+		appendHookCallReport(report, call)
+	}
+	return nil
+}
+
+func appendHookCallReport(report *HookReport, call HookCallReport) {
+	if report != nil {
 		report.Calls = append(report.Calls, call)
 	}
-	return report, nil
 }
 
 func (r *Runtime) beginRun() (*runtimeRunLease, error) {

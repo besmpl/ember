@@ -1172,6 +1172,52 @@ return {
 	})
 }
 
+func TestRuntimeRunHookReturnsPartialReportWhenLaterEntrypointFails(t *testing.T) {
+	loader := &programTestLoader{
+		sources: map[string]string{
+			"logical:game/first": `
+return {
+	startup = function()
+		return nil
+	end,
+}
+`,
+			"logical:game/second": `
+return {
+	startup = 7,
+}
+`,
+		},
+	}
+	program, _, err := ember.LoadProgram(context.Background(), loader, ember.ProgramOptions{
+		Entrypoints: []ember.Entrypoint{
+			{Name: "first", Module: ember.LogicalModule("game/first")},
+			{Name: "second", Module: ember.LogicalModule("game/second")},
+		},
+		Parallelism: 1,
+	})
+	if err != nil {
+		t.Fatalf("LoadProgram returned error: %v", err)
+	}
+	runtime, err := program.NewRuntime(ember.RuntimeOptions{})
+	if err != nil {
+		t.Fatalf("NewRuntime returned error: %v", err)
+	}
+	defer runtime.Close()
+
+	report, err := runtime.RunHook(context.Background(), "startup")
+	if err == nil {
+		t.Fatal("RunHook succeeded, want later entrypoint error")
+	}
+	if !strings.Contains(err.Error(), "second.startup") {
+		t.Fatalf("RunHook error is %q, want second entrypoint context", err)
+	}
+	if report.Hook != "startup" {
+		t.Fatalf("report hook = %q, want startup", report.Hook)
+	}
+	assertHookCalls(t, report.Calls, []hookCallWant{{entrypoint: "first", called: true}})
+}
+
 func TestRuntimeRunHookRejectsNonTableEntrypointExport(t *testing.T) {
 	loader := &programTestLoader{
 		sources: map[string]string{
