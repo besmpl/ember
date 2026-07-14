@@ -76,7 +76,22 @@ if REQUIRE_FIXED_CORE=0 scripts/bench-summary --before "$before" --after "$missi
 fi
 grep -F 'missing required scaling row: BenchmarkCompileMatrix/straight_line/10000' "$fixture_dir/missing-scaling-output" >/dev/null
 
-sed 's#straight_line/1000-8 1200 ns/op 1200 B/op 120 allocs/op#straight_line/1000-8 1200 ns/op 120 allocs/op#' "$after" >"$missing_metric_after"
+awk '
+    /^BenchmarkCompileMatrix\/straight_line\/1000-/ {
+        for (i = 2; i < NF; i++) {
+            if ($(i + 1) == "B/op") {
+                $i = ""
+                $(i + 1) = ""
+                break
+            }
+        }
+    }
+    { print }
+' "$after" >"$missing_metric_after"
+if awk '$1 ~ /^BenchmarkCompileMatrix\/straight_line\/1000-/ { print }' "$missing_metric_after" | grep -F 'B/op' >/dev/null; then
+	printf '%s\n' 'bench-summary-test: missing-metric fixture still has B/op' >&2
+	exit 1
+fi
 if REQUIRE_FIXED_CORE=0 scripts/bench-summary --before "$before" --after "$missing_metric_after" >"$fixture_dir/missing-metric-output"; then
 	printf '%s\n' 'bench-summary-test: missing required metric unexpectedly passed' >&2
 	exit 1

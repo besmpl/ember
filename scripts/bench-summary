@@ -323,7 +323,8 @@ function average_after(metric_name, unused, name) {
     return sample_median("after", metric_name, name)
 }
 
-function check_required_row(name, label, missing) {
+function check_required_row(name, label, missing_count) {
+    missing_count = 0
     if (!(name in before_rows) || !(name in after_rows)) {
         printf "missing %s row: %s\n", label, name
         failures++
@@ -331,17 +332,17 @@ function check_required_row(name, label, missing) {
     }
     if (b_ns_count[name] <= 0 || a_ns_count[name] <= 0) {
         printf "missing %s ns/op metric: %s\n", label, name
-        missing++
+        missing_count++
     }
     if (b_bytes_count[name] <= 0 || a_bytes_count[name] <= 0) {
         printf "missing %s B/op metric: %s\n", label, name
-        missing++
+        missing_count++
     }
     if (b_allocs_count[name] <= 0 || a_allocs_count[name] <= 0) {
         printf "missing %s allocs/op metric: %s\n", label, name
-        missing++
+        missing_count++
     }
-    if (missing > 0) { failures++ }
+    if (missing_count > 0) { failures++ }
 }
 
 function print_scaling_pair(label, left, right, left_value, right_value, left_bytes, right_bytes, left_allocs, right_allocs, ratio, bytes_ratio, allocs_ratio, status) {
@@ -443,14 +444,14 @@ END {
     emit_set("compile-other", "compile-other")
 
     for (name in cold) {
-        if (require_fixed_core != 0) { check_required_row(name, "fixed cold-core") }
+        if (require_fixed_core != 0) { check_required_row(name, "fixed cold-core", 0) }
     }
 
     required_scaling["BenchmarkCompileMatrix/straight_line/100"] = 1
     required_scaling["BenchmarkCompileMatrix/straight_line/1000"] = 1
     required_scaling["BenchmarkCompileMatrix/straight_line/10000"] = 1
     for (name in required_scaling) {
-        check_required_row(name, "required scaling")
+        check_required_row(name, "required scaling", 0)
     }
 
     print ""
