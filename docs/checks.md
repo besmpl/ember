@@ -38,6 +38,31 @@ an existing capture. The compiler-stage family is retained as raw `go test`
 output because `scripts/bench-summary` only formats runtime and parity rows.
 Failed runs leave an `INCOMPLETE` marker in the newly created directory.
 
+## Scheduled evidence
+
+`.github/workflows/scheduled.yml` runs the long-lived checks weekly (and by
+manual dispatch). The five fuzz targets each have a separate matrix entry,
+`fail-fast: false`, and a bounded 10-minute fuzz budget. Every entry uploads its
+log and `testdata/fuzz/<target>` corpus, including when the fuzz process fails.
+
+The runtime parity job runs `scripts/check-runtime-parity --phase full` on the
+controlled self-hosted Darwin 24.6.0 arm64 Apple M1 runner labeled
+`[self-hosted, macOS, ARM64, apple-m1, ember-parity]`, with the pinned Luau
+executable. The existing harness records raw samples and applies the
+median and p90 ratio limits as hard gates (invalid or contaminated input is a
+failure); the workflow additionally uploads the command, source, toolchain,
+Luau, CPU, OS, and environment fingerprint along with all retained attempts.
+
+The performance job runs `scripts/performance-audit --profiles` on a controlled
+Apple M1 runner labeled
+`[self-hosted, macOS, ARM64, apple-m1, ember-performance]`. This covers the
+Scenario, recursive Fibonacci, sparse-grid, compiler-stage, and runtime-mode
+families, and writes CPU and allocation profiles for each. Its output, command
+log, fingerprint, and any `INCOMPLETE` marker are uploaded regardless of the
+result. Pull-request CI remains the owner of structural and allocation-budget
+gates; the scheduled job supplies repeatable long-run evidence without
+duplicating noisy wall-time assertions in PRs.
+
 ## Lane Helper
 
 ```sh

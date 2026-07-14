@@ -1,0 +1,256 @@
+name: Scheduled
+
+on:
+  schedule:
+    - cron: '23 3 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Scheduled runs must finish (and retain their evidence) instead of cancelling
+# an in-flight benchmark or fuzz capture when the next run is queued.
+concurrency:
+  group: scheduled-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: validate scheduled checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Validate workflow and helper self-tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby -e 'require "yaml"; YAML.load_file(".github/workflows/scheduled.yml"); puts "scheduled workflow YAML: pass"'
+          sh -n scripts/check-runtime-parity scripts/performance-audit
+          scripts/check-runtime-parity --self-test
+          scripts/performance-audit --help >/dev/null
+
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - FuzzParserSpeculativePaths
+          - FuzzLexMalformedEscapes
+          - FuzzWordcodeDecoderNeverPanics
+          - FuzzWordcodeDecoderBoundedBytes
+          - FuzzWordcodeRoundTrip
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run bounded fuzz target
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "testdata/fuzz/${{ matrix.target }}" fuzz-artifacts
+          set +e
+          go test -run '^$' -fuzz="^${{ matrix.target }}$" -fuzztime=10m -fuzzminimizetime=1m -parallel=1 . 2>&1 | tee "fuzz-artifacts/${{ matrix.target }}.log"
+          pipeline_status=("${PIPESTATUS[@]}")
+          producer_status=${pipeline_status[0]}
+          tee_status=${pipeline_status[1]}
+          printf 'fuzz target %s producer exit status: %s; tee exit status: %s\n' '${{ matrix.target }}' "$producer_status" "$tee_status"
+          printf 'fuzz target %s producer exit status: %s; tee exit status: %s\n' '${{ matrix.target }}' "$producer_status" "$tee_status" >>"fuzz-artifacts/${{ matrix.target }}.log"
+          append_status=$?
+          status=0
+          [ "$producer_status" -eq 0 ] || status=$producer_status
+          [ "$status" -eq 0 ] && [ "$tee_status" -ne 0 ] && status=$tee_status
+          [ "$status" -eq 0 ] && [ "$append_status" -ne 0 ] && status=$append_status
+          exit "$status"
+
+      - name: Preserve fuzz log and corpus
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.target }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: |
+            fuzz-artifacts/${{ matrix.target }}.log
+            testdata/fuzz/${{ matrix.target }}
+
+  parity:
+    name: runtime parity (Darwin arm64 Apple M1)
+    # This label set is intentionally explicit: parity numbers are only
+    # meaningful on the pinned controlled self-hosted reference runner.
+    runs-on: [self-hosted, macOS, ARM64, apple-m1, ember-parity]
+    timeout-minutes: 45
+    env:
+      CGO_ENABLED: '0'
+      GOMAXPROCS: '1'
+      LUAU_BIN: /opt/homebrew/bin/luau
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Capture pinned parity fingerprint
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_fingerprint=$(
+            {
+              printf 'HEAD\t%s\n' "$(git rev-parse HEAD)"
+              {
+                find . -maxdepth 1 -type f -name '*.go' -print | awk '{sub(/^\.\//, ""); print}'
+                printf '%s\n' scripts/check-runtime-parity scripts/scenario-ratio-gate
+              } | LC_ALL=C sort | while IFS= read -r path; do
+                digest="$(shasum -a 256 "$path" | awk '{print $1}')"
+                printf '%s\t%s\n' "$path" "$digest"
+              done
+            } | shasum -a 256 | awk '{print $1}'
+          )
+          mkdir -p parity-artifacts
+          {
+            printf '%s\n' '# ember scheduled parity fingerprint/v1'
+            printf 'command=LUAU_BIN=/opt/homebrew/bin/luau CGO_ENABLED=0 GOMAXPROCS=1 scripts/check-runtime-parity --phase full\n'
+            printf 'commit='; git rev-parse HEAD
+            printf 'source_fingerprint=%s\n' "$source_fingerprint"
+            printf 'source_status_begin\n'; git status --porcelain=v1; printf 'source_status_end\n'
+            printf 'go_version='; go version
+            printf 'go_env_begin\n'; go env; printf 'go_env_end\n'
+            printf 'os_uname='; uname -a
+            printf 'os_release='; sysctl -n kern.osrelease
+            printf 'os_machine='; sysctl -n hw.machine
+            printf 'cpu='; sysctl -n machdep.cpu.brand_string
+            printf 'luau_path=%s\n' "$LUAU_BIN"
+            printf 'luau_sha256='; shasum -a 256 "$LUAU_BIN" | awk '{print $1}'
+            printf 'luau_homebrew_info_begin\n'; brew info luau --json=v2; printf 'luau_homebrew_info_end\n'
+            printf 'environment_begin\n'
+            env | LC_ALL=C sort | awk -F= '/^(CGO_ENABLED|GOMAXPROCS|GOFLAGS|GODEBUG|LUAU_BIN|BENCHTIME|RUNTIME_PARITY_CASES|RUNTIME_PARITY_RAW)=/ {print}'
+            printf 'environment_end\n'
+          } > parity-artifacts/fingerprint.txt
+
+      - name: Run full runtime parity gate
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p parity-artifacts
+          set +e
+          LUAU_BIN="$LUAU_BIN" CGO_ENABLED="$CGO_ENABLED" GOMAXPROCS="$GOMAXPROCS" \
+            scripts/check-runtime-parity --phase full 2>&1 | tee parity-artifacts/parity.log
+          pipeline_status=("${PIPESTATUS[@]}")
+          producer_status=${pipeline_status[0]}
+          tee_status=${pipeline_status[1]}
+          printf 'runtime parity producer exit status: %s; tee exit status: %s\n' "$producer_status" "$tee_status"
+          printf 'runtime parity producer exit status: %s; tee exit status: %s\n' "$producer_status" "$tee_status" >>parity-artifacts/parity.log
+          append_status=$?
+          status=0
+          [ "$producer_status" -eq 0 ] || status=$producer_status
+          [ "$status" -eq 0 ] && [ "$tee_status" -ne 0 ] && status=$tee_status
+          [ "$status" -eq 0 ] && [ "$append_status" -ne 0 ] && status=$append_status
+          exit "$status"
+
+      - name: Preserve parity evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-parity
+          retention-days: 30
+          if-no-files-found: warn
+          path: |
+            parity-artifacts
+            tmp/runtime-parity
+
+  performance:
+    name: performance audit (Darwin arm64 Apple M1)
+    # The audit is controlled for CPU/OS noise, but does not duplicate the
+    # structural and allocation gates already enforced by pull-request CI.
+    runs-on: [self-hosted, macOS, ARM64, apple-m1, ember-performance]
+    timeout-minutes: 90
+    env:
+      BENCHTIME: 500ms
+      CGO_ENABLED: '0'
+      GOMAXPROCS: '1'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run complete performance audit with profiles
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p performance-artifacts
+          set +e
+          BENCHTIME="$BENCHTIME" CGO_ENABLED="$CGO_ENABLED" GOMAXPROCS="$GOMAXPROCS" \
+            scripts/performance-audit --output performance-artifacts/audit --profiles 2>&1 | tee performance-artifacts/audit.log
+          pipeline_status=("${PIPESTATUS[@]}")
+          producer_status=${pipeline_status[0]}
+          tee_status=${pipeline_status[1]}
+          printf 'performance audit producer exit status: %s; tee exit status: %s\n' "$producer_status" "$tee_status"
+          printf 'performance audit producer exit status: %s; tee exit status: %s\n' "$producer_status" "$tee_status" >>performance-artifacts/audit.log
+          append_status=$?
+          status=0
+          [ "$producer_status" -eq 0 ] || status=$producer_status
+          [ "$status" -eq 0 ] && [ "$tee_status" -ne 0 ] && status=$tee_status
+          [ "$status" -eq 0 ] && [ "$append_status" -ne 0 ] && status=$append_status
+          exit "$status"
+
+      - name: Record performance fingerprint
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p performance-artifacts/audit
+          {
+            printf '%s\n' '# ember scheduled performance fingerprint/v1'
+            printf 'command=BENCHTIME=500ms CGO_ENABLED=0 GOMAXPROCS=1 scripts/performance-audit --output performance-artifacts/audit --profiles\n'
+            printf 'commit='; git rev-parse HEAD
+            printf 'source_status_begin\n'; git status --porcelain=v1; printf 'source_status_end\n'
+            printf 'go_version='; go version
+            printf 'go_env_begin\n'; go env; printf 'go_env_end\n'
+            printf 'os_uname='; uname -a
+            printf 'os_release='; sysctl -n kern.osrelease
+            printf 'os_machine='; sysctl -n hw.machine
+            printf 'cpu='; sysctl -n machdep.cpu.brand_string
+            printf 'environment_begin\n'
+            env | LC_ALL=C sort | awk -F= '/^(CGO_ENABLED|GOMAXPROCS|GOFLAGS|GODEBUG|LUAU_BIN|BENCHTIME)=/ {print}'
+            printf 'environment_end\n'
+          } > performance-artifacts/audit/fingerprint.txt
+
+      - name: Preserve performance evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-audit
+          retention-days: 30
+          if-no-files-found: warn
+          path: performance-artifacts
