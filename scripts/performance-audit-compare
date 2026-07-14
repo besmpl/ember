@@ -172,7 +172,7 @@ awk -F '\t' 'BEGIN {
         expected["compiler_256kib"] = 1
         header=0; bad=0
     }
-    $1 == "row" && $2 == "family" && $3 == "name" && $4 == "ns_max_ratio_a" && $5 == "ns_max_ratio_b" && $6 == "bytes_max" && $7 == "allocs_max" { header++; next }
+    $1 == "row" && $2 == "family" && $3 == "name" && $4 == "ns_max_ratio_a" && $5 == "ns_max_ratio_b" && $6 == "bytes_max" && $7 == "allocs_max" && NF == 7 { header++; next }
     function nonnegative(value) { return value ~ /^[0-9]+([.][0-9]*)?([eE][+-]?[0-9]+)?$/ && value + 0 >= 0 }
     $1 == "row" {
         key=$2 SUBSEP $3

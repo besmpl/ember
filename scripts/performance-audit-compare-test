@@ -176,6 +176,10 @@ cp "$root/gates.tsv" "$root/extra-column.tsv"
 awk -F '\t' 'BEGIN { OFS="\t" } $1 == "row" && $2 != "family" && !done++ { $8="unexpected" } { print }' "$root/extra-column.tsv" >"$root/extra-column.tmp"
 mv "$root/extra-column.tmp" "$root/extra-column.tsv"
 run_fail 'invalid gate manifest rows' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/extra-column.tsv"
+cp "$root/gates.tsv" "$root/extra-header-column.tsv"
+awk -F '\t' 'BEGIN { OFS="\t" } $1 == "row" && $2 == "family" && !done++ { $8="unexpected" } { print }' "$root/extra-header-column.tsv" >"$root/extra-header-column.tmp"
+mv "$root/extra-header-column.tmp" "$root/extra-header-column.tsv"
+run_fail 'invalid gate manifest rows' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/extra-header-column.tsv"
 for malformed in missing duplicate nonnumeric below-one; do
 	cp "$root/gates.tsv" "$root/role-b-$malformed.tsv"
 	case "$malformed" in
