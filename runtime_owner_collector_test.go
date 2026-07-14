@@ -105,13 +105,6 @@ func TestRuntimeOwnerCollectRejectsActiveAndClosedOwners(t *testing.T) {
 		t.Fatalf("collect during run = %v, want %v", err, errRuntimeOwnerActive)
 	}
 	lease.end()
-	if err := owner.beginSlotRun(); err != nil {
-		t.Fatalf("begin slot run: %v", err)
-	}
-	if _, err := owner.collect(nil); !errors.Is(err, errRuntimeOwnerActive) {
-		t.Fatalf("collect during slot run = %v, want %v", err, errRuntimeOwnerActive)
-	}
-	owner.endSlotRun()
 	thread := &vmThread{}
 	if err := owner.registerThread(thread); err != nil {
 		t.Fatalf("register thread: %v", err)

@@ -9,21 +9,15 @@ single favorable microbenchmark. The public `Value` representation and the
 canonical wordcode VM are already the compatibility boundary; the decision is
 whether any private alternate should remain production machinery.
 
-The checked-in internal harness is
-`f3_execution_retention_benchmark_test.go`. It compiles representative Top10
-arithmetic, recursive-call, and fixed-call fixtures plus the canonical 25-row
-Scenario corpus. The Scenario rows are loaded in the test by parsing
-`top10_luau_benchmark_test.go`, so the evidence cannot drift from the existing
-compatibility cases. The harness measures forced `direct`, `direct_no_kernel`,
-`slot`, `numeric_slot`, and `compact_call` paths where those paths are
-meaningful. `TestF3ExecutionPathCoverage` records representative eligibility;
-`TestF3ScenarioPathCoverage` records full-corpus parity, eligibility, and
-dynamic direct-loop-kernel coverage without making the decision depend on one
-machine's timing noise.
+The F3 benchmark harness was a temporary decision tool. Its measurements are
+recorded below and the harness was deleted with the losing engines after this
+decision, so the repository has no dormant alternate-path selector or
+benchmark-only compatibility shim.
 
 ## Evidence
 
-Reproducible checked-in harness commands:
+Archived harness commands (recorded from commit `0aa7d7af`; the harness is no
+longer checked in):
 
 ```text
 go test -run '^TestF3ExecutionPathCoverage$' -count=1 -v .
@@ -32,8 +26,8 @@ go test -run '^$' -bench '^BenchmarkF3ExecutionPaths/' -benchmem -benchtime=200m
 go test -run '^$' -bench '^BenchmarkF3ScenarioPaths/' -benchmem -benchtime=200ms -count=5 .
 ```
 
-The full-corpus coverage run currently reports 25 rows, 0 alternate-eligible
-rows, 8 direct-loop-kernel target rows, and 24.12% dynamic kernel instructions
+The full-corpus coverage run reported 25 rows, 0 alternate-eligible rows, 8
+direct-loop-kernel target rows, and 24.12% dynamic kernel instructions
 (106137 of 439956 direct instructions, including cold instructions).
 
 A short M1 decision run used `-benchtime=100ms -count=3`; each row below is the
@@ -50,9 +44,9 @@ mean of alternate/direct ratios:
 The general and numeric engines clear their isolated >=20% speed gate, and
 compact clears its isolated >=10% call-family gate. They still execute 0% of
 dynamic Scenario instructions because all 25 rows are ineligible. Full
-Scenario `auto/direct` measured a 0.991x full-corpus geometric mean, which is
-neutral timing noise around
-the same direct engine rather than alternate-engine coverage. The kernel slows
+Scenario `auto/direct` measured a 0.991x full-corpus geometric mean, which was
+neutral timing noise around the same direct engine rather than alternate-engine
+coverage. The kernel slowed
 its eight-row target family by 22.3%; treating the other seventeen rows as
 unchanged gives a 1.067x full-Scenario geomean regression. Its eight median
 ratios ranged from 1.001x to 1.385x and none supplied an allocation reduction.
@@ -60,10 +54,10 @@ ratios ranged from 1.001x to 1.385x and none supplied an allocation reduction.
 The full Scenario benchmark includes `auto` and `direct` for every row and
 `direct_no_kernel` only for the eight rows that compile a kernel target. Rerun
 the longer commands above on a target machine before using the numbers as a
-general performance forecast; the retention decision depends primarily on
+general performance forecast; the retention decision depended primarily on
 the exact coverage failures and the kernel's consistent target-family loss.
 
-The per-engine CPU and GC evidence used these commands:
+The archived per-engine CPU and GC evidence used these commands:
 
 ```text
 go test -run '^$' -bench '^BenchmarkF3ExecutionPaths/top10_arithmetic_for/(direct|slot|numeric_slot)$' -benchtime=1s -count=1 -cpuprofile=/tmp/ember-f3-slots.cpu.pprof .
@@ -91,12 +85,13 @@ opcode `case` bodies, versus 138 `case` bodies across the two canonical direct
 loops. Those alternate semantic families and kernel-specific state must stay
 aligned with cancellation, limits, error frames, and coroutine boundaries.
 
-The internal benchmark also records the expected shape of the trade-off:
-alternate paths can win isolated scalar or call-heavy cases, while the
-canonical direct path remains the only path covering arbitrary tables,
+The archived F3 measurements recorded the expected shape of the trade-off:
+alternate paths could win isolated scalar or call-heavy cases, while the
+canonical direct path remained the only path covering arbitrary tables,
 metatables, globals, callbacks, protected calls, coroutine state, errors, and
-limits without a boundary fallback. F2's differential corpus, race lane, and
-checkptr lane are the semantic and safety gates for all of these paths.
+limits without a boundary fallback. The direct production/instrumented
+differential corpus, race lane, and checkptr lane were the semantic and safety
+gates before deletion.
 
 Parity and safety commands used for the gate, all passing, were:
 
@@ -106,13 +101,25 @@ go test -race -run '^TestExecutionDifferentialCorpus$' -count=1 .
 go test -gcflags=all=-d=checkptr=2 -run '^TestExecutionDifferentialCorpus$' -count=1 .
 ```
 
+Post-deletion confirmation on the same Apple M1 used a short three-sample run:
+
+```text
+go test -run '^$' -bench '^(BenchmarkScenarioLuau|BenchmarkRuntimeLanePersistent)$' -benchmem -benchtime=100ms -count=3 .
+```
+
+All 25 Scenario rows completed. Representative `ember_run` medians were
+18,943 ns/op for `combat_tick`, 42,554 ns/op for `inventory_value`, and
+3,124,294 ns/op for `sparse_grid_neighbors`. Persistent runtime samples were
+1,058, 1,301, and 1,361 ns/op, each at 1,000 B/op and 13 allocs/op. These short
+samples are deletion smoke checks, not new performance forecasts.
+
 ## Decision
 
 Retain the canonical direct wordcode VM as Ember's only production execution
 engine. Delete the general slot engine, numeric slot engine, compact call
-program, and direct loop kernel experiments. Keep the forced-mode and
-differential tests until deletion is complete so that the migration proves the
-same source-level behavior before removing the alternate implementations.
+program, and direct loop kernel experiments. Forced-mode tests and benchmark
+scaffolding were retained only through deletion; the direct production versus
+instrumented differential corpus remains as the compatibility proof.
 
 The canonical semantic representation is the existing immutable wordcode plus
 the established `Value`/VM frame state. No new slot ABI, compact continuation
@@ -123,12 +130,14 @@ truth.
 
 1. Land F3 evidence and this ADR.
 2. Remove automatic selection and forced entry points for slot, numeric, and
-   compact execution; keep direct differential coverage green during the edit.
+   compact execution while keeping direct differential coverage green.
 3. Remove direct-loop-kernel construction, dispatch, counters, and tests.
 4. Remove the remaining alternate-engine source, path counters, and temporary
-   benchmark-only compatibility shims.
+   benchmark-only compatibility shims, including their owner-bound transient
+   heap adapters.
 5. Re-run source/result compatibility, cancellation, every runtime limit,
-   error-stack, race, checkptr, allocation, and benchmark gates.
+   error-stack, race, checkptr, allocation, and benchmark gates. This deletion
+   is complete; future optimization must target the canonical direct VM.
 
 No public API is added by this decision. The private alternate engines are
 deleted because their broad-workload coverage and full-corpus gates fail, not

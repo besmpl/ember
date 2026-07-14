@@ -10,8 +10,8 @@ const maxInt64Uint = uint64(1<<63 - 1)
 const executionPollInterval uint32 = 256
 
 // executionWindow keeps the hot-loop safety state local to the active direct
-// loop. The controller remains the shared ownership boundary; handled and
-// error exits commit the window, while speculative fallbacks discard it.
+// loop. The controller remains the shared ownership boundary; the window
+// commits charged state whenever the loop yields control.
 type executionWindow struct {
 	controller *executionController
 	remaining  int64
@@ -89,34 +89,15 @@ func (window *executionWindow) refresh() {
 }
 
 type executionController struct {
-	ctx                          context.Context
-	limits                       ExecutionLimits
-	remaining                    int64
-	speculativeInstructions      uint64
-	trackSpeculativeInstructions bool
-	onStep                       func()
-	callDepth                    uint32
-	moduleInitializations        uint32
-	generatedStringBytes         uint64
-	runtimeObjects               uint64
-	inheritedScriptFrames        []ScriptFrame
-}
-
-func (controller *executionController) restoreInstructionRemaining(initial int64) {
-	if controller == nil {
-		return
-	}
-	if controller.trackSpeculativeInstructions {
-		controller.speculativeInstructions += executionRemainingDelta(initial, controller.remaining)
-	}
-	controller.remaining = initial
-}
-
-func (controller *executionController) recordSpeculativeRemaining(remaining int64) {
-	if controller == nil || !controller.trackSpeculativeInstructions {
-		return
-	}
-	controller.speculativeInstructions += executionRemainingDelta(controller.remaining, remaining)
+	ctx                   context.Context
+	limits                ExecutionLimits
+	remaining             int64
+	onStep                func()
+	callDepth             uint32
+	moduleInitializations uint32
+	generatedStringBytes  uint64
+	runtimeObjects        uint64
+	inheritedScriptFrames []ScriptFrame
 }
 
 func (controller *executionController) pushInheritedScriptFrames(frames []ScriptFrame) func() {

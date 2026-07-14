@@ -20,7 +20,7 @@ func TestApprovedExecutionLoopsRemainExplicit(t *testing.T) {
 	}
 	root := filepath.Dir(testFile)
 	var loops []string
-	for _, name := range []string{"vm.go", "slot_execution.go", "compact_execution.go", "direct_loop_kernel.go"} {
+	for _, name := range []string{"vm.go"} {
 		file, err := goparser.ParseFile(token.NewFileSet(), filepath.Join(root, name), nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
@@ -55,14 +55,7 @@ func TestApprovedExecutionLoopsRemainExplicit(t *testing.T) {
 		}
 	}
 	sort.Strings(loops)
-	want := []string{
-		"runCompactCallProgramWordsWithController",
-		"runDirectFrameInstrumentedLoop",
-		"runDirectFrameProductionLoop",
-		"runDirectLoopKernel",
-		"runNumericSlotExecutionWordsWithController",
-		"runSlotExecutionWordsWithController",
-	}
+	want := []string{"runDirectFrameInstrumentedLoop", "runDirectFrameProductionLoop"}
 	sort.Strings(want)
 	if !reflect.DeepEqual(loops, want) {
 		t.Fatalf("instruction dispatch loops = %v, want approved set %v", loops, want)

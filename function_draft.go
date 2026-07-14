@@ -64,7 +64,6 @@ func sealFunctionDraft(draft *functionDraft) (*Proto, error) {
 	if err != nil {
 		return nil, err
 	}
-	proto.compact = buildCompactCallProgram(proto)
 	return proto, nil
 }
 

@@ -1681,21 +1681,10 @@ type Proto struct {
 	capturedLocals          []bool
 	cacheSiteCount          int
 	cacheIndex              *wordcodeCacheIndex
-	directLoopKernels       *directLoopKernelSet
 	entryNilRegisters       []int
 	reuseZeroCaptureClosure bool
-	// compact is the immutable direct-call sidecar for an admitted pure numeric
-	// function graph. Child prototypes remain canonical wordcode objects; only
-	// the graph entry retains the shared program.
-	compact *compactProgram
-	// slotExecutionEligible is sealed with the immutable wordcode artifact.
-	// Side-effect-free scalar programs use the compact tagged-slot runner;
-	// slotExecutionNumeric marks the stricter compiler-proven subset that can
-	// execute over an untagged float64 register file.
-	slotExecutionEligible bool
-	slotExecutionNumeric  bool
-	verifyErr             error
-	debugInfo             *protoDebugInfo
+	verifyErr               error
+	debugInfo               *protoDebugInfo
 }
 
 // protoDebugInfo is immutable compiler metadata used by runtime diagnostics.
@@ -1800,7 +1789,6 @@ func finalizeProtoExecutionArtifact(proto *Proto, sourceCode ...[]instruction) e
 	if proto == nil {
 		return nil
 	}
-	proto.compact = nil
 	var code []instruction
 	if len(sourceCode) != 0 {
 		code = sourceCode[0]
@@ -1834,7 +1822,6 @@ func finalizeProtoExecutionArtifact(proto *Proto, sourceCode ...[]instruction) e
 		proto.verifyErr = err
 		return proto.verifyErr
 	}
-	proto.compact = buildCompactCallProgram(proto)
 	return proto.verifyErr
 }
 
@@ -1889,9 +1876,8 @@ func encodeProtoWords(proto *Proto, code []instruction) error {
 		return err
 	}
 	cacheSiteCount := wordcodeCacheSiteCount(code)
-	needsKernelBoundaries := hasDirectLoopKernelCandidate(code)
 	var boundaries []int
-	if cacheSiteCount != 0 || needsKernelBoundaries {
+	if cacheSiteCount != 0 {
 		var boundaryErr error
 		boundaries, boundaryErr = wordcodeBoundaries(code)
 		if boundaryErr != nil {
@@ -1905,31 +1891,15 @@ func encodeProtoWords(proto *Proto, code []instruction) error {
 			return err
 		}
 	}
-	directLoopKernels, err := buildDirectLoopKernels(code, boundaries, words, cacheIndex)
-	if err != nil {
-		return err
-	}
 	proto.words = words
 	proto.cacheSiteCount = cacheSiteCount
 	proto.cacheIndex = cacheIndex
-	proto.directLoopKernels = directLoopKernels
 	if len(proto.lines) == 0 {
 		proto.wordLines = nil
 	} else {
 		proto.wordLines = wordcodeLinesFromWords(proto.lines, words)
 	}
-	proto.slotExecutionEligible = slotExecutionEligible(proto, code)
-	proto.slotExecutionNumeric = proto.slotExecutionEligible && slotExecutionNumericEligible(proto, code)
 	return nil
-}
-
-func hasDirectLoopKernelCandidate(code []instruction) bool {
-	for _, ins := range code {
-		if ins.op == opArrayNextJump2 {
-			return true
-		}
-	}
-	return false
 }
 
 // wordcodeLinesFromWords maps logical source lines onto physical words without

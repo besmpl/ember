@@ -100,6 +100,14 @@ func runtimeScriptFrame(proto *Proto, pc int) (ScriptFrame, bool) {
 	return frame, true
 }
 
+func runtimeScriptFrames(proto *Proto, pc int) []ScriptFrame {
+	frame, ok := runtimeScriptFrame(proto, pc)
+	if !ok {
+		return nil
+	}
+	return []ScriptFrame{frame}
+}
+
 func protoLineAt(proto *Proto, pc int) int {
 	if proto == nil || pc < 0 {
 		return 0

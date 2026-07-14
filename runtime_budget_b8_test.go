@@ -125,7 +125,7 @@ end }
 
 func TestB8CoroutineResumeDepthReattach(t *testing.T) {
 	globals := runtimeGlobals(nil)
-	proto := compileB5Proto(t, `local function nested() coroutine.yield("pause") end nested() return 1`)
+	proto := compileB8Proto(t, `local function nested() coroutine.yield("pause") end nested() return 1`)
 	coroutine := newVMCoroutine(globals, &closure{proto: proto})
 	parent := newVMThread(globals)
 	globals.thread = &parent
@@ -230,22 +230,6 @@ end }
 	}
 }
 
-func TestB8CompactCallDepthLimit(t *testing.T) {
-	proto := compileB5Proto(t, `local function add(left, right) return left + right end return add(add(1, 2), add(3, 4))`)
-	if proto.compact == nil {
-		t.Fatal("fixture did not build compact program")
-	}
-	controller, err := newExecutionController(context.Background(), ExecutionLimits{MaxCallDepth: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, handled, err := runSlotExecutionWithController(proto, nil, controller)
-	var limit *LimitError
-	if !handled || !errors.As(err, &limit) || limit.Kind != LimitCallDepth {
-		t.Fatalf("compact result = %t, %v", handled, err)
-	}
-}
-
 func TestB8BorrowedRecordCallDepthLimit(t *testing.T) {
 	proto, err := Compile(`local function loop(x) return loop(x + 1) end return loop(1)`)
 	if err != nil {
@@ -266,7 +250,7 @@ func TestB8BorrowedRecordCallDepthLimit(t *testing.T) {
 }
 
 func TestB8MetamethodCallDepthLimit(t *testing.T) {
-	proto := compileB5Proto(t, `
+	proto := compileB8Proto(t, `
 local mt = { __add = function(a, b) return a + b end }
 local value = setmetatable({}, mt)
 return value + 1
@@ -282,4 +266,13 @@ return value + 1
 	if !errors.As(err, &limit) || limit.Kind != LimitCallDepth {
 		t.Fatalf("metamethod result = %v", err)
 	}
+}
+
+func compileB8Proto(t *testing.T, source string) *Proto {
+	t.Helper()
+	proto, err := Compile(source)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	return proto
 }

@@ -35,40 +35,6 @@ func TestRuntimeErrorCapturesNestedFrames(t *testing.T) {
 	}
 }
 
-func TestRuntimeErrorCapturesCompactLimitStack(t *testing.T) {
-	proto, err := Compile(`
-local function sum(n)
-  if n == 0 then return 0 end
-  return n + sum(n - 1)
-end
-return sum(100)
-`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if proto.compact == nil {
-		t.Fatal("expected compact program")
-	}
-	controller, err := newExecutionController(context.Background(), ExecutionLimits{MaxCallDepth: 4})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, handled, err := runSlotExecutionWithController(proto, nil, controller)
-	if !handled || err == nil {
-		t.Fatalf("compact execution = handled %t, err %v", handled, err)
-	}
-	var runtimeErr *RuntimeError
-	if !errors.As(err, &runtimeErr) {
-		t.Fatalf("error %T = %v, want RuntimeError", err, err)
-	}
-	if len(runtimeErr.Frames) < 3 {
-		t.Fatalf("frames = %#v, want recursive stack", runtimeErr.Frames)
-	}
-	if runtimeErr.Frames[0].Function != "sum" || runtimeErr.Frames[1].Function != "sum" {
-		t.Fatalf("frames = %#v, want recursive sum frames", runtimeErr.Frames)
-	}
-}
-
 func TestRuntimeErrorCapturesDirectCallDepthStack(t *testing.T) {
 	proto, err := Compile(`
 local function recurse(n)

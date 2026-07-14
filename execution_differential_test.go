@@ -11,8 +11,9 @@ import (
 )
 
 // executionDifferentialCase describes one source-level behavior slice. The
-// source is compiled once, then every selected engine receives a fresh set of
-// host state so comparisons include observable effects without sharing state.
+// source is compiled once, then production and instrumented direct loops
+// receive fresh host state so comparisons include observable effects without
+// sharing state.
 type executionDifferentialCase struct {
 	name           string
 	source         string
@@ -22,10 +23,8 @@ type executionDifferentialCase struct {
 	coroutineLimit uint32
 	limits         ExecutionLimits
 	cancel         bool
-	expectedReject map[executionMode]string
 	check          func(*testing.T, differentialRun)
 	wantOps        []string
-	requireKernel  bool
 }
 
 type differentialRun struct {
@@ -33,14 +32,12 @@ type differentialRun struct {
 	err     error
 	globals map[string]Value
 	events  []string
-	stats   *executionPathStats
 }
 
 var errDifferentialHost = errors.New("differential host failure")
 
 func TestExecutionDifferentialCorpus(t *testing.T) {
 	corpus := executionDifferentialCorpus()
-	seenModes := make(map[executionMode]bool)
 	for _, test := range corpus {
 		t.Run(test.name, func(t *testing.T) {
 			proto, err := Compile(test.source)
@@ -50,54 +47,13 @@ func TestExecutionDifferentialCorpus(t *testing.T) {
 			if missing := missingDifferentialOps(proto, test.wantOps); len(missing) != 0 {
 				t.Fatalf("compiled source is missing opcode families %v\ndisassembly:\n%s", missing, strings.Join(differentialDisassembly(proto), "\n"))
 			}
-			direct := runDifferentialCase(proto, test, executionModeDirect, false)
-			instrumented := runDifferentialCase(proto, test, executionModeDirect, true)
+			direct := runDifferentialCase(proto, test, false)
+			instrumented := runDifferentialCase(proto, test, true)
 			assertDifferentialEquivalent(t, test, proto, "direct-instrumented", direct, instrumented)
-			if test.requireKernel && (proto.directLoopKernels == nil || direct.stats.loopKernelInstructions == 0) {
-				t.Fatalf("differential fixture did not execute a direct loop kernel: proto=%#v stats=%#v", proto.directLoopKernels, direct.stats)
-			}
 			if test.check != nil {
 				test.check(t, direct)
 			}
-
-			for _, mode := range eligibleDifferentialModes(proto) {
-				seenModes[mode] = true
-				got := runDifferentialCase(proto, test, mode, false)
-				assertDifferentialEquivalent(t, test, proto, executionModeName(mode), direct, got)
-				if got.err == nil && differentialModeInstructionCount(got.stats, mode) == 0 {
-					t.Fatalf("forced %s returned successfully without recording its path: %#v", executionModeName(mode), got.stats)
-				}
-			}
-			for mode, want := range test.expectedReject {
-				got := runDifferentialCase(proto, test, mode, false)
-				if got.err == nil || !strings.Contains(got.err.Error(), want) {
-					t.Fatalf("forced %s rejection = %v, want error containing %q\nsource:\n%s\ndisassembly:\n%s", executionModeName(mode), got.err, want, test.source, strings.Join(differentialDisassembly(proto), "\n"))
-				}
-			}
 		})
-	}
-	for _, mode := range []executionMode{executionModeSlot, executionModeNumericSlot, executionModeCompactCall} {
-		if !seenModes[mode] {
-			t.Errorf("differential corpus did not exercise forced %s execution", executionModeName(mode))
-		}
-	}
-}
-
-func differentialModeInstructionCount(stats *executionPathStats, mode executionMode) uint64 {
-	if stats == nil {
-		return 0
-	}
-	switch mode {
-	case executionModeSlot:
-		return stats.slotInstructions
-	case executionModeNumericSlot:
-		return stats.numericSlotInstructions
-	case executionModeCompactCall:
-		return stats.compactCallInstructions
-	case executionModeDirect:
-		return stats.directProductionInstructions + stats.directInstrumentedInstructions
-	default:
-		return 0
 	}
 }
 
@@ -119,7 +75,7 @@ return total > 20, total
 			withOwner: true,
 		},
 		{
-			name: "direct loop kernel",
+			name: "direct loop behavior",
 			source: `
 local rows = {{cooldown = 2}, {cooldown = 0}, {cooldown = 3}}
 local total = 0
@@ -129,7 +85,6 @@ for _, row in rows do
 end
 return total
 `,
-			requireKernel: true,
 		},
 		{
 			name:    "scalar arithmetic operators",
@@ -154,7 +109,7 @@ return total, second, third
 `,
 		},
 		{
-			name:   "compact nested calls",
+			name:   "nested calls",
 			source: `local function add(left, right) return left + right end return add(add(1, 2), add(3, 4))`,
 		},
 		{
@@ -259,36 +214,14 @@ return ok1, label, first, ok2, final, coroutine.status(co)
 			source: `return 1 + 2`,
 			cancel: true,
 		},
-		{
-			name:           "declared forced rejections",
-			source:         `return missingGlobal`,
-			expectedReject: map[executionMode]string{executionModeSlot: "forced slot execution unsupported", executionModeNumericSlot: "forced numeric slot execution unsupported", executionModeCompactCall: "forced compact call execution unsupported"},
-		},
 	}
 }
 
 // Module initialization is charged by Program/Runtime require-graph
-// orchestration, before executeProto selects an execution mode. It therefore
-// cannot be differentially forced here; runtime_budget_b8_test.go covers it.
+// orchestration outside executeProto. The direct-loop differential corpus
+// cannot observe that boundary; runtime_budget_b8_test.go covers it.
 func TestExecutionDifferentialCorpusScope(t *testing.T) {
-	t.Log("MaxModuleInitializations is intentionally covered by runtime orchestration tests, not selectable executeProto modes")
-}
-
-func eligibleDifferentialModes(proto *Proto) []executionMode {
-	if proto == nil {
-		return nil
-	}
-	modes := make([]executionMode, 0, 3)
-	if proto.slotExecutionEligible {
-		modes = append(modes, executionModeSlot)
-	}
-	if proto.slotExecutionNumeric {
-		modes = append(modes, executionModeNumericSlot)
-	}
-	if proto.compact != nil {
-		modes = append(modes, executionModeCompactCall)
-	}
-	return modes
+	t.Log("MaxModuleInitializations is covered by runtime orchestration tests")
 }
 
 func differentialDisassembly(proto *Proto) []string {
@@ -316,7 +249,7 @@ func missingDifferentialOps(proto *Proto, want []string) []string {
 	return missing
 }
 
-func runDifferentialCase(proto *Proto, test executionDifferentialCase, mode executionMode, instrumented bool) differentialRun {
+func runDifferentialCase(proto *Proto, test executionDifferentialCase, instrumented bool) differentialRun {
 	var events []string
 	globals := map[string]Value(nil)
 	if test.withGlobals {
@@ -357,15 +290,12 @@ func runDifferentialCase(proto *Proto, test executionDifferentialCase, mode exec
 	} else {
 		env = runtimeGlobalsOrNil(globals)
 	}
-	stats := &executionPathStats{}
 	values, err := executeProto(ctx, proto, env, executeOptions{
 		args:         test.args,
 		controller:   controller,
-		mode:         mode,
-		stats:        stats,
 		instrumented: instrumented,
 	})
-	return differentialRun{values: values, err: err, globals: globals, events: events, stats: stats}
+	return differentialRun{values: values, err: err, globals: globals, events: events}
 }
 
 func runtimeGlobalsOrNil(globals map[string]Value) *globalEnv {
@@ -559,21 +489,6 @@ func valuesEquivalent(want, got Value, comparison *tableComparison) bool {
 		// Functions, userdata, and host callbacks are opaque. Their kind is the
 		// observable contract for the differential corpus.
 		return true
-	}
-}
-
-func executionModeName(mode executionMode) string {
-	switch mode {
-	case executionModeDirect:
-		return "direct"
-	case executionModeSlot:
-		return "slot"
-	case executionModeNumericSlot:
-		return "numeric-slot"
-	case executionModeCompactCall:
-		return "compact-call"
-	default:
-		return "unknown"
 	}
 }
 
