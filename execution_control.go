@@ -216,6 +216,20 @@ func newExecutionController(ctx context.Context, limits ExecutionLimits) (*execu
 	}, nil
 }
 
+// newExecutionPolicy returns the invocation controller only when the call
+// needs execution policy enforcement. An unlimited, non-cancelable context
+// has no policy state to carry, so the nil controller is the unrestricted
+// execution mode used by the direct VM loops.
+func newExecutionPolicy(ctx context.Context, limits ExecutionLimits) (*executionController, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if limits == (ExecutionLimits{}) && ctx.Done() == nil && ctx.Err() == nil {
+		return nil, nil
+	}
+	return newExecutionController(ctx, limits)
+}
+
 func validateExecutionLimits(limits ExecutionLimits) error {
 	_, err := executionControllerRemaining(limits)
 	return err

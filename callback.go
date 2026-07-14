@@ -94,7 +94,7 @@ func (cb Callback) Call(ctx context.Context, args ...Value) ([]Value, error) {
 
 	call := cb.call
 	call.ctx = ctx
-	controller, err := newExecutionController(ctx, cb.call.runtime.limits)
+	controller, err := newExecutionPolicy(ctx, cb.call.runtime.limits)
 	if err != nil {
 		return nil, fmt.Errorf("callback: create execution controller: %w", err)
 	}

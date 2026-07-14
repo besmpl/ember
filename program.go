@@ -289,7 +289,7 @@ func (r *Runtime) runHook(ctx context.Context, hook string, args []Value, report
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	controller, err := newExecutionController(ctx, r.limits)
+	controller, err := newExecutionPolicy(ctx, r.limits)
 	if err != nil {
 		return fmt.Errorf("runtime: create execution controller: %w", err)
 	}

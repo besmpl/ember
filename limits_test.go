@@ -134,6 +134,106 @@ func TestExecutionControllerRejectsInt64Overflow(t *testing.T) {
 	}
 }
 
+func TestNewExecutionPolicyElidesUnrestrictedBackground(t *testing.T) {
+	for _, ctx := range []context.Context{nil, context.Background()} {
+		controller, err := newExecutionPolicy(ctx, ExecutionLimits{})
+		if err != nil {
+			t.Fatalf("newExecutionPolicy(%T) returned error: %v", ctx, err)
+		}
+		if controller != nil {
+			t.Fatalf("newExecutionPolicy(%T) = %#v, want nil", ctx, controller)
+		}
+	}
+}
+
+func TestNewExecutionPolicyRetainsRequiredController(t *testing.T) {
+	cancelable, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	deadline, cancelDeadline := context.WithTimeout(context.Background(), 0)
+	defer cancelDeadline()
+	errorOnly := executionPolicyErrorContext{Context: context.Background(), err: context.Canceled}
+
+	tests := []struct {
+		name   string
+		ctx    context.Context
+		limits ExecutionLimits
+	}{
+		{name: "instruction limit", ctx: context.Background(), limits: ExecutionLimits{MaxInstructions: 1}},
+		{name: "object limit", ctx: context.Background(), limits: ExecutionLimits{MaxRuntimeObjects: 1}},
+		{name: "cancelable", ctx: cancelable},
+		{name: "deadline", ctx: deadline},
+		{name: "current error", ctx: errorOnly},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller, err := newExecutionPolicy(tt.ctx, tt.limits)
+			if err != nil {
+				t.Fatalf("newExecutionPolicy returned error: %v", err)
+			}
+			if controller == nil {
+				t.Fatal("newExecutionPolicy returned nil controller")
+			}
+		})
+	}
+}
+
+func TestExecutionControllerNilReceiverIsNoOp(t *testing.T) {
+	var controller *executionController
+	if restore := controller.pushInheritedScriptFrames([]ScriptFrame{{}}); restore == nil {
+		t.Fatal("nil pushInheritedScriptFrames returned nil restore")
+	} else {
+		restore()
+	}
+	if err := controller.enterCall(); err != nil {
+		t.Fatalf("nil enterCall = %v", err)
+	}
+	if err := controller.enterCalls(3); err != nil {
+		t.Fatalf("nil enterCalls = %v", err)
+	}
+	controller.leaveCall()
+	if err := controller.chargeModuleInitialization(); err != nil {
+		t.Fatalf("nil chargeModuleInitialization = %v", err)
+	}
+	if err := controller.chargeGeneratedStringBytes(4); err != nil {
+		t.Fatalf("nil chargeGeneratedStringBytes = %v", err)
+	}
+	if err := controller.chargeRuntimeObject(); err != nil {
+		t.Fatalf("nil chargeRuntimeObject = %v", err)
+	}
+	if err := controller.chargeRuntimeObjects(2); err != nil {
+		t.Fatalf("nil chargeRuntimeObjects = %v", err)
+	}
+	controller.releaseRuntimeObjects(2)
+	if err := controller.checkContext(); err != nil {
+		t.Fatalf("nil checkContext = %v", err)
+	}
+	if err := controller.chargeInstructions(4); err != nil {
+		t.Fatalf("nil chargeInstructions = %v", err)
+	}
+	if got := controller.configuredLimits(); got != (ExecutionLimits{}) {
+		t.Fatalf("nil configuredLimits = %#v, want zero limits", got)
+	}
+	var window *executionWindow
+	if err := window.stepInstruction(); err != nil {
+		t.Fatalf("nil window stepInstruction = %v", err)
+	}
+	if err := window.limitError(1); err != nil {
+		t.Fatalf("nil window limitError = %v", err)
+	}
+	window.flush()
+	window.commit()
+	window.refresh()
+}
+
+type executionPolicyErrorContext struct {
+	context.Context
+	err error
+}
+
+func (ctx executionPolicyErrorContext) Done() <-chan struct{} { return nil }
+
+func (ctx executionPolicyErrorContext) Err() error { return ctx.err }
+
 func limitsTestProgram(t *testing.T) *Program {
 	t.Helper()
 	proto, err := Compile(`return { startup = function() end }`)
