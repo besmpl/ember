@@ -31,12 +31,15 @@ and retire or delete it when the slice lands or is abandoned.
 - `hearth-integration.md`: host boundary notes for Hearth.
 - `golang-rules.md`: Go coding rules for this repository.
 - `checks.md`: local verification commands.
-- `adr/0001-go-native-runtime-mapping.md`: decision to prefer Go objects,
-  Go GC, and Go runtime features behind Ember interfaces.
+- `adr/0001-go-native-runtime-mapping.md`: public Go ownership decision; ADR 0007
+  supersedes its ordinary-Go-object default for hot internal state.
 - `adr/0004-runtime-slot-handle-ownership.md`: private runtime slots, typed
-  handle ownership, external pins, and the first stop-the-world collector.
+  handle ownership, external pins, and the earlier collector design now
+  partially superseded by ADR 0007.
 - `adr/0006-persistent-table-allocation-gate.md`: evidence for stopping the
   conditional table allocator campaign after persistent workload profiling.
+- `adr/0007-compact-production-machine.md`: accepted owner-neutral `CodeImage`,
+  owner-bound scalar `Machine`, pure-Go kernel, and production migration.
 
 ## Workflow Documents
 
