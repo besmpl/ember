@@ -71,13 +71,7 @@ func newVMCoroutineChecked(globals *globalEnv, root *closure) (*vmCoroutine, err
 	owner := runtimeOwnerFromGlobals(globals)
 	coroutineGlobals := globals
 	if globals != nil && globals.pooled {
-		detached := *globals
-		detached.thread = nil
-		detached.pooled = false
-		detached.scope = invocationScope{}
-		detached.hasScope = false
-		detached.controller = nil
-		coroutineGlobals = &detached
+		coroutineGlobals = promotePooledGlobals(globals)
 	}
 	coroutine := &vmCoroutine{
 		status: vmCoroutineSuspended,
@@ -102,6 +96,61 @@ func newVMCoroutineChecked(globals *globalEnv, root *closure) (*vmCoroutine, err
 		}
 	}
 	return coroutine, nil
+}
+
+// promotePooledGlobals transfers an active pooled environment to a stable
+// heap object before a coroutine can retain it. The parent thread switches to
+// that same object, preserving shared global values, slot versions, and host
+// snapshots across parent/sibling coroutine execution. A pooled environment
+// with no active thread is cloned as a defensive slow-path fallback.
+func promotePooledGlobals(globals *globalEnv) *globalEnv {
+	if globals == nil || !globals.pooled {
+		return globals
+	}
+	if globals.thread == nil {
+		promoted := *globals
+		promoted.values = cloneGlobalValues(globals.values)
+		promoted.host = cloneGlobalValues(globals.host)
+		promoted.slots = cloneGlobalSlots(globals.slots)
+		promoted.thread = nil
+		promoted.pooled = false
+		promoted.scope = invocationScope{}
+		promoted.hasScope = false
+		promoted.controller = nil
+		return &promoted
+	}
+	parent := globals.thread
+	promoted := *globals
+	// Do not let pool reset clear backing maps that the retained coroutine will
+	// keep using. The parent switches to this same promoted environment, so the
+	// copies still preserve all parent/sibling sharing and slot versions.
+	promoted.values = cloneGlobalValues(globals.values)
+	promoted.host = cloneGlobalValues(globals.host)
+	promoted.slots = cloneGlobalSlots(globals.slots)
+	promoted.pooled = false
+	promoted.thread = parent
+	parent.globals = &promoted
+	return &promoted
+}
+
+func cloneGlobalValues(values map[string]Value) map[string]Value {
+	if len(values) == 0 {
+		return nil
+	}
+	clone := make(map[string]Value, len(values))
+	for name, value := range values {
+		clone[name] = value
+	}
+	return clone
+}
+
+func cloneGlobalSlots(slots []globalSlot) []globalSlot {
+	if len(slots) == 0 {
+		return nil
+	}
+	clone := make([]globalSlot, len(slots))
+	copy(clone, slots)
+	return clone
 }
 
 func baseCoroutineResume(globals *globalEnv, args []Value) ([]Value, error) {

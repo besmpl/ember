@@ -4,7 +4,12 @@ type globalEnv struct {
 	values map[string]Value
 	host   map[string]Value
 	slots  []globalSlot
-	thread *vmThread
+	// require is injected for runtime-owned invocation environments without
+	// pretending it is a script assignment. A script write to the same name
+	// still wins through values, preserving normal global lookup precedence.
+	require    Value
+	hasRequire bool
+	thread     *vmThread
 	// scope carries the private invocation capability into a VM entry. The
 	// active thread owns the dynamic copy used by host adapters, so yielded
 	// coroutines can replace context and controller state on resume.
@@ -101,6 +106,9 @@ func (env *globalEnv) get(name string) (Value, bool) {
 	if value, ok := env.values[name]; ok {
 		return value, true
 	}
+	if name == "require" && env.hasRequire {
+		return env.require, true
+	}
 	if value, ok := env.hostValue(name); ok {
 		return value, true
 	}
@@ -125,6 +133,9 @@ func (env *globalEnv) nativeGlobalUnchanged(name string, nativeID nativeFuncID) 
 			return valueNativeID(value) == nativeID
 		}
 	}
+	if name == "require" && env.hasRequire {
+		return valueNativeID(env.require) == nativeID
+	}
 	if value, ok := env.hostValue(name); ok {
 		return valueNativeID(value) == nativeID
 	}
@@ -139,6 +150,9 @@ func (env *globalEnv) overrideValue(name string) (Value, bool) {
 		if value, ok := env.values[name]; ok {
 			return value, true
 		}
+	}
+	if name == "require" && env.hasRequire {
+		return env.require, true
 	}
 	return env.hostValue(name)
 }
@@ -165,6 +179,22 @@ func (env *globalEnv) set(name string, value Value) {
 	env.version++
 	if env.host != nil {
 		env.host[name] = value
+	}
+}
+
+// setRequire installs the private runtime require capability. It deliberately
+// does not populate values, so a pooled nil-host invocation can stay free of a
+// global map allocation. A subsequent script assignment to require is stored
+// in values and therefore takes precedence over this capability.
+func (env *globalEnv) setRequire(value Value) {
+	if env == nil {
+		return
+	}
+	env.require = value
+	env.hasRequire = true
+	env.version++
+	if env.host != nil {
+		env.host["require"] = value
 	}
 }
 
@@ -195,4 +225,58 @@ func (env *globalEnv) ensureSlots(count int) {
 	slots := make([]globalSlot, count)
 	copy(slots, env.slots)
 	env.slots = slots
+}
+
+// resetForInvocation prepares a reusable environment for one fresh runtime
+// invocation. The host map is owned by the invocation and is intentionally
+// not cleared here; callbacks may retain that copied snapshot.
+func (env *globalEnv) resetForInvocation(host map[string]Value, owner *runtimeOwner, scope invocationScope, require Value) {
+	if env == nil {
+		return
+	}
+	values := env.values
+	if values != nil {
+		clear(values)
+	}
+	slots := env.slots[:0]
+	pooled := env.pooled
+	*env = globalEnv{
+		values:   values,
+		host:     host,
+		slots:    slots,
+		owner:    owner,
+		pooled:   pooled,
+		scope:    scope,
+		hasScope: true,
+	}
+	if len(host) != 0 {
+		env.version = 1
+	}
+	env.setRequire(require)
+}
+
+// releaseReusable removes all invocation-owned references before returning a
+// thread to the pool. Host maps are snapshots that may be retained by
+// callbacks, so the map itself is released but never cleared here.
+func (env *globalEnv) releaseReusable() {
+	if env == nil {
+		return
+	}
+	if env.values != nil {
+		clear(env.values)
+	}
+	for i := range env.slots {
+		env.slots[i] = globalSlot{}
+	}
+	env.slots = env.slots[:0]
+	env.host = nil
+	env.require = Value{}
+	env.hasRequire = false
+	env.thread = nil
+	env.scope = invocationScope{}
+	env.hasScope = false
+	env.controller = nil
+	env.owner = nil
+	env.version = 0
+	env.pooled = true
 }

@@ -333,7 +333,11 @@ func (r *Runtime) runHook(ctx context.Context, hook string, args []Value, report
 		if !ok {
 			return fmt.Errorf("runtime: entrypoint %s returned %s, want table or nil", entrypoint.name, export.Kind())
 		}
-		hookValue, err := runtimeTableAccess(runtimeGlobalsWithOwner(hookGlobals, r.owner)).get(table, StringValue(hook))
+		hookEnv := globalEnv{host: hookGlobals, owner: r.owner}
+		if len(hookGlobals) != 0 {
+			hookEnv.version = 1
+		}
+		hookValue, err := runtimeTableAccess(&hookEnv).get(table, StringValue(hook))
 		if err != nil {
 			return fmt.Errorf("runtime: get hook %s.%s: %w", entrypoint.name, hook, err)
 		}
@@ -346,8 +350,20 @@ func (r *Runtime) runHook(ctx context.Context, hook string, args []Value, report
 			return fmt.Errorf("runtime: hook %s.%s is %s, want function", entrypoint.name, hook, hookValue.Kind())
 		}
 		callContext := r.newInvocationScope(ctx, entrypoint.key, hookGlobals, controller)
-		if _, err := callValueWithContextController(ctx, hookValue, callContext.envWithRequire(), args, controller); err != nil {
-			return fmt.Errorf("runtime: call hook %s.%s: %w", entrypoint.name, hook, err)
+		var callErr error
+		if closure, ok := hookValue.scriptFunction(); ok {
+			_, callErr = executeProtoWithInvocationScope(ctx, closure.proto, callContext, executeOptions{
+				args:           args,
+				upvalues:       closure.upvalues,
+				upvalueValues:  closure.upvalueValues,
+				upvalueValueOK: closure.upvalueValueOK,
+				controller:     controller,
+			})
+		} else {
+			_, callErr = callValueWithContextController(ctx, hookValue, callContext.envWithRequire(), args, controller)
+		}
+		if callErr != nil {
+			return fmt.Errorf("runtime: call hook %s.%s: %w", entrypoint.name, hook, callErr)
 		}
 		call.Called = true
 		appendHookCallReport(report, call)

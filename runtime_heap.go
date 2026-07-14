@@ -1272,6 +1272,9 @@ func (collector *runtimeHeapCollector) scanGlobal(value *globalEnv) {
 	for _, item := range value.values {
 		collector.scanValue(item)
 	}
+	if value.hasRequire {
+		collector.scanValue(value.require)
+	}
 	for _, item := range value.host {
 		collector.scanValue(item)
 	}

@@ -89,6 +89,60 @@ func executeProto(ctx context.Context, proto *Proto, globals *globalEnv, options
 	return thread.runWithUpvalues(proto, options.args, options.upvalues, options.upvalueValues, options.upvalueValueOK)
 }
 
+// executeProtoWithInvocationScope runs a runtime-owned script call against the
+// thread's reusable base environment. The environment is prepared before the
+// owner is bound and is released by the first defer so every exit path drops
+// invocation capabilities and host references.
+func executeProtoWithInvocationScope(ctx context.Context, proto *Proto, scope invocationScope, options executeOptions) ([]Value, error) {
+	if proto == nil {
+		return nil, fmt.Errorf("run: nil prototype")
+	}
+	if proto.verifyErr != nil {
+		return nil, fmt.Errorf("run: invalid prototype: %w", proto.verifyErr)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if options.controller == nil && (ctx.Done() != nil || ctx.Err() != nil) {
+		controller, err := newExecutionController(ctx, ExecutionLimits{})
+		if err != nil {
+			return nil, err
+		}
+		options.controller = controller
+	}
+	if scope.ctx == nil {
+		scope.ctx = ctx
+	}
+	scope.controller = options.controller
+	thread := acquireVMThread(ctx, nil)
+	defer releaseVMThread(thread)
+	owner := runtimeOwnerFromInvocationScope(scope)
+	require := nativeFuncValue(missingRuntimeRequire)
+	if scope.runtime != nil {
+		require = scope.runtime.requireAdapter(scope.from)
+	}
+	thread.baseGlobals.resetForInvocation(scope.globals, owner, scope, require)
+	thread.globals = &thread.baseGlobals
+	thread.owner = owner
+	thread.scope = scope
+	thread.hasScope = true
+	thread.controller = options.controller
+	thread.setInheritedScriptFrames(options.inheritedScriptFrames)
+	thread.baseGlobals.clearInvocationScope()
+	if err := thread.bindOwner(owner); err != nil {
+		return nil, err
+	}
+	thread.directFrameInstrumented = options.instrumented
+	return thread.runWithUpvalues(proto, options.args, options.upvalues, options.upvalueValues, options.upvalueValueOK)
+}
+
+func runtimeOwnerFromInvocationScope(scope invocationScope) *runtimeOwner {
+	if scope.runtime == nil {
+		return nil
+	}
+	return scope.runtime.owner
+}
+
 func executeProtoWithOwner(ctx context.Context, proto *Proto, globals *globalEnv, options executeOptions) ([]Value, error) {
 	thread := acquireVMThread(ctx, globals)
 	thread.setInvocationScope(options.scope, globals)
@@ -1497,7 +1551,7 @@ func (thread *vmThread) resetForRun(ctx context.Context, globals *globalEnv) {
 		ctx = context.Background()
 	}
 	if globals == nil {
-		thread.baseGlobals = globalEnv{pooled: true}
+		thread.baseGlobals.releaseReusable()
 		globals = &thread.baseGlobals
 	}
 	thread.ctx = ctx
@@ -1571,11 +1625,18 @@ func (thread *vmThread) resetForPool() {
 		thread.stack = thread.stackOwner.values
 	}
 	thread.ctx = context.Background()
+	if thread.globals != nil && thread.globals != &thread.baseGlobals {
+		// A pooled invocation may have promoted its environment for a retained
+		// coroutine. Stop advertising this thread as active without clearing the
+		// promoted environment's shared values.
+		thread.globals.thread = nil
+		thread.globals.controller = nil
+	}
 	thread.globals = nil
 	thread.scope = invocationScope{}
 	thread.hasScope = false
 	thread.inheritedScriptFrames = nil
-	thread.baseGlobals = globalEnv{}
+	thread.baseGlobals.releaseReusable()
 	thread.controller = nil
 	thread.resumeCallDepthErr = nil
 	thread.executionWindow = executionWindow{}

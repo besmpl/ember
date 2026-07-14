@@ -35,9 +35,8 @@ func (r *Runtime) runModuleWithContextGlobalsController(ctx context.Context, key
 	}()
 
 	call := r.newInvocationScope(ctx, key, globals, controller)
-	results, err := executeProto(ctx, proto, call.envWithRequire(), executeOptions{
+	results, err := executeProtoWithInvocationScope(ctx, proto, call, executeOptions{
 		controller:            controller,
-		scope:                 &call,
 		inheritedScriptFrames: inherited,
 	})
 	if err != nil {

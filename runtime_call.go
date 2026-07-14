@@ -88,9 +88,9 @@ func (call invocationScope) envWithRequire() *globalEnv {
 	}
 	env := runtimeGlobalsWithInvocation(call.globals, owner, call)
 	if call.runtime != nil {
-		env.set("require", call.runtime.requireAdapter(call.from))
+		env.setRequire(call.runtime.requireAdapter(call.from))
 	} else {
-		env.set("require", nativeFuncValue(missingRuntimeRequire))
+		env.setRequire(nativeFuncValue(missingRuntimeRequire))
 	}
 	return env
 }

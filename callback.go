@@ -99,7 +99,17 @@ func (cb Callback) Call(ctx context.Context, args ...Value) ([]Value, error) {
 		return nil, fmt.Errorf("callback: create execution controller: %w", err)
 	}
 	call.controller = controller
-	return callValueWithContextController(ctx, cb.value, call.envWithRequire(), args, controller)
+	closure, ok := cb.value.scriptFunction()
+	if !ok {
+		return nil, fmt.Errorf("callback: value is %s, want script function", cb.value.Kind())
+	}
+	return executeProtoWithInvocationScope(ctx, closure.proto, call, executeOptions{
+		args:           args,
+		upvalues:       closure.upvalues,
+		upvalueValues:  closure.upvalueValues,
+		upvalueValueOK: closure.upvalueValueOK,
+		controller:     controller,
+	})
 }
 
 // Close releases the callback's collector roots. Callback copies share the
