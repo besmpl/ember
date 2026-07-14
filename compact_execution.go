@@ -690,7 +690,7 @@ func runCompactCallProgramWithController(proto *Proto, args []Value, state *slot
 	}
 	if !ok || slotExecutionNumberNeedsBox(result) {
 		if controller != nil && ok {
-			controller.remaining = initialRemaining
+			controller.restoreInstructionRemaining(initialRemaining)
 		}
 		return nil, false, nil
 	}
@@ -720,6 +720,9 @@ func runCompactCallProgramWordsWithController(program *compactProgram, state *sl
 	constants := function.proto.constantNumbers
 	window := newExecutionWindow(controller)
 	defer func() {
+		if !ok && windowErr == nil {
+			controller.recordSpeculativeRemaining(window.remaining)
+		}
 		if windowErr != nil {
 			windowErr = newRuntimeErrorWithController(windowErr, compactRuntimeFrames(program, functionID, pc, frames), controller)
 		}

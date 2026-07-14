@@ -536,6 +536,67 @@ func runSlotExecutionWithController(proto *Proto, args []Value, controller *exec
 	return runSlotExecutionStateWithController(proto, args, state, false, controller)
 }
 
+func runSelectedSlotExecution(proto *Proto, args []Value, controller *executionController, mode executionMode, stats *executionPathStats) (values []Value, handled bool, err error) {
+	if proto == nil {
+		return nil, false, nil
+	}
+	if mode == executionModeDirect {
+		return nil, false, nil
+	}
+	if mode == executionModeNumericSlot || (mode == executionModeAuto && proto.slotExecutionNumeric) {
+		if !proto.slotExecutionNumeric {
+			return nil, false, nil
+		}
+		state := acquireSlotExecutionState(0, 0)
+		before := executionInstructionMark(controller)
+		values, handled, err := runNumericSlotExecutionWithController(proto, args, state, controller)
+		stats.record(executionModeNumericSlot, controller, before)
+		releaseSlotExecutionState(state)
+		if handled || err != nil {
+			return values, handled, err
+		}
+		if mode == executionModeNumericSlot {
+			return nil, false, nil
+		}
+		stats.fallback(executionFallbackNumericUnsupported)
+	}
+	if mode == executionModeCompactCall || (mode == executionModeAuto && proto.compact != nil) {
+		if proto.compact == nil {
+			return nil, false, nil
+		}
+		state := acquireSlotExecutionState(0, 0)
+		before := executionInstructionMark(controller)
+		values, handled, err := runCompactCallProgramWithController(proto, args, state, controller)
+		stats.record(executionModeCompactCall, controller, before)
+		releaseSlotExecutionState(state)
+		if handled || err != nil {
+			return values, handled, err
+		}
+		if mode == executionModeCompactCall {
+			return nil, false, nil
+		}
+		stats.fallback(executionFallbackCompactUnsupported)
+	}
+	if !proto.slotExecutionEligible {
+		if mode == executionModeAuto {
+			stats.fallback(executionFallbackSlotIneligible)
+		}
+		return nil, false, nil
+	}
+	if mode == executionModeNumericSlot || mode == executionModeCompactCall {
+		return nil, false, nil
+	}
+	state := acquireSlotExecutionState(proto.registers, len(proto.constants))
+	defer releaseSlotExecutionState(state)
+	before := executionInstructionMark(controller)
+	values, handled, err = runSlotExecutionStateWithController(proto, args, state, false, controller)
+	stats.record(executionModeSlot, controller, before)
+	if !handled && err == nil && mode == executionModeAuto {
+		stats.fallback(executionFallbackSlotUnsupported)
+	}
+	return values, handled, err
+}
+
 // runSlotExecutionWithHeap executes an eligible prototype against a heap
 // borrowed from its runtime owner. The borrowed heap is never reset here.
 // Values created by this run are released when it ends; preexisting owner
@@ -582,11 +643,100 @@ func runSlotExecutionWithHeapController(proto *Proto, args []Value, heap *runtim
 		return values, handled, err
 	}
 
+	heap.collectMu.Lock()
+	previousHeap := state.heap
+	state.heap = heap
+	state.heapActive = true
+	if slotExecutionImportAll(state, proto.constants, args, params, true) {
+		values, handled, err = runSlotExecutionPreparedWithController(proto, state, controller)
+	}
+	state.releaseTransients(heap)
+	state.heapActive = false
+	state.heap = previousHeap
+	releaseSlotExecutionState(state)
+	heap.collectMu.Unlock()
+	return values, handled, err
+}
+
+func runSelectedSlotExecutionWithHeapController(proto *Proto, args []Value, heap *runtimeHeap, controller *executionController, mode executionMode, stats *executionPathStats) (values []Value, handled bool, err error) {
+	if proto == nil || heap == nil {
+		return nil, false, nil
+	}
+	if mode == executionModeDirect {
+		return nil, false, nil
+	}
+	if mode == executionModeNumericSlot || (mode == executionModeAuto && proto.slotExecutionNumeric) {
+		if !proto.slotExecutionNumeric {
+			return nil, false, nil
+		}
+		state := acquireSlotExecutionState(0, 0)
+		before := executionInstructionMark(controller)
+		values, handled, err := runNumericSlotExecutionWithController(proto, args, state, controller)
+		stats.record(executionModeNumericSlot, controller, before)
+		releaseSlotExecutionState(state)
+		if handled || err != nil {
+			return values, handled, err
+		}
+		if mode == executionModeNumericSlot {
+			return nil, false, nil
+		}
+		stats.fallback(executionFallbackNumericUnsupported)
+	}
+	if mode == executionModeCompactCall || (mode == executionModeAuto && proto.compact != nil) {
+		if proto.compact == nil {
+			return nil, false, nil
+		}
+		state := acquireSlotExecutionState(0, 0)
+		before := executionInstructionMark(controller)
+		values, handled, err := runCompactCallProgramWithController(proto, args, state, controller)
+		stats.record(executionModeCompactCall, controller, before)
+		releaseSlotExecutionState(state)
+		if handled || err != nil {
+			return values, handled, err
+		}
+		if mode == executionModeCompactCall {
+			return nil, false, nil
+		}
+		stats.fallback(executionFallbackCompactUnsupported)
+	}
+	if !proto.slotExecutionEligible {
+		if mode == executionModeAuto {
+			stats.fallback(executionFallbackSlotIneligible)
+		}
+		return nil, false, nil
+	}
+	if mode == executionModeNumericSlot || mode == executionModeCompactCall {
+		return nil, false, nil
+	}
+	state := acquireSlotExecutionState(proto.registers, len(proto.constants))
+	for index := range state.registers {
+		state.registers[index] = slotNil
+	}
+	params, needsHeap, ok := slotExecutionPrepareImmediates(state, proto.constants, args, proto.params)
+	if !ok {
+		if mode == executionModeAuto {
+			stats.fallback(executionFallbackSlotUnsupported)
+		}
+		releaseSlotExecutionState(state)
+		return nil, false, nil
+	}
+	if !needsHeap {
+		before := executionInstructionMark(controller)
+		values, handled, err = runSlotExecutionPreparedWithController(proto, state, controller)
+		stats.record(executionModeSlot, controller, before)
+		releaseSlotExecutionState(state)
+		if !handled && err == nil && mode == executionModeAuto {
+			stats.fallback(executionFallbackSlotUnsupported)
+		}
+		return values, handled, err
+	}
+
 	// Immediate-only runs never contend on the owner heap. Reference-bearing
 	// runs hold its collector gate across import, execution, export, and
 	// transactional release so concurrent owner runs and root/pin operations
 	// cannot observe or mutate a partial heap transaction.
 	heap.collectMu.Lock()
+	before := executionInstructionMark(controller)
 	previousHeap := state.heap
 	state.heap = heap
 	state.heapActive = true
@@ -600,6 +750,10 @@ func runSlotExecutionWithHeapController(proto *Proto, args []Value, heap *runtim
 	state.heap = previousHeap
 	releaseSlotExecutionState(state)
 	heap.collectMu.Unlock()
+	stats.record(executionModeSlot, controller, before)
+	if !handled && err == nil && mode == executionModeAuto {
+		stats.fallback(executionFallbackSlotUnsupported)
+	}
 	return values, handled, err
 }
 
@@ -642,7 +796,7 @@ func runNumericSlotExecutionWithController(proto *Proto, args []Value, state *sl
 		// quiet-NaN payloads that overlap the slot tag prefix.
 		if slotExecutionNumberNeedsBox(number) {
 			if controller != nil {
-				controller.remaining = initialRemaining
+				controller.restoreInstructionRemaining(initialRemaining)
 			}
 			return nil, false, nil
 		}
@@ -665,6 +819,9 @@ func runNumericSlotExecutionWordsWithController(proto *Proto, registers []float6
 	window := newExecutionWindow(controller)
 	pc := 0
 	defer func() {
+		if !ok && err == nil {
+			controller.recordSpeculativeRemaining(window.remaining)
+		}
 		if err != nil {
 			err = newRuntimeErrorWithController(err, numericRuntimeFrames(proto, pc), controller)
 		}
@@ -893,7 +1050,7 @@ func runSlotExecutionPreparedWithController(proto *Proto, state *slotExecutionSt
 		value, ok := slotExecutionExport(state, state.results[index])
 		if !ok {
 			if controller != nil {
-				controller.remaining = initialRemaining
+				controller.restoreInstructionRemaining(initialRemaining)
 			}
 			return nil, false, nil
 		}
@@ -1068,6 +1225,9 @@ func runSlotExecutionWordsWithController(proto *Proto, state *slotExecutionState
 	window := newExecutionWindow(controller)
 	pc := 0
 	defer func() {
+		if !handled && err == nil {
+			controller.recordSpeculativeRemaining(window.remaining)
+		}
 		if err != nil {
 			err = newRuntimeErrorWithController(err, numericRuntimeFrames(proto, pc), controller)
 		}

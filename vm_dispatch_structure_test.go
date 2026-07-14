@@ -1,12 +1,73 @@
 package ember
 
 import (
+	"go/ast"
+	goparser "go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 )
+
+func TestApprovedExecutionLoopsRemainExplicit(t *testing.T) {
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	root := filepath.Dir(testFile)
+	var loops []string
+	for _, name := range []string{"vm.go", "slot_execution.go", "compact_execution.go", "direct_loop_kernel.go"} {
+		file, err := goparser.ParseFile(token.NewFileSet(), filepath.Join(root, name), nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Body == nil {
+				continue
+			}
+			isDispatchLoop := false
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				loop, ok := node.(*ast.ForStmt)
+				if !ok {
+					return true
+				}
+				ast.Inspect(loop.Body, func(node ast.Node) bool {
+					switchStatement, ok := node.(*ast.SwitchStmt)
+					if !ok {
+						return true
+					}
+					identifier, ok := switchStatement.Tag.(*ast.Ident)
+					if ok && identifier.Name == "op" {
+						isDispatchLoop = true
+					}
+					return !isDispatchLoop
+				})
+				return !isDispatchLoop
+			})
+			if isDispatchLoop {
+				loops = append(loops, function.Name.Name)
+			}
+		}
+	}
+	sort.Strings(loops)
+	want := []string{
+		"runCompactCallProgramWordsWithController",
+		"runDirectFrameInstrumentedLoop",
+		"runDirectFrameProductionLoop",
+		"runDirectLoopKernel",
+		"runNumericSlotExecutionWordsWithController",
+		"runSlotExecutionWordsWithController",
+	}
+	sort.Strings(want)
+	if !reflect.DeepEqual(loops, want) {
+		t.Fatalf("instruction dispatch loops = %v, want approved set %v", loops, want)
+	}
+}
 
 func TestVMExecutionDoesNotMaterializePackedInstructions(t *testing.T) {
 	_, testFile, _, ok := runtime.Caller(0)

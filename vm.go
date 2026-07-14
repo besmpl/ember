@@ -50,15 +50,247 @@ type executeOptions struct {
 	upvalueValues  []Value
 	upvalueValueOK []bool
 	controller     *executionController
+	mode           executionMode
+	stats          *executionPathStats
+	instrumented   bool
+}
+
+// executionMode selects the private execution engine used by tests. Auto is
+// the production policy: it tries the proven fast paths before the canonical
+// VM frame loop.
+type executionMode uint8
+
+const (
+	executionModeAuto executionMode = iota
+	executionModeDirect
+	executionModeSlot
+	executionModeNumericSlot
+	executionModeCompactCall
+)
+
+// executionFallbackReason identifies an auto-mode fast-path rejection.
+type executionFallbackReason uint8
+
+const (
+	executionFallbackSlotIneligible executionFallbackReason = iota
+	executionFallbackNumericUnsupported
+	executionFallbackCompactUnsupported
+	executionFallbackSlotUnsupported
+	executionFallbackBoundaryUnsupported
+)
+
+// executionPathStats is intentionally private and optional. A nil pointer is
+// the normal production configuration and keeps counters out of the hot path.
+type executionPathStats struct {
+	directProductionInstructions   uint64
+	directInstrumentedInstructions uint64
+	loopKernelInstructions         uint64
+	slotInstructions               uint64
+	numericSlotInstructions        uint64
+	compactCallInstructions        uint64
+	coldInstructions               uint64
+	fallbacks                      map[executionFallbackReason]uint64
+}
+
+func (stats *executionPathStats) fallback(reason executionFallbackReason) {
+	if stats == nil {
+		return
+	}
+	if stats.fallbacks == nil {
+		stats.fallbacks = make(map[executionFallbackReason]uint64)
+	}
+	stats.fallbacks[reason]++
+}
+
+type executionPathMeter struct {
+	controller          *executionController
+	restoreUnlimited    bool
+	restoreSpeculative  bool
+	originalTrack       bool
+	originalRemaining   int64
+	originalLimit       uint64
+	originalSpeculative uint64
+}
+
+func beginExecutionPathMeter(ctx context.Context, options *executeOptions) (executionPathMeter, error) {
+	if options == nil || options.stats == nil {
+		return executionPathMeter{}, nil
+	}
+	if options.controller == nil {
+		controller, err := newExecutionController(ctx, ExecutionLimits{MaxInstructions: maxInt64Uint})
+		if err != nil {
+			return executionPathMeter{}, err
+		}
+		options.controller = controller
+		controller.trackSpeculativeInstructions = true
+		return executionPathMeter{controller: controller}, nil
+	}
+	meter := executionPathMeter{
+		controller:          options.controller,
+		restoreSpeculative:  true,
+		originalTrack:       options.controller.trackSpeculativeInstructions,
+		originalSpeculative: options.controller.speculativeInstructions,
+	}
+	options.controller.trackSpeculativeInstructions = true
+	if options.controller.remaining < 0 {
+		meter.restoreUnlimited = true
+		meter.originalRemaining = options.controller.remaining
+		meter.originalLimit = options.controller.limits.MaxInstructions
+		options.controller.remaining = int64(maxInt64Uint)
+		options.controller.limits.MaxInstructions = maxInt64Uint
+	}
+	return meter, nil
+}
+
+func (meter executionPathMeter) restore() {
+	if meter.controller == nil {
+		return
+	}
+	if meter.restoreSpeculative {
+		meter.controller.speculativeInstructions = meter.originalSpeculative
+		meter.controller.trackSpeculativeInstructions = meter.originalTrack
+	}
+	if meter.restoreUnlimited {
+		meter.controller.remaining = meter.originalRemaining
+		meter.controller.limits.MaxInstructions = meter.originalLimit
+	}
+}
+
+type executionInstructionSnapshot struct {
+	remaining   int64
+	speculative uint64
+}
+
+func executionInstructionMark(controller *executionController) executionInstructionSnapshot {
+	if controller == nil {
+		return executionInstructionSnapshot{remaining: -1}
+	}
+	return executionInstructionSnapshot{
+		remaining:   controller.remaining,
+		speculative: controller.speculativeInstructions,
+	}
+}
+
+func executionInstructionDelta(controller *executionController, before executionInstructionSnapshot) uint64 {
+	if controller == nil {
+		return 0
+	}
+	return executionRemainingDelta(before.remaining, controller.remaining) + controller.speculativeInstructions - before.speculative
+}
+
+func executionRemainingDelta(before, after int64) uint64 {
+	if before < 0 || after < 0 || after > before {
+		return 0
+	}
+	return uint64(before - after)
+}
+
+func (stats *executionPathStats) record(mode executionMode, controller *executionController, before executionInstructionSnapshot) {
+	if stats == nil {
+		return
+	}
+	count := executionInstructionDelta(controller, before)
+	switch mode {
+	case executionModeSlot:
+		stats.slotInstructions += count
+	case executionModeNumericSlot:
+		stats.numericSlotInstructions += count
+	case executionModeCompactCall:
+		stats.compactCallInstructions += count
+	}
+}
+
+func (stats *executionPathStats) recordLoopKernel(before, after int64) {
+	if stats == nil {
+		return
+	}
+	// The production loop charges the kernel entry instruction before handing
+	// control to the kernel; the controller delta therefore covers only the
+	// remaining kernel instructions.
+	stats.loopKernelInstructions += executionRemainingDelta(before, after) + 1
+}
+
+type directExecutionPathMark struct {
+	instructions executionInstructionSnapshot
+	cold         uint64
+	kernel       uint64
+}
+
+func (stats *executionPathStats) directMark(controller *executionController) directExecutionPathMark {
+	if stats == nil {
+		return directExecutionPathMark{instructions: executionInstructionSnapshot{remaining: -1}}
+	}
+	return directExecutionPathMark{
+		instructions: executionInstructionMark(controller),
+		cold:         stats.coldInstructions,
+		kernel:       stats.loopKernelInstructions,
+	}
+}
+
+func (stats *executionPathStats) recordDirect(controller *executionController, mark directExecutionPathMark, instrumented bool) {
+	if stats == nil {
+		return
+	}
+	total := executionInstructionDelta(controller, mark.instructions)
+	subpaths := stats.coldInstructions - mark.cold + stats.loopKernelInstructions - mark.kernel
+	if subpaths < total {
+		total -= subpaths
+	} else {
+		total = 0
+	}
+	if instrumented {
+		stats.directInstrumentedInstructions += total
+	} else {
+		stats.directProductionInstructions += total
+	}
+}
+
+func forcedExecutionError(mode executionMode, proto *Proto) error {
+	name := "unknown"
+	switch mode {
+	case executionModeDirect:
+		name = "direct"
+	case executionModeSlot:
+		name = "slot"
+	case executionModeNumericSlot:
+		name = "numeric slot"
+	case executionModeCompactCall:
+		name = "compact call"
+	}
+	if proto == nil {
+		return fmt.Errorf("run: forced %s execution unsupported: nil prototype", name)
+	}
+	if proto.verifyErr != nil {
+		return fmt.Errorf("run: forced %s execution unsupported: invalid prototype: %w", name, proto.verifyErr)
+	}
+	return fmt.Errorf("run: forced %s execution unsupported for prototype", name)
+}
+
+func (mode executionMode) valid() bool {
+	return mode <= executionModeCompactCall
 }
 
 func executeProto(ctx context.Context, proto *Proto, globals *globalEnv, options executeOptions) ([]Value, error) {
+	if options.mode != executionModeAuto {
+		if !options.mode.valid() || proto == nil || proto.verifyErr != nil {
+			return nil, forcedExecutionError(options.mode, proto)
+		}
+	}
 	if options.controller == nil && ctx != nil && (ctx.Done() != nil || ctx.Err() != nil) {
 		controller, err := newExecutionController(ctx, ExecutionLimits{})
 		if err != nil {
 			return nil, err
 		}
 		options.controller = controller
+	}
+	var meter executionPathMeter
+	if options.stats != nil {
+		var err error
+		meter, err = beginExecutionPathMeter(ctx, &options)
+		if err != nil {
+			return nil, err
+		}
+		defer meter.restore()
 	}
 	if globals != nil {
 		previousController := globals.controller
@@ -71,9 +303,29 @@ func executeProto(ctx context.Context, proto *Proto, globals *globalEnv, options
 	// corresponding slot ABI slice is proven.
 	if globals == nil && len(options.upvalues) == 0 &&
 		len(options.upvalueValues) == 0 && len(options.upvalueValueOK) == 0 {
-		if values, handled, err := runSlotExecutionWithController(proto, options.args, options.controller); handled || err != nil {
+		var values []Value
+		var handled bool
+		var err error
+		if options.mode == executionModeAuto && options.stats == nil {
+			values, handled, err = runSlotExecutionWithController(proto, options.args, options.controller)
+		} else {
+			values, handled, err = runSelectedSlotExecution(proto, options.args, options.controller, options.mode, options.stats)
+		}
+		if handled || err != nil {
 			return values, err
 		}
+		if options.mode != executionModeAuto && options.mode != executionModeDirect {
+			return nil, forcedExecutionError(options.mode, proto)
+		}
+	}
+	if options.mode != executionModeAuto && options.mode != executionModeDirect &&
+		((globals != nil && (globals.owner == nil || globals.thread != nil)) || len(options.upvalues) != 0 || len(options.upvalueValues) != 0 || len(options.upvalueValueOK) != 0) {
+		return nil, forcedExecutionError(options.mode, proto)
+	}
+	if options.mode == executionModeAuto && options.stats != nil &&
+		(globals == nil || globals.owner == nil) &&
+		((globals != nil && (globals.owner == nil || globals.thread != nil)) || len(options.upvalues) != 0 || len(options.upvalueValues) != 0 || len(options.upvalueValueOK) != 0) {
+		options.stats.fallback(executionFallbackBoundaryUnsupported)
 	}
 	if globals != nil && globals.owner != nil {
 		return executeProtoWithOwner(ctx, proto, globals, options)
@@ -81,7 +333,16 @@ func executeProto(ctx context.Context, proto *Proto, globals *globalEnv, options
 	thread := acquireVMThread(ctx, globals)
 	defer releaseVMThread(thread)
 	thread.controller = options.controller
-	return thread.runWithUpvalues(proto, options.args, options.upvalues, options.upvalueValues, options.upvalueValueOK)
+	thread.executionPathStats = options.stats
+	thread.directFrameInstrumented = options.instrumented
+	if options.stats == nil {
+		return thread.runWithUpvalues(proto, options.args, options.upvalues, options.upvalueValues, options.upvalueValueOK)
+	}
+	mark := options.stats.directMark(options.controller)
+	instrumented := thread.directFrameInstrumented || thread.debugHook != nil
+	values, runErr := thread.runWithUpvalues(proto, options.args, options.upvalues, options.upvalueValues, options.upvalueValueOK)
+	options.stats.recordDirect(options.controller, mark, instrumented)
+	return values, runErr
 }
 
 func executeProtoWithOwner(ctx context.Context, proto *Proto, globals *globalEnv, options executeOptions) ([]Value, error) {
@@ -91,13 +352,30 @@ func executeProtoWithOwner(ctx context.Context, proto *Proto, globals *globalEnv
 	// shared. The owner activity counter keeps close from racing this
 	// VM-thread-free path; the slot runner itself keeps using its pooled
 	// ephemeral heap until collector/root integration lands.
-	if proto != nil && (proto.slotExecutionEligible || proto.compact != nil) && globals.thread == nil &&
+	attemptedSlot := options.mode != executionModeDirect && proto != nil && (proto.slotExecutionEligible || proto.compact != nil) && globals.thread == nil &&
 		len(options.upvalues) == 0 && len(options.upvalueValues) == 0 &&
-		len(options.upvalueValueOK) == 0 {
-		values, handled, err := runOwnerSlotExecutionWithController(globals.owner, proto, options.args, options.controller)
+		len(options.upvalueValueOK) == 0
+	if attemptedSlot {
+		var values []Value
+		var handled bool
+		var err error
+		if options.mode == executionModeAuto && options.stats == nil {
+			values, handled, err = runOwnerSlotExecutionWithController(globals.owner, proto, options.args, options.controller)
+		} else {
+			values, handled, err = runSelectedOwnerSlotExecution(globals.owner, proto, options.args, options.controller, options.mode, options.stats)
+		}
 		if handled || err != nil {
 			return values, err
 		}
+		if options.mode != executionModeAuto && options.mode != executionModeDirect {
+			return nil, forcedExecutionError(options.mode, proto)
+		}
+	}
+	if options.mode != executionModeAuto && options.mode != executionModeDirect {
+		return nil, forcedExecutionError(options.mode, proto)
+	}
+	if options.mode == executionModeAuto && options.stats != nil && !attemptedSlot {
+		options.stats.fallback(executionFallbackBoundaryUnsupported)
 	}
 	thread := acquireVMThread(ctx, globals)
 	if err := thread.bindOwner(globals.owner); err != nil {
@@ -108,7 +386,16 @@ func executeProtoWithOwner(ctx context.Context, proto *Proto, globals *globalEnv
 	}
 	defer releaseVMThread(thread)
 	thread.controller = options.controller
-	return thread.runWithUpvalues(proto, options.args, options.upvalues, options.upvalueValues, options.upvalueValueOK)
+	thread.executionPathStats = options.stats
+	thread.directFrameInstrumented = options.instrumented
+	if options.stats == nil {
+		return thread.runWithUpvalues(proto, options.args, options.upvalues, options.upvalueValues, options.upvalueValueOK)
+	}
+	mark := options.stats.directMark(options.controller)
+	instrumented := thread.directFrameInstrumented || thread.debugHook != nil
+	values, runErr := thread.runWithUpvalues(proto, options.args, options.upvalues, options.upvalueValues, options.upvalueValueOK)
+	options.stats.recordDirect(options.controller, mark, instrumented)
+	return values, runErr
 }
 
 func runOwnerSlotExecution(owner *runtimeOwner, proto *Proto, args []Value) (values []Value, handled bool, err error) {
@@ -124,6 +411,17 @@ func runOwnerSlotExecutionWithController(owner *runtimeOwner, proto *Proto, args
 		return nil, false, errRuntimeOwnerReleased
 	}
 	return runSlotExecutionWithHeapController(proto, args, owner.heap, controller)
+}
+
+func runSelectedOwnerSlotExecution(owner *runtimeOwner, proto *Proto, args []Value, controller *executionController, mode executionMode, stats *executionPathStats) (values []Value, handled bool, err error) {
+	if err := owner.beginSlotRun(); err != nil {
+		return nil, false, err
+	}
+	defer owner.endSlotRun()
+	if owner.heap == nil {
+		return nil, false, errRuntimeOwnerReleased
+	}
+	return runSelectedSlotExecutionWithHeapController(proto, args, owner.heap, controller, mode, stats)
 }
 
 var vmThreadPool = sync.Pool{
@@ -167,6 +465,7 @@ type vmThread struct {
 	protectedRecoveryScans   uint64
 	protectedRecoveryErrors  uint64
 	controller               *executionController
+	executionPathStats       *executionPathStats
 	// executionWindow is owned by the currently executing direct frame. It is
 	// a value on the thread (rather than a pointer to a loop-local) so
 	// reentrant calls can save/restore it without forcing the hot loop window
@@ -1415,6 +1714,7 @@ func (thread *vmThread) resetForRun(ctx context.Context, globals *globalEnv) {
 	thread.protectedRecoveryScans = 0
 	thread.protectedRecoveryErrors = 0
 	thread.controller = nil
+	thread.executionPathStats = nil
 	thread.resumeCallDepthErr = nil
 	thread.executionWindow = executionWindow{}
 	thread.coroutine = nil
@@ -1467,6 +1767,7 @@ func (thread *vmThread) resetForPool() {
 	thread.globals = nil
 	thread.baseGlobals = globalEnv{}
 	thread.controller = nil
+	thread.executionPathStats = nil
 	thread.resumeCallDepthErr = nil
 	thread.executionWindow = executionWindow{}
 	thread.coroutine = nil
@@ -4223,6 +4524,9 @@ func (thread *vmThread) runFrame(frame *vmFrame) (vmFrameResult, error) {
 		}
 		if exit.kind != directFrameSideExitGenericFrame {
 			break
+		}
+		if thread.executionPathStats != nil {
+			thread.executionPathStats.coldInstructions++
 		}
 		action := thread.runColdInstruction(frame)
 		switch action.kind {
@@ -8519,7 +8823,14 @@ reload:
 			d += nextWord
 			if proto.directLoopKernels != nil {
 				if kernel := proto.directLoopKernels.kernelAt(pc); kernel != nil {
-					exit := runDirectLoopKernel(thread, frame, kernel, window)
+					var exit directFrameSideExit
+					if thread.executionPathStats == nil {
+						exit = runDirectLoopKernel(thread, frame, kernel, window)
+					} else {
+						before := window.remaining
+						exit = runDirectLoopKernel(thread, frame, kernel, window)
+						thread.executionPathStats.recordLoopKernel(before, window.remaining)
+					}
 					if !exit.resumesDirectFrame() {
 						return exit
 					}
