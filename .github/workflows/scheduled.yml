@@ -208,6 +208,7 @@ jobs:
       BENCHTIME: 500ms
       CGO_ENABLED: '0'
       GOMAXPROCS: '1'
+      PERFORMANCE_ARTIFACT_ROOT: ${{ runner.temp }}/ember-performance-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
       - name: Check out repository
@@ -223,15 +224,15 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          mkdir -p performance-artifacts
+          mkdir -p "$PERFORMANCE_ARTIFACT_ROOT"
           set +e
           BENCHTIME="$BENCHTIME" CGO_ENABLED="$CGO_ENABLED" GOMAXPROCS="$GOMAXPROCS" \
-            scripts/performance-audit --output performance-artifacts/audit --profiles 2>&1 | tee performance-artifacts/audit.log
+            scripts/performance-audit --output "$PERFORMANCE_ARTIFACT_ROOT/audit" --profiles 2>&1 | tee "$PERFORMANCE_ARTIFACT_ROOT/audit.log"
           pipeline_status=("${PIPESTATUS[@]}")
           producer_status=${pipeline_status[0]}
           tee_status=${pipeline_status[1]}
           printf 'performance audit producer exit status: %s; tee exit status: %s\n' "$producer_status" "$tee_status"
-          printf 'performance audit producer exit status: %s; tee exit status: %s\n' "$producer_status" "$tee_status" >>performance-artifacts/audit.log
+          printf 'performance audit producer exit status: %s; tee exit status: %s\n' "$producer_status" "$tee_status" >>"$PERFORMANCE_ARTIFACT_ROOT/audit.log"
           append_status=$?
           status=0
           [ "$producer_status" -eq 0 ] || status=$producer_status
@@ -244,10 +245,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p performance-artifacts/audit
+          mkdir -p "$PERFORMANCE_ARTIFACT_ROOT/audit"
           {
             printf '%s\n' '# ember scheduled performance fingerprint/v1'
-            printf 'command=BENCHTIME=500ms CGO_ENABLED=0 GOMAXPROCS=1 scripts/performance-audit --output performance-artifacts/audit --profiles\n'
+            printf 'command=BENCHTIME=500ms CGO_ENABLED=0 GOMAXPROCS=1 scripts/performance-audit --output %s/audit --profiles\n' "$PERFORMANCE_ARTIFACT_ROOT"
             printf 'commit='; git rev-parse HEAD
             printf 'source_status_begin\n'; git status --porcelain=v1; printf 'source_status_end\n'
             printf 'go_version='; go version
@@ -259,7 +260,7 @@ jobs:
             printf 'environment_begin\n'
             env | LC_ALL=C sort | awk -F= '/^(CGO_ENABLED|GOMAXPROCS|GOFLAGS|GODEBUG|LUAU_BIN|BENCHTIME)=/ {print}'
             printf 'environment_end\n'
-          } > performance-artifacts/audit/fingerprint.txt
+          } > "$PERFORMANCE_ARTIFACT_ROOT/audit/fingerprint.txt"
 
       - name: Preserve performance evidence
         if: ${{ always() }}
@@ -268,4 +269,4 @@ jobs:
           name: performance-audit
           retention-days: 30
           if-no-files-found: warn
-          path: performance-artifacts
+          path: ${{ env.PERFORMANCE_ARTIFACT_ROOT }}

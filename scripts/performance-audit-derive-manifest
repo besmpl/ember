@@ -7,9 +7,10 @@ usage() {
 usage: scripts/performance-audit-derive-manifest --before DIR --after DIR --output PATH
 
 Derive per-row timing gates from two complete captures of the same baseline.
-Capture fingerprints cover metadata.txt, capture-facts.tsv, and the five raw
-family files (not summaries or profiles); the comparator binds --before to the
-baseline fingerprint recorded here.
+The --before capture is baseline role A and --after is baseline role B.
+Capture fingerprints cover metadata.txt, capture-facts.tsv, environment.tsv,
+and the five raw family files (not summaries or profiles); the comparator binds
+the selected baseline role to its exact fingerprint.
 EOF
 }
 
@@ -32,6 +33,7 @@ capture_fingerprint() {
 	{
 		printf 'FILE metadata.txt\n'; cat "$dir/metadata.txt"
 		printf 'FILE capture-facts.tsv\n'; cat "$dir/capture-facts.tsv"
+		printf 'FILE environment.tsv\n'; cat "$dir/environment.tsv"
 		for family in scenario_ember_run recursive_fibonacci sparse_grid_neighbors runtime_modes compiler_256kib; do
 			printf 'FILE %s.raw.txt\n' "$family"
 			cat "$dir/$family.raw.txt"
@@ -43,6 +45,7 @@ for dir in "$before" "$after"; do
 	[ -f "$dir/COMPLETE" ] && [ ! -e "$dir/INCOMPLETE" ] || { printf 'derive-manifest: capture is incomplete: %s\n' "$dir" >&2; exit 1; }
 	[ -r "$dir/metadata.txt" ] || { printf 'derive-manifest: metadata.txt is required: %s\n' "$dir" >&2; exit 1; }
 	[ -r "$dir/capture-facts.tsv" ] || { printf 'derive-manifest: capture-facts.tsv is required: %s\n' "$dir" >&2; exit 1; }
+	[ -r "$dir/environment.tsv" ] || { printf 'derive-manifest: environment.tsv is required: %s\n' "$dir" >&2; exit 1; }
 done
 for key in source_fingerprint environment_fingerprint commit samples benchtime; do
 	b=$(metadata_value "$before/metadata.txt" "$key")
@@ -54,6 +57,19 @@ case "$samples" in ''|*[!0-9]*) printf '%s\n' 'derive-manifest: samples must be 
 [ "$samples" -gt 0 ] || { printf '%s\n' 'derive-manifest: samples must be positive' >&2; exit 1; }
 before_capture_fingerprint=$(capture_fingerprint "$before")
 after_capture_fingerprint=$(capture_fingerprint "$after")
+[ "$before_capture_fingerprint" != "$after_capture_fingerprint" ] || {
+	printf '%s\n' 'derive-manifest: baseline A and B capture fingerprints must differ' >&2
+	exit 1
+}
+environment_sha256() {
+	shasum -a 256 "$1/environment.tsv" | awk '{print $1}'
+}
+before_environment_sha256=$(environment_sha256 "$before")
+after_environment_sha256=$(environment_sha256 "$after")
+[ "$before_environment_sha256" = "$after_environment_sha256" ] || {
+	printf '%s\n' 'derive-manifest: incompatible environment.tsv fingerprints' >&2
+	exit 1
+}
 
 families='scenario_ember_run:scenario_ember_run:runtime
 recursive_fibonacci:recursive_fibonacci:runtime
@@ -80,8 +96,14 @@ trap 'rm -f "$out_tmp"; cleanup' EXIT HUP INT TERM
 	printf 'samples=%s\n' "$samples"
 	printf 'baseline_source_fingerprint=%s\n' "$(metadata_value "$before/metadata.txt" source_fingerprint)"
 	printf 'baseline_environment_fingerprint=%s\n' "$(metadata_value "$before/metadata.txt" environment_fingerprint)"
+	printf 'baseline_environment_sha256=%s\n' "$before_environment_sha256"
 	printf 'baseline_commit=%s\n' "$(metadata_value "$before/metadata.txt" commit)"
 	printf 'baseline_benchtime=%s\n' "$(metadata_value "$before/metadata.txt" benchtime)"
+	printf 'baseline_a_capture_role=a\n'
+	printf 'baseline_a_capture_fingerprint=%s\n' "$before_capture_fingerprint"
+	printf 'baseline_b_capture_role=b\n'
+	printf 'baseline_b_capture_fingerprint=%s\n' "$after_capture_fingerprint"
+	# Retain the old names as aliases for readers from the pre-A/B format.
 	printf 'baseline_capture_fingerprint=%s\n' "$before_capture_fingerprint"
 	printf 'repeat_capture_fingerprint=%s\n' "$after_capture_fingerprint"
 	printf 'row\tfamily\tname\tns_max_ratio\tbytes_max\tallocs_max\n'

@@ -81,6 +81,22 @@ audit_exit() {
 }
 trap audit_exit EXIT
 
+# Validate and retain the exact acceptance environment before any benchmark
+# process starts. The shared validator fails closed on unsupported hosts or
+# toolchains and atomically writes the v1 environment artifact.
+if ! scripts/runtime-acceptance-env --output "$output/environment.tsv" --capture-kind performance; then
+	printf '%s\n' 'performance-audit: acceptance environment validation failed' >&2
+	exit 1
+fi
+[ -s "$output/environment.tsv" ] || {
+	printf '%s\n' 'performance-audit: acceptance environment artifact is empty' >&2
+	exit 1
+}
+environment_sha256=$(shasum -a 256 "$output/environment.tsv" | awk '{print $1}')
+[ -n "$environment_sha256" ] || {
+	printf '%s\n' 'performance-audit: could not hash acceptance environment artifact' >&2
+	exit 1
+}
 benchtime=${BENCHTIME:-500ms}
 samples=5
 pkg=.
@@ -105,6 +121,10 @@ effective_gomaxprocs=${GOMAXPROCS:-default}
 logical_cpus=$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || printf unknown)
 power_mode=${POWER_MODE:-unknown}
 
+# Preserve the performance-specific fingerprint as well as the shared pinned
+# acceptance artifact. The former also binds build/debug flags, logical CPU
+# count, power mode, and the complete kernel string used by this benchmark
+# runner; the latter is shared byte-for-byte with parity and allocation.
 environment_fingerprint=$(
 	{
 		printf 'go_version=%s\n' "$(go version)"
@@ -134,6 +154,7 @@ done >"$output/untracked-files.tsv"
 	printf 'commit=%s\n' "$(git rev-parse HEAD)"
 	printf 'source_fingerprint=%s\n' "$source_fingerprint"
 	printf 'environment_fingerprint=%s\n' "$environment_fingerprint"
+	printf 'environment_sha256=%s\n' "$environment_sha256"
 	printf 'cpu_model=%s\n' "$cpu_model"
 	printf 'os_kernel=%s\n' "$os_kernel"
 	printf 'effective_gomaxprocs=%s\n' "$effective_gomaxprocs"
@@ -309,7 +330,7 @@ facts_tmp=$output/capture-facts.tsv.tmp.$$
 } >"$facts_tmp"
 mv "$facts_tmp" "$output/capture-facts.tsv"
 
-for artifact in metadata.txt git-status.txt tracked-diff.patch untracked-files.tsv capture-facts.tsv commands.txt; do
+for artifact in metadata.txt environment.tsv git-status.txt tracked-diff.patch untracked-files.tsv capture-facts.tsv commands.txt; do
 	[ -f "$output/$artifact" ] || { printf 'performance-audit: missing artifact: %s\n' "$artifact" >&2; exit 1; }
 done
 if [ "$profiles" -eq 1 ]; then

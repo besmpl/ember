@@ -42,14 +42,16 @@ scripts/performance-audit-derive-manifest \
 scripts/performance-audit-compare \
   --before /tmp/ember-audit-baseline-a \
   --after /tmp/ember-audit-candidate \
-  --manifest /tmp/ember-audit-gates.tsv
+  --manifest /tmp/ember-audit-gates.tsv \
+  --baseline-role a
 ```
 
 The runner retains one raw benchmark file for each of the five families. The
 manifest derives a separate robust timing envelope and observed allocation
-ceiling for every benchmark row from both baseline captures. It also binds the
-gate to hashes of each baseline's metadata, capture facts, and five raw files;
-profiles and human-readable summaries are evidence, but not gate inputs. The
+ceiling for every benchmark row from both baseline captures. It binds distinct
+A/B roles to hashes of each baseline's metadata, shared environment artifact,
+capture facts, and five raw files; profiles and human-readable summaries are
+evidence, but not gate inputs. The
 comparison command parses retained raw files through `scripts/bench-summary`,
 reports runtime timing, compiler timing, B/op, and allocs/op separately, and fails
 closed for missing rows or metrics, incomplete captures, source or baseline
