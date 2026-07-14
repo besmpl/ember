@@ -1,433 +1,415 @@
 # Performance Profile Audit
 
-## Snapshot and scope
+## Snapshot and method
 
-This audit records current benchmark weak points at commit
-`2c558013a0f372c5a2e6a508eaee7b195fe9d7fa` on 2026-07-13. Measurements
-used Go 1.26.4 on darwin/arm64 and an Apple M1.
+This audit records current benchmark weak points on 2026-07-14 at commit
+`fd0aa29a7d3cf3c22ea1fc74ac11305109c81681`, using Go 1.26.4 on
+darwin/arm64 and an Apple M1. The performance-audit source fingerprint was
+`0efae3eeafd85be1758d950e7b97c92be714a171368c645c5c63108de97132d7`.
 
-The audit answers two different questions:
+The worktree contained unrelated user changes. In particular, the untracked
+`compatibility_manifest_test.go` imported `go/parser` as `parser`, which
+conflicted with Ember's package-level `parser` type and prevented `go test`
+from compiling. Profiles were therefore captured from a temporary copy that
+excluded only that test file. Production Go files and benchmark files were
+otherwise identical to the worktree.
 
-1. Which benchmark workloads take the longest per operation?
-2. Which functions consume the most CPU or allocation inside those workloads?
+The repeatable runner supplied five 500 ms samples and aggregate CPU and
+allocation profiles. The three most important paths were then captured again
+with clean, focused 5 second profiles:
 
-Absolute benchmark times are not a fair comparison of unlike scripts. A long
-scenario can be healthy while a short scenario is inefficient. The function
-profiles and stage-specific compiler benchmarks are the stronger prioritization
-evidence.
+- recursive Fibonacci;
+- sparse-grid neighbors;
+- the 256 KiB compiler `emit` and `compile` stages.
 
-No Luau comparison was collected for this audit. It ranks Ember's current
-internal costs, not its parity gap.
+Wall-clock comparisons between unlike scripts are descriptive, not normalized
+for work performed. CPU flat percentages name work done in a function;
+cumulative percentages include callees and overlap with their callers.
+Allocation profiles measure allocation over the profile lifetime, not retained
+heap.
 
 ## Executive findings
 
 The strongest current weak points are:
 
-1. The general VM dispatch path. `runDirectFrameProductionLoop`,
-   `runDirectLoopKernel`, and `valueKind` account for 51.1% of flat Scenario CPU
-   samples. This is broad interpreter and value-representation cost rather than
-   one slow opcode.
-2. Fresh table construction. `newTableWithCapacity` owns 91.4% cumulative
-   Scenario allocation space and 85.3% cumulative allocated objects. This also
-   makes allocator and Go runtime work visible in CPU profiles.
-3. Dynamic string-key tables. `sparse_grid_neighbors` consistently takes about
-   2.33 ms/op. Overflowed string-field probing, numeric key formatting, table
-   growth, and insertion-order bookkeeping are all material.
-4. Compact recursive calls. `recursive_fibonacci` takes about 637 us/op with
-   only 2 allocations/op, but `compactProgram.callSite` alone consumes 11.4%
-   of CPU because every call performs a non-inlined linear metadata lookup.
-5. Parser object churn. A 256 KiB compile allocates about 102,000 objects;
-   isolated parsing accounts for essentially all of that count through
-   one-element AST slices and pointer-backed scalar nodes.
-6. Repeated whole-IR optimization. The 256 KiB straight-line fixture emits
-   14,565 IR instructions and optimizes them to 3, while allocating 20.2 MB in
-   the optimizer. Multiple passes copy or reassemble the IR and intern
-   intermediate constants that are later discarded.
+1. Recursive script call and return handling. The focused Fibonacci profile
+   puts 29.80% flat CPU in the generated VM loop, 12.60% in
+   `enterRecordOnlyFixedCall`, and 6.60% in
+   `resumeRecordOnlyFixedCallOne`. The enter/resume paths are 26.20% and
+   22.60% cumulative respectively.
+2. Per-instruction VM mechanics. Across the complete Scenario family,
+   `runGeneratedDirectFrameProductionLoop` owns 39.41% flat and 79.27%
+   cumulative CPU, `valueKind` owns 9.57% flat, and
+   `executionWindow.stepInstruction` owns 4.56% flat.
+3. Persistent `Runtime.RunHook` setup. Persistent rows pay a stable 1,000 B and
+   13 allocations per operation. Aggregate runtime allocation is led by global
+   environment construction, the `require` binding, execution-controller
+   creation, and context wrapping.
+4. Stateless table construction. `newTableWithCapacity` accounts for 91.92%
+   cumulative Scenario allocation space. This remains a large stateless cost,
+   but the persistent table-allocation gate in ADR 0006 is still false.
+5. Dynamic string-table growth. Sparse-grid allocation is led by
+   `tableHashFields.grow` (30.01%), table storage (26.20%), iteration-journal
+   slice growth (22.09%), and `Table.buildIterationIndex` (11.05%).
+6. Repeated syntax-tree walks during emission. In the clean 256 KiB
+   emit/compile profile, `canCompileSingleLocalAssignmentInPlace` is 27.41%
+   cumulative CPU and `expressionCanAssignToNameInPlace` is 19.50%. The many
+   arena accessor functions at the top of the flat profile show that the same
+   small expression shape is being inspected repeatedly.
 
-## Benchmark observations
+The previous audit's compact-call engine and direct-loop-kernel findings are
+not current. ADR 0005 deliberately removed those alternate engines. The
+parser's old tiny-object churn is also no longer a leading allocation-count
+problem: typed arenas reduced the 256 KiB parse stage to 67 allocations per
+operation.
 
-### Long runtime rows
+## Slow benchmark rows
 
-The following values are medians of three 1-second runs for the selected rows.
-The ordering is descriptive, not normalized for script work.
+The clean five-sample Scenario medians below identify the longest rows in that
+family. They do not prove that one row is less efficient than another.
 
-| Benchmark | Median ns/op | B/op | allocs/op | Note |
-| --- | ---: | ---: | ---: | --- |
-| `sparse_grid_neighbors` | 2,333,286 | 40,389 | 407 | Stable across all three runs |
-| `formation_layout_score` | 1,494,920 | 4,522 | 26 | Noisy: 510,494 to 1,529,867 ns/op |
-| `recursive_fibonacci` | 636,655 | 21 | 2 | Call-heavy; stable and allocation-light |
-| `economy_market_tick` | 362,177 | 5,928 | 38 | Dynamic field reads and writes |
-| `threat_aggro_table` | 298,665 | 5,979 | 38 | Dynamic string-key accesses |
-| `prototype_fallback` | 270,639 | 2,878 | 25 | Function-valued `__index` calls |
-
-The short baseline showed large timing variance on some rows, especially
-`formation_layout_score`. Longer confirmation runs made `sparse_grid_neighbors`
-and `recursive_fibonacci` stable, but benchmark comparisons should still use
-multiple runs and a controlled machine before accepting a small improvement.
-
-### Large-source compiler stages
-
-These are medians of three 100 ms benchmark samples for the 256 KiB compiler
-fixture. Stages are isolated and overlap in work, so they do not add to the
-end-to-end `Compile` time.
-
-| Stage | Median time | B/op | allocs/op |
+| Scenario row | Median ns/op | B/op | allocs/op |
 | --- | ---: | ---: | ---: |
-| Parse | 18.295 ms | 26,456,862 | 101,979 |
-| Optimize | 12.021 ms | 20,199,520 | 216 |
-| Emit | 9.079 ms | 7,570,345 | 33 |
-| Bind | 2.451 ms | 1,171,944 | 11 |
-| Lex | 2.303 ms | 8,577,027 | 13 |
-| Assemble and seal | 2.063 us | 1,664 | 28 |
-| Full `Compile` | 37.330 ms | 52,822,386 | 102,261 |
-| `LoadProgram` | 38.934 ms | 53,035,853 | 102,294 |
+| `sparse_grid_neighbors` | 2,433,663 | 39,174 | 71 |
+| `formation_layout_score` | 511,207 | 4,512 | 25 |
+| `economy_market_tick` | 398,403 | 5,921 | 37 |
+| `threat_aggro_table` | 304,958 | 5,969 | 37 |
+| `component_churn` | 257,041 | 6,241 | 34 |
+| `ai_utility_scoring` | 220,870 | 3,840 | 23 |
+| `save_state_diff` | 205,487 | 5,009 | 31 |
+| `prototype_fallback` | 194,529 | 2,888 | 24 |
 
-Parse time varied in follow-up runs, but its allocation count and bytes were
-stable. The allocation shape, rather than a single wall-time sample, is the
-strong signal.
+The focused 5 second rows measured recursive Fibonacci at 3,300,452 ns/op and
+sparse-grid neighbors at 2,777,091 ns/op. Fibonacci allocated only 269 B and 4
+objects per operation, so it is a CPU/call-machinery problem rather than an
+allocation problem.
 
-## Profile findings and causes
+The clean focused 256 KiB compiler rows measured:
 
-CPU percentages below are percentages of the named profile. Cumulative values
-overlap with their callers and must not be added.
+| Stage | ns/op | B/op | allocs/op |
+| --- | ---: | ---: | ---: |
+| `emit` | 19,803,827 | 992,998 | 13 |
+| `compile` | 43,856,921 | 21,843,539 | 191 |
 
-### 1. General VM dispatch and value tagging
+The full five-sample compiler-stage run was partially overlapped by unrelated
+workspace checks, so its wall times are only indicative. Its stable allocation
+shape still agrees with the focused capture: parse uses about 14.5 MB and 67
+allocations, optimize about 6.0 MB and 82 allocations, and full compile about
+21.8 MB and 191 allocations.
 
-The aggregate Scenario CPU profile contains 12.81 seconds of samples:
+## Profile findings and why they are slow
 
-| Function | Flat | Cumulative | Why it is present |
-| --- | ---: | ---: | --- |
-| `runDirectFrameProductionLoop` | 30.68% | 79.78% | Main wordcode fetch, decode, switch, and opcode bodies |
-| `runDirectLoopKernel` | 11.32% | 19.67% | Predecoded loop still performs an indexed op load, operand copies, and another large switch |
-| `valueKind` | 9.06% | 9.06% | Most typed opcode guards compare the `Value.ref` sentinel before reading the tag |
-| `wordcodeCacheIndex.cacheIDAt` | 2.26% | 2.26% | Cacheable field/index ops compute block, bit, rank, and popcount from physical PC |
-| `wordcodeCacheIndex.cacheSiteAt` | 1.33% | 3.59% | Wraps cache-id lookup and descriptor access |
-| `Value.tableRef` | 1.87% | 3.83% | Repeated type/ref extraction on table operations |
+### 1. Recursive calls repeatedly rebuild and clean frame state
 
-Why this is slow:
-
-- General programs still move 16-byte, pointer-bearing `Value` objects through
-  registers and repeatedly recover their type through sentinel comparisons.
-- The production loop decodes operands and branches through a large switch for
-  every instruction. The loop kernel removes wordcode decoding but retains a
-  second switch and copies four operands from each predecoded record.
-- Cache site IDs are not directly present in the instruction. Each cacheable
-  operation derives an ID through a compact rank bitset. This saves wordcode
-  space but costs arithmetic, bounds checks, and popcount in the hot path.
-
-This is a structural hotspot, not permission to add benchmark-shaped opcodes.
-The private slot work described by ADR 0004 is the broadest existing direction:
-if general execution stops repeatedly classifying wide public `Value` objects,
-`valueKind` and register traffic should fall together. A smaller experiment is
-to compare the compact rank index with a direct, immutable per-PC cache-site
-sidecar and measure whether the roughly 3.6% cumulative lookup cost justifies
-the memory.
-
-Proof signal: lower flat samples in `valueKind`, cache-index helpers, and the
-two dispatch functions on the full Scenario profile, without growing opcode or
-side-table budgets accidentally.
-
-### 2. Fresh table construction and allocator pressure
-
-The aggregate Scenario allocation-space profile contains 750.94 MB of sampled
-allocation:
+The clean recursive Fibonacci CPU profile contained about 5 seconds of CPU
+samples:
 
 | Function | Flat | Cumulative |
 | --- | ---: | ---: |
-| `newTableStorage` | 55.41% | 55.41% |
-| `newTableWithCapacity` | 30.43% | 91.44% |
-| `newTableArrayStorage` | 5.59% | 5.59% |
-| `Table.ensureIterationJournal` | 1.67% | 1.67% |
-
-The allocated-object profile tells the same story: `newTableStorage` is 45.4%
-of objects and `newTableWithCapacity` is 85.3% cumulative.
+| `runGeneratedDirectFrameProductionLoop` | 29.80% | 93.60% |
+| `vmThread.enterRecordOnlyFixedCall` | 12.60% | 26.20% |
+| `vmThread.resumeRecordOnlyFixedCallOne` | 6.60% | 22.60% |
+| `vmThread.maybeEnterRecordOnlyFixedCall` | 3.20% | 29.40% |
+| `vmFrame.resetFrameIntoRegistersWithVarargSource` | 3.40% | 6.80% |
 
 Why this is slow:
 
-- Every `ember_run` operation starts from a fresh execution and recreates all
-  table literals. Nested records therefore allocate a table object and, when
-  the inline capacities are exceeded, array, string-field, or hash storage.
-- Those allocations make Go runtime work visible in the CPU profile:
-  `runtime.madvise` is 10.15% flat, with allocator spans, scheduler wakeups,
-  and GC workers elsewhere in the profile.
-- This benchmark shape includes legitimate language allocation. It cannot be
-  removed by reusing a table whose identity or contents can escape through a
-  returned `Value`.
+- `fib(20)` crosses about 21,890 script call edges. Small fixed costs are
+  multiplied by every edge.
+- `enterRecordOnlyFixedCall` rechecks call eligibility, destination bounds,
+  register ownership, cell ranges, encoded record widths, stack capacity, and
+  call limits before rebinding the physical frame to the callee.
+- `resumeRecordOnlyFixedCallOne` decodes the saved record, finds the owner
+  range, closes upvalues, clears pointer-bearing child registers, restores the
+  caller's closure/register/cell/cold state, and writes the result.
+- The path is allocation-light because it reuses the shared stack and compact
+  frame records. The remaining cost is validation, state mutation, and memory
+  clearing rather than heap churn.
 
-The useful design space is therefore ownership-aware: compact table storage,
-compiler-owned literal shape templates, or runtime-owned arenas/slabs with a
-proven escape boundary. Blind `sync.Pool` reuse is unsafe because tables and
-their graphs can escape `Run`.
+Useful experiments:
 
-Proof signal: `newTableStorage` and `newTableWithCapacity` bytes/op fall in
-table-heavy rows, followed by lower Go runtime CPU. Retained-result and identity
-tests must remain unchanged.
+1. Precompute immutable fixed-call facts in the `Proto` or call-site sidecar so
+   the hot path validates only state that can actually vary at runtime.
+2. Split the proven one-result, non-variadic, no-cell return case from the
+   generic restore path while retaining one canonical VM semantic path.
+3. Use compiler liveness to narrow the register range that must be cleared, or
+   prove which slots are immediately overwritten before skipping a clear.
 
-### 3. `sparse_grid_neighbors`: dynamic strings, hash growth, and iteration order
+Proof signal: the combined cumulative share of enter/resume falls materially,
+Fibonacci ns/op falls, and call-limit, upvalue, error-stack, coroutine, race,
+and checkptr tests remain green. Do not reintroduce the deleted compact engine
+as a benchmark-only second VM.
 
-The focused sparse-grid CPU profile contains 5.02 seconds of samples:
+### 2. Dispatch, safety polling, and value classification tax every instruction
 
-| Function or path | Flat | Cumulative |
-| --- | ---: | ---: |
-| `runDirectFrameProductionLoop` | 28.88% | 90.04% |
-| `Table.rawStringFieldSlotWithProbe` | 4.38% | 9.16% |
-| `Table.rawStringFieldSlot` | 0.40% | 9.96% |
-| `valueKind` | 6.77% | 6.77% |
-| `baseToStringValue` | 0.80% | 6.97% |
-| `vmThread.resumeRecordOnlyFixedCallOne` | 4.78% | 6.77% |
-| `vmThread.enterRecordOnlyFixedCall` | 2.79% | 4.78% |
-| `vmThread.internStringConcatValues` | 0.60% | 3.39% |
-
-The benchmark builds keys with `tostring(x) .. ":" .. tostring(y)`, calls a
-local `cellKey` function for centers and neighbors, and accesses a table that
-grows from five keys into overflow hash storage.
-
-Why this is slow:
-
-- `rawStringFieldSlotWithProbe` scans inline string fields before checking the
-  overflow hash. Once `cells` is mostly overflow-backed, dynamic lookups still
-  pay the inline scan on every access.
-- The four-entry dynamic string cache scans entries and validates table, key
-  identity/hash/bytes, shape token, and slot before falling back to the raw
-  lookup.
-- Each `cellKey` invocation enters and resumes a compact one-result call
-  record. Key creation also performs two numeric `tostring` operations and a
-  concatenation/intern lookup.
-- Negative neighbor coordinates miss the existing non-negative small-integer
-  string cache and fall through to `strconv.FormatInt`.
-
-Focused sparse-grid allocation space is also revealing:
-
-| Function | Flat allocation space |
-| --- | ---: |
-| `tableHashFields.grow` | 28.21% |
-| `newTableStorage` | 26.23% |
-| `Table.buildIterationIndex` | 16.47% |
-| `Table.markIterationKeyPresent` | 15.98% flat, 32.45% cumulative |
-| `Table.ensureIterationJournal` | 4.22% |
-
-The table grows geometrically and records deterministic insertion order. Once
-the journal passes 32 entries it also builds a `map[tableKey]int`. This is real
-semantic bookkeeping, but its repeated slice/map growth is expensive in this
-workload. `strconv.FormatInt` is only 2.34% of allocation bytes but about 40%
-of sampled allocated objects, so a signed small-integer cache is primarily an
-allocation-count and modest CPU improvement, not the main byte win.
-
-Best bounded experiments:
-
-1. On overflowed tables, probe the hash sidecar before scanning inline fields,
-   while preserving the inline fallback and key-identity rules.
-2. Preallocate journal/index capacity from the hash capacity when a table is
-   already growing, and measure the memory cost on small tables.
-3. Compare current hash growth with a larger first overflow capacity on tables
-   that continue receiving dynamic fields.
-4. Extend the exact small-integer string cache to a bounded signed range.
-
-Proof signal: sparse-grid ns/op and B/op fall; the raw-slot, hash-grow,
-journal, and `FormatInt` profile entries move in the predicted direction.
-
-### 4. `recursive_fibonacci`: compact call metadata
-
-The focused recursive profile contains 5.16 seconds of CPU samples:
+The clean aggregate Scenario CPU profile contained 13.17 seconds of samples:
 
 | Function | Flat | Cumulative |
 | --- | ---: | ---: |
-| `runCompactCallProgramWords` | 80.23% | 93.60% |
-| `compactProgram.callSite` | 11.24% | 11.43% |
-| `runtime.pthread_cond_signal` | 5.43% | 5.43% |
-| `math.IsNaN` | 1.55% | 1.55% |
+| `runGeneratedDirectFrameProductionLoop` | 39.41% | 79.27% |
+| `valueKind` | 9.57% | 9.57% |
+| `executionWindow.stepInstruction` | 4.56% | 4.63% |
+| `propertyIC.get` | 2.05% | 3.42% |
+| `wordcodeCacheIndex.cacheSiteAt` | 1.44% | 2.73% |
+| `wordcodeCacheIndex.cacheIDAt` | 1.29% | 1.29% |
 
 Why this is slow:
 
-- The compact numeric path is one large, non-inlinable wordcode switch. It
-  decodes operands, validates bounds and NaNs, and pushes/pops explicit compact
-  frames for every recursive edge.
-- `compactProgram.callSite` is also non-inlinable. For every call it validates
-  function/range metadata and linearly scans the current function's sorted call
-  sites for a matching word PC. Fibonacci has two static child call sites, but
-  it traverses about 21,890 call edges for `fib(20)`, so even a one- or two-entry
-  scan consumes 11.4% of total CPU.
-- Each call appends a `compactCallFrame` and writes the possibly reallocated
-  slice back to pooled state. That state write is required for backing-slice
-  retention on exits; it is a redesign candidate, not a line that can simply
-  be deleted.
-- The script recursion is iterative inside this function. It does not recurse
-  through Go frames per script call. Scheduler/preemption symbols are secondary
-  profile noise: disabling async preemption removed those symbols but did not
-  improve benchmark time.
+- Every wordcode instruction performs the loop bound check, calls
+  `stepInstruction`, fetches and decodes a word, and branches through the large
+  opcode switch.
+- `stepInstruction` checks a controller pointer, maintains the 256-instruction
+  context-poll countdown, and conditionally maintains the instruction budget.
+  The common unlimited, non-cancelled path still pays the helper call and
+  branches.
+- `Value` is a 16-byte pointer-bearing public representation. Numbers and
+  booleans use GC-visible pointer sentinels, so `valueKind` compares the
+  reference against scalar sentinels before reading tag bits. Typed opcode
+  guards repeat that classification throughout the loop.
+- Cacheable property operations derive a compact cache ID from the physical
+  program counter rather than loading a direct per-instruction ID. The compact
+  sidecar saves code space but costs rank/index work in the hot path.
 
-The most isolated improvement is a direct call-site index keyed by function and
-word PC, or an equivalent prebound call descriptor. It should remove the
-`callSite` scan and make call setup easier to inline. A depth-indexed frame store
-could then avoid append/clear/state-sync work, but has more pooling and fallback
-invariants.
+Useful experiments, in increasing blast radius:
 
-Proof signal: `compactProgram.callSite` approaches zero and recursive time falls
-by roughly its current 10-12% share before attempting a larger decoded micro-op
-or dispatch redesign.
+1. Inline the common execution-window countdown and move context/error work to
+   a cold helper. Measure bounded and cancelable runtime rows separately.
+2. Cache or encode only the immutable type facts already proved by the
+   compiler so numeric/table opcode bodies do not repeat `valueKind` calls.
+3. Compare the compact cache-rank sidecar with a direct immutable per-PC cache
+   ID table, including its memory cost.
 
-### 5. Compiler parsing: many tiny AST allocations
+Proof signal: `stepInstruction`, `valueKind`, and cache-index flat samples fall
+across the full Scenario family, not only scalar microbenchmarks. Wordcode and
+side-table size gates must be reported with any timing win.
 
-The 256 KiB fixture contains 72,815 syntax nodes. Isolated parse allocates
-26.46 MB and 101,979 objects per operation. Allocation-object attribution is
-concentrated in the nested parser path:
+### 3. Persistent hooks rebuild per-call boundary objects
 
-- `parseIdentifierStatement`: 29.97% flat objects;
-- `parseExpressionList`: 16.20%;
-- `parseExpression`: 15.94%;
-- `parseAndExpression`: 15.26%;
-- `parseAdditiveExpression`: 15.08%;
-- `parsePrimaryTerm`: 7.07%.
+The runtime-mode allocation profile attributes allocation space as follows:
 
-Why this is slow:
+| Function | Flat | Cumulative |
+| --- | ---: | ---: |
+| `globalEnv.set` | 25.04% | 28.92% |
+| `runtimeGlobals` | 13.19% | 13.19% |
+| `newExecutionController` | 10.57% | 10.57% |
+| `contextWithRuntimeCallContext` | 7.21% | 11.34% |
+| `Runtime.RunHook` | 7.18% | 84.30% |
+| `runtimeCallContext.envWithRequire` | 5.98% | 43.42% |
+| `context.WithValue` | 4.13% | 4.13% |
 
-- A simple `value = value + 1` allocates one-element backing slices at several
-  grammar levels: assignment targets, expression lists, `or` terms, `and`
-  terms, and additive rest.
-- Numeric terms store a pointer to a scalar, creating another small object.
-- `parseStatement` attempts type-alias and keyword forms before reaching the
-  common identifier-assignment path.
-- The lexer initially caps token capacity at 4,096 while this fixture has tens
-  of thousands of tokens, so the token slice repeatedly grows and copies.
-
-The clearest improvement is a private compact AST representation with an inline
-first element and an optional remainder for expression/value lists. This keeps
-the common one-element shape allocation-free without weakening the public API.
-A smaller first slice is token-kind dispatch in `parseStatement`, followed by a
-bounded token-capacity estimate that scales farther for large source files.
-
-Proof signal: parse allocs/op falls by several allocations per assignment,
-ideally at least 50%, and parse CPU falls across straight-line, branch-heavy,
-type-heavy, and malformed-source fixtures.
-
-### 6. Compiler optimization and emission: full-stream work that is discarded
-
-The large straight-line fixture emits 14,565 IR instructions and finishes with
-3. Isolated optimization still takes 12.02 ms and allocates 20.20 MB/op.
-
-Important allocation-space entries in the focused compiler profile are:
-
-| Function | Flat allocation space |
-| --- | ---: |
-| `bytecodeBuilder.emitWithSource` | 11.66% |
-| `assembleBytecodeIRRaw` | 5.42% |
-| `bytecodeBuilder.addKeyedConstant` | 5.30% |
-| `applyBytecodeIRRemovalSet` | 4.70% |
-| `bytecodeIRLiveAfter` | 2.61% |
-| `optimizeBytecodeIRWithFacts` | 35.62% cumulative |
+All persistent scalar, recursive, and nested-table rows measured exactly
+1,000 B/op and 13 allocs/op. Persistent dynamic string growth measured 1,049
+B/op and 14 allocs/op. This fixed floor is more important to Hearth-style
+updates than stateless table allocation.
 
 Why this is slow:
 
-- Emission appends source-bearing IR records to an initially nil slice. Only 33
-  allocations occur, but geometric growth and copying total 7.57 MB/op.
-- The optimizer performs peephole removal, control-flow simplification,
-  constant propagation, move propagation/coalescing, loop-invariant hoisting,
-  dead-code elimination, and another control-flow simplification. Several
-  passes assemble a second instruction form, copy IR, or rebuild CFG/liveness.
-- Straight-line scalar propagation interns every intermediate folded value into
-  the constant pool. Thousands of transient constants are hashed and appended,
-  then dead-code elimination and constant compaction discard almost all of
-  them.
-- Move-related analyses still run when the fixture contains no `opMove`, and
-  loop work can run when there is no backedge.
+- Every hook creates a fresh execution controller even when limits are
+  unlimited and the context is not cancelled.
+- `envWithRequire` creates a fresh `globalEnv`, lazily allocates its values map,
+  creates a bound native `require` value, and inserts it into the map.
+- The internal call context is copied into a new `context.WithValue` node.
+- Some data is genuinely invocation-specific: context, host globals, module
+  origin, and controller. The current representation combines it with runtime
+  invariants, so invariants are allocated again on every call.
 
-The first experiments should be conservative guards and deferred materialization:
+Useful experiments:
 
-1. Skip move-only passes when no move opcode exists, and skip loop-only work
-   when there is no backedge.
-2. Defer interning folded constants until the surviving rewrite is known, or
-   keep transient values in a local lattice/map rather than the durable pool.
-3. Reuse one analysis across passes that do not invalidate its inputs, and
-   avoid repeated IR-to-instruction materialization.
-4. Give the emitter a conservative, bounded IR-capacity hint derived from
-   syntax nodes or representative source density.
+1. Separate an immutable runtime/entrypoint global template from the small
+   invocation-specific capability carrying context, host overrides, and the
+   controller.
+2. Pass `runtimeCallContext` explicitly through the private call seam instead
+   of storing it in `context.Context`, if callbacks and module loading can keep
+   the same public context behavior.
+3. Reuse/reset an execution controller only after proving cancellation,
+   instruction counts, object counts, inherited frames, and errors cannot leak
+   between hooks.
 
-Proof signal: optimizer B/op falls by at least half on the straight-line case,
-`addKeyedConstant` and repeated analysis allocations shrink, and compiler
-corpus/CFG fixtures prove no semantic or code-quality regression.
+Proof signal: persistent rows drop below 13 allocs/op and 1,000 B/op while
+host-global freshness, `require` origin, cancellation, limits, callbacks, and
+concurrent-runtime ownership tests retain their behavior.
+
+### 4. Stateless tables dominate allocation but not persistent updates
+
+The clean aggregate Scenario allocation-space profile contains:
+
+| Function | Flat | Cumulative |
+| --- | ---: | ---: |
+| `newTableStorage` | 54.79% | 54.79% |
+| `newTableWithCapacity` | 31.82% | 91.92% |
+| `newTableArrayStorage` | 5.30% | 5.30% |
+
+`runtime.madvise` also appears at 13.29% flat CPU in the Scenario profile,
+consistent with allocator/page pressure being visible beyond the table
+constructors themselves.
+
+Why this is slow:
+
+- Each stateless `ember_run` recreates every table literal and any nested table
+  graph. A table may allocate the table object, array storage, string/hash
+  storage, cold data, and iteration metadata.
+- Returned tables and their children can escape to Go. Reusing them blindly
+  would violate identity, retained-result, and mutation behavior.
+- Persistent `RunHook` workloads mutate already-loaded tables and do not show
+  table construction among their top three allocation sources. ADR 0006
+  therefore correctly stopped the slab/template campaign at its persistent
+  gate.
+
+The current priority is to reduce the `RunHook` boundary floor first. Revisit
+literal templates or owner-safe slabs only if a fresh persistent profile makes
+table construction a top-three source. Any allocator experiment must include
+retained-result and identity tests.
+
+### 5. Sparse-grid tables duplicate growth and deterministic-order bookkeeping
+
+The clean focused sparse-grid profile measured 2,777,091 ns/op, 39,205 B/op,
+and 71 allocs/op. Its important entries were:
+
+| Function | Profile | Flat | Cumulative |
+| --- | --- | ---: | ---: |
+| `tableHashFields.grow` | allocation space | 30.01% | 30.01% |
+| `newTableStorage` | allocation space | 26.20% | 26.20% |
+| iteration-key `slices.Grow` | allocation space | 22.09% | 22.09% |
+| `Table.buildIterationIndex` | allocation space | 11.05% | 11.05% |
+| `tableHashFields.find` | CPU | 1.99% | 5.42% |
+| `Table.rawStringFieldSlot` | CPU | 1.08% | 6.86% |
+
+Why this is slow:
+
+- The benchmark repeatedly constructs `tostring(x) .. ":" .. tostring(y)`,
+  performs dynamic lookups, and inserts previously absent neighbor keys.
+- The open-address hash grows geometrically and rehashes live entries.
+- Ember also preserves deterministic insertion order. Once the journal grows,
+  it owns a second key slice and an index map, so one logical insert updates
+  both lookup storage and iteration storage.
+- Overflow-first string probing and signed small-integer formatting are already
+  implemented. They should not be proposed again as new work.
+
+Useful experiments:
+
+1. Store an iteration position in hash entries, or otherwise share indexing
+   between hash lookup and deterministic order, to avoid a second map.
+2. Re-evaluate journal capacity at the exact hash-growth boundary; the current
+   reservation helper still leaves `slices.Grow` as 22.09% of allocation space.
+3. Test a larger first overflow capacity only on tables that have demonstrated
+   continued dynamic insertion, and measure the memory regression on small
+   tables.
+
+Proof signal: sparse-grid B/op and allocs/op fall with lower hash-grow,
+iteration-grow, and index-build profile shares. Table iteration identity,
+deletion/reinsertion order, equal-content string keys, and small-table memory
+tests are required gates.
+
+### 6. Compiler emission repeatedly asks the syntax tree the same question
+
+The clean focused compiler profile combines `emit` and full `compile`, each
+run for 5 seconds. Important CPU entries were:
+
+| Function | Flat | Cumulative |
+| --- | ---: | ---: |
+| `compiler.compileAssignment` | - | 66.22% |
+| `compiler.canCompileSingleLocalAssignmentInPlace` | 0.96% | 27.41% |
+| `expressionCanAssignToNameInPlace` | - | 19.50% |
+| `syntaxTree.arenaTerm` | 6.50% | 10.07% |
+| `syntaxTree.termName` | 3.25% | 5.48% |
+| `syntaxTree.termChild` | 2.49% | 4.02% |
+| `syntaxTree.expressionTerms` | 2.17% | 4.02% |
+
+`-` means the function's own flat share was not material in the top listing;
+the cumulative share is the relevant signal for its subtree.
+
+Why this is slow:
+
+- The 256 KiB fixture repeats `value = value + 1`, producing 14,565 emitted IR
+  instructions that optimize to 3.
+- Before compiling each assignment in place, the compiler proves that writing
+  the target register cannot clobber a value still needed by the expression.
+- The proof is recursive. Each `...CanAssignToNameInPlace` level first calls a
+  matching `...ReferencesName` traversal and then descends again to identify
+  where the reference occurs. The actual expression compiler traverses the
+  same arena a third time.
+- Typed arenas have already removed the previous tiny-object explosion, but
+  repeated checked ID/span access now appears as CPU in `arenaTerm`,
+  `termName`, `termChild`, and related accessors.
+
+The clearest experiment is a single-pass assignment dependency analysis that
+returns both "references target" and "safe to write in place", computed once
+per assignment during binding or emission. A small cached classification on
+the arena statement is another option if it does not complicate the syntax
+representation.
+
+The allocation picture is secondary but still measurable: full compile uses
+about 21.8 MB/op, led by syntax-arena storage and lexed tokens, while optimizer
+space is about 6.0 MB/op. Do not revive the old recommendation to replace
+pointer AST nodes; that work has already landed.
+
+Proof signal: `canCompileSingleLocalAssignmentInPlace` and the name-reference
+walker approach zero cumulative share, `emit` time falls on straight-line and
+mixed-expression fixtures, and branch-heavy, closures/upvalues, multi-target,
+selector, and side-effect-order tests remain green.
 
 ## Recommended experiment order
 
-1. Direct-index compact call sites. It is isolated, measured at 11.4% of the
-   recursive profile, and has a precise success signal.
-2. Guard no-op optimizer passes and stop interning transient folded constants.
-   This targets large measured allocations without changing public structure.
-3. Compact common parser list/node shapes. This has the largest compiler
-   allocation-count opportunity but a broader internal blast radius.
-4. Probe hash storage first on overflowed dynamic-string tables, then tune hash
-   and iteration-journal capacity with mixed-table benchmarks.
-5. Prototype ownership-safe table allocation or literal-shape reuse. The
-   potential corpus-wide gain is large, but escape and identity semantics make
-   this higher risk.
-6. Reprofile before considering private-slot, decoded-micro-op, or dispatch
-   restructuring. Those are broad changes and should follow the smaller
-   measured wins.
+1. Collapse the repeated compiler in-place-assignment analysis. It is isolated,
+   27.41% cumulative in a clean compiler profile, and has a narrow semantic
+   proof surface.
+2. Reduce fixed-call enter/resume work in the canonical VM. It is the dominant
+   current call-heavy cost, but requires stronger safety coverage.
+3. Remove the persistent `RunHook` allocation floor by separating invariant
+   runtime state from invocation state.
+4. Inline the execution-window common path, then measure `valueKind` and cache
+   indexing again before considering representation changes.
+5. Share sparse-table hash and iteration bookkeeping. Keep this behind
+   deterministic iteration and small-table memory gates.
+6. Do not start a general table allocator campaign unless persistent profiles
+   overturn ADR 0006's gate.
 
-Every experiment should start with one predicted profile movement above, then
-be kept only if the relevant full benchmark family improves without moving the
-cost to another function or increasing allocations elsewhere.
-
-## GC A/B result
-
-A bounded `GOGC=off` experiment did not make the 256 KiB compile faster. Five
-three-iteration samples had a 37.576 ms median with normal GC and 41.551 ms with
-GC disabled, about 10.6% slower. The run is intentionally small, so heap growth
-and page acquisition affect it, but it is enough to reject GC tuning as the
-primary compiler remedy. The target is less AST/IR allocation and copying.
+Each experiment should name one expected profile movement, run the focused row
+first, then run the complete Scenario or runtime-mode family to detect cost
+shifting.
 
 ## Reproduction
 
-Unprofiled timing baselines:
+Repeatable family capture:
+
+```sh
+scripts/performance-audit --output /tmp/ember-audit --profiles
+```
+
+Focused captures:
 
 ```sh
 go test -run '^$' \
-  -bench 'Benchmark(Top10Luau|ClassicLuau|ScenarioLuau)/.*/ember_run$' \
-  -benchmem -benchtime=200ms -count=3 .
+  -bench '^BenchmarkClassicLuau/recursive_fibonacci/ember_run$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile=/tmp/recursive.cpu.pprof \
+  -memprofile=/tmp/recursive.alloc.pprof .
 
 go test -run '^$' \
-  -bench 'Benchmark(CompileMatrix|CompilerStageMatrix)$' \
-  -benchmem -benchtime=100ms -count=3 .
+  -bench '^BenchmarkScenarioLuau/sparse_grid_neighbors/ember_run$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile=/tmp/sparse.cpu.pprof \
+  -memprofile=/tmp/sparse.alloc.pprof .
+
+go test -run '^$' \
+  -bench '^BenchmarkCompilerStageMatrix/256KiB/(emit|compile)$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile=/tmp/compiler.cpu.pprof \
+  -memprofile=/tmp/compiler.alloc.pprof .
 ```
 
-Focused profiles:
+Inspect profiles with:
 
 ```sh
-go test -run '^$' \
-  -bench 'BenchmarkScenarioLuau/.*/ember_run$' \
-  -benchtime=500ms -count=1 \
-  -cpuprofile=/tmp/ember-scenario.cpu.prof \
-  -memprofile=/tmp/ember-scenario.mem.prof .
-
-go test -run '^$' \
-  -bench 'BenchmarkScenarioLuau/sparse_grid_neighbors/ember_run$' \
-  -benchtime=5s -count=1 \
-  -cpuprofile=/tmp/ember-sparse.cpu.prof \
-  -memprofile=/tmp/ember-sparse.mem.prof .
-
-go test -run '^$' \
-  -bench 'BenchmarkClassicLuau/recursive_fibonacci/ember_run$' \
-  -benchtime=5s -count=1 \
-  -cpuprofile=/tmp/ember-recursive.cpu.prof \
-  -memprofile=/tmp/ember-recursive.mem.prof .
-
-go test -run '^$' \
-  -bench 'BenchmarkCompilerStageMatrix/256KiB/compile$' \
-  -benchtime=5s -count=1 \
-  -cpuprofile=/tmp/ember-compiler.cpu.prof \
-  -memprofile=/tmp/ember-compiler.mem.prof .
+go tool pprof -top /tmp/recursive.cpu.pprof
+go tool pprof -top /tmp/sparse.cpu.pprof
+go tool pprof -top -alloc_space /tmp/sparse.alloc.pprof
+go tool pprof -top /tmp/compiler.cpu.pprof
+go tool pprof -top -alloc_space /tmp/compiler.alloc.pprof
 ```
 
-Profile summaries:
-
-```sh
-go tool pprof -top /tmp/ember-scenario.cpu.prof
-go tool pprof -top -cum /tmp/ember-sparse.cpu.prof
-go tool pprof -top -alloc_space /tmp/ember-sparse.mem.prof
-go tool pprof -top -alloc_objects /tmp/ember-compiler.mem.prof
-```
-
-Memory profiles report allocation over the profile lifetime, not retained heap.
-CPU profiling also includes Go runtime and profiler work. The rankings above
-exclude obvious `testing`, regexp, gzip, and pprof harness allocations. Source
-line attribution inside very large switch functions is coarse; function-level
-samples and focused benchmark deltas are more trustworthy.
+For reliable timing deltas, use a clean worktree, keep other builds idle, take
+at least five samples, and compare with `benchstat` or equivalent statistics.
+Function-level CPU rankings are more trustworthy than source-line attribution
+inside the generated switch. Generated-loop changes belong in
+`vm_dispatch_template.go.tmpl`, not directly in `vm_dispatch_generated.go`.
