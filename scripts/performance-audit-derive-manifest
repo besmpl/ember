@@ -8,6 +8,8 @@ usage: scripts/performance-audit-derive-manifest --before DIR --after DIR --outp
 
 Derive per-row timing gates from two complete captures of the same baseline.
 The --before capture is baseline role A and --after is baseline role B.
+The emitted immutable manifest is version 2 with independent A/B timing
+envelopes.
 Capture fingerprints cover metadata.txt, capture-facts.tsv, environment.tsv,
 and the five raw family files (not summaries or profiles); the comparator binds
 the selected baseline role to its exact fingerprint.
@@ -92,7 +94,7 @@ mkdir -p "$(dirname "$output")"
 out_tmp=$output.tmp.$$
 trap 'rm -f "$out_tmp"; cleanup' EXIT HUP INT TERM
 {
-	printf 'version=1\n'
+	printf 'version=2\n'
 	printf 'samples=%s\n' "$samples"
 	printf 'baseline_source_fingerprint=%s\n' "$(metadata_value "$before/metadata.txt" source_fingerprint)"
 	printf 'baseline_environment_fingerprint=%s\n' "$(metadata_value "$before/metadata.txt" environment_fingerprint)"
@@ -103,10 +105,7 @@ trap 'rm -f "$out_tmp"; cleanup' EXIT HUP INT TERM
 	printf 'baseline_a_capture_fingerprint=%s\n' "$before_capture_fingerprint"
 	printf 'baseline_b_capture_role=b\n'
 	printf 'baseline_b_capture_fingerprint=%s\n' "$after_capture_fingerprint"
-	# Retain the old names as aliases for readers from the pre-A/B format.
-	printf 'baseline_capture_fingerprint=%s\n' "$before_capture_fingerprint"
-	printf 'repeat_capture_fingerprint=%s\n' "$after_capture_fingerprint"
-	printf 'row\tfamily\tname\tns_max_ratio\tbytes_max\tallocs_max\n'
+	printf 'row\tfamily\tname\tns_max_ratio_a\tns_max_ratio_b\tbytes_max\tallocs_max\n'
 } >"$out_tmp"
 
 for spec in $families; do
@@ -149,9 +148,13 @@ END {
         mad = median(deviations, pooled_count); shift = absolute(candidate_median - baseline_median); noise = 1.4826 * mad
         if (shift > noise) noise = shift
         if (noise < 100) noise = 100
-		ratio = 1 + noise / baseline_median
-        if (set_name == "scenario_ember_run" && ratio < 1.05) ratio = 1.05
-		printf "row\t%s\t%s\t%.17g\t%.17g\t%.17g\n", family, row, ratio, bytes_max, allocs_max
+		ratio_a = 1 + noise / baseline_median
+		ratio_b = 1 + noise / candidate_median
+		if (set_name == "scenario_ember_run") {
+			if (ratio_a < 1.05) ratio_a = 1.05
+			if (ratio_b < 1.05) ratio_b = 1.05
+		}
+		printf "row\t%s\t%s\t%.17g\t%.17g\t%.17g\t%.17g\n", family, row, ratio_a, ratio_b, bytes_max, allocs_max
     }
 }
 ' "$tmp_dir/$family.before.tsv" "$tmp_dir/$family.after.tsv" >>"$out_tmp" || { rm -f "$out_tmp"; exit 1; }

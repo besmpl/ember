@@ -57,13 +57,25 @@ grep -F 'baseline_a_capture_role=a' "$root/gates.tsv" >/dev/null
 grep -F 'baseline_b_capture_role=b' "$root/gates.tsv" >/dev/null
 grep -F 'baseline_a_capture_fingerprint=' "$root/gates.tsv" >/dev/null
 grep -F 'baseline_b_capture_fingerprint=' "$root/gates.tsv" >/dev/null
-grep -F 'row	family	name	ns_max_ratio	bytes_max	allocs_max' "$root/gates.tsv" >/dev/null
+grep -F 'row	family	name	ns_max_ratio_a	ns_max_ratio_b	bytes_max	allocs_max' "$root/gates.tsv" >/dev/null
 scripts/performance-audit-compare --before "$root/base1" --after "$root/base2" --manifest "$root/gates.tsv" >"$root/slower-baseline"
 grep -F 'result: PASS' "$root/slower-baseline" >/dev/null
 run_fail 'capture fingerprint mismatch' scripts/performance-audit-compare --before "$root/base2" --after "$root/base1" --manifest "$root/gates.tsv" --baseline-role a
 scripts/performance-audit-compare --before "$root/base2" --after "$root/base1" --manifest "$root/gates.tsv" --baseline-role b >"$root/role-b-pass"
 grep -F 'result: PASS' "$root/role-b-pass" >/dev/null
 run_fail 'capture fingerprint mismatch' scripts/performance-audit-compare --before "$root/base1" --after "$root/base2" --manifest "$root/gates.tsv" --baseline-role b
+
+# Directional regression: A is slower than B. Independent role-specific timing
+# envelopes must admit A->B and the reverse B->A role selection.
+write_capture "$root/directional-a" env source 1000 10 1
+write_capture "$root/directional-b" env source 900 10 1
+scripts/performance-audit-derive-manifest --before "$root/directional-a" --after "$root/directional-b" --output "$root/directional-gates.tsv" >/dev/null
+scripts/performance-audit-compare --before "$root/directional-a" --after "$root/directional-b" --manifest "$root/directional-gates.tsv" --baseline-role a >"$root/directional-a-pass"
+grep -F 'result: PASS' "$root/directional-a-pass" >/dev/null
+scripts/performance-audit-compare --before "$root/directional-b" --after "$root/directional-a" --manifest "$root/directional-gates.tsv" --baseline-role b >"$root/directional-b-pass"
+grep -F 'result: PASS' "$root/directional-b-pass" >/dev/null
+awk -F '\t' '$1 == "row" && $2 == "scenario_ember_run" && $3 == "BenchmarkShared/row/ember_run" { exit !($4 > 1 && $5 > 1 && $4 != $5) }' "$root/directional-gates.tsv"
+
 run_fail 'refusing to overwrite' scripts/performance-audit-derive-manifest --before "$root/base1" --after "$root/base2" --output "$root/gates.tsv"
 
 write_capture "$root/precision-base1" env source 3080499 10 1 10000 3080499
@@ -156,8 +168,43 @@ run_fail 'invalid gate manifest sample count' scripts/performance-audit-compare 
 cp "$root/gates.tsv" "$root/duplicate-metadata.tsv"
 printf '%s\n' 'samples=2' >>"$root/duplicate-metadata.tsv"
 run_fail 'invalid gate manifest samples' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/duplicate-metadata.tsv"
-printf 'row\tscenario_ember_run\tBenchmarkShared/row/ember_run\t1.1\texact\texact\n' >>"$root/gates.tsv"
+cp "$root/gates.tsv" "$root/v1-manifest.tsv"
+sed -i.bak 's/^version=2$/version=1/' "$root/v1-manifest.tsv"
+rm -f "$root/v1-manifest.tsv.bak"
+run_fail 'invalid gate manifest metadata' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/v1-manifest.tsv"
+for malformed in missing duplicate nonnumeric below-one; do
+	cp "$root/gates.tsv" "$root/role-b-$malformed.tsv"
+	case "$malformed" in
+	missing) awk -F '\t' 'BEGIN { OFS="\t" } $1 == "row" && $2 != "family" && !done++ { $5="" } { print }' "$root/role-b-$malformed.tsv" >"$root/role-b-$malformed.tmp" ;;
+	duplicate) awk -F '\t' 'BEGIN { OFS="\t" } { print; if ($1 == "row" && $2 != "family" && !done++) saved=$0 } END { print saved }' "$root/role-b-$malformed.tsv" >"$root/role-b-$malformed.tmp" ;;
+	nonnumeric) awk -F '\t' 'BEGIN { OFS="\t" } $1 == "row" && $2 != "family" && !done++ { $5="bad" } { print }' "$root/role-b-$malformed.tsv" >"$root/role-b-$malformed.tmp" ;;
+	below-one) awk -F '\t' 'BEGIN { OFS="\t" } $1 == "row" && $2 != "family" && !done++ { $5="0.5" } { print }' "$root/role-b-$malformed.tsv" >"$root/role-b-$malformed.tmp" ;;
+	esac
+	mv "$root/role-b-$malformed.tmp" "$root/role-b-$malformed.tsv"
+	run_fail 'invalid gate manifest rows' scripts/performance-audit-compare --before "$root/base2" --after "$root/candidate" --baseline-role b --manifest "$root/role-b-$malformed.tsv"
+done
+printf 'row\tscenario_ember_run\tBenchmarkShared/row/ember_run\t1.1\t1.1\texact\texact\n' >>"$root/gates.tsv"
 run_fail 'invalid gate manifest rows' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/gates.tsv"
+
+cp "$root/gates.tsv" "$root/threshold-gates.tsv"
+# Remove the deliberately appended duplicate from the general malformed test.
+sed -i.bak '$d' "$root/threshold-gates.tsv"
+rm -f "$root/threshold-gates.tsv.bak"
+awk -F '\t' 'BEGIN { OFS="\t" } $1 == "row" && $2 != "family" { $4="1.1"; $5="1.1" } { print }' "$root/threshold-gates.tsv" >"$root/threshold-gates.tmp"
+mv "$root/threshold-gates.tmp" "$root/threshold-gates.tsv"
+write_capture "$root/threshold-candidate" env candidate 110 10 1
+scripts/performance-audit-compare --before "$root/base1" --after "$root/threshold-candidate" --baseline-role a --manifest "$root/threshold-gates.tsv" >"$root/threshold-a-pass"
+grep -F 'result: PASS' "$root/threshold-a-pass" >/dev/null
+write_capture "$root/threshold-candidate" env candidate 120 10 1
+scripts/performance-audit-compare --before "$root/base1" --after "$root/threshold-candidate" --baseline-role a --manifest "$root/threshold-gates.tsv" >"$root/threshold-a-exact-pass"
+grep -F 'result: PASS' "$root/threshold-a-exact-pass" >/dev/null
+write_capture "$root/threshold-candidate" env candidate 122 10 1
+run_fail 'result: FAIL' scripts/performance-audit-compare --before "$root/base1" --after "$root/threshold-candidate" --baseline-role a --manifest "$root/threshold-gates.tsv"
+write_capture "$root/threshold-candidate" env candidate 121.1 10 1
+scripts/performance-audit-compare --before "$root/base2" --after "$root/threshold-candidate" --baseline-role b --manifest "$root/threshold-gates.tsv" >"$root/threshold-b-pass"
+grep -F 'result: PASS' "$root/threshold-b-pass" >/dev/null
+write_capture "$root/threshold-candidate" env candidate 123 10 1
+run_fail 'result: FAIL' scripts/performance-audit-compare --before "$root/base2" --after "$root/threshold-candidate" --baseline-role b --manifest "$root/threshold-gates.tsv"
 
 write_capture "$root/base2" env changed 101 10 1
 run_fail 'incompatible source_fingerprint' scripts/performance-audit-derive-manifest --before "$root/base1" --after "$root/base2" --output "$root/bad-gates.tsv"

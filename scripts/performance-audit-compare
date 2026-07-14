@@ -7,7 +7,7 @@ usage() {
 usage: scripts/performance-audit-compare --before DIR --after DIR --manifest PATH [--baseline-role a|b]
        scripts/performance-audit-compare --self-test
 
-The manifest is explicit and immutable. Its capture fingerprints cover
+The manifest is explicit and immutable (version 2 only). Its capture fingerprints cover
 metadata.txt, environment.tsv, capture-facts.tsv, and the five raw family
 files (not summaries or profiles); --before must match the recorded fingerprint
 for the selected baseline role. The default role is A for compatibility with
@@ -150,7 +150,7 @@ case "$gate_samples" in ''|*[!0-9]*) printf '%s\n' 'invalid gate manifest sample
 [ "$gate_samples" -gt 0 ] || { printf '%s\n' 'invalid gate manifest sample count' >&2; exit 1; }
 [ "${before_capture_samples:-}" = "$gate_samples" ] || printf 'sample mismatch: baseline facts vs gate manifest\n' >>"$issues"
 [ "${after_capture_samples:-}" = "$gate_samples" ] || printf 'sample mismatch: candidate facts vs gate manifest\n' >>"$issues"
-awk -F= 'BEGIN { want["version"]=1; want["samples"]=1; want["baseline_source_fingerprint"]=1; want["baseline_environment_fingerprint"]=1; want["baseline_environment_sha256"]=1; want["baseline_commit"]=1; want["baseline_benchtime"]=1; want["baseline_a_capture_role"]=1; want["baseline_a_capture_fingerprint"]=1; want["baseline_b_capture_role"]=1; want["baseline_b_capture_fingerprint"]=1 } $1 in want { seen[$1]++; if (($1 == "version" && $2 != "1") || $2 == "") bad=1 } END { for (key in want) if (seen[key] != 1) bad=1; if (bad) exit 1 }' "$manifest" || { printf '%s\n' 'invalid gate manifest metadata' >&2; exit 1; }
+awk -F= 'BEGIN { want["version"]=1; want["samples"]=1; want["baseline_source_fingerprint"]=1; want["baseline_environment_fingerprint"]=1; want["baseline_environment_sha256"]=1; want["baseline_commit"]=1; want["baseline_benchtime"]=1; want["baseline_a_capture_role"]=1; want["baseline_a_capture_fingerprint"]=1; want["baseline_b_capture_role"]=1; want["baseline_b_capture_fingerprint"]=1 } $1 in want { seen[$1]++; if (($1 == "version" && $2 != "2") || $2 == "") bad=1 } END { for (key in want) if (seen[key] != 1 || bad) exit 1 }' "$manifest" || { printf '%s\n' 'invalid gate manifest metadata' >&2; exit 1; }
 gate_source=$(awk -F= '$1 == "baseline_source_fingerprint" { print $2; count++ } END { if (count != 1) exit 1 }' "$manifest") || { printf '%s\n' 'invalid gate manifest source fingerprint' >&2; exit 1; }
 gate_environment=$(awk -F= '$1 == "baseline_environment_fingerprint" { print $2; count++ } END { if (count != 1) exit 1 }' "$manifest") || { printf '%s\n' 'invalid gate manifest environment fingerprint' >&2; exit 1; }
 gate_commit=$(awk -F= '$1 == "baseline_commit" { print $2; count++ } END { if (count != 1) exit 1 }' "$manifest") || { printf '%s\n' 'invalid gate manifest commit' >&2; exit 1; }
@@ -172,15 +172,15 @@ awk -F '\t' 'BEGIN {
         expected["compiler_256kib"] = 1
         header=0; bad=0
     }
-    $1 == "row" && $2 == "family" { header++; next }
+    $1 == "row" && $2 == "family" && $3 == "name" && $4 == "ns_max_ratio_a" && $5 == "ns_max_ratio_b" && $6 == "bytes_max" && $7 == "allocs_max" { header++; next }
     function nonnegative(value) { return value ~ /^[0-9]+([.][0-9]*)?([eE][+-]?[0-9]+)?$/ && value + 0 >= 0 }
     $1 == "row" {
         key=$2 SUBSEP $3
         if (seen[key]++ || !($2 in expected) || $3 == "") bad=1
-        if (!nonnegative($4) || $4 < 1 || !nonnegative($5) || !nonnegative($6)) bad=1
+        if (!nonnegative($4) || $4 < 1 || !nonnegative($5) || $5 < 1 || !nonnegative($6) || !nonnegative($7)) bad=1
         next
     }
-	$1 ~ /^(version|samples|baseline_source_fingerprint|baseline_environment_fingerprint|baseline_environment_sha256|baseline_commit|baseline_benchtime|baseline_a_capture_role|baseline_a_capture_fingerprint|baseline_b_capture_role|baseline_b_capture_fingerprint|baseline_capture_fingerprint|repeat_capture_fingerprint)=/ { next }
+	$1 ~ /^(version|samples|baseline_source_fingerprint|baseline_environment_fingerprint|baseline_environment_sha256|baseline_commit|baseline_benchtime|baseline_a_capture_role|baseline_a_capture_fingerprint|baseline_b_capture_role|baseline_b_capture_fingerprint)=/ { next }
     NF != 0 { bad=1 }
     END { if (bad || header != 1) exit 1 }' "$manifest" || { printf '%s\n' 'invalid gate manifest rows' >&2; exit 1; }
 
@@ -218,7 +218,11 @@ runtime_modes:runtime
 compiler_256kib:compiler'
 
 gate_rows=$tmp_dir/gates.tsv
-awk -F '\t' '$1 == "row" && $2 != "family" { print $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6 }' "$manifest" >"$gate_rows"
+if [ "$baseline_role" = a ]; then
+	awk -F '\t' '$1 == "row" && $2 != "family" { print $2 "\t" $3 "\t" $4 "\t" $6 "\t" $7 }' "$manifest" >"$gate_rows"
+else
+	awk -F '\t' '$1 == "row" && $2 != "family" { print $2 "\t" $3 "\t" $5 "\t" $6 "\t" $7 }' "$manifest" >"$gate_rows"
+fi
 while IFS=: read -r family set_name; do
 	[ -n "$family" ] || continue
 	for dir in "$before" "$after"; do
