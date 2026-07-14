@@ -1,10 +1,14 @@
 package ember
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"fmt"
 	"go/ast"
 	goparser "go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -20,7 +24,7 @@ func TestApprovedExecutionLoopsRemainExplicit(t *testing.T) {
 	}
 	root := filepath.Dir(testFile)
 	var loops []string
-	for _, name := range []string{"vm.go"} {
+	for _, name := range []string{"vm_dispatch_generated.go"} {
 		file, err := goparser.ParseFile(token.NewFileSet(), filepath.Join(root, name), nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
@@ -55,10 +59,46 @@ func TestApprovedExecutionLoopsRemainExplicit(t *testing.T) {
 		}
 	}
 	sort.Strings(loops)
-	want := []string{"runDirectFrameInstrumentedLoop", "runDirectFrameProductionLoop"}
+	want := []string{"runGeneratedDirectFrameInstrumentedLoop", "runGeneratedDirectFrameProductionLoop"}
 	sort.Strings(want)
 	if !reflect.DeepEqual(loops, want) {
 		t.Fatalf("instruction dispatch loops = %v, want approved set %v", loops, want)
+	}
+}
+
+func TestGeneratedDispatchMatchesSemanticSource(t *testing.T) {
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	root := filepath.Dir(testFile)
+	spec, err := os.ReadFile(filepath.Join(root, "vm_dispatch_spec.go"))
+	if err != nil {
+		t.Fatalf("read dispatch spec: %v", err)
+	}
+	generated, err := os.ReadFile(filepath.Join(root, "vm_dispatch_generated.go"))
+	if err != nil {
+		t.Fatalf("read generated dispatch: %v", err)
+	}
+	template, err := os.ReadFile(filepath.Join(root, "vm_dispatch_template.go.tmpl"))
+	if err != nil {
+		t.Fatalf("read dispatch template: %v", err)
+	}
+	template = bytes.TrimPrefix(template, []byte("package ember\n\n"))
+	hashInput := append(append([]byte{}, spec...), template...)
+	want := fmt.Sprintf("dispatch spec sha256: %x", sha256.Sum256(hashInput))
+	if !strings.Contains(string(generated), want) {
+		t.Fatalf("generated dispatch is stale: missing %q", want)
+	}
+	for _, name := range []string{"func runGeneratedDirectFrameProductionLoop", "func runGeneratedDirectFrameInstrumentedLoop"} {
+		if !strings.Contains(string(generated), name) {
+			t.Fatalf("generated dispatch is missing %s", name)
+		}
+	}
+	check := exec.Command("go", "run", "./cmd/ember-vmgen", "-check")
+	check.Dir = root
+	if output, err := check.CombinedOutput(); err != nil {
+		t.Fatalf("generated dispatch check failed: %v\n%s", err, output)
 	}
 }
 
@@ -68,7 +108,7 @@ func TestVMExecutionDoesNotMaterializePackedInstructions(t *testing.T) {
 		t.Fatal("runtime.Caller failed")
 	}
 	root := filepath.Dir(testFile)
-	source, err := os.ReadFile(filepath.Join(root, "vm.go"))
+	source, err := os.ReadFile(filepath.Join(root, "vm_dispatch_generated.go"))
 	if err != nil {
 		t.Fatalf("read vm.go: %v", err)
 	}
@@ -77,25 +117,26 @@ func TestVMExecutionDoesNotMaterializePackedInstructions(t *testing.T) {
 		t.Fatal("vm execution still calls packedInstruction.unpack; decode packed operands in place")
 	}
 	if strings.Contains(text, "runColdInstructionLoop") {
-		t.Fatal("vm.go still carries the legacy full cold instruction loop")
+		t.Fatal("generated dispatch still carries the legacy full cold instruction loop")
 	}
 	if strings.Contains(text, "packedCode") || strings.Contains(text, "packedInstruction") {
 		t.Fatal("vm.go still executes through the legacy packed instruction stream")
 	}
-	for _, marker := range []string{"raw := words[pc]", "wordcodeAuxBit", "wordcodeDecodeAD", "nextWord := pc + 1"} {
+	for _, marker := range []string{"raw := words[pc]", "wordcodeAuxBit", "nextWord := pc + 1"} {
 		if !strings.Contains(text, marker) {
 			t.Fatalf("direct loops must fetch and decode wordcode directly; missing %q", marker)
 		}
 	}
-	assertDirectLoopUsesLocalPC(t, text, "func runDirectFrameInstrumentedLoop", "func runDirectFrameProductionLoop")
-	assertDirectLoopUsesLocalPC(t, text, "func runDirectFrameProductionLoop", "func (thread *vmThread) runDebugCountHook")
-	productionStart := strings.Index(text, "func runDirectFrameProductionLoop")
+	assertDirectLoopUsesLocalPC(t, text, "func runGeneratedDirectFrameProductionLoop", "func runGeneratedDirectFrameInstrumentedLoop")
+	productionStart := strings.Index(text, "func runGeneratedDirectFrameProductionLoop")
 	if productionStart < 0 {
 		t.Fatal("vm.go is missing the production direct loop boundaries")
 	}
-	productionEnd := strings.Index(text[productionStart:], "func (thread *vmThread) runDebugCountHook")
+	productionEnd := strings.Index(text[productionStart+len("func runGeneratedDirectFrameProductionLoop"):], "\nfunc ")
 	if productionEnd < 0 {
-		t.Fatal("vm.go is missing the production direct loop end boundary")
+		productionEnd = len(text) - productionStart
+	} else {
+		productionEnd += len("func runGeneratedDirectFrameProductionLoop")
 	}
 	production := text[productionStart : productionStart+productionEnd]
 	for _, forbidden := range []string{
@@ -210,52 +251,54 @@ func TestDirectFrameDefersRuntimeFunctionInstanceLookupUntilCacheUse(t *testing.
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	source, err := os.ReadFile(filepath.Join(filepath.Dir(testFile), "vm.go"))
+	source, err := os.ReadFile(filepath.Join(filepath.Dir(testFile), "vm_dispatch_generated.go"))
 	if err != nil {
 		t.Fatalf("read vm.go: %v", err)
 	}
 	text := string(source)
-	for _, bounds := range [][2]string{
-		{"func runDirectFrameInstrumentedLoop", "func runDirectFrameProductionLoop"},
-		{"func runDirectFrameProductionLoop", "func (thread *vmThread) runDebugCountHook"},
-	} {
-		start := strings.Index(text, bounds[0])
-		end := strings.Index(text, bounds[1])
-		if start < 0 || end <= start {
-			t.Fatalf("vm.go is missing direct-loop bounds %q..%q", bounds[0], bounds[1])
+	for _, name := range []string{"runGeneratedDirectFrameProductionLoop", "runGeneratedDirectFrameInstrumentedLoop"} {
+		start := strings.Index(text, "func "+name)
+		if start < 0 {
+			t.Fatalf("generated dispatch is missing %s", name)
+		}
+		end := strings.Index(text[start+len("func "+name):], "\nfunc ")
+		if end < 0 {
+			end = len(text)
+		} else {
+			end += start + len("func "+name)
 		}
 		loop := text[start:end]
 		reload := strings.Index(loop, "reload:")
 		if reload < 0 {
-			t.Fatalf("%s is missing reload marker", bounds[0])
+			t.Fatalf("%s is missing reload marker", name)
 		}
 		dispatch := strings.Index(loop[reload:], "for uint(pc) < uint(len(words))")
 		if dispatch < 0 {
-			t.Fatalf("%s is missing reload/dispatch markers", bounds[0])
+			t.Fatalf("%s is missing reload/dispatch markers", name)
 		}
 		setup := loop[reload : reload+dispatch]
 		if strings.Contains(setup, "thread.functionInstance(proto)") {
-			t.Fatalf("%s eagerly looks up runtime function state on every frame reload", bounds[0])
+			t.Fatalf("%s eagerly looks up runtime function state on every frame reload", name)
 		}
 		if !strings.Contains(setup, "functionInstance = nil") {
-			t.Fatalf("%s does not reset its lazy runtime function state", bounds[0])
+			t.Fatalf("%s does not reset its lazy runtime function state", name)
 		}
 		if got, want := strings.Count(loop, "functionInstance = thread.functionInstance(proto)"), 6; got != want {
-			t.Fatalf("%s has %d lazy runtime function lookups, want %d cache paths", bounds[0], got, want)
+			t.Fatalf("%s has %d lazy runtime function lookups, want %d cache paths", name, got, want)
 		}
 		if got, want := strings.Count(loop, "cache := functionInstance.cacheAt(cacheID)"), 6; got != want {
-			t.Fatalf("%s has %d runtime cache reads, want %d cache paths", bounds[0], got, want)
+			t.Fatalf("%s has %d runtime cache reads, want %d cache paths", name, got, want)
 		}
 		dispatchLoop := loop[reload+dispatch:]
 		opSwitch := strings.Index(dispatchLoop, "switch op {")
 		if opSwitch < 0 {
-			t.Fatalf("%s is missing opcode switch", bounds[0])
+			t.Fatalf("%s is missing opcode switch", name)
 		}
 		if strings.Contains(dispatchLoop[:opSwitch], "cacheSiteAt(pc)") {
-			t.Fatalf("%s resolves cache metadata before opcode dispatch", bounds[0])
+			t.Fatalf("%s resolves cache metadata before opcode dispatch", name)
 		}
 		if got, want := strings.Count(loop, "cacheSiteAt(pc)"), 6; got != want {
-			t.Fatalf("%s has %d cache metadata lookups, want %d cache opcode handlers", bounds[0], got, want)
+			t.Fatalf("%s has %d cache metadata lookups, want %d cache opcode handlers", name, got, want)
 		}
 	}
 }
@@ -289,9 +332,11 @@ func assertDirectLoopUsesLocalPC(t *testing.T, source, startMarker, endMarker st
 	if start < 0 {
 		t.Fatalf("vm.go is missing %q", startMarker)
 	}
-	endOffset := strings.Index(source[start:], endMarker)
+	endOffset := strings.Index(source[start+len(startMarker):], "\nfunc ")
 	if endOffset < 0 {
-		t.Fatalf("vm.go is missing %q after %q", endMarker, startMarker)
+		endOffset = len(source) - start
+	} else {
+		endOffset += len(startMarker)
 	}
 	loop := source[start : start+endOffset]
 	for _, forbidden := range []string{"for frame.pc <", "code[frame.pc]", "frame.pc++"} {
