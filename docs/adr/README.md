@@ -18,3 +18,6 @@ Current runtime decisions:
   measured internal VM pressure justifies a runtime heap.
 - `0005-execution-path-retention.md`: retain one canonical direct VM and delete
   the narrow slot, compact-call, and loop-kernel experiments.
+- `0006-persistent-table-allocation-gate.md`: stop the table allocator campaign
+  when fresh profiles show that persistent Hearth updates are dominated by
+  runtime call-boundary setup instead.

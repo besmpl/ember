@@ -16,6 +16,7 @@ return (x + y) * 3 - 4 / 2
 `
 
 var runtimeLaneResultsSink []ember.Value
+var runtimeLaneRetainedResultSink ember.Value
 
 type runtimeLaneWorkload struct {
 	name       string
@@ -188,6 +189,58 @@ func BenchmarkRuntimeLaneStatelessRun(b *testing.B) {
 				runtimeLaneResultsSink = results
 			}
 		})
+	}
+}
+
+// BenchmarkRuntimeLaneRetainedResult keeps one table returned by a stateless
+// run alive while later runs execute. This models a host retaining a result
+// beyond the call that produced it without retaining every transient result.
+func BenchmarkRuntimeLaneRetainedResult(b *testing.B) {
+	proto := benchmarkCompile(b, `
+return {
+    nested = {value = 42},
+    cells = {alpha = {score = 7}},
+}
+`)
+	preflight, err := ember.Run(proto)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if len(preflight) != 1 {
+		b.Fatalf("retained result count = %d, want 1", len(preflight))
+	}
+	retained := preflight[0]
+	retainedTable, ok := retained.Table()
+	if !ok || retainedTable == nil {
+		b.Fatalf("retained result = %v, want table", retained)
+	}
+	runtimeLaneRetainedResultSink = retained
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		results, err := ember.Run(proto)
+		if err != nil {
+			b.Fatal(err)
+		}
+		runtimeLaneResultsSink = results
+	}
+	b.StopTimer()
+
+	nested, err := retainedTable.Get(ember.StringValue("nested"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	nestedTable, ok := nested.Table()
+	if !ok || nestedTable == nil {
+		b.Fatalf("retained nested result = %v, want table", nested)
+	}
+	value, err := nestedTable.Get(ember.StringValue("value"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	if got, ok := value.Number(); !ok || got != 42 {
+		b.Fatalf("retained nested value = %v, want 42", value)
 	}
 }
 

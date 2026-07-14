@@ -34,6 +34,8 @@ and retire or delete it when the slice lands or is abandoned.
   Go GC, and Go runtime features behind Ember interfaces.
 - `adr/0004-runtime-slot-handle-ownership.md`: private runtime slots, typed
   handle ownership, external pins, and the first stop-the-world collector.
+- `adr/0006-persistent-table-allocation-gate.md`: evidence for stopping the
+  conditional table allocator campaign after persistent workload profiling.
 
 ## Workflow Documents
 
