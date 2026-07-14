@@ -176,7 +176,7 @@ awk -F '\t' 'BEGIN {
     function nonnegative(value) { return value ~ /^[0-9]+([.][0-9]*)?([eE][+-]?[0-9]+)?$/ && value + 0 >= 0 }
     $1 == "row" {
         key=$2 SUBSEP $3
-        if (seen[key]++ || !($2 in expected) || $3 == "") bad=1
+        if (NF != 7 || seen[key]++ || !($2 in expected) || $3 == "") bad=1
         if (!nonnegative($4) || $4 < 1 || !nonnegative($5) || $5 < 1 || !nonnegative($6) || !nonnegative($7)) bad=1
         next
     }
