@@ -1,8 +1,12 @@
 # Ember Runtime Within 2x of Luau: General No-CGO Architecture
 
-Status: implementation plan, not yet executed
+Status: production integration plan; not yet executed; blocked until the
+standalone architecture proof records `PROCEED`
 
 Created: 2026-07-14
+
+Proof prerequisite:
+[`runtime-speed-2x-no-cgo-proof-implementation-plan.md`](runtime-speed-2x-no-cgo-proof-implementation-plan.md)
 
 Target acceptance platform: Darwin 24.6.0, Apple M1, arm64, Go 1.26.4,
 `CGO_ENABLED=0`, `GOMAXPROCS=1`, pinned Luau 0.728 at SHA-256
@@ -17,29 +21,22 @@ completed performance history.
 
 ## Decision in one paragraph
 
-Replace Ember's pointer-bearing, frame-reconstructing interpreter core with a
-runtime-owned execution module whose backend-visible mutable state is
-pointer-free. Every Proto lowers through one general verifier into a compact
-execution image. The canonical runtime state
-uses 64-bit slots, owner-relative handles, a flat value stack, a compact
-continuation stack, and assembly-readable table/global/property descriptors.
-On Darwin/arm64, a statically linked Go-assembly burst engine executes bounded
-groups of general semantic operations, including direct script calls and
-stable table/property hits, then returns a precise side exit to Go for effects.
-A generated pure-Go engine uses the same image as the correctness oracle and
-portable fallback. There is no CGO, C, C++, dynamic foreign-function bridge,
-embedded upstream Luau, runtime-generated code, executable-memory mapping, or
-runtime helper process.
+After the companion proof passes, bind its frozen pointer-free execution
+image, independent Go kernel, and bounded Darwin/arm64 handlers to Ember's real
+owner graph and public entrypoints. The production cutover completes roots,
+pins, GC, modules, callbacks, coroutines, errors, limits, public results, table
+growth, descriptors, and portable fallback without inventing a second backend
+layout. There is no CGO, C, C++, dynamic foreign-function bridge, embedded
+upstream Luau, runtime-generated code, executable-memory mapping, or runtime
+helper process.
 
 This is not claimed to be certain. Before an artifact exists, current evidence
 supports only roughly 20% to 30% confidence that a complete arm64
-implementation can put every frozen workload under 2.00x. A passing general
-Phase 1 vertical proof can raise that to roughly 60% to 65%. Confidence exceeds
-90% only after the full held-out gates and two independent clean all-row
-captures pass. If the prototype cannot produce the class-relative multi-x
-gains required by the baseline, stop and report that the target is not
-achievable under the no-CGO constraints; do not resume a sequence of 15%
-micro-optimizations.
+implementation can put every frozen workload under 2.00x. A passing companion
+proof can raise that to roughly 60% to 65%. Confidence exceeds 90% only after
+the full production held-out gates and two independent clean all-row captures
+pass. If the companion proof records `STOP`, do not execute this plan and do
+not resume a sequence of 15% micro-optimizations.
 
 ## Hard constraints
 
@@ -139,14 +136,16 @@ semantic requirements unless separately changed and documented.
 
 ## Repository evidence
 
-At plan creation, `main` is at `09cd4722`. The worktree contains user-owned
+The original architecture plan was created at `09cd4722`; the proof split is
+planned from `0ea32563`. The worktree contains user-owned
 edits in `base_coroutine.go`, `base_env.go`, `callback.go`,
 `module_runtime.go`, `program.go`, `runtime_call.go`, `runtime_heap.go`, and
 `vm.go`, plus untracked plans. These overlap the future implementation. An
 executor must preserve them and may not stage, revert, overwrite, or build a
-clean acceptance artifact from them. Phase 0 starts only after the owner lands,
-replaces, or otherwise resolves those edits. Dirty diagnostic work is allowed
-only when labeled non-acceptance.
+clean acceptance artifact from them. Production work starts only after the
+companion proof records `PROCEED` and the owner lands, replaces, or otherwise
+resolves overlapping edits. Dirty diagnostic work is allowed only when labeled
+non-acceptance.
 
 Current architecture and profiles show the problem is structural:
 
@@ -371,6 +370,15 @@ A separate persistent Runtime lane measures an already prepared image directly
 and is never mixed into the stateless slope. Every baseline/candidate uses the
 same start/stop event trace; no side silently excludes lifecycle work.
 
+This all-37 product policy intentionally differs from the companion proof's
+cold-point policy. The proof and Phase 4 integration-tax acquisitions include
+`Compile` inside both compared paths so the candidate cannot hide lowering or
+image construction. The all-37 runtime target excludes Ember `Compile` for
+both baseline and candidate because compiler work is outside the declared
+runtime target; Luau child compilation remains an unavoidable fitted
+intercept. Proof ratios, integration-tax ratios, and all-37 product ratios are
+separate gates and are never divided into or substituted for one another.
+
 Public identity is an explicit bridge, not a copy accident. A public `Table`
 becomes a stable owner-backed view/pin for one table handle under an explicit
 Result/Runtime lease; cross-owner use fails unless the caller requests the cold
@@ -497,15 +505,17 @@ execution, but those labels never enter the runtime.
 
 ## Agent and ownership strategy
 
-This is high-risk, cross-cutting work. Use one implementation owner for each
-hot runtime file group and a Sol review at every architectural retention gate.
+This is high-risk, cross-cutting production integration. Use one implementation
+owner for each hot runtime file group and a Sol review at every architectural
+retention gate.
 Every agent re-reads `AGENTS.md`, preserves user work, works on `main`, and
 does not stage files outside its assigned slice.
 
 Work classification:
 
-- scope: whole runtime execution core plus performance tooling;
-- uncertainty: high until the Phase 1 native vertical proof;
+- scope: whole production runtime execution core plus final acceptance tooling;
+- uncertainty: high even after the prerequisite proof because public ownership
+  and effect integration can consume its measured headroom;
 - coupling: compiler metadata, VM semantics, ownership/GC, calls, tables,
   coroutines, callbacks, and host entrypoints;
 - risk: very high for semantic drift and Go runtime integration, with explicit
@@ -515,8 +525,8 @@ Work classification:
 | --- | --- | --- |
 | Harness, statistics, manifests, docs | Luna high | Exact bounded tooling work |
 | Generated semantic corpus and differential oracle | Luna max | Broad correctness and anti-overfit design |
-| Execution image, slot ownership, stacks, tables | Luna max | Cross-cutting performance-critical rewrite |
-| ARM64 ABI/dispatch proof and backend | Luna max | Native correctness and measurement uncertainty |
+| Owner binding, roots, public lifetimes, stacks, tables | Luna max | Cross-cutting performance-critical integration |
+| ARM64 proof promotion and production-only extensions | Luna max | Native correctness and integration uncertainty |
 | Architecture/kill-gate review | Sol high | Reject locally attractive but insufficient paths |
 | Final integrated correctness/speed review | Sol high | Independent challenge of completion evidence |
 
@@ -529,101 +539,138 @@ layout changes are one retention group with one owner.
 ## Dependency graph
 
 ```text
-Phase 0: trustworthy all-row + held-out gates
+Companion proof plan: exact image/ABI + Go/arm64 class proof
+        |
+        +-- STOP --> do not execute this plan
+        v PROCEED
+Phase 0: production all-row + fresh held-out + allocation gates
         |
         v
-Phase 1: general assembly/ABI vertical proof
-        |
-        +-- fails required multi-x class gains --> STOP, report constraint
-        v
-Phase 2: canonical execution image + slots + flat calls + packed tables
+Phase 2: bind the proven core to owners, public edges, and full state
         |
         v
-Phase 3: full generated Go engine, then production cut to it
+Phase 3: complete the proven Go engine, then production cut to it
         |
         +-- all rows already pass --> reject assembly, finish
         v
-Phase 4: bounded ARM64 backend across the full semantic island
+Phase 4: promote and complete the proven ARM64 backend
         |
         +-- coverage/safety/speed fails --> delete assembly; target unachieved
         v
 Phase 5: delete old oracle, verify twice, document result
 ```
 
-The Phase 1 proof happens before the expensive production cutover. It is
-deliberately broad enough to include calls and table/property hits; an
-arithmetic-only assembly microbenchmark does not authorize Phase 2.
+## Prerequisite: passing standalone architecture proof
+
+Do not begin Phase 0 or any runtime edit in this plan until the companion proof
+has produced all of the following with separately reviewed baseline-surface
+and candidate-surface hashes:
+
+- an explicit `PROCEED` decision in ADR 0007;
+- frozen operation/image, slot, continuation, table/global/property/iteration,
+  request/exit/generic-effect transport, quantum, and owner-cookie layouts,
+  plus the explicitly extensible Go-only effect-kind catalog boundary;
+- an independently structured Go proof kernel over that ABI;
+- passing general arm64 handlers for scalar/control, direct calls/varargs/
+  upvalues, globals/tables/properties, stable iteration, and precise effects;
+- exact visible and post-freeze held-out differential evidence;
+- passing class-relative speed, coverage, allocation, latency, code-size, W^X,
+  liveness, disassembly, and no-CGO gates;
+- a per-program production integration-tax ceiling of 1.057142857 for median
+  and 1.052631579 for p90, derived from the proof/product threshold margins;
+- `testdata/runtime-proof/proof-handoff-v1.manifest`, content-addressing every
+  retained visible/held-out/transition artifact and exact row inventory,
+  including the normalized leaf instruction/constant fingerprint.
+
+Production may bind and extend those artifacts, but may not reimplement them
+under a second layout. Any change to a backend-visible layout, operation cost,
+retirement rule, quantum, wrapper-liveness rule, or proven handler semantic
+invalidates the proof and reruns its affected gates before production
+retention. A Go-only opaque effect-kind addition follows the proof's narrower
+catalog/vector/normalized-handler identity gate; it escalates to a full proof
+rerun if transport, handler behavior, or timed hot transition rates change.
 
 ## Phase 0: Make success and overfitting measurable
 
-### Slice 0.1 - Reconcile the tree and freeze the no-CGO target
+### Slice 0.1 - Consume the proof decision and promote production gates
 
 Assigned agent: primary orchestrator, reviewed by Sol high.
 
-Objective and reason: create one clean source fingerprint and explicit target
-contract before any optimization. The current dirty tree cannot be acceptance
-evidence and overlaps the planned implementation.
+Objective and reason: verify that this plan is consuming the exact passing
+proof, then promote its scoped constraints into fail-closed production and
+acceptance gates without changing the proven core.
 
 Files and symbols:
 
-- current user-owned files listed under Repository evidence;
-- `performance-audit.md`;
-- `docs/adr/0007-runtime-speed-no-cgo.md` (new);
+- `testdata/runtime-proof/proof-handoff-v1.manifest` and its raw artifacts;
+- `docs/adr/0007-runtime-speed-no-cgo.md`;
+- `docs/README.md`, `docs/design.md`, and `performance-audit.md`;
 - `docs/checks.md`;
-- `scripts/check-purego`.
+- `scripts/check-purego` and the proof-scoped no-foreign scanner;
+- retained generated ABI/layout metadata and proof files.
 
 Ordered work:
 
-1. Record `git status --short --branch` and the current HEAD. Do not alter the
-   listed dirty files. Wait for the owner to resolve them before a clean
-   baseline or overlapping edit.
-2. Add ADR 0007 with the target platform/hash, per-row 1.85/2.00 gate,
-   allocation lifetime rule, breaking-change authority, strict no-CGO/no-FFI
-   boundary, generality contract, selected assembly architecture, and explicit
-   rejection of upstream embedding and Darwin JIT.
-3. Link ADR 0007 from `docs/README.md`, `docs/design.md`,
-   `performance-audit.md`, and the two runtime-speed plans without deleting
-   historical evidence.
-4. Extend `scripts/check-purego` with a mandatory no-foreign-runtime lane. It
-   must reject repo-owned production `.c`, `.cc`, `.cpp`, `.cxx`, `.m`, and
-   `.mm`, archive, or foreign-object files; `import "C"`; C/linker flags;
-   `//go:cgo_import_dynamic`; `//go:wasmimport`; private-runtime or foreign
-   `go:linkname`; dynamic-loader and executable-memory/JIT APIs such as `dlopen`, `MAP_JIT`,
-   `PROT_EXEC`, and executable `mmap`; helper-process APIs such as `os/exec`,
-   `syscall.Exec`, and fork/exec orchestration; and foreign `CALL`/`BL` targets
-   from Ember-owned `.s` files. The Luau executable is allowlisted only in
-   measurement/test scripts. The final linked-symbol check is scoped to
-   Ember-owned objects and dynamic-import directives, because the Go runtime
-   itself legitimately imports Darwin system symbols.
-5. Add fail/pass fixtures for every forbidden mechanism. Scope structural
-   pointer/`uintptr` checks to execution-image, backend-visible, request, and
-   exit records; public edge adapters may continue to use pointer identity.
-   The gate must be invoked by `scripts/check`, not left as an optional audit.
-6. Commit only the ADR/link/check changes after focused checks. Do not stage
-   unrelated user work.
+1. Verify `testdata/runtime-proof/proof-handoff-v1.manifest`, the exact row
+   inventory, and the proof decision is `PROCEED`, then verify that its
+   baseline/candidate surfaces, ABI/layout, operation-cost, class-manifest,
+   generator, timer, linked-binary, normalized leaf, and raw evidence hashes
+   match the retained files. A missing or changed artifact blocks production work; do not
+   reconstruct it from a summary. Object/linked hashes may change under normal
+   build-tag promotion, so identity of the leaf uses the proof's normalized
+   ordered instruction/immediate/constant/branch/table fingerprint.
+2. Record `git status --short --branch` and the current HEAD. Preserve all
+   user-owned files. Wait for the owner to resolve overlapping edits before a
+   clean production baseline or overlapping runtime change.
+3. Keep ADR 0007 at "Accepted for production integration", not final product
+   acceptance. Link it and the companion proof from `docs/README.md`,
+   `docs/design.md`, `performance-audit.md`, and both runtime-speed plans.
+4. Promote the proof-scoped no-foreign-runtime scan into
+   `scripts/check-purego` and the normal repository check. Reject repo-owned
+   production C/C++/Objective-C/object/archive inputs, `import "C"`, cgo/linker/
+   wasm import directives, private or foreign `go:linkname`, dynamic-loader
+   and executable-memory/JIT APIs, helper-process backend APIs, and foreign
+   `CALL`/`BL` targets from Ember-owned assembly. The pinned Luau process is
+   allowlisted only in measurement/test paths.
+5. Retain fixture coverage for every forbidden mechanism and add production
+   paths to the scan. Scope pointer/`uintptr` structural checks to the
+   execution image, backend-visible state, request, and exit; public Go edge
+   adapters remain explicit pointer-bearing owners.
+6. Add structural handoff tests that hash the frozen proof-owned types, core
+   generated metadata, generic effect transport, and normalized leaf. A
+   Go-only effect catalog extension must prove the leaf does not reference its
+   enumerated IDs and pass the generic exit/resume vector. Other
+   backend-visible changes fail with an instruction to rerun the companion
+   proof.
+7. Commit only handoff, ADR/link, and gate changes after focused checks. Do not
+   stage unrelated user work.
 
 Verification:
 
 ```sh
+scripts/runtime-architecture-proof verify-handoff \
+  --manifest testdata/runtime-proof/proof-handoff-v1.manifest
 scripts/check-purego
-scripts/check-purego --self-test
+scripts/check-runtime-architecture-proof-purego --self-test
+go run ./cmd/ember-vmgen -check
 git diff --check -- docs/README.md docs/design.md docs/checks.md \
   docs/adr/0007-runtime-speed-no-cgo.md performance-audit.md \
-  runtime-speed-2x-luau-implementation-plan.md
+  runtime-speed-2x-luau-implementation-plan.md \
+  runtime-speed-2x-no-cgo-proof-implementation-plan.md
 ```
 
 Completion criteria:
 
-- clean baseline source is identified and user work is preserved;
-- target/no-CGO/generality rules are fail-closed, fixture-tested, and invoked
-  by the normal repository check;
+- the production plan is bound to one passing proof artifact group;
+- no backend-visible proof contract changed during handoff;
+- no-CGO/no-FFI/no-JIT/no-helper rules are fail-closed in normal checks;
 - no acceptance capture is labeled clean while runtime files are dirty.
 
 Risks and dependencies:
 
-- this slice is blocked on resolving overlapping user edits, not on planning;
-- do not solve the conflict with a reset, checkout, temporary branch, or
-  selective staging of someone else's hunks.
+- this slice cannot turn a `STOP` decision into conditional production work;
+- broad scan exclusions can accidentally permit a foreign backend; exceptions
+  stay limited to explicit test/measurement oracle paths.
 
 ### Slice 0.2 - Add a real all-37 speed2x acquisition phase
 
@@ -642,8 +689,12 @@ Files and symbols:
 - `scripts/check-runtime-parity`: phase parsing, fingerprint, capture command;
 - `scripts/scenario-ratio-gate`: schedule parsing, inventory, line fits;
 - new focused shell/Go fixtures beside the existing parity tests;
+- new engine-neutral invocation-event contract and current/candidate/Luau
+  adapter fixtures;
 - `testdata/runtime-parity/speed2x-schedule-v1.tsv` after clean calibration;
-- `.github/workflows/scheduled.yml` only after local proof.
+- a checked timeout/job-split recommendation consumed by
+  `.github/workflows/scheduled.yml` only after final local production
+  acceptance.
 
 Ordered work:
 
@@ -671,21 +722,27 @@ Ordered work:
    or candidate-time recalibration. Apply the same pre/post CPU-load and
    contamination checks as live acquisition; store pilot raw samples/status in
    the schedule artifact and reacquire the entire calibration if contaminated.
-4. Standardize both engines on the exact external Go monotonic boundary above:
-   start immediately before Ember `Run` or Luau command start; stop after
-   result parse/validation and Result close or child exit. Remove Luau
-   `os.clock()` from ratio computation. Record prebuilt-input hashes, timer
-   start/stop event IDs, implementation/resolution/quantization, and which
-   N-invariant preparation remained inside the invocation; reject points at or
-   below the declared resolution. A fixture traces and compares the event
-   sequence for every N, engine, baseline, and candidate.
+4. Freeze an engine-neutral invocation event contract before baseline capture:
+   immutable input preparation occurs before the point; the timed trace is
+   `invoke-start -> execute -> validate -> release -> invoke-stop`. The current
+   Ember adapter wraps `[]Value` with an explicit no-op releaser; the candidate
+   adapter accepts the owner-bearing `Result` and calls `Close`; the Luau
+   adapter maps process exit/result parse to the same validate/release boundary.
+   Start one external Go monotonic timer at `invoke-start` and stop only after
+   `release`. Remove Luau `os.clock()` from ratio computation. Freeze the event
+   contract, adapter interface, and old/new/Luau mapping hashes, but record each
+   adapter implementation hash separately because the current and candidate
+   APIs intentionally differ. A fixture compares the complete event trace for
+   every N, engine, baseline, and candidate and proves release runs on success
+   and error.
 5. Require live acquisition to name the immutable schedule and a fresh
    replicate ID: `--schedule PATH --replicate ID`. Validate IDs with
    `[a-z0-9][a-z0-9-]{0,31}` and write under
    `tmp/runtime-parity/speed2x/<fingerprint>/<replicate>/`. Existing replicate
    directories fail instead of being reused. Bind the schedule SHA-256,
-   calibration source commit, manifest SHA-256, and acquisition schema version
-   into every raw header and fingerprint.
+   calibration source commit, manifest SHA-256, invocation-contract/adapter
+   mapping hashes, and acquisition schema version into every raw header and
+   fingerprint.
    After baseline review, check the versioned schedule into `testdata` with its
    calibration raw-artifact SHA and source commit recorded in ADR 0007. CI and
    candidates refuse a missing or hash-mismatched checked-in schedule; `/tmp`
@@ -707,10 +764,12 @@ Ordered work:
    Instrumented calibration also rejects a schedule where a one-time stack/
    arena capacity transition or GC regime discontinuity dominates one point;
    ordinary workload-proportional allocation remains measured. The public
-   lifecycle and wrapper must otherwise be identical at all four points.
+   invocation event contract and selected adapter must otherwise be identical
+   at all four points.
 7. Extend the raw schema with ordered corpus manifest/counts/hashes, per-row N
    schedule, schedule/calibration hashes, source commit and clean status,
-   recursive production/harness fingerprint, Go toolchain, OS/CPU, timer,
+   recursive production/harness fingerprint, selected adapter implementation
+   hash, invariant invocation-contract/mapping hash, Go toolchain, OS/CPU, timer,
    `CGO_ENABLED`, `GOMAXPROCS`, Luau binary hash, exact Luau argv/default flags
    and verified codegen-disabled mode, acquisition version, all threshold
    constants, and quiet-system samples. Fingerprint all tracked production,
@@ -720,8 +779,10 @@ Ordered work:
 8. Make each replicate a real acquisition. The script may validate or report a
    named existing artifact only through a separate read-only command; a normal
    capture never follows the old "one completed acquisition per fingerprint"
-   reuse path. Schedule, manifest, argv, threshold, clock, or environment
-   mismatch invalidates the whole replicate. Preserve and report all nine raw
+   reuse path. Schedule, manifest, argv, threshold, clock, environment, or
+   invocation-contract mismatch invalidates the whole replicate. An engine
+   implementation hash change is recorded, not confused with invariant
+   contract drift. Preserve and report all nine raw
    ratios; do not aggregate them before the per-row median/p90 gate.
 9. If process startup dominates acquisition, batch points only after a test
    proves every timed point gets fresh VM/global state. Do not trade validity
@@ -736,10 +797,10 @@ Ordered work:
     scripts only orchestrate acquisition; BSD/GNU awk differences cannot
     change acceptance. Bind the helper source/version hash into the artifact.
 12. From the calibrated pilot, compute a fail-closed worst-case acquisition
-    budget including Luau launches and 25% runner margin. Split independent
-    replicates into separate scheduled jobs when needed, raise the current
-    45-minute timeout explicitly, and upload each raw replicate plus schedule
-    even on gate failure. A timeout is a failed/missing capture, never partial
+    budget including Luau launches and 25% runner margin. Record the required
+    independent-job split, timeout, and always-upload contract as a checked
+    artifact. Apply it to the scheduled workflow only after final local
+    production acceptance. A timeout is a failed/missing capture, never partial
     evidence.
 
 Verification:
@@ -765,6 +826,8 @@ Completion criteria:
 - schedules are baseline-frozen, content-addressed, uniformly calibrated, and
   never regenerated by a candidate capture;
 - every row has nine valid paired ratios and the gate fails on any omission;
+- current `[]Value`, candidate `Result.Close`, and Luau process lifecycles use
+  one frozen event trace without requiring their implementation hashes to match;
 - two replicate IDs necessarily perform two independent acquisitions;
 - the previous nonexistent `speed2x` command is now executable.
 
@@ -775,96 +838,100 @@ Risks and dependencies:
 - threshold values must be fixed in ADR 0007 before candidate capture;
 - shell arithmetic must remain portable to the repo's existing POSIX style.
 
-### Slice 0.3 - Add class-balanced held-out generation and differential oracles
+### Slice 0.3 - Extend the proof corpus to production integration oracles
 
 Assigned agent: Luna max.
 
-Objective and reason: prove mechanisms generalize beyond the visible corpus and
-catch semantic drift before native execution can corrupt state.
+Objective and reason: reuse the proven class taxonomy and generator while
+adding the real owner/public/effect semantics that the isolated proof
+deliberately excluded.
 
 Files and symbols:
 
+- retained proof class manifest, grammar, expected-state model, and revealed
+  proof epoch;
 - existing execution differential/fuzz tests discovered by `rg` at execution;
 - `bytecode.go`: `opcodeMetadataTable`, operand/effect metadata;
 - `opcode_info.go`, `register_effects.go`;
-- new `execution_generated_corpus_test.go`;
-- new deterministic generator helpers in test-only Go files;
-- new backend anti-overfit source scan test.
+- production owner, module, callback, coroutine, limit, error, and public-result
+  tests;
+- production anti-overfit source scan and diagnostic class reports.
 
 Ordered work:
 
-1. Define semantic families from existing opcode/effect metadata: scalar and
-   truth behavior; CFG/loops/iteration; globals/fields/property chains;
-   fixed/tail/open/vararg/multi-result calls; closures/upvalues; arrays/hash
-   tables/metatables; errors/protected calls/limits; coroutine and host edges.
-2. Create a deterministic grammar that emits valid Luau source and, where
-   needed, verified execution-image states. Control depth, object count, loop
-   bounds, and recursion so every generated case terminates.
-3. Keep development seeds visible for debugging. Maintain three one-use
-   held-out epochs: Phase 1 proof, Phase 4 retention, and final cutover. Derive
-   each epoch only at its named freeze point, generate exactly 5,000 valid
-   programs after deterministic rejection filtering, and freeze generator
-   version, seed derivation, accepted count, rejection counts, and corpus hash
-   before execution. Once revealed, those seeds become ordinary regression
-   seeds and can never serve as held-out evidence again. A failure may be fixed
-   against the revealed regression set, but the next retention decision must
-   use its already-reserved untouched epoch. The backend never receives seed,
-   source name, epoch, or family label.
-4. Compare canonical Go execution, selected backend, and pinned Luau where the
-   external oracle supports the behavior. Check exact values/NaN bits, object
+1. Import the frozen proof semantic taxonomy and all revealed proof cases as
+   ordinary regression inputs. Do not rename or reclassify a proven family to
+   improve later coverage. Extend the taxonomy only for production-only
+   semantics: owner/pin/result lifetime, modules, callbacks, host values,
+   protected errors, all limits, cancellation, collection, and coroutine
+   lifecycle.
+2. Extend the deterministic grammar and independent expected-state/event model
+   for real `Run`, `RunWithGlobals`, persistent Runtime, module cycles,
+   callback re-entry, owner close, public table/result lifetime, cross-owner
+   rejection, host errors, every limit, and yield/resume. Continue to compile
+   source through the normal compiler; verified state vectors cover boundaries
+   that cannot be expressed externally.
+3. Maintain exactly two fresh one-use 5,000-case epochs for this plan: the
+   Phase 4 production-backend retention epoch and the final pre-deletion epoch.
+   Derive each only after its named mechanism freeze, then seal generator
+   version, seed commitment, accepted/rejected counts, per-family counts, and
+   corpus hash before execution. Never reuse the companion proof epoch.
+4. Compare the old VM, completed new Go engine, selected assembly, and pinned
+   Luau wherever externally expressible. For Ember-only host, cancellation,
+   owner/result-lifetime, limit, and raw-state cases, compare every engine
+   against the independently generated model. Check exact values/NaN bits,
    identity, table mutation/order, metamethod order, callbacks, yields/resume,
-   limits/cancellation, and error frames/causes.
-   For Ember-only host, cancellation, owner/result-lifetime, limit, and raw
-   state vectors, generate an expected event/state trace from a small pure
-   reference model over grammar nodes. It may share value-format constants but
-   not production lowering, dispatch, descriptor, table, or effect helpers.
-5. Add state-level differential vectors for every burst operation and every
-   exit reason. Invalid images are rejected before execution, never dispatched
-   into assembly.
-6. Add a recursive static test over production Go, generated Go, `.s`, build-
-   tagged fallback, generator templates/specs, and linked Ember symbol/string
-   data. Reject the 37 names, source/result hashes, fixture paths, import/exec/
-   environment APIs used for source fingerprint routing, and prohibited
-   identity logic. Corpus labels may exist only in measurement, test, and docs
-   paths. False positives are resolved by moving labels to those paths, not by
-   broad exceptions.
-7. Record semantic-class dynamic counts and backend/side-exit classification.
-   Zero executed members in a required family is a generator failure.
-8. Add a small, deterministic class-performance inventory generated from the
-   same grammars. Each source must run unchanged on current Ember, the proof
-   engine, and pinned Luau, with enough work to amortize entry. Keep this
-   inventory broad and class-balanced; it supplies same-program baseline ratios
-   for the Phase 1 gain formula and is not an acceptance replacement.
+   limits, errors, frames, causes, globals writeback, and close behavior.
+5. Add real-state differential vectors for every production effect exit,
+   descriptor invalidation, arena growth, root refresh, and public adapter.
+   Invalid images and mixed-owner requests fail before any backend executes.
+6. Expand the proof anti-overfit scan recursively across all production Go,
+   generated Go, assembly, build-tag fallbacks, generator specs/templates, and
+   linked Ember strings/symbols. Reject all-37 names, source/result hashes,
+   fixture paths, and source/fingerprint routing APIs in production backend
+   paths. Corpus labels remain measurement/test metadata only.
+7. Extend diagnostic counts for production-only semantic/effect/guard classes.
+   Reports emit every declared family including zero; a required zero count
+   fails.
+8. Consume the proof's frozen class-performance gate as architecture evidence;
+   do not rebuild the proof inventory or retune its schedule here. New
+   production-only semantics are judged by exact behavior, transition/
+   allocation budgets, and the all-37 product gate. If an extension changes a
+   proven backend layout or handler, rerun the companion proof instead of
+   silently adding a new class benchmark.
 
 Verification:
 
 ```sh
-CGO_ENABLED=0 go test -run '^(TestExecution.*Differential|TestGeneratedExecution|TestBackendHasNoCorpusFingerprints)$' ./...
+CGO_ENABLED=0 go test -run '^(TestExecution.*Differential|TestGeneratedExecution|TestProductionBackendHasNoCorpusFingerprints)$' ./...
 CGO_ENABLED=0 go test -race -run '^(TestExecution.*Differential|TestGeneratedExecution)$' ./...
 CGO_ENABLED=0 go test -gcflags=all=-d=checkptr=2 -run '^(TestExecution.*Differential|TestGeneratedExecution)$' ./...
 ```
 
 Completion criteria:
 
-- all semantic families have nonzero class-balanced coverage;
-- held-out seeds are created after mechanism freeze and are absent from backend
-  inputs;
-- exact semantic differential is 100%; there is no accepted mismatch budget;
-- production source contains no benchmark identity or fingerprint path.
+- proof families remain frozen and production-only semantics have nonzero
+  class-balanced coverage;
+- two untouched production epochs remain available for their named decisions;
+- the independent model covers behavior that Luau or the old VM cannot
+  independently establish;
+- production source contains no benchmark identity or fingerprint route.
 
 Risks and dependencies:
 
-- generated programs can accidentally test only easy monomorphic states;
-  require shape churn, misses, unknown calls, errors, and mutation boundaries;
-- upstream Luau is an oracle only in test tooling and must not leak into build
-  or runtime dependencies.
+- the proof Go kernel and assembly are not independent of each other when they
+  share metadata; the old VM, pinned Luau, and expected-state model remain
+  required until final deletion;
+- generated programs must include churn, misses, host effects, errors, and
+  lifetime transitions rather than only stable hits.
 
 ### Slice 0.4 - Capture clean mechanism, speed, and allocation baselines
 
 Assigned agent: primary orchestrator, reviewed by Sol high.
 
-Objective and reason: replace dirty exploratory ratios with evidence that gives
-each semantic class an explicit required speedup and allocation ceiling.
+Objective and reason: freeze the complete product-level speed, allocation,
+lifecycle, and static-size baselines that the class-level companion proof did
+not attempt.
 
 Files and components:
 
@@ -878,6 +945,7 @@ Files and components:
 - low-distortion counters in diagnostic-only generated VM variants;
 - CPU profiles for direct loop, calls, tables/properties, iteration, strings,
   coroutines, and host boundaries.
+- the frozen companion-proof family gate and ABI/layout hashes.
 
 Ordered work:
 
@@ -891,9 +959,13 @@ Ordered work:
    arena capacity snapshots for retained bytes rather than relying on noisy
    process-wide `runtime.MemStats` alone. Classify public-result and host-edge
    conversions separately but never omit them from their API lane.
-   Use the exact speed2x source wrapper, checked-in calibrated N schedule, and
-   lifecycle. Normalize both per public invocation and per retired guest
-   operation; also retain a separate repeated-hook no-growth lane.
+   Use the exact speed2x source, checked-in calibrated N schedule, and frozen
+   engine-neutral invocation event contract. Capture through the current
+   `[]Value`/no-op-release adapter now; preregister the candidate
+   owner-bearing-Result/`Close` mapping before any candidate result exists.
+   Include release in allocation/time accounting. Normalize both per public
+   invocation and per retired guest operation; also retain a separate
+   repeated-hook no-growth lane.
 3. Add a fail-closed cold image/arena schema. `guestWordCount` means every
    verified lowered word in all reachable executable Protos; `protoCount`
    means every reachable validated executable Proto including nested closure
@@ -921,22 +993,21 @@ Ordered work:
    dynamic call edges, fixed/open/vararg results, table hit/miss/grow,
    property-chain depth and descriptor stability, iteration class, metamethod
    target type, coroutine/host boundaries, and current allocations.
-8. Run the generated class-performance inventory on current Ember and pinned
-   Luau with the same calibrated paired method. For each semantic family,
-   compute the required Ember reduction on the same programs:
-   `candidate/current <= 1.75 / baseline_ratio` for prototype headroom and
-   `<= 1.85 / baseline_ratio` for production median. Store the formula and
-   data, not named optimization instructions. Do not infer a family ratio by
-   assigning one mixed acceptance row to one cause.
-   Freeze a machine-readable semantic-family manifest containing metadata
-   membership, baseline ratio/interval, required proof gain, and whether its
-   eligible-exit cap is 5% or 2%. Candidate reports and gates consume this same
-   hash; no family is reclassified after results appear.
+8. Import the companion proof's machine-readable family membership, baseline
+   ratio/interval, required gain, event minima, and eligible-exit cap. Bind its
+   hash and ABI/layout hash into the product baseline. Do not rerun or retune
+   the proof class inventory here. If source or a backend-visible contract has
+   changed enough to invalidate it, rerun the companion proof before taking a
+   production baseline.
 9. Freeze per-row/per-lifecycle B/op and allocs/op ceilings from the two all-37
    allocation captures. A candidate may not increase either value on any row;
    the five-family `performance-audit` remains diagnostic and cannot certify
    the other rows. Check the reviewed manifest into `testdata` with source,
-   schedule, wrapper, and raw baseline hashes; candidates/CI fail on mismatch.
+   schedule, invocation-contract/adapter-mapping, current-adapter, and raw
+   baseline hashes. Candidate captures bind their distinct adapter/engine hash
+   and must produce the identical event trace; they fail on invariant contract,
+   source-program, schedule, or mapping drift, not merely because the intended
+   API/engine implementation hash changed.
    Logical owner/image counters must match exactly across baselines; measured
    B/op must agree within 1% and allocs/op within the reporting resolution or
    the baseline is reacquired. Freeze the lower observed value for each metric,
@@ -976,8 +1047,8 @@ CGO_ENABLED=0 scripts/execution-code-size-gate --baseline
 Completion criteria:
 
 - two clean, compatible all-row speed artifacts and two Ember audit artifacts
-  exist at one source fingerprint;
-- every family has a required speedup and coverage denominator, and every one
+  exist at one baseline engine hash and one invariant invocation-contract hash;
+- every proof family gate is hash-bound to the product evidence, and every one
   of the 37 rows/lifecycles has an allocation ceiling;
 - cold formulas, warmed image identity, warm-up break-even, and the static text
   cap have executable gates;
@@ -985,388 +1056,119 @@ Completion criteria:
 
 Risks and dependencies:
 
-- target runner time is substantial; partial data cannot authorize Phase 1;
-- if the baseline changes before the architecture proof, reacquire it rather
-  than mixing commits.
+- target runner time is substantial; partial data cannot authorize production
+  state work;
+- if source changes invalidate the proof or acceptance baseline, reacquire the
+  affected artifact rather than mixing commits.
 
-## Phase 1: Prove the bold mechanism before rewriting the runtime
+## Proof implementation lives only in the companion plan
 
-### Slice 1.1 - Freeze the execution-image and burst ABI contract
+The former Phase 1 implementation has been removed from this document. The
+companion proof exclusively owns the proof class timer/baseline, post-freeze
+proof epoch, exact image/ABI layouts, synthetic pointer-free state, independent
+Go kernel, static arm64 ABI/dispatch/handlers, randomized state differential,
+and the class-relative proceed/kill gate.
 
-Assigned agent: Luna max, reviewed by Sol high.
-
-Objective and reason: define one pointer-free contract that both the Go oracle
-and assembly backend can implement, without first changing production VM state.
-
-Files and symbols:
-
-- `bytecode.go`: opcode/effect/operand metadata;
-- `vm_dispatch_spec.go` and `cmd/ember-vmgen/main.go`;
-- `slot.go`;
-- new `execution_image_spec.go` and `execution_burst_abi.go`;
-- new generated layout/assertion tests;
-- no production call site changes in this slice.
-
-Ordered work:
-
-1. Define dense micro-operation classes, operands, guest-PC mapping, guest
-   instruction cost, effect class, maximum bounded work, and legal exit reasons.
-   Initial lowering is one semantic operation per guest rule; do not add
-   workload-shaped fusions.
-2. Define fixed-width execution words and pointer-free descriptor/continuation
-   records. Use offsets/indices and typed Go-owned base arrays, never persistent
-   raw pointers or hidden `uintptr` roots.
-3. Define `burstRequest` and `burstExit` with explicit size/alignment/offset
-   constants generated from one spec. Add compile-time and runtime assertions
-   for Go and arm64 layout. The request is a typed-pointer boundary, not a
-   pointer-free record: every base is a generated typed pointer plus logical
-   length/capacity, is read-only as a pointer value in assembly, and is kept
-   live by the Go wrapper. Mutable arrays reached through it and the entire
-   exit are pointer-free.
-4. Specify verifier invariants: opcode bounds, operand/register bounds, valid
-   block targets, descriptor kinds, continuation capacity, table probe bound,
-   guest-PC mapping, and maximum work per operation.
-5. Specify two independent budgets: at most 64 retired guest instructions and
-   at most 256 primitive work units per burst. One scalar operation costs one
-   unit; each copied slot, hash probe, property-chain step, upvalue close, or
-   cleared cell costs one. Freeze native maxima of 16 hash probes, eight
-   property-chain steps, and 64 copied/cleared slots per guest operation.
-   Oversized work exits to Go before mutation or uses a reviewed resumable
-   micro-phase; it never runs an unbounded assembly loop.
-6. Retire a guest instruction exactly once, only after its semantic mutation is
-   complete. A pre-effect exit reports it unretired; a Go-completed effect marks
-   it retired before resume. Prefer a pre-mutation Go exit for work above a
-   native bound. Any later resumable native micro-phase must carry explicit
-   `{phase,instructionCharged}` state: charge MaxInstructions once before its
-   first chunk, never recharge on quantum resume, expose no host-observable
-   partial result, and finish or roll back before cancellation/error delivery.
-   Limit/error tests cover every cut point.
-7. Extend `cmd/ember-vmgen` or a sibling standard-library-only generator so
-   enum/layout/effect metadata is shared by Go and assembly outputs. Generated
-   files are checked in and stale generation fails tests.
-8. Add tests that use reflection/unsafe only in test code to prove every
-   assembly-mutable record is pointer-free and its layout matches generated
-   offsets. Separately assert that `burstRequest` contains only its generated
-   typed-pointer/length allowlist and that assembly never writes those fields.
-9. Generate descriptor maxima, operation/cost tables, owner/image cookies, and
-   the complete root/liveness manifest from the same spec. The guest cost of an
-   opcode matches current semantics: one charge for the executable opcode;
-   AUX/auxiliary words decoded by that opcode are not independently charged.
-   Fused/lowered micro-ops preserve that one semantic charge and exact guest PC.
-
-Verification:
-
-```sh
-go generate ./...
-CGO_ENABLED=0 go test -run '^(TestExecutionImageSpec|TestBurstABI|TestGenerated.*Current)$' ./...
-go vet ./...
-git diff --check
-```
-
-Completion criteria:
-
-- one reviewed ABI covers Go and arm64 without benchmark knowledge;
-- every operation is bounded or explicitly side-exiting;
-- verifier rejects malformed images before any assembly call;
-- layout generation is deterministic and standard-library only.
-
-Risks and dependencies:
-
-- a too-wide word restores bandwidth pressure; start with a measured compact
-  layout and cap at 16 bytes per operation unless evidence requires an escape
-  record;
-- exposing pointers to pointer-bearing Go objects or retaining any typed base
-  past return is an immediate design failure;
-- this spec is provisional until Slice 1.3 passes and must be deleted if the
-  architecture is killed.
-
-### Slice 1.2 - Prove linked arm64 dispatch, ABI, and bounded preemption
-
-Assigned agent: Luna max, reviewed by Sol high.
-
-Objective and reason: exercise the exact native mechanism on the target before
-committing to the runtime rewrite. This is a general backend proof, not a
-single arithmetic benchmark.
-
-Files and components:
-
-- new root-package proof files behind the explicit
-  `asmprobe && darwin && arm64` build constraint, using the exact unexported
-  request/state types but with no production routing;
-- generated arm64 layout include;
-- Go reference proof kernel;
-- arm64 `.s` leaf burst function;
-- no production runtime routing.
-
-Ordered work:
-
-1. Implement the stable ABI0 Go declaration and leaf assembly function. Let
-   the compiler provide the ABIInternal wrapper; do not use `go:linkname` or
-   private runtime ABI symbols. First prove by source review and disassembly
-   that the leaf neither stores nor returns any request-derived pointer and
-   that the wrapper keeps every typed base live through return. Then apply
-   `//go:noescape` as a reviewed ABI assertion; only after that use `-m=2` and
-   allocation tests to verify request/exit remain stack-resident. Apply a no-
-   split leaf only after bounded stack/no-call disassembly proves it valid.
-   Inspect the wrapper and leaf separately; neither may allocate per burst.
-2. Preserve the exact Go/Darwin arm64 invariants: R18 is platform-reserved, R28
-   holds `g`, SP remains 16-byte aligned, R29 follows the Go frame convention,
-   R30/LR returns correctly, and FPCR is unchanged. Do not keep VM state in
-   R16/R17 (linker scratch) or R27 (assembler scratch) across pseudo-instruction
-   expansion. Do not assume a general C-style callee-saved register set. Use no
-   local pointer frame, no Go or foreign calls, and no stack growth.
-3. Prove an in-text dispatch table using `ADR` to a dense sequence of static
-   `B handler` instructions and indirect `B (Rx)` after verifier bounds checks. Inspect
-   the object code. If assembler/linker behavior is not reliable, compare a
-   generated branch tree and generated Go jump-table dispatch; do not depend on
-   undocumented code-address data.
-4. Implement proof operations for all required families: scalar/control,
-   direct guest call/return on a flat continuation array, fixed/open/vararg
-   moves, guarded global hit, bounded array/hash/property hit, stable iteration,
-   and one precise effect side exit. Use generated class-balanced states and
-   CFGs, not a frozen benchmark sequence.
-5. Enforce the 64-guest-operation and 256-primitive-work budgets plus per-op
-   copy/probe/chain bounds. Return exact retired count, primitive count, phase,
-   and next PC. On the pinned quiet M1, freeze these safety gates before speed
-   tuning: uncontended burst p99 <=50 microseconds and observed max <=250
-   microseconds; heartbeat/cancellation and a forced-GC rendezvous p99 <=2 ms
-   and observed max <=10 ms. Any overrun caused by guest work kills the native
-   handler; contaminated runner samples reacquire the whole latency artifact.
-   Measure at least one million post-warm bursts spanning every operation and
-   declared worst-case probe/copy/chain bound, plus 10,000 heartbeat,
-   cancellation, and forced-GC rendezvous trials. Record quantum, work counts,
-   CPU/load, GOGC, GC events, warm-up, raw histogram, nearest-rank p99, and max;
-   no 20-run smoke test can authorize these bounds.
-6. Run millions of randomized Go-versus-assembly state transitions. Compare
-   every slot, continuation, table directory mutation, PC, count, and exit.
-7. Use `go tool objdump` to prove the leaf has the expected dispatch, no calls,
-   no accidental frame/spill shape, and no foreign symbol references.
-   Use `go tool nm -size` and `otool -l` to record linked backend text/rodata,
-   branch reach, and W^X segments. ADR 0007 records the chosen in-text layout,
-   its arm64 +/-1 MiB conditional-branch reach assumptions, and the measured
-   256 KiB maximum before promotion.
-8. Build and test with `CGO_ENABLED=0`, `GOGC=1`, async preemption enabled,
-   race, and checkptr. Race/checkptr do not instrument assembly, so combine
-   them with serialized-owner assertions, canaries, red zones, and exact state
-   differential.
-9. In the Go wrapper, increment active-burst ownership before entry and call
-   `runtime.KeepAlive` after return for request, exit, owner, image, and each
-   backing array owner before decrementing it. Add escape/alloc tests proving
-   the wrapper performs zero recurring allocations.
-10. Delete proof files immediately if ABI, preemption, or state safety cannot be
-   demonstrated. Retain only the ADR evidence of rejection.
-
-Verification:
-
-```sh
-CGO_ENABLED=0 go test -tags=asmprobe -run '^TestAssemblyBurstProbe' -count=100 .
-CGO_ENABLED=0 GOGC=1 GOMAXPROCS=1 go test -tags=asmprobe -run '^TestAssemblyBurstProbeGCAndHeartbeat$' -count=20 .
-CGO_ENABLED=0 go test -race -tags=asmprobe -run '^TestAssemblyBurstProbe' .
-CGO_ENABLED=0 go test -tags=asmprobe -gcflags=all=-d=checkptr=2 -run '^TestAssemblyBurstProbe' .
-CGO_ENABLED=0 go test -tags=asmprobe -gcflags='all=-m=2' -run '^$' . 2>/tmp/ember-asm-escape.txt
-CGO_ENABLED=0 go test -tags=asmprobe -c -o /tmp/ember-assembly-probe.test .
-go tool objdump -s '.*runAssemblyBurst.*' /tmp/ember-assembly-probe.test
-go tool nm -size /tmp/ember-assembly-probe.test | scripts/execution-code-size-gate --stdin
-otool -l /tmp/ember-assembly-probe.test | scripts/execution-code-size-gate --segments
-scripts/check-purego
-```
-
-Completion criteria:
-
-- arm64 dispatch and ABI work in a fully cgo-disabled binary;
-- all proof families are exact against Go over randomized states;
-- no burst or operation can delay Go beyond the recorded bound;
-- disassembly shows no Go/foreign calls and no unexpected pointer/frame path.
-
-Risks and dependencies:
-
-- Go assembly is not asynchronously preemptible; failure of bounded return is
-  a hard kill, not a tuning issue;
-- assembly is not race-instrumented; ownership and differential tests carry
-  the proof burden;
-- a dispatch proof without calls/table/property families does not authorize the
-  next slice.
-
-### Slice 1.3 - Run the general end-to-end architecture proof and kill gate
-
-Assigned agent: Luna max, independently reviewed by Sol high.
-
-Objective and reason: determine whether the complete general mechanism can
-deliver the required multi-x gains before production state is rewritten.
-
-Files and components:
-
-- proof execution image and Go/assembly adapters from Slices 1.1-1.2;
-- held-out semantic generator from Slice 0.3;
-- baseline class requirements from Slice 0.4;
-- proof benchmark and coverage report files kept outside production routing.
-
-Ordered work:
-
-1. Freeze the proof mechanism set before selecting held-out seeds: fixed-width
-   lowering, slot layout, flat continuations, descriptor guards, bounded table
-   probes, dispatch form, and side-exit classes.
-   The proof uses the exact intended production word, slot, continuation,
-   packed table, descriptor, request, exit, and effect-resume structures; an
-   adapter that bypasses their loads, guards, ownership, or side exits cannot
-   authorize Phase 2. This is the Phase 1 held-out epoch's lock point.
-2. Compile the deterministic class-performance programs through the normal
-   Ember compiler into proof execution images, then execute those same programs
-   through current Ember, the proof Go engine, proof assembly, and pinned Luau.
-   Also execute class-balanced generated states for exhaustive mechanics.
-   Include scalar/control, recursive/direct/vararg calls,
-   closures/upvalues, global/property/table/metatable hits, iteration, misses,
-   allocation exits, host exits, errors, and coroutine boundaries.
-3. Measure end-to-end time including the Go wrapper, quantum returns, spill/exit
-   handling, and resume. Do not benchmark only the assembly inner loop.
-4. Apply the clean same-program baseline-derived class gate. For each family,
-   require `proof/current <= 1.75 / baseline_ratio`; algebraically this requires
-   proof/Luau <=1.75 on that family. If the proof cannot execute an entire
-   family end to end, the family fails rather than being estimated from an
-   isolated operation benchmark.
-   Freeze each baseline ratio from nine paired four-point slope fits under the
-   same timer/statistical rules as speed2x, with its 95% interval, source and
-   toolchain hashes. Use the conservative interval endpoint that demands the
-   larger proof gain; a noisy or invalid family ratio fails rather than
-   weakening the gate.
-5. Apply the native coverage and side-exit floors from this plan. No family may
-   be absent, merged into "other", or excluded because it is slow.
-6. Require warmed allocation non-regression and zero recurring proof allocation
-   per instruction/call/hit/iteration.
-7. Run a screening all-37 capture through the production Ember path plus any
-   safely integrated proof path. This is diagnostic; the class proof remains
-   the authorization because a partial adapter may not cover every row yet.
-8. Have Sol review disassembly, ABI ownership, semantics, coverage denominators,
-   statistics, and whether any mechanism was derived from visible workload
-   structure.
-
-Retention gate:
-
-- Proceed only if every semantic family is exact, meets its baseline-derived
-  required gain, satisfies class coverage, and has bounded scheduler/GC impact.
-- A mere 20% to 25% improvement does not pass unless the clean baseline proves
-  that family needs no more. The hardest families must demonstrate their
-  required multi-x reduction.
-- If the proof fails, delete the production-intended image/assembly additions,
-  retain measurement tests/evidence only where independently useful, mark ADR
-  0007 rejected under current constraints, and stop the campaign.
-
-Verification:
-
-```sh
-CGO_ENABLED=0 go test -run '^(TestAssemblyBurstProof|TestGeneratedExecution)' -count=1 ./...
-CGO_ENABLED=0 go test -run '^$' -bench '^BenchmarkAssemblyArchitectureProof/' \
-  -benchmem -benchtime=500ms -count=9 ./...
-scripts/check-purego
-scripts/check-fast
-```
-
-Completion criteria:
-
-- the decision is based on general families and hidden programs, not named
-  workload improvements;
-- measured gains are large enough to bridge the actual clean baseline gaps;
-- Sol records an explicit proceed/kill decision before Phase 2.
-
-Risks and dependencies:
-
-- a synthetic state kernel can overstate end-to-end gains; wrapper, side exits,
-  stack/table representations, and resume cost must be included;
-- this is the principal honesty gate. Do not weaken it after an expensive
-  prototype.
+This production plan consumes only a passing, content-addressed handoff. It
+does not keep a second proof adapter, recreate the proof layouts, or repeat the
+same scalar/call/table handler implementation under different names.
 
 ## Phase 2: Replace the canonical runtime state
 
-Phase 2 is one architectural retention group. It builds a separate private
-candidate owner graph and candidate-only types; the existing VM remains the
-production route and no production entry constructs, mirrors, or warms the new
-state. Phase 3 completes semantics, then Slice 3.4 performs the sole production
-cut to the generated Go engine. Phase 4 optimizes that live canonical state;
-Phase 5 deletes the now test-only old oracle and migration residue.
+Phase 2 is one architectural retention group. It adopts the frozen proof core
+inside a separate private candidate owner graph and adds only production
+ownership/public/effect state around it; the existing VM remains the production
+route and no production entry constructs, mirrors, or warms the candidate.
+Phase 3 completes semantics, then Slice 3.4 performs the sole production cut to
+the generated Go engine. Phase 4 promotes the proven assembly over that live
+state; Phase 5 deletes the now test-only old oracle and migration residue.
 
-### Slice 2.1 - Build the runtime-owned execution image
+### Slice 2.1 - Bind the proven execution image to production ownership
 
 Assigned agent: Luna max, reviewed by Sol high.
 
-Objective and reason: convert immutable compiler output and messy owner state
-into execution-ready records once, eliminating repeated decode, identity
-discovery, and map/string work from the hot loop.
+Objective and reason: adopt the frozen owner-neutral lowerer/image without
+reimplementing it, then attach explicit Program and Runtime lifetimes around
+the proven backend-visible records.
 
 Files and symbols:
 
+- retained proof image/lowering/ABI files and handoff manifest;
 - `program.go`: `Program`, Proto ownership and validation;
 - `bytecode.go`: opcodes, metadata, wordcode encoding;
 - `vm_dispatch_spec.go`, `cmd/ember-vmgen/main.go`;
 - `module_runtime.go`, `runtime_heap.go`;
-- new private `execution_image.go`, `execution_lower.go`, and focused tests;
+- new production owner binding, preparation, and focused tests;
 - no public package split unless the resulting interface is independently
   useful and smaller than the root implementation.
 
 Ordered work:
 
-1. Split preparation into a shareable immutable lowered-code object owned by
-   `Program` and an owner-bound `executionImage` containing runtime constants,
-   descriptor bindings, exact guest-PC maps, and mutable guard/cache state.
-   Build the lowered object during explicit Compile/finalization (or an equally
-   explicit `Prepare` API), not through a hidden global identity map or normal
-   Run constructor. It contains no owner handle, root, global, or writable
-   cache.
-2. Keep Program and Proto immutable and shareable after Compile/Prepare. Their
-   immutable lowered representation is allowed; never write runtime handles,
-   globals, mutable cache state, or owner/backend bases into them.
-3. Lower every supported opcode through the verifier from Slice 1.1. Reject an
-   entire image on malformed control flow, operands, descriptor capacity, or
-   an unclassified effect. Do not fall back opcode-by-opcode after validation
-   begins.
-4. Resolve constant and Proto identities to dense indices. Materialize string
-   hashes/intern handles, native/call identities, global keys, field keys, and
-   descriptor slots once per owner.
-5. Separate immutable image data from mutable owner data so multiple Runtime
-   owners can use one Program without races or handle aliasing.
-6. Add an explicit `image *executionImage` (or equivalently narrow owner
-   registry) to persistent Runtime ownership. Prepare it lazily once at a
-   named preflight, preserve pointer/generation identity across repeated hooks,
-   and release it exactly once on successful inactive close. Give stateless
-   preparation and release equally explicit lifetimes. Constructors remain
-   boring: image work occurs at the explicit execution preparation seam.
-7. Add cold benchmarks for image construction, repeated Runtime hooks, and
-   image release. Enforce the cold allocation/byte caps and prove warmed calls
-   do not rebuild image records.
-8. Add full opcode inventory tests: every opcode has lowering, effects,
-   bounded-work classification, guest-cost mapping, and either a backend class
-   or a declared Go effect exit.
+1. Verify the retained proof image word, guest-PC/cost map, verifier, lowerer,
+   request/exit, and generated metadata hashes before editing production
+   ownership. Copy or remove proof build constraints only where necessary; do
+   not fork the records or operation inventory.
+2. Split preparation into the already-proven shareable immutable lowered-code
+   object owned by `Program` and a production owner binding containing runtime
+   constants, descriptor bindings, roots, and mutable guard/cache state. The
+   backend-visible portion stays byte-for-byte/layout-hash identical to proof.
+3. Keep Program and Proto immutable/shareable. Never write owner handles,
+   globals, mutable caches, roots, or backend bases into them.
+4. Resolve constant and Proto identities to dense production owner indices.
+   Materialize string hashes/intern handles, native/call identities, global
+   keys, field keys, and descriptor bindings once per owner while preserving
+   the proof image's indexed interface.
+5. Add an explicit owner-bound image to persistent Runtime ownership. Prepare
+   it once at a named preflight, preserve identity across repeated hooks, and
+   release it once on successful inactive close. Give stateless preparation
+   and release equally explicit lifetimes; constructors hide no repeated work.
+6. Classify production-only opcodes/effects through the same generator and
+   verifier. Prefer a declared Go effect for semantics outside the proven
+   island. If support requires changing a proven word, record, cost, exit,
+   quantum, or handler, version the ABI and rerun the companion proof before
+   continuing.
+7. Add cold benchmarks for owner binding, repeated Runtime hooks, and release.
+   Enforce the all-37 cold allocation/byte caps and prove warm calls do not
+   rebuild lowered or owner-bound records.
+8. Add full opcode inventory tests: every opcode has verified lowering, effect,
+   bounded-work, guest-cost, semantic-family, and backend/effect
+   classification.
 
 Verification:
 
 ```sh
-CGO_ENABLED=0 go test -run '^(TestExecutionImage|TestExecutionLower|TestOpcode.*Classified)' ./...
+CGO_ENABLED=0 go test -run '^(TestExecutionImage|TestExecutionOwnerBinding|TestOpcode.*Classified)' ./...
 CGO_ENABLED=0 go test -run '^$' -bench '^BenchmarkExecutionImage' -benchmem -count=5 ./...
 go generate ./...
+go run ./cmd/ember-vmgen -check
 scripts/check-lane root
 ```
 
 Completion criteria:
 
-- every valid Proto lowers deterministically and every invalid image fails
-  before execution;
-- Program/Proto have no owner-local mutation;
-- repeated execution uses one prepared image and adds no warm allocation;
-- all opcodes and effect classes are fail-closed in generated inventory tests.
+- production uses the frozen proof lowerer and backend-visible layout rather
+  than a parallel implementation;
+- Program/Proto remain owner-neutral and repeated execution reuses one binding;
+- every production-only semantic is either classified as a precise effect or
+  covered by a newly re-proven ABI version;
+- warm preparation allocations remain zero.
 
 Risks and dependencies:
 
-- lowering can move cost rather than remove it if rebuilt for stateless runs;
-  measure both ephemeral and persistent Runtime lifetimes;
-- do not add one side table per optimization. Fold state into the image's few
-  dense arrays;
-- this slice depends on a passing Phase 1 gate and the frozen ABI spec.
+- binding can move preparation into every stateless call; measure ephemeral and
+  persistent lifetimes separately;
+- a convenience side table per integration concern would destroy the compact
+  proof representation; fold state into a few explicit owner arrays;
+- this slice depends on the passing companion handoff, not on a recreated
+  local prototype.
 
-### Slice 2.2 - Cut the complete owner graph to 64-bit slots
+### Slice 2.2 - Extend the proven slots into the complete owner graph
 
 Assigned agent: Luna max, reviewed by Sol high.
 
-Objective and reason: remove 16-byte pointer-bearing Value traffic and make all
-backend-visible state safe for assembly without hidden Go pointers.
+Objective and reason: replace the proof's synthetic roots with real production
+roots, pins, payloads, and public lifetimes while leaving its hot 64-bit slot
+and scalar-array contract unchanged.
 
 Files and symbols:
 
@@ -1379,15 +1181,17 @@ Files and symbols:
 
 Ordered work:
 
-1. Freeze the exact slot contract from ADR 0004 or deliberately supersede it
-   in ADR 0007. Preserve every float64 bit pattern; colliding NaNs use the rare
-   boxed-number handle rather than losing payload bits.
-2. Split owner storage into pointer-free hot arrays and GC-visible root/payload
-   slabs. Slots contain `{kind,index,generation}` handles, never raw pointers or
-   a `uintptr` conversion of a Go pointer.
-3. Convert runtime constants, globals, module exports, registers, arguments,
+1. Adopt the proof's exact slot/tag/handle bits and scalar hot-array layouts.
+   Re-run the proof before any change. Preserve every float64 bit pattern;
+   colliding NaNs use the proven rare boxed-number handle.
+2. Replace the synthetic proof owner with GC-visible production root/payload
+   slabs around the unchanged pointer-free arrays. Slots remain
+   `{kind,index,generation}` handles, never raw pointers or a `uintptr`
+   conversion of a Go pointer.
+3. Connect runtime constants, globals, module exports, registers, arguments,
    varargs, results, closures, cells/upvalues, coroutines, native-builtin
-   staging, callback staging, and all image/cache payloads to slots.
+   staging, callback staging, and image/cache payloads to those proven arrays.
+   Do not introduce a second Value-shaped hot representation during migration.
 4. Define typed allocation, stale-handle validation, generation exhaustion,
    free-list reuse, object identity, and deterministic identity hash. Fail
    closed in tests/debug on stale or cross-owner handles.
@@ -1465,156 +1269,163 @@ Risks and dependencies:
   guessing captured Go state;
 - do not enable collection until every root and edge has a scanner.
 
-### Slice 2.3 - Replace frames with flat value and continuation stacks
+### Slice 2.3 - Bind proven flat calls to threads, limits, and coroutines
 
 Assigned agent: Luna max, reviewed by Sol high.
 
-Objective and reason: remove `vmFrame` reconstruction and make direct calls,
-returns, recursion, tail calls, varargs, and coroutines index-based operations
-that both backends can execute.
+Objective and reason: attach the proven value/continuation mechanics to real
+threads, protected state, limits, errors, and coroutine ownership without
+rewriting the already-measured direct-call algorithms.
 
 Files and symbols:
 
-- `vm.go`: `vmThread`, `vmFrame`, direct loop and call paths;
+- retained proof value stack, continuation, call/arity/result, closure/upvalue,
+  and effect records;
+- `vm.go`: `vmThread`, `vmFrame`, current direct loop and call paths;
 - `runtime_call.go` and `runtime_call_test.go`;
 - `base_coroutine.go` and runtime-owner coroutine tests;
-- execution-image call/arity/result descriptors;
-- new continuation layout and call differential tests.
+- production execution-image call descriptors;
+- protected-call, limit, error-frame, and call differential tests.
 
 Ordered work:
 
-1. Define a compact pointer-free continuation record containing caller Proto
-   and micro-PC, guest return PC, caller base/top, result destination/mode,
-   expected arity, vararg base/count, protected-call state ID, and exact limit
-   metadata. Generate layout constants for Go and assembly.
-2. Allocate one owner-managed value stack and one continuation stack per active
-   thread. Addresses inside guest state are indices, not pointers into slice
-   backing arrays.
-3. Implement direct fixed-arity call, general call, return-one, open return,
-   tail-call frame reuse, recursion, multiple results, and vararg windows using
-   stack indices and descriptors. Do not create Go slices per call.
-4. Resolve already-known closure/Proto/arity at image preparation or guarded
-   descriptor hit. Dynamic/host call classification becomes a precise effect
-   exit, not repeated generic validation on every direct script edge.
-5. Preserve exact call-depth limits, instruction accounting, protected-call
-   boundaries, error frame order, stack traces, and tail-call observability.
-6. Give each coroutine stable slot/continuation blocks plus a scalar suspended
-   state record. Yield/resume switches the active owner in Go and then resumes
+1. Adopt the proof's exact continuation record, stack-index conventions,
+   call/return/tail/vararg/multi-result operations, guest-PC mapping, and
+   capacity exits. A layout or semantic change reruns the proof.
+2. Give each production thread one owner-managed value stack and continuation
+   stack with the same backend-visible arrays. Replace `vmFrame` reconstruction
+   on the candidate path by binding real globals, roots, closures, and
+   invocation scope around those indices.
+3. Bind actual closure/Proto/arity/upvalue records to the proven dense
+   descriptors. Unknown host/native/dynamic calls keep the proof's precise
+   effect shape and are completed by the production effect executor.
+4. Add real call-depth and instruction limits, protected-call state, error
+   frame order/causes, debug observability, and tail-call semantics around the
+   proven mechanics. Charges occur exactly once across side exit/resume.
+5. Replace proof coroutine model records with stable owner slot/continuation
+   blocks. Yield/resume changes active production ownership in Go and resumes
    the same image PC; it does not copy `[]Value` or reconstruct frame objects.
-7. Grow stacks only at a Go side exit. Refresh typed base pointers before
-   re-entering a backend. Enforce maximum sizes and leave no stale native base
-   after growth.
-8. Differentially test every call/result/vararg/coroutine shape against the old
-   VM while it remains the test oracle. Add recursive and mutually recursive
-   generated graphs, not a single Fibonacci special case.
-9. Profile and assert that `enterRecordOnlyFixedCall`,
-   `resumeRecordOnlyFixedCallOne`, frame clear/reset, and per-call allocation
-   are absent from the new path.
+6. Grow stacks only through the existing precise Go capacity exit. Refresh
+   roots and typed bases before resume and prove no stale native address
+   survives allocation or collection.
+7. Differentially test direct, indirect, mutually recursive, tail-recursive,
+   fixed/open/vararg, multi-result, closure, upvalue, protected/error, limit,
+   and coroutine shapes against the old VM while it remains an oracle.
+8. Add structural and profile checks showing the candidate path does not enter
+   `enterRecordOnlyFixedCall`, `resumeRecordOnlyFixedCallOne`, construct a
+   `vmFrame`, or allocate per direct call.
+9. Keep old frame/call code reachable only by the old oracle until the final
+   production cut and independent semantic gate; do not delete it in this
+   slice.
 
 Verification:
 
 ```sh
-CGO_ENABLED=0 go test -run '^(TestRuntimeCall|TestExecution.*Call|Test.*Vararg|Test.*TailCall|Test.*Coroutine)' ./...
+CGO_ENABLED=0 go test -run '^(TestRuntimeCall|TestExecution.*Call|Test.*Vararg|Test.*TailCall|Test.*Coroutine|Test.*Protected|Test.*Limit)' ./...
 CGO_ENABLED=0 go test -run '^$' -bench 'Call|Vararg|Coroutine' -benchmem -count=9 ./...
-CGO_ENABLED=0 GOGC=1 go test -count=20 -run 'Call|Vararg|Coroutine' ./...
+CGO_ENABLED=0 GOGC=1 go test -count=20 -run 'Call|Vararg|Coroutine|Protected|Limit' ./...
+CGO_ENABLED=0 go test -race -run 'Call|Coroutine|Owner' ./...
 ```
 
 Completion criteria:
 
-- direct script call/return/tail/vararg mechanics require no Go allocation and
-  no frame-object construction;
-- coroutine suspension/resume preserves exact semantics without state copies;
-- generated recursive/call-shape differential is exact;
-- new call-class benchmarks meet the Phase 1 baseline-derived gain.
+- production threads and coroutines use the proven flat mechanics and exact
+  backend-visible records;
+- protected calls, limits, errors, suspension, and resume match the old VM;
+- no frame-object construction, Value conversion, or per-call allocation
+  remains on the candidate direct path;
+- the frozen proof class gain remains valid; changed core mechanics trigger a
+  proof rerun.
 
 Risks and dependencies:
 
-- error/protected-call and open-result semantics are easy to flatten
-  incorrectly; retain precise guest-PC and continuation tests;
-- stack growth cannot occur inside assembly and must invalidate all cached base
-  pointers before resume;
+- production protected/error/coroutine semantics are deliberately outside the
+  synthetic proof and carry high integration risk;
+- stack growth cannot occur inside assembly and must refresh every root/base
+  before resume;
 - this slice owns call state; no concurrent worker edits call/frame symbols.
 
-### Slice 2.4 - Install pointer-free table, global, and property storage
+### Slice 2.4 - Bind proven packed data state to real tables and globals
 
 Assigned agent: Luna max, reviewed by Sol high.
 
-Objective and reason: allow the backend to execute stable table/property/global
-hits directly. Side-exiting these classes would leave the hardest dynamic rows
-several times over target.
+Objective and reason: replace the proof's synthetic packed owner with real
+public/runtime tables, globals, growth, mutation, and metatable invalidation
+while retaining the measured lookup/probe/property/iteration algorithms.
 
 Files and symbols:
 
+- retained proof table directory/cell/control/order, global, property,
+  iteration, and descriptor layouts;
 - `value.go`: `Table`, `tableStorage`;
 - `table_ops.go`, `table_shape.go`, `property_ic.go`;
 - `base_env.go`: `globalEnv`;
-- table shape/hash/iteration/metamethod tests;
-- execution-image table/global/property descriptors;
-- new packed-storage and descriptor differential tests.
+- public table, shape/hash/iteration/metamethod tests;
+- production arena, root, growth, and invalidation helpers.
 
 Ordered work:
 
-1. Define an owner table directory indexed by table handle. Hot header fields
-   are scalar: array/hash/order offsets and lengths, capacity/mask, shape and
-   mutation versions, metatable handle/version, and deterministic identity.
-2. Store table keys, values, hash controls, and ordered-iteration links in
-   owner-managed pointer-free arrays. Prefer offsets into shared arenas over a
-   nested forest of Go slice headers. Go owns arena backing slices and keeps
-   them rooted.
-3. Implement dense numeric-array access and ordered open-addressed hash lookup
-   with a strict maximum native probe count. Normalize numeric zero and NaN
-   behavior exactly. Intern string keys so equality can use owner handles plus
-   cached hash.
-4. Side-exit growth, rehash, new-key insertion when capacity is exhausted,
-   delete/compaction, long string work, and structural changes. Go performs the
-   operation, increments the right versions, refreshes arena bases, and resumes.
-5. Replace global map/string discovery on stable paths with dense global
-   descriptors. Host/global mutation invalidates by version; it never silently
-   leaves an assembly descriptor pointing at stale state.
-6. Make property descriptors represent the complete guarded state: receiver
-   shape/version, normalized key, finite table/prototype chain, metatable
-   versions, terminal value/slot or scripted target, and miss/effect reason.
-7. Execute stable own-field, prototype-chain, and scripted metamethod targets
-   through the same generic descriptor and direct call mechanics. Unknown or
-   host metamethods exit to Go.
-8. Preserve deterministic iteration and mutation rules through an ordered
-   scalar journal/cursor. Stable iteration stays backend-visible; mutation that
-   invalidates the cursor exits and reconstructs through Go.
-9. Add differential model tests for collisions, holes, numeric zeros, NaNs,
-   mixed keys, shape churn, metatable replacement, deep finite chains,
-   descriptor invalidation, deletion, iteration under mutation, cyclic graphs,
-   and owner isolation.
-10. Measure cold arena reservations separately. Warm array/hash/property/global
-    hits and iteration steps allocate zero and meet the class gain gate.
+1. Adopt the proof's exact table directory/cell/control/order, global,
+   property, and iteration records plus its bounded probe/chain algorithms.
+   Do not implement a parallel production lookup. A record or algorithm change
+   reruns the proof.
+2. Allocate the proven pointer-free records from owner-managed production
+   arenas and attach GC-visible roots/payload slabs outside the backend-visible
+   data. Public `Table` views resolve through explicit owner leases rather than
+   exposing arena addresses.
+3. Bind script/public table creation, import, identity, numeric/string key
+   normalization, stable hashes, metatables, and globals to the packed records.
+   Preserve the proof hit path exactly for all matching states.
+4. Implement production Go effects for allocation, growth, rehash, new-key
+   insertion, deletion/compaction, long string work, and structural mutation.
+   Each effect updates roots, versions, arena bases, journals, and descriptors
+   before rebuilding the request and resuming.
+5. Bind host/global mutation to dense global descriptors and complete
+   invalidation. A public or callback mutation becomes visible at the exact
+   semantic boundary and never leaves a stale stable descriptor.
+6. Extend proof property descriptors with real metatable/prototype ownership,
+   full metamethod ordering, public table identity, and host/script target
+   binding without changing their backend-visible guard fields. Unsupported
+   host targets remain precise effects.
+7. Bind deterministic production iteration and mutation behavior to the proven
+   scalar cursor/order records. Reconstruct invalidated cursors only in Go.
+8. Add differential/model tests for collisions, holes, signed zero/NaN, mixed
+   keys, public aliases, shape churn, growth, deletion, metatable replacement,
+   deep finite chains, descriptor invalidation, iteration mutation, cyclic
+   graphs, owner isolation, and callback-observed changes.
+9. Enforce cold arena formulas separately. Warm array/hash/global/property/
+   scripted-target hits and stable iteration use the proof path, allocate zero,
+   and retain the frozen coverage/gain characteristics.
+10. Do not revive ADR 0006's rejected table allocator for allocation savings.
+    This packed state is retained only as the proven native-accessible canonical
+    representation and must pass the full production CPU/semantic gates.
 
 Verification:
 
 ```sh
-CGO_ENABLED=0 go test -run 'Table|Property|Global|Metatable|Iteration|Hash|Shape' ./...
-CGO_ENABLED=0 go test -race -run 'Table|Property|Global|Metatable|Iteration|Hash|Shape' ./...
+CGO_ENABLED=0 go test -run 'Table|Property|Global|Metatable|Iteration|Hash|Shape|Owner' ./...
+CGO_ENABLED=0 go test -race -run 'Table|Property|Global|Metatable|Iteration|Hash|Shape|Owner' ./...
 CGO_ENABLED=0 go test -gcflags=all=-d=checkptr=2 -run 'Table|Property|Global|Metatable|Iteration|Hash|Shape' ./...
 CGO_ENABLED=0 go test -run '^$' -bench 'Table|Property|Global|Iteration' -benchmem -count=9 ./...
 ```
 
 Completion criteria:
 
-- stable array/hash/global/property/metatable/iteration paths use only bounded
-  scalar/slot operations;
-- every structural mutation increments the correct guard and stale descriptors
-  fail to a semantic Go path;
-- deterministic table semantics and owner isolation are exact;
-- warm operations allocate zero and meet Phase 1 class-relative speed gates.
+- real tables/globals use the proof's bounded scalar hit paths;
+- every production structural mutation updates roots, bases, versions, and
+  descriptors before resume;
+- public identity, aliases, deterministic iteration, metatable order, and
+  owner isolation are exact;
+- warm operations allocate zero without a duplicate Go-table hot path.
 
 Risks and dependencies:
 
-- table layout is likely the largest implementation change after slots;
-- a maximum probe exit can raise transition frequency. Size/growth policy must
-  keep measured stable-hit coverage above the declared floor without relying
-  on workload keys;
-- arena growth may move backing arrays; assembly requests are rebuilt only at
-  Go safepoints after growth;
-- do not revive rejected table-allocation work solely for allocation savings.
-  This storage change is justified by native accessibility and measured CPU.
+- arena growth may move backing arrays; the request is rebuilt only at a Go
+  safepoint after every such move;
+- public table lifetime and cyclic aliases make this much riskier than the
+  synthetic proof;
+- a high structural-exit rate can erase proof headroom and must fail the
+  product gate, not motivate benchmark-specific capacity choices.
 
 ### Slice 2.5 - Seal descriptor invalidation and owner isolation
 
@@ -1679,77 +1490,85 @@ Risks and dependencies:
 
 ## Phase 3: Build the complete generated Go oracle and portable backend
 
-### Slice 3.1 - Generate lowering, dispatch metadata, and the Go burst loop
+### Slice 3.1 - Promote and complete the proven Go kernel
 
 Assigned agent: Luna max, reviewed by Sol high.
 
-Objective and reason: establish one complete, readable semantic engine on the
-new state before production assembly duplicates bounded mechanics.
+Objective and reason: turn the independent proof kernel into the complete
+portable production engine while preserving its measured image/ABI and
+semantic bodies for the proven island.
 
 Files and symbols:
 
+- retained proof Go kernel, lowerer, image/ABI spec, and generated metadata;
 - `vm_dispatch_spec.go`, `cmd/ember-vmgen/main.go`;
-- `bytecode.go` metadata and new execution-image spec;
-- new `execution_burst_go.go` plus checked-in generated output;
+- `bytecode.go` opcode/effect metadata;
+- production Go burst files and generated output;
 - `execution_control.go` for policy integration;
 - generation-current and structural tests.
 
 Ordered work:
 
-1. Extend the existing generator rather than creating unrelated inventories.
-   Generate micro-op names, operand decoding, effect/bounded-work tables,
-   Go dispatch cases, arm64 layout constants, and test vector inventory from
-   the same reviewed source metadata.
-2. Implement one monolithic Go switch over verified micro-ops. Do not use a
-   function-value table, closure per operation, interface dispatch, or a second
-   `stepInstruction` call inside the loop.
-3. Keep hot state in locals for the duration of a burst and spill only at exit,
-   quantum, effect, error, or return. The Go loop uses the same 64-guest-op
-   contract and exact `burstExit` as assembly.
-4. Implement all bounded semantic classes against slots, flat stacks, and
-   packed tables. Effectful work calls the shared Go effect executor after the
-   loop returns, not from a duplicate hidden path.
-5. Generate unrestricted, controlled, and diagnostic policy variants from one
-   template/spec. Production unrestricted output must contain no dead
-   instrumentation branches or counters.
-6. Make stale generation, missing opcode, mismatched layout, or unclassified
-   effect fail `go run ./cmd/ember-vmgen -check` and focused tests. Any sibling
-   generator gets its own documented `-check`; Go's `generate` command itself
-   has no `-check` flag.
-7. Inspect compiler output for switch dispatch, bounds-check elimination, hot
-   spills, and unexpected escapes. Change data flow before adding unsafe
-   directives.
+1. Verify the proof handoff hashes, then promote the independent Go kernel and
+   shared generator inputs rather than generating a second switch. Remove proof
+   constraints only after the production owner/state bindings match its ABI.
+2. Preserve the proven monolithic switch, hot locals, <=64-op burst contract,
+   `burstExit`, and scalar/call/table/property/iteration bodies. Do not route
+   back into `stepInstruction`, the old direct loop, function-value tables,
+   interfaces, or per-operation helpers.
+3. Extend the same generated inventory for production-only opcodes and bounded
+   semantics. Effectful or unproven work exits to the shared production Go
+   effect executor. A change to a proven body/layout/cost is versioned and
+   re-proven first.
+4. Generate unrestricted, controlled, and diagnostic policy variants from one
+   small reviewed spec. Production unrestricted output contains no dormant
+   counters, engine flag checks, or instrumentation branches.
+5. Add root/base refresh and production owner-cookie handling only at wrapper
+   and effect edges. The backend-visible mutable records stay pointer-free and
+   identical across Go and assembly.
+6. Make stale generation, missing opcode, mismatched layout, unclassified
+   effect, or proof-hash drift fail `go run ./cmd/ember-vmgen -check` and
+   focused tests.
+7. Inspect compiler output for switch dispatch, bounds-check elimination,
+   spills, and escapes. Fix data flow rather than adding unsafe directives.
+8. Measure proof-kernel versus promoted-kernel transitions on the frozen proof
+   corpus. They must be bit-for-bit identical before production-only extensions
+   are exercised.
 
 Verification:
 
 ```sh
 go generate ./...
 go run ./cmd/ember-vmgen -check
-CGO_ENABLED=0 go test -run '^(TestGenerated|TestGoBurst|TestExecutionImage)' ./...
+CGO_ENABLED=0 go test -run '^(TestGenerated|TestGoBurst|TestExecutionImage|TestProofProductionKernelIdentity)' ./...
 CGO_ENABLED=0 go test -run '^$' -bench '^BenchmarkGoBurst/' -benchmem -count=9 ./...
 CGO_ENABLED=0 go test -gcflags='all=-m=2' -run '^$' ./... 2>/tmp/ember-escape.txt
 ```
 
 Completion criteria:
 
-- Go implements every semantic/bounded class over the canonical new state;
-- all variants share one semantic inventory and generated files are current;
-- production loop has no instrumentation policy work or recurring allocation;
-- Go and proof assembly use an identical request/exit contract.
+- production has one complete Go engine derived from the proven kernel, not a
+  parallel semantic implementation;
+- proof-island transitions remain exact and production-only effects are
+  fail-closed;
+- generated files are current and production variants contain no dormant
+  instrumentation;
+- recurring warm allocations remain zero.
 
 Risks and dependencies:
 
-- generated source can become another 4,000-line maintenance island. Keep the
-  human-owned spec small and generate mechanical cases only;
-- do not retain old `stepInstruction` calls as a convenient fallback inside
-  the new loop.
+- generated source can become a maintenance island; keep human-owned policy and
+  metadata small;
+- a convenient fallback into the old VM would invalidate both the proof and
+  later deletion.
 
 ### Slice 3.2 - Implement one Go effect executor and exact control policy
 
 Assigned agent: Luna max, reviewed by Sol high.
 
-Objective and reason: keep allocation, host effects, errors, cancellation, and
-coroutine transitions at one Go seam shared by both backends.
+Objective and reason: replace the proof's synthetic effect model with one real
+production effect seam shared by both backends, without changing the proven
+exit/retirement protocol.
 
 Files and symbols:
 
@@ -1760,16 +1579,24 @@ Files and symbols:
 
 Ordered work:
 
-1. Define a closed `burstExitReason` inventory covering completion, quantum,
-   budget, descriptor miss, stack/arena growth, allocation, table structural
-   mutation, string work, host/native call, unknown/metamethod call, protected
-   error, debug hook, yield/resume, cancellation, and collection poll.
-2. Implement one Go dispatcher from a validated exit record to a small pure or
-   effectful helper. It either completes execution, returns an error/outcome,
-   or refreshes request bases/descriptors and resumes.
-3. Charge exact guest instruction cost before each operation. A MaxInstructions
-   boundary stops before the over-budget operation and reports the same guest
-   PC/error as the old VM and Luau-facing contract.
+1. Adopt the proof's closed transport reasons, generic `effect` record, phase,
+   retirement, quantum, and request-refresh protocol. Extend only the Go-side
+   opaque effect-kind catalog for production completion, budget, descriptor
+   miss, stack/arena growth, allocation, table structural mutation, string
+   work, host/native call, unknown/metamethod call, protected error, debug hook,
+   yield/resume, cancellation, collection, module, and public-adapter effects.
+   Assembly copies the verified kind and never branches on catalog IDs. Each
+   extension runs catalog validation, the generic exit/resume vector, and the
+   normalized handler-identity check. A field, phase, retirement, handler, or
+   transport change reruns the companion proof before this slice continues.
+2. Replace the synthetic proof effect model with one Go dispatcher from a
+   validated exit record to a small pure or effectful production helper. It
+   either completes execution, returns an error/outcome, or refreshes roots,
+   request bases, descriptors, and ownership before resume.
+3. Preserve the proven exact guest instruction cost and pre/post-mutation
+   retirement point. A MaxInstructions boundary stops before the over-budget
+   operation and reports the same guest PC/error as the old VM and Luau-facing
+   contract.
 4. Check context cancellation and GC/owner policy at every quantum and at
    effect boundaries. Record and test the maximum cancellation/heartbeat
    latency; do not poll hidden wall clocks in core semantics.
@@ -1846,9 +1673,10 @@ Ordered work:
 1. Run all public source-to-result tests through old and new engines and compare
    results/errors/state. Add explicit backend selection only in test plumbing;
    no public permanent engine flag.
-2. Run all 5,000 now-revealed Phase 1 regression programs, the development
-   corpus, and the state-level corpus under normal, race, checkptr, GOGC=1, and
-   repeated owner close/reopen. Do not reveal the reserved Phase 4 epoch here.
+2. Run all 5,000 now-revealed companion-proof regression programs, the
+   development corpus, and the state-level corpus under normal, race,
+   checkptr, GOGC=1, and repeated owner close/reopen. Do not reveal the reserved
+   Phase 4 production epoch here.
 3. Run the full existing fuzz seed corpus. Add any discovered mismatch as a
    minimized semantic regression test, not as a backend special case.
 4. Capture the all-37 sources through an internal test-only Go-engine runner
@@ -1858,9 +1686,10 @@ Ordered work:
 5. Treat a passing test-only screen as evidence to expect a Go-only finish, not
    as acceptance. Slice 3.4 must still cut the real production route and take
    two official captures before Phase 4 can be skipped.
-6. For failing screens, verify the Phase 1 assembly proof still predicts enough remaining
-   gain for every failing semantic family. If not, stop rather than entering a
-   doomed native phase.
+6. For failing screens, verify the frozen companion proof still predicts enough
+   remaining gain for every failing semantic family. If production integration
+   has consumed that headroom or changed the mechanism, stop or rerun the proof
+   rather than entering a doomed native phase.
 
 Verification:
 
@@ -1919,8 +1748,9 @@ Ordered work:
    all-37 allocation captures; these now exercise the production Go engine
    naturally, without test selection plumbing.
 5. If the production Go engine passes every speed row twice, declare Go the
-   retained backend and skip Phase 4. Otherwise proceed only when the Phase 1
-   proof still covers every failing family with adequate measured leverage.
+   retained backend and skip Phase 4. Otherwise proceed only when the frozen
+   companion proof still covers every failing family with adequate measured
+   leverage and no backend-visible proof contract has changed.
 
 Verification:
 
@@ -1956,7 +1786,7 @@ Risks and dependencies:
 - this is the semantic/API cutover, so it must be a cohesive reviewed commit;
 - do not postpone public lifetime or globals-writeback correctness to Phase 5.
 
-## Phase 4: Implement the bounded Darwin/arm64 production backend
+## Phase 4: Promote and complete the bounded Darwin/arm64 backend
 
 All Phase 4 files use normal Go build constraints so unsupported targets build
 and run the generated Go backend. Performance support is initially declared
@@ -1972,16 +1802,21 @@ the canonical execution image without changing semantics or lifetime rules.
 
 Files and components:
 
-- new `execution_burst_arm64.go` and generated `.s`/include files;
+- retained proof wrapper, generated `.s`/include files, and their production
+  normal-build-constraint form;
 - generic build fallback in `execution_burst_generic.go`;
 - `execution_burst_abi.go`, generator, layout tests;
 - backend selection inside private `executeImage` only.
 
 Ordered work:
 
-1. Move only the passing proof mechanism into production: stable Go prototype,
-   ABI0 wrapper, no-call leaf, in-text dispatch, 64-op maximum quantum, exact
-   request/exit spill, and generated layouts.
+1. Promote the retained proof mechanism as one artifact group: ABI0 wrapper,
+   no-call leaf, in-text dispatch, frozen maximum/default quantum, exact
+   request/exit spill, generated layouts, and passing handler blocks. Do not
+   copy them into a separately editable production implementation. Verify the
+   normalized ordered leaf instruction/immediate/constant/branch/table
+   fingerprint; do not require proof and production object/linked hashes,
+   symbol spelling, addresses, or relocation offsets to be identical.
 2. Select assembly only on the explicitly supported Darwin/arm64 target and
    only for verified images with supported semantic version/layout. Generic
    builds always select Go.
@@ -1989,7 +1824,8 @@ Ordered work:
    version falls back before execution begins, never mid-state after mutation.
 4. Add a diagnostic force-Go mode available only to tests and benchmark
    tooling. Production API has no user-visible engine choice.
-5. Add object-code tests for no calls/foreign symbols, maximum function/text
+5. Add object-code tests for the normalized proof-leaf identity, no
+   calls/foreign symbols, maximum function/text
    shape, dispatch table size, and required returns. Run the linked-binary
    `scripts/execution-code-size-gate`; backend hot text plus dispatch rodata
    must remain <=256 KiB and within the ADR's proven branch reach.
@@ -2023,156 +1859,171 @@ Risks and dependencies:
   architectures on every change;
 - never use ABIInternal directly or `go:linkname` as a shortcut.
 
-### Slice 4.2 - Implement scalar/control and exact retirement in assembly
+### Slice 4.2 - Bind the proven scalar/control handlers to production state
 
 Assigned agent: Luna max.
 
-Objective and reason: execute the highest-frequency bounded value/control
-mechanics with no Go dispatch or spill between guest instructions.
+Objective and reason: enable the already-passing scalar/control/retirement
+handlers on the live canonical state without rewriting or retuning them.
 
 Files and components:
 
-- generated arm64 semantic handlers/template;
-- slot/layout constants;
-- scalar/control differential vectors and disassembly checks.
+- retained proof arm64 handler source/generated output and hashes;
+- production request/image/slot bindings;
+- scalar/control differential vectors and disassembly checks;
+- production limit/error/effect executor.
 
 Ordered work:
 
-1. Implement slot load/move/constant, nil/bool truth tests, number tag/boxed
-   escape checks, hardware-bounded arithmetic, unary operations, comparisons, branches,
-   numeric-for, and loop backedges.
-2. Preserve IEEE behavior, division/mod/idiv, negative zero, NaN payload
-   boxing, overflow/error exits, and metamethod ambiguity exactly. `pow`,
-   transcendentals, string-number coercion, and any division edge requiring an
-   unbounded/runtime helper make a deliberate pre-mutation Go effect exit unless
-   a separately reviewed bounded exact handler is proven. They remain in
-   end-to-end timing and their declared effect denominator.
-3. Bounds-check all image/register/stack indices through verifier invariants and
-   explicit dynamic checks where sizes can change. No fault is an accepted
-   guest error path.
-4. Check remaining guest budget before each operation cost. Decrement quantum
-   and return before the maximum. Spill one exact PC/top/count state on every
-   exit.
-5. Use descriptor/type guards that apply to every matching runtime state. A
-   guard miss exits; it never patches code or matches a source sequence.
-6. Differentially run every scalar/control vector and randomized CFG under Go
-   and assembly, including every possible quantum and instruction-limit cut.
+1. Verify the proof handler, generated metadata, image word, slot, cost,
+   retirement, quantum, and normalized leaf fingerprint. Promote the same
+   handler blocks under normal Darwin/arm64 constraints; do not create
+   production variants of their semantic bodies. Raw object/linked hashes are
+   evidence for each build, not the cross-build identity contract.
+2. Bind live value-stack, image, descriptor, budget, and exit bases through the
+   production request. Assert their offsets/layout hashes equal proof before
+   the backend is selected.
+3. Route production-only boxed-number allocation, metamethod ambiguity,
+   unsupported pow/transcendental/string-number work, errors, hooks, and limits
+   through the precise shared Go effect path. Do not widen a proven native
+   handler merely to avoid an honest effect.
+4. Differentially run real production scalar/control states, IEEE edge vectors,
+   randomized CFGs, and every quantum/instruction-limit cut through promoted
+   assembly and the completed Go engine.
+5. Re-run proof class coverage, speed, allocation, latency, and disassembly
+   checks after linking into production. A source or semantic change to a
+   handler reruns the companion P2/P3 gates before retention.
+6. Prove no production Value conversion, old-loop dispatch, recurring
+   allocation, or extra spill/transition has entered the promoted path.
 
 Verification:
 
 ```sh
-CGO_ENABLED=0 go test -run '^(TestAssemblyScalar|TestAssemblyControl|TestAssemblyLimitCut)' -count=50 ./...
+CGO_ENABLED=0 go test -run '^(TestAssemblyScalar|TestAssemblyControl|TestAssemblyLimitCut|TestProofHandlerIdentity)' -count=50 ./...
 CGO_ENABLED=0 go test -run '^$' -bench '^BenchmarkBurst(Scalar|Control)/' -benchmem -count=9 ./...
+CGO_ENABLED=0 go test -c -o /tmp/ember-arm64-scalar.test .
+go tool objdump -s '.*runAssemblyBurst.*' /tmp/ember-arm64-scalar.test
 ```
 
 Completion criteria:
 
-- exact state/PC/count for all scalar/control vectors and limit cuts;
-- no recurring allocation or Go exit for >=99% of class operations;
-- measured class speed meets the clean baseline-derived requirement.
+- production executes the normalized-instruction-identical proven
+  scalar/control handlers;
+- real state/PC/count/limit behavior matches the Go engine at every cut;
+- no recurring allocation or avoidable Go transition appears;
+- frozen class gain and >=99% eligible coverage still pass.
 
 Risks and dependencies:
 
-- arithmetic edge behavior can differ subtly from Go expressions; use shared
-  vectors and explicit slow exits rather than approximating semantics;
-- excessive spills erase the point of assembly and fail the speed gate.
+- production wrapper/root work can consume proof headroom despite identical
+  handler code; fail the gate rather than retuning to named rows;
+- any semantic handler change is proof work first, production promotion second.
 
-### Slice 4.3 - Implement calls, continuations, varargs, and upvalues
+### Slice 4.3 - Bind proven call/upvalue handlers to real closures and effects
 
 Assigned agent: Luna max, reviewed by Sol high.
 
-Objective and reason: close the largest remaining call-heavy gap through
-general direct script mechanics, not a special recursive opcode path.
+Objective and reason: connect the proven flat call/continuation/vararg/upvalue
+handlers to production closures, roots, protected state, and host/coroutine
+effects without recreating their mechanics.
 
 Files and components:
 
-- arm64 call/return/continuation handlers;
-- execution-image call/arity/result descriptors;
-- flat stack/continuation and upvalue storage;
-- generated call-graph differential corpus.
+- retained proof call/return/continuation/vararg/upvalue handlers;
+- production call/arity/result descriptors and owner-bound closure/upvalue
+  records;
+- completed flat stacks and production effect executor;
+- generated call-graph, limit, protected-call, and coroutine differential
+  corpus.
 
 Ordered work:
 
-1. Implement guarded direct closure/Proto entry, fixed/general call, return-one,
-   open return, tail-call reuse, recursion, multiple-result moves, and
-   continuation push/pop entirely in pointer-free state.
-2. Implement vararg base/count, pack/unpack, select-style movement, and open
-   argument/result windows without allocating Go slices.
-3. Implement existing closure invocation and open/closed upvalue reads/writes.
-   Closure/cell allocation remains a Go exit, but invoking an already-created
-   script closure does not.
-4. Exit for host/native/unknown/protected calls through a precise call record.
-   Stable scripted metamethod targets use the same direct call mechanism.
-5. Enforce stack/continuation capacity, call-depth limit, protected-state ID,
-   tail-call frame semantics, and exact return guest PC. Capacity growth exits
-   before mutation and resumes with refreshed bases.
-6. Generate direct, indirect, mutually recursive, tail-recursive,
-   fixed/open/vararg, multi-result, closure, and upvalue graphs. Compare every
-   intermediate state and exit to Go.
-7. Require >=95% native direct script edges and the Phase 1 class speed gain.
-   If Go transitions remain on direct calls, kill the backend.
+1. Verify and promote the proof's direct/fixed/open/tail/recursive call,
+   continuation, return, vararg, multi-result, closure-invocation, and upvalue
+   handler blocks unchanged.
+2. Bind real owner-relative closure/Proto/upvalue handles and production
+   call/arity/result descriptors to their frozen fields. Mixed-owner, stale,
+   dynamic, or host targets exit before mutation.
+3. Attach real call-depth limits, protected-state IDs, stack/error frames,
+   callback/native effects, module calls, coroutine yield/resume, and capacity
+   growth through the production Go effect executor. Refresh every root/base
+   before re-entry.
+4. Keep stable scripted metamethod targets on the same proven direct-call path
+   when their production descriptor validates. Unknown/host targets remain
+   effects.
+5. Generate production direct/indirect/mutually recursive/tail/fixed/open/
+   vararg/multi-result/closure/upvalue graphs plus protected, limit, module,
+   callback, and coroutine boundaries. Compare every intermediate state and
+   exit to the Go engine and old oracle.
+6. Re-run proof allocation/latency/class gates and require >=95% native direct
+   script edges. A handler extension or record change is implemented and
+   measured in the companion proof before promotion.
+7. Add structural checks that direct script calls never enter the old frame
+   trampolines or construct Go slices/frames on the assembly path.
 
 Verification:
 
 ```sh
-CGO_ENABLED=0 go test -run 'Assembly.*(Call|Return|Vararg|Upvalue|Closure|Recursion)' -count=50 ./...
+CGO_ENABLED=0 go test -run 'Assembly.*(Call|Return|Vararg|Upvalue|Closure|Recursion|Protected|Coroutine)' -count=50 ./...
 CGO_ENABLED=0 go test -run '^$' -bench '^BenchmarkAssembly(Call|Vararg|Closure)/' -benchmem -count=9 ./...
-CGO_ENABLED=0 GOGC=1 go test -count=20 -run 'Assembly.*(Call|Vararg|Upvalue)' ./...
+CGO_ENABLED=0 GOGC=1 go test -count=20 -run 'Assembly.*(Call|Vararg|Upvalue|Coroutine)' ./...
 ```
 
 Completion criteria:
 
-- all direct script call shapes stay in assembly and are exact;
-- host/effect calls exit once with complete state;
-- no per-call allocation/frame reconstruction remains;
-- required class speed and >=95% edge coverage pass.
+- production uses the proven direct-call handlers and flat records unchanged;
+- real protected/host/module/coroutine boundaries exit once with complete state;
+- no per-call allocation, frame reconstruction, or Value conversion remains;
+- required class speed and >=95% edge coverage still pass.
 
 Risks and dependencies:
 
-- indirect dynamic script calls may still be native after a general type/owner
-  guard; do not require a source-static callee;
-- continuation overflow and protected calls must fail before partial mutation.
+- production protected/coroutine ownership was outside the proof and must be
+  established at the Go edge before native resume;
+- continuation overflow and every rejected limit charge fail before partial
+  mutation.
 
-### Slice 4.4 - Implement stable globals, tables, properties, and iteration
+### Slice 4.4 - Bind proven data handlers to production descriptors and tables
 
 Assigned agent: Luna max, reviewed by Sol high.
 
-Objective and reason: make the packed storage from Phase 2 pay off across
-dynamic object/data workloads.
+Objective and reason: connect the proven global/table/property/iteration
+handlers to the live packed arenas, public mutation, metatables, and complete
+descriptor invalidation without reimplementing stable hits.
 
 Files and components:
 
-- arm64 global/table/property/iteration handlers;
-- descriptor/arena layout includes;
-- table/property/iteration differential and guard-miss tests.
+- retained proof global/table/property/scripted-target/iteration handlers;
+- production descriptor/arena layout includes and owner roots;
+- full table/metatable/intrinsic effect executor;
+- production data differential and guard-miss corpus.
 
 Ordered work:
 
-1. Implement dense global descriptor get/set with owner/version guard.
-2. Implement numeric array access, bounded open-address hash hit, existing-slot
-   write, normalized key/hash checks, and precise miss/grow/structural exits.
-3. Implement guarded own-field and finite property-chain traversal from the
-   complete descriptor. Check every table/shape/metatable version before using
-   a cached slot.
-4. For stable scripted `__index`, `__newindex`, `__len`, `__iter`, `__call`,
-   arithmetic, concat, relational, and equality targets, enter through the same
-   native direct-call/continuation mechanism with the exact operand/result
-   convention. Unknown/host targets and `__tostring` string-generation work
-   exit with the original guest operation uncommitted.
-5. Implement stable array and generic ordered iteration with a scalar cursor.
-   Mutation/version mismatch exits before producing the next result.
-6. Implement the generated bounded slot-ABI intrinsic inventory: `rawlen`,
-   `select`, numeric `math.min`/`math.max`, `next`, and stable `pairs`/`ipairs`;
-   existing-capacity `table.insert`/`table.remove` is chunked within the copy
-   budget or exits before mutation. `setmetatable`, growth, allocation, and
-   coroutine transitions remain precise Go effects. Emit per-intrinsic counts.
-7. Cap every hash/property probe and chain step in the verified descriptor.
-   There is no unbounded loop inside one assembly operation.
-8. Differentially test collisions, misses, chain replacement, shape churn,
-   metatable swaps, iterator mutation, holes, numeric zero/NaN, and every exit
-   point.
-9. Require >=90% stable global/property/table/metatable hits, >=95% stable
-   iteration, total side exits within budget, and class-relative speed gates.
+1. Verify and promote the proof's dense global, bounded array/hash,
+   existing-cell write, guarded property-chain, stable scripted target, and
+   stable iteration handlers unchanged.
+2. Bind production arena bases, table handles, shape/mutation/metatable
+   versions, key normalization, descriptor chains, and iteration cursors to the
+   frozen request/record fields. Assert layout hashes before selection.
+3. Route growth, rehash, insertion, deletion, compaction, public/host mutation,
+   long string work, setmetatable, unknown targets, and cursor invalidation
+   through exact pre-mutation Go effects. Rebuild roots, bases, versions, and
+   descriptors before resume.
+4. Exercise every supported scripted metamethod target through the proven
+   call/continuation path with real operand/result conventions. Unknown/host
+   targets and string generation remain effects.
+5. Promote only proof-validated bounded slot intrinsics. Any new native
+   intrinsic or chunked table operation first extends the generated proof
+   inventory and reruns its semantic, work-bound, coverage, speed, and latency
+   gates.
+6. Differentially test collisions, holes, signed zero/NaN, shape churn,
+   metatable replacement, deep finite chains, aliases, iterator mutation,
+   growth, deletion, and every effect/resume point against Go, old VM, and the
+   independent model.
+7. Re-run production anti-overfit, class coverage, allocations, and speed.
+   Require >=90% global/table/property attempts, >=95% stable iteration, and
+   the frozen eligible-exit ceilings without key/source specialization.
 
 Verification:
 
@@ -2185,17 +2036,19 @@ CGO_ENABLED=0 go test -race -run 'OwnerIsolation|Descriptor|Table|Property' ./..
 
 Completion criteria:
 
-- stable data/object operations stay in assembly at declared coverage;
-- all guard misses and structural effects are exact and uncommitted on exit;
-- deterministic iteration and metatable order match Go/reference;
-- class speed gates pass without key/source/case specialization.
+- stable production data operations execute the proven handlers at declared
+  coverage;
+- every guard miss and structural/public effect exits uncommitted and resumes
+  with refreshed state;
+- deterministic iteration, aliases, and metatable order match all references;
+- class speed gates pass without source/key/case specialization.
 
 Risks and dependencies:
 
-- property chains that change frequently may exceed side-exit budget; resolver
-  and version design must be general and measured;
-- assembly cannot safely mutate Go pointer-rich `Table`; Phase 2 packed storage
-  is a hard prerequisite.
+- real mutation may raise side-exit frequency beyond the synthetic proof;
+  production coverage and all-37 timing decide retention;
+- assembly never touches pointer-rich public `Table`; only the canonical packed
+  owner state is backend-visible.
 
 ### Slice 4.5 - Integrate side exits, quanta, GC, cancellation, and host edges
 
@@ -2216,9 +2069,10 @@ Ordered work:
 
 1. Route every assembly exit through the same Go effect executor used by the
    oracle. Reject unknown/malformed exit reason or state before resuming.
-2. Tune quantum only within the proven safe envelope. Measure 16/32/64 guest
-   operations on class-balanced programs; select one general default based on
-   wrapper overhead and worst-case heartbeat/GC/cancellation latency.
+2. Use the proof-frozen general quantum and work bounds. Re-measure wrapper
+   overhead and worst-case heartbeat/GC/cancellation latency on production
+   state. If integration requires a different default or bound, return to the
+   companion proof, freeze and pass it there, then promote the new version.
 3. Prove forced GC and STW complete while another goroutine repeatedly runs
    bursts on `GOMAXPROCS=1`. Record maximum latency and fail if a handler can
    exceed the bounded envelope.
@@ -2270,6 +2124,8 @@ Files and evidence:
 
 - all generated/differential tests;
 - class coverage and side-exit reports;
+- retained owner-neutral proof artifacts and
+  `testdata/runtime-proof/proof-handoff-v1.manifest`;
 - all-37 speed2x artifacts;
 - allocation audit and CPU profiles;
 - assembly object/disassembly report;
@@ -2292,17 +2148,39 @@ Ordered work:
    family side-exit threshold. A missing denominator is a failure.
 4. Run warmed allocation gates and cold image/arena caps. Any recurring hot
    allocation increase is a failure even if speed passes.
-5. Take a clean all-37 `speed2x` capture. Require every row <=1.85 median and
+5. At the frozen production mechanism, load the exact ordered inventory from
+   `proof-handoff-v1.manifest` and run every visible, composition, and selected
+   held-out performance program through the owner-neutral proof assembly path
+   and integrated production assembly path in two fresh paired acquisitions
+   using the proof's exact schedules and cold-point event mapping: sealed source
+   is the input, and `Compile`, lowering/binding, execution, digest validation,
+   result release, and cleanup are inside both paired timers. This mapping is
+   deliberately independent of the final all-37 runtime policy below. For
+   paired fit `i`, define `D_i=productionSlope_i/proofSlope_i`,
+   `M_D=median(D_i)`, and `Q_D=max(D_i)`. In both captures, every individual
+   program must have `M_D <=1.057142857` and `Q_D <=1.052631579`. Apply the
+   same two ceilings to the median and maximum paired
+   `productionElapsed_i(N)/proofElapsed_i(N)` at each scheduled N so lifecycle/
+   intercept overhead cannot disappear into the slope. No class, stratum, or
+   aggregate may substitute for a failing row. This tax includes real owner
+   binding, public/result lifecycle, root refresh, descriptors, and real effect
+   handling that occurs in the program. A missing proof artifact, incompatible
+   semantic core, failed fit, or exceeded program budget is a hard stop before
+   backend retention and old-oracle deletion.
+6. Take a clean all-37 `speed2x` capture. Require every row <=1.85 median and
    <=2.00 p90. Also require no row regress more than 3% relative to the new Go
    engine unless both engines are comfortably below 1.75 and the change is
    explained by shared representation.
-6. Run the production source anti-overfit scan and disassembly checks.
-7. Sol reviews raw artifacts, not only summaries, and records retain/delete.
+7. Run the production source anti-overfit scan and disassembly checks. Add
+   self-tests for an omitted/extra/duplicate/hash-mismatched row or artifact,
+   schedule substitution, ratio-of-summary instead of paired `D_i`, and
+   attempted class aggregation.
+8. Sol reviews raw artifacts, not only summaries, and records retain/delete.
 
 Retention outcomes:
 
-- Retain assembly only if semantics, safety, class coverage, allocations, and
-  every-row speed all pass.
+- Retain assembly only if semantics, safety, class coverage, allocations,
+  every-class integration tax, and every-row speed all pass.
 - If Go alone passes and assembly fails or adds unjustified complexity, delete
   assembly and retain the Go engine.
 - If neither backend passes, delete production assembly, keep the correct Go
@@ -2316,6 +2194,12 @@ CGO_ENABLED=0 go test -count=1 ./...
 CGO_ENABLED=0 go test -race -count=1 ./...
 CGO_ENABLED=0 go test -gcflags=all=-d=checkptr=2 -count=1 ./...
 scripts/check-purego
+CGO_ENABLED=0 GOMAXPROCS=1 scripts/runtime-architecture-proof integration-tax \
+  --proof-handoff testdata/runtime-proof/proof-handoff-v1.manifest \
+  --production --replicate assembly-integration-tax-a
+CGO_ENABLED=0 GOMAXPROCS=1 scripts/runtime-architecture-proof integration-tax \
+  --proof-handoff testdata/runtime-proof/proof-handoff-v1.manifest \
+  --production --replicate assembly-integration-tax-b
 CGO_ENABLED=0 GOMAXPROCS=1 scripts/performance-audit \
   --output /tmp/ember-speed2x-arm64 --profiles
 CGO_ENABLED=0 GOMAXPROCS=1 scripts/execution-allocation-gate \
@@ -2332,7 +2216,7 @@ CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau \
 Completion criteria:
 
 - a signed-off retain/delete decision cites raw correctness, coverage,
-  allocation, speed, scheduler, and disassembly evidence;
+  allocation, integration-tax, speed, scheduler, and disassembly evidence;
 - no partial assembly tier survives a failed gate;
 - no threshold, row, or semantic family is waived.
 
@@ -2597,22 +2481,22 @@ slice passes its checks:
 
 Recommended retained commit boundaries:
 
-1. speed2x all-row calibrated harness and ADR;
-2. held-out generator/differential/anti-overfit gates;
-3. passing ABI/assembly architecture proof or its explicit rejection evidence;
-4. execution image and verifier;
-5. slot/owner cutover;
-6. flat stacks/calls/coroutines;
-7. packed tables/globals/properties/descriptors;
-8. complete generated Go engine/effect executor;
-9. each passing assembly semantic island slice;
+1. verified proof handoff plus promoted production no-foreign gate;
+2. speed2x all-row calibrated harness;
+3. production held-out/differential/anti-overfit and allocation baselines;
+4. execution-image owner binding;
+5. slot/root/pin/public-lifetime cutover;
+6. flat-stack production calls/errors/limits/coroutines;
+7. packed public tables/globals/properties/descriptors;
+8. completed production Go engine/effect executor;
+9. each passing proof-handler promotion or production-only extension;
 10. production cutover/deletion;
 11. final evidence/docs/scheduled gate.
 
-Do not commit a failed production prototype merely to preserve it. Record its
-measurements and delete the dead path in the same retention decision. Temporary
-proof commits may be retained only when they are clearly test-only,
-independently useful, and add no production routing/allocation.
+Do not commit a failed production adapter merely to preserve it. Record its
+measurements and delete the dead path in the same retention decision. The
+companion plan owns proof retention; this plan may not keep a second tagged
+prototype after the promoted path exists.
 
 ## Verification matrix
 
@@ -2635,8 +2519,8 @@ independently useful, and add no production routing/allocation.
 Stop the campaign and report the target unachieved under current constraints if
 any of the following remains after one complete general attempt:
 
-- the Phase 1 vertical proof cannot deliver the baseline-derived multi-x gains
-  for calls and table/property families;
+- the companion proof records `STOP`, its handoff cannot be verified, or a
+  later backend-visible change fails the required proof rerun;
 - linked assembly cannot provide reliable bounded dispatch under the public Go
   ABI without private runtime hooks or foreign calls;
 - direct script calls, stable table/property/metatable hits, or iteration cannot
@@ -2647,6 +2531,9 @@ any of the following remains after one complete general attempt:
   oracle, checkptr oracle, or forced-GC tests find a mismatch that cannot be
   fixed generally;
 - warmed allocation increases recur in a hot operation;
+- integrated production slope or point-total overhead exceeds the frozen
+  proof-to-production tax ceiling for any performance program in either
+  capture;
 - the final general lowering still leaves any acceptance row above 2.00 p90;
 - meeting the target would require CGO, C/C++, dynamic foreign ABI, upstream
   embedding, runtime JIT/entitlement, helper processes, or benchmark-specific
