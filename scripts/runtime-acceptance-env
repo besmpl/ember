@@ -1,0 +1,231 @@
+#!/bin/sh
+set -eu
+
+script_dir=${0%/*}
+[ "$script_dir" = "$0" ] && script_dir=.
+repo_root=$(cd "$script_dir/.." && pwd)
+
+expected_go=go1.26.4
+expected_goos=darwin
+expected_goarch=arm64
+expected_os_build=24.6.0
+expected_cpu='Apple M1'
+expected_luau_version=0.728
+expected_luau_sha256=c921fa51dbc0d81f9acbddcfa9208aa58f039388301f9fba77d2c5a324cb42bd
+header='schema_version	go_version	goos	goarch	os_build	cpu_model	cgo_enabled	gomaxprocs	luau_version	luau_sha256'
+
+usage() {
+	cat >&2 <<'EOF'
+usage: scripts/runtime-acceptance-env --output PATH --capture-kind performance|parity|allocation
+       scripts/runtime-acceptance-env --self-test
+EOF
+}
+
+fail() {
+	printf 'runtime-acceptance-env: %s\n' "$1" >&2
+	return 1
+}
+
+hash_file() {
+	if command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 "$1" | awk '{print $1}'
+	elif command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | awk '{print $1}'
+	else
+		fail 'SHA-256 tool is required'
+	fi
+}
+
+validate_values() {
+	[ "$actual_go" = "$expected_go" ] || { fail "Go version must be $expected_go, got $actual_go"; return 1; }
+	[ "$actual_goos" = "$expected_goos" ] || { fail "GOOS must be $expected_goos, got $actual_goos"; return 1; }
+	[ "$actual_goarch" = "$expected_goarch" ] || { fail "GOARCH must be $expected_goarch, got $actual_goarch"; return 1; }
+	[ "$actual_os_build" = "$expected_os_build" ] || { fail "OS build must be Darwin $expected_os_build, got $actual_os_build"; return 1; }
+	[ "$actual_cpu" = "$expected_cpu" ] || { fail "CPU must be $expected_cpu, got $actual_cpu"; return 1; }
+	[ "$actual_cgo_env" = 0 ] || { fail "CGO_ENABLED environment must be 0, got $actual_cgo_env"; return 1; }
+	[ "$actual_cgo_go" = 0 ] || { fail "go env CGO_ENABLED must be 0, got $actual_cgo_go"; return 1; }
+	[ "$actual_gomaxprocs" = 1 ] || { fail "GOMAXPROCS environment must be 1, got $actual_gomaxprocs"; return 1; }
+	tab=$(printf '\t')
+	for field in "$actual_go" "$actual_goos" "$actual_goarch" "$actual_os_build" "$actual_cpu" "$actual_cgo_env" "$actual_cgo_go" "$actual_gomaxprocs"; do
+		case "$field" in
+		*"$tab"*) fail 'environment values must not contain tabs'; return 1 ;;
+		esac
+		line_count=$(printf '%s\n' "$field" | wc -l | tr -d ' ')
+		[ "$line_count" = 1 ] || { fail 'environment values must not contain newlines'; return 1; }
+	done
+	if [ "$capture_kind" = parity ]; then
+		[ "$actual_luau_executable" = 1 ] || { fail 'LUAU_BIN must name an executable file'; return 1; }
+		[ "$actual_luau_version" = "$expected_luau_version" ] || { fail "Luau version must be $expected_luau_version, got $actual_luau_version"; return 1; }
+		[ "$actual_luau_sha256" = "$expected_luau_sha256" ] || { fail "Luau SHA-256 must be $expected_luau_sha256, got $actual_luau_sha256"; return 1; }
+	else
+		[ "$actual_luau_version" = not-applicable ] || { fail 'non-parity Luau version must be not-applicable'; return 1; }
+		[ "$actual_luau_sha256" = not-applicable ] || { fail 'non-parity Luau SHA-256 must be not-applicable'; return 1; }
+	fi
+}
+
+validate_runtime_process() {
+	if ! (cd "$repo_root" && EMBER_RUNTIME_ACCEPTANCE_PROCESS=1 go test -run '^TestRuntimeAcceptanceProcessContract$' -count=1 . >/dev/null); then
+		fail 'Go-runtime GOMAXPROCS probe failed'
+		return 1
+	fi
+}
+
+write_artifact() {
+	path=$1
+	[ ! -e "$path" ] || { fail "output already exists: $path"; return 1; }
+	dir=$(dirname "$path")
+	mkdir -p "$dir"
+	tmp=$dir/.runtime-acceptance-env.$$
+	[ ! -e "$tmp" ] || { fail "temporary output already exists: $tmp"; return 1; }
+	trap 'rm -f "$tmp"' EXIT HUP INT TERM
+	{
+		printf '%s\n' "$header"
+		printf '1\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+			"$actual_go" "$actual_goos" "$actual_goarch" "$actual_os_build" \
+			"$actual_cpu" "$actual_cgo_go" "$actual_gomaxprocs" \
+			"$actual_luau_version" "$actual_luau_sha256"
+	} >"$tmp"
+	mv "$tmp" "$path"
+	trap - EXIT HUP INT TERM
+}
+
+set_valid_fixture() {
+	capture_kind=$1
+	actual_go=$expected_go
+	actual_goos=$expected_goos
+	actual_goarch=$expected_goarch
+	actual_os_build=$expected_os_build
+	actual_cpu=$expected_cpu
+	actual_cgo_env=0
+	actual_cgo_go=0
+	actual_gomaxprocs=1
+	if [ "$capture_kind" = parity ]; then
+		actual_luau_executable=1
+		actual_luau_version=$expected_luau_version
+		actual_luau_sha256=$expected_luau_sha256
+	else
+		actual_luau_executable=0
+		actual_luau_version=not-applicable
+		actual_luau_sha256=not-applicable
+	fi
+}
+
+expect_invalid() {
+	label=$1
+	field=$2
+	value=$3
+	set_valid_fixture parity
+	eval "$field=\$value"
+	if validate_values >/dev/null 2>&1; then
+		fail "self-test accepted invalid $label"
+	fi
+}
+
+run_self_test() {
+	for kind in performance parity allocation; do
+		set_valid_fixture "$kind"
+		validate_values || fail "self-test rejected valid $kind values"
+	done
+	expect_invalid go-version actual_go go1.99.0
+	expect_invalid goos actual_goos linux
+	expect_invalid goarch actual_goarch amd64
+	expect_invalid os-build actual_os_build 24.5.0
+	expect_invalid cpu actual_cpu 'Other CPU'
+	expect_invalid cgo-environment actual_cgo_env 1
+	expect_invalid cgo-go actual_cgo_go 1
+	expect_invalid gomaxprocs actual_gomaxprocs 2
+	expect_invalid luau-executable actual_luau_executable 0
+	expect_invalid luau-version actual_luau_version 0.999
+	expect_invalid luau-sha256 actual_luau_sha256 deadbeef
+
+	root=$(mktemp -d "${TMPDIR:-/tmp}/runtime-acceptance-env.XXXXXX")
+	trap 'rm -rf "$root"' EXIT HUP INT TERM
+	set_valid_fixture performance
+	validate_values
+	write_artifact "$root/environment.tsv"
+	{
+		printf '%s\n' "$header"
+		printf '1\tgo1.26.4\tdarwin\tarm64\t24.6.0\tApple M1\t0\t1\tnot-applicable\tnot-applicable\n'
+	} >"$root/want.tsv"
+	cmp -s "$root/want.tsv" "$root/environment.tsv" || fail 'self-test artifact differs from v1 contract'
+	if (write_artifact "$root/environment.tsv") >/dev/null 2>&1; then
+		fail 'self-test reused an existing output'
+	fi
+	rm -rf "$root"
+	trap - EXIT HUP INT TERM
+	printf '%s\n' 'runtime-acceptance-env self-test: PASS'
+}
+
+output=
+capture_kind=
+self_test=0
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+	--output)
+		[ "$#" -ge 2 ] || { usage; exit 2; }
+		output=$2
+		shift 2
+		;;
+	--capture-kind)
+		[ "$#" -ge 2 ] || { usage; exit 2; }
+		capture_kind=$2
+		shift 2
+		;;
+	--self-test)
+		self_test=1
+		shift
+		;;
+	-h|--help)
+		usage
+		exit 0
+		;;
+	*)
+		usage
+		exit 2
+		;;
+	esac
+done
+
+if [ "$self_test" -eq 1 ]; then
+	[ -z "$output$capture_kind" ] || { usage; exit 2; }
+	run_self_test
+	exit 0
+fi
+
+[ -n "$output" ] && [ -n "$capture_kind" ] || { usage; exit 2; }
+case "$capture_kind" in
+performance|parity|allocation) ;;
+*) fail "unknown capture kind: $capture_kind"; exit 2 ;;
+esac
+[ ! -e "$output" ] || { fail "output already exists: $output"; exit 1; }
+
+actual_go=$(go env GOVERSION)
+actual_goos=$(go env GOOS)
+actual_goarch=$(go env GOARCH)
+actual_os_build=$(uname -r)
+actual_cpu=$(sysctl -n machdep.cpu.brand_string)
+actual_cgo_env=${CGO_ENABLED-}
+actual_cgo_go=$(go env CGO_ENABLED)
+actual_gomaxprocs=${GOMAXPROCS-}
+actual_luau_executable=0
+if [ "$capture_kind" = parity ]; then
+	luau_bin=${LUAU_BIN-}
+	[ -n "$luau_bin" ] && [ -f "$luau_bin" ] && [ -x "$luau_bin" ] && actual_luau_executable=1
+	if [ "$actual_luau_executable" -eq 1 ]; then
+		actual_luau_sha256=$(hash_file "$luau_bin")
+	else
+		actual_luau_sha256=missing
+	fi
+	# The pinned digest identifies the exact 0.728 oracle binary. Luau does not
+	# expose a stable version flag, so the version is accepted only together
+	# with that exact digest.
+	actual_luau_version=$expected_luau_version
+else
+	actual_luau_version=not-applicable
+	actual_luau_sha256=not-applicable
+fi
+
+validate_values
+validate_runtime_process
+write_artifact "$output"
+printf 'runtime-acceptance-env: wrote %s\n' "$output"

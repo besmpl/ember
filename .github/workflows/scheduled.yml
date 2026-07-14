@@ -34,8 +34,12 @@ jobs:
         run: |
           set -euo pipefail
           ruby -e 'require "yaml"; YAML.load_file(".github/workflows/scheduled.yml"); puts "scheduled workflow YAML: pass"'
-          sh -n scripts/check-runtime-parity scripts/performance-audit
+          sh -n scripts/check-runtime-parity scripts/runtime-ratio-gate scripts/runtime-allocation-gate scripts/runtime-acceptance-env scripts/performance-audit
           scripts/check-runtime-parity --self-test
+          scripts/runtime-ratio-gate --self-test
+          scripts/runtime-allocation-gate --self-test
+          scripts/runtime-acceptance-env --self-test
+          go test -run '^TestRuntimeParityHarness$' .
           scripts/performance-audit --help >/dev/null
 
   fuzz:
@@ -97,11 +101,12 @@ jobs:
     # This label set is intentionally explicit: parity numbers are only
     # meaningful on the pinned controlled self-hosted reference runner.
     runs-on: [self-hosted, macOS, ARM64, apple-m1, ember-parity]
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       CGO_ENABLED: '0'
       GOMAXPROCS: '1'
       LUAU_BIN: /opt/homebrew/bin/luau
+      PARITY_ARTIFACT_ROOT: ${{ runner.temp }}/ember-parity-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
       - name: Check out repository
@@ -123,17 +128,18 @@ jobs:
               printf 'HEAD\t%s\n' "$(git rev-parse HEAD)"
               {
                 find . -maxdepth 1 -type f -name '*.go' -print | awk '{sub(/^\.\//, ""); print}'
-                printf '%s\n' scripts/check-runtime-parity scripts/scenario-ratio-gate
+                printf '%s\n' scripts/check-runtime-parity scripts/runtime-ratio-gate scripts/runtime-acceptance-env
               } | LC_ALL=C sort | while IFS= read -r path; do
                 digest="$(shasum -a 256 "$path" | awk '{print $1}')"
                 printf '%s\t%s\n' "$path" "$digest"
               done
             } | shasum -a 256 | awk '{print $1}'
           )
-          mkdir -p parity-artifacts
+          mkdir -p "$PARITY_ARTIFACT_ROOT"
           {
             printf '%s\n' '# ember scheduled parity fingerprint/v1'
-            printf 'command=LUAU_BIN=/opt/homebrew/bin/luau CGO_ENABLED=0 GOMAXPROCS=1 scripts/check-runtime-parity --phase full\n'
+            printf 'full_command=LUAU_BIN=/opt/homebrew/bin/luau CGO_ENABLED=0 GOMAXPROCS=1 scripts/check-runtime-parity --phase full --output %s/full-all37\n' "$PARITY_ARTIFACT_ROOT"
+            printf 'speed_command=LUAU_BIN=/opt/homebrew/bin/luau CGO_ENABLED=0 GOMAXPROCS=1 scripts/check-runtime-parity --phase speed2x --capture-only --capture-role frozen-current --capture-pair a --output %s/speed2x-a\n' "$PARITY_ARTIFACT_ROOT"
             printf 'commit='; git rev-parse HEAD
             printf 'source_fingerprint=%s\n' "$source_fingerprint"
             printf 'source_status_begin\n'; git status --porcelain=v1; printf 'source_status_end\n'
@@ -149,28 +155,39 @@ jobs:
             printf 'environment_begin\n'
             env | LC_ALL=C sort | awk -F= '/^(CGO_ENABLED|GOMAXPROCS|GOFLAGS|GODEBUG|LUAU_BIN|BENCHTIME|RUNTIME_PARITY_CASES|RUNTIME_PARITY_RAW)=/ {print}'
             printf 'environment_end\n'
-          } > parity-artifacts/fingerprint.txt
+          } > "$PARITY_ARTIFACT_ROOT/fingerprint.txt"
 
-      - name: Run full runtime parity gate
+      - name: Run all-37 runtime correctness capture
         if: ${{ always() }}
         shell: bash
         run: |
           set -o pipefail
-          mkdir -p parity-artifacts
+          mkdir -p "$PARITY_ARTIFACT_ROOT"
           set +e
           LUAU_BIN="$LUAU_BIN" CGO_ENABLED="$CGO_ENABLED" GOMAXPROCS="$GOMAXPROCS" \
-            scripts/check-runtime-parity --phase full 2>&1 | tee parity-artifacts/parity.log
+            scripts/check-runtime-parity --phase full --output "$PARITY_ARTIFACT_ROOT/full-all37" 2>&1 | tee "$PARITY_ARTIFACT_ROOT/full.log"
           pipeline_status=("${PIPESTATUS[@]}")
           producer_status=${pipeline_status[0]}
           tee_status=${pipeline_status[1]}
           printf 'runtime parity producer exit status: %s; tee exit status: %s\n' "$producer_status" "$tee_status"
-          printf 'runtime parity producer exit status: %s; tee exit status: %s\n' "$producer_status" "$tee_status" >>parity-artifacts/parity.log
+          printf 'runtime parity producer exit status: %s; tee exit status: %s\n' "$producer_status" "$tee_status" >>"$PARITY_ARTIFACT_ROOT/full.log"
           append_status=$?
           status=0
           [ "$producer_status" -eq 0 ] || status=$producer_status
           [ "$status" -eq 0 ] && [ "$tee_status" -ne 0 ] && status=$tee_status
           [ "$status" -eq 0 ] && [ "$append_status" -ne 0 ] && status=$append_status
           exit "$status"
+
+      - name: Capture all-37 speed2x evidence
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$PARITY_ARTIFACT_ROOT"
+          LUAU_BIN="$LUAU_BIN" CGO_ENABLED="$CGO_ENABLED" GOMAXPROCS="$GOMAXPROCS" \
+            scripts/check-runtime-parity --phase speed2x --capture-only \
+              --capture-role frozen-current --capture-pair a \
+              --output "$PARITY_ARTIFACT_ROOT/speed2x-a" 2>&1 | tee "$PARITY_ARTIFACT_ROOT/speed2x.log"
 
       - name: Preserve parity evidence
         if: ${{ always() }}
@@ -179,9 +196,7 @@ jobs:
           name: runtime-parity
           retention-days: 30
           if-no-files-found: warn
-          path: |
-            parity-artifacts
-            tmp/runtime-parity
+          path: ${{ env.PARITY_ARTIFACT_ROOT }}
 
   performance:
     name: performance audit (Darwin arm64 Apple M1)

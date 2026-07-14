@@ -2,6 +2,7 @@ package ember_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -1523,6 +1524,49 @@ func BenchmarkClassicLuau(b *testing.B) {
 
 func BenchmarkScenarioLuau(b *testing.B) {
 	benchmarkLuauCases(b, scenarioLuauCases)
+}
+
+// BenchmarkRuntimeSpeed2x exposes the frozen warmed-call surface used by the
+// acceptance harness. Compilation and callable construction happen before the
+// timer; each measured operation is one call through the already prepared
+// program and therefore has a stable lifecycle boundary.
+func BenchmarkRuntimeSpeed2x(b *testing.B) {
+	for _, group := range []struct {
+		corpus string
+		cases  []top10LuauCase
+	}{
+		{corpus: "top10", cases: top10LuauCases},
+		{corpus: "classic", cases: classicLuauCases},
+		{corpus: "scenario", cases: scenarioLuauCases},
+	} {
+		for _, tc := range group.cases {
+			tc := tc
+			b.Run(group.corpus+"/"+tc.name+"/warm_call", func(b *testing.B) {
+				callable, err := prepareParityEmberRuntime(parityCaseSource(tc.source, 1))
+				if err != nil {
+					b.Fatal(err)
+				}
+				b.Cleanup(func() {
+					if err := callable.close(); err != nil {
+						b.Errorf("close warmed callable: %v", err)
+					}
+				})
+				warm, err := callable.callback.Call(context.Background())
+				if err != nil {
+					b.Fatal(err)
+				}
+				validateTop10EmberResult(b, warm, tc.want)
+				b.ResetTimer()
+				for b.Loop() {
+					result, err := callable.callback.Call(context.Background())
+					if err != nil {
+						b.Fatal(err)
+					}
+					benchmarkEmberResultsSink = result
+				}
+			})
+		}
+	}
 }
 
 func benchmarkLuauCases(b *testing.B, cases []top10LuauCase) {

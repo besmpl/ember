@@ -63,6 +63,62 @@ an existing capture. Raw `go test` output is retained for all five families;
 `scripts/bench-summary` provides the shared table and TSV parsing contract.
 Failed runs leave an `INCOMPLETE` marker in the newly created directory.
 
+## Runtime parity and speed
+
+`full` and `speed2x` both use the frozen corpus-qualified inventory: 10 Top10,
+2 Classic, and 25 Scenario cases. `full` is the all-37 correctness capture;
+`speed2x` additionally names the acceptance intent. Both use the same matched
+warmed-callable timer contract and exact `N={1,10,100,1000}`, three-repeat
+sampling. Output directories are caller-owned and must not already exist.
+
+```sh
+CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau \
+  scripts/check-runtime-parity --phase full \
+  --output /tmp/ember-parity-full
+
+CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau \
+  scripts/check-runtime-parity --phase speed2x --capture-only \
+  --capture-role frozen-current --capture-pair a \
+  --output /tmp/ember-speed2x-a
+```
+
+`--capture-only` preserves correct, uncontaminated evidence even when the
+future 2x target is missed. It does not waive environment, result, row,
+contamination, or slope validation. Gate two independent captures and derive
+their immutable manifest separately:
+
+```sh
+scripts/runtime-ratio-gate --derive \
+  --baseline-a /tmp/ember-speed2x-a \
+  --baseline-b /tmp/ember-speed2x-b \
+  --output /tmp/ember-speed2x-baselines-v1.tsv
+
+scripts/runtime-ratio-gate --capture-a /tmp/ember-speed2x-a \
+  --capture-b /tmp/ember-speed2x-b --report-only \
+  --baseline-manifest /tmp/ember-speed2x-baselines-v1.tsv
+```
+
+The ratio gate rejects any missing, extra, duplicate, contaminated, malformed,
+or nonpositive row and independently checks all 37 cases in both captures.
+Acceptance is per row: the nine Cartesian Ember/Luau slope ratios must have
+median at most 1.85 and p90 at most 2.0. Candidate/current comparisons bind the
+manifest and both baseline directories and require each paired median to stay
+at or below 1.05.
+
+Allocation evidence is separate. Capture two baselines with explicit pairs,
+derive the exact 56-row ceiling manifest, then compare candidate evidence:
+
+```sh
+CGO_ENABLED=0 GOMAXPROCS=1 scripts/runtime-allocation-gate --capture \
+  --capture-role frozen-current --capture-pair a \
+  --output /tmp/ember-runtime-alloc-a
+```
+
+Warmed B/op and allocs/op cannot exceed their frozen ceilings. Cold allocation
+counts cannot rise; cold byte and retained-state snapshots remain report-only.
+A finite snapshot cannot establish unbounded growth, so a later repeated-growth
+test must supply that evidence before retained bytes can become a blocking gate.
+
 ## Scheduled evidence
 
 `.github/workflows/scheduled.yml` runs the long-lived checks weekly (and by
@@ -70,13 +126,12 @@ manual dispatch). The five fuzz targets each have a separate matrix entry,
 `fail-fast: false`, and a bounded 10-minute fuzz budget. Every entry uploads its
 log and `testdata/fuzz/<target>` corpus, including when the fuzz process fails.
 
-The runtime parity job runs `scripts/check-runtime-parity --phase full` on the
+The runtime parity job runs caller-named `full` and `speed2x` all-37 captures on the
 controlled self-hosted Darwin 24.6.0 arm64 Apple M1 runner labeled
 `[self-hosted, macOS, ARM64, apple-m1, ember-parity]`, with the pinned Luau
-executable. The existing harness records raw samples and applies the
-median and p90 ratio limits as hard gates (invalid or contaminated input is a
-failure); the workflow additionally uploads the command, source, toolchain,
-Luau, CPU, OS, and environment fingerprint along with all retained attempts.
+executable. It uploads exact v1 raw and fitted-slope artifacts plus the command,
+source, toolchain, Luau, CPU, OS, and environment fingerprint. Invalid or
+contaminated acquisition fails; a baseline speed miss is retained honestly.
 
 The performance job runs `scripts/performance-audit --profiles` on a controlled
 Apple M1 runner labeled

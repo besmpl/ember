@@ -1,0 +1,98 @@
+#!/bin/sh
+set -eu
+
+header=$(printf 'schema_version\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\tbytes_per_op\tallocs_per_op\timage_prepare_ns\tmachine_bind_ns\tarena_retained_bytes\troot_retained_bytes\tcommand\tenvironment_sha256')
+manifest_header=$(printf 'schema_version\tcapture_sha256_a\tcapture_sha256_b\tsource_commit\tenvironment_sha256\tcorpus\tname\tlifecycle\tbytes_per_op_ceiling\tallocs_per_op_ceiling\timage_prepare_ns_max\tmachine_bind_ns_max\tarena_retained_bytes_max\troot_retained_bytes_max\tcommand_a\tcommand_b')
+warm_ids='top10/arithmetic_for top10/while_branching top10/table_fields top10/array_ops top10/generic_iteration top10/closures_upvalues top10/method_calls top10/metatable_index top10/varargs_select top10/coroutine_yield classic/recursive_fibonacci classic/iterative_fibonacci scenario/combat_tick scenario/inventory_value scenario/event_dispatch scenario/buff_stack_tick scenario/ability_resolution scenario/ai_utility_scoring scenario/cooldown_scheduler scenario/projectile_sweep scenario/quest_progress_update scenario/behavior_tree_tick scenario/threat_aggro_table scenario/economy_market_tick scenario/formation_layout_score scenario/dialogue_condition_eval scenario/procgen_room_scoring scenario/save_state_diff scenario/path_relaxation scenario/component_churn scenario/prototype_fallback scenario/signal_bus_callbacks scenario/state_machine_transitions scenario/sparse_grid_neighbors scenario/dirty_metatable_writes scenario/array_hole_compaction scenario/command_vararg_router'
+life_ids='Compile CompileWithOptions LoadProgram_ModuleLoader Run RunWithGlobals image_prepare machine_bind_ephemeral machine_detach machine_close NewRuntime RunHook_persistent RunHook_bounded RunHook_cancelable module_require RuntimeHost Callback coroutine_resume result_detach close'
+die(){ printf 'runtime-allocation-gate: %s\n' "$1" >&2; exit 2; }
+hash_file(){ shasum -a 256 "$1" 2>/dev/null|awk '{print $1}' || sha256sum "$1"|awk '{print $1}'; }
+hash_dir(){
+ dir=$1; [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+ find "$dir" -type l -print -quit | grep -q . && return 1 || :
+ (cd "$dir" && find . -type f ! -name INCOMPLETE -print | LC_ALL=C sort | while IFS= read -r p; do printf '%s\t%s\n' "$p" "$(hash_file "$p")"; done) | shasum -a 256 | awk '{print $1}'
+}
+validate_capture(){
+ dir=$1; want_role=${2:-}; want_pair=${3:-}; [ -d "$dir" ] && [ ! -L "$dir" ] && [ ! -e "$dir/INCOMPLETE" ] && [ -f "$dir/allocation.tsv" ] && [ ! -L "$dir/allocation.tsv" ] && [ -f "$dir/environment.tsv" ] && [ ! -L "$dir/environment.tsv" ] || return 1
+ expected_env=$(hash_file "$dir/environment.tsv")
+ awk -v h="$header" -v warm="$warm_ids" -v life="$life_ids" -v wr="$want_role" -v wp="$want_pair" -v eh="$expected_env" 'BEGIN{FS="\t";split(warm,w," ");for(i in w){split(w[i],q,"/");e[q[1] SUBSEP q[2] SUBSEP "warm_call"]=1};split(life,l," ");for(i in l)e["public" SUBSEP l[i] SUBSEP l[i]]=1;n="^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$";x="^[0-9a-f]+$"} NR==1{if($0!=h)b=1;next} NF{if(NF!=16||$1!="1"||($2!="frozen-current"&&$2!="candidate")||($3!="a"&&$3!="b")||$4==""||((length($5)!=40&&length($5)!=64)||$5!~x)||$16!=eh||length($16)!=64||$16!~x||$15==""||$9!~n||$10!~n||$11!~n||$12!~n||$13!~n||$14!~n||$9<0||$10<0||$11<0||$12<0||$13<0||$14<0){b=1;next};if(wr!=""&&$2!=wr)b=1;if(wp!=""&&$3!=wp)b=1;if(!seen_meta){role=$2;pair=$3;id=$4;src=$5;env=$16;cmd=$15;seen_meta=1}else if(role!=$2||pair!=$3||id!=$4||src!=$5||env!=$16||cmd!=$15)b=1;k=$6 SUBSEP $7 SUBSEP $8;if(!(k in e)||k in s)b=1;s[k]=1;r++}END{for(k in e)if(!(k in s))b=1;if(r!=56||b)exit 1}' "$dir/allocation.tsv"
+}
+
+write_fixture(){
+ dir=$1; role=$2; pair=$3; id=$4; env=$5
+ [ -f "$dir/environment.tsv" ] || printf '%s\n' 'environment fixture' >"$dir/environment.tsv"
+ env=$(hash_file "$dir/environment.tsv")
+ printf '%s\n' "$header" >"$dir/allocation.tsv"
+ for q in $warm_ids; do c=${q%%/*}; n=${q#*/}; printf '1\t%s\t%s\t%s\t0000000000000000000000000000000000000001\t%s\t%s\twarm_call\t10\t1\t0\t0\t0\t0\tfixture\t%s\n' "$role" "$pair" "$id" "$c" "$n" "$env" >>"$dir/allocation.tsv"; done
+ for l in $life_ids; do printf '1\t%s\t%s\t%s\t0000000000000000000000000000000000000001\tpublic\t%s\t%s\t10\t1\t0\t0\t0\t0\tfixture\t%s\n' "$role" "$pair" "$id" "$l" "$l" "$env" >>"$dir/allocation.tsv"; done
+}
+
+self_test(){
+ root=$(mktemp -d "${TMPDIR:-/tmp}/runtime-allocation-gate.XXXXXX"); if [ "${RUNTIME_ALLOCATION_KEEP_SELF_TEST:-0}" = 1 ]; then printf 'runtime-allocation-gate self-test root: %s\n' "$root" >&2; else trap 'rm -rf "$root"' EXIT HUP INT TERM; fi
+ mkdir "$root/a"; write_fixture "$root/a" candidate a id env; validate_capture "$root/a"
+ awk 'NR!=3' "$root/a/allocation.tsv" >"$root/x"; mv "$root/x" "$root/a/allocation.tsv"; if validate_capture "$root/a" >/dev/null 2>&1; then die 'accepted missing row'; fi
+ write_fixture "$root/a" candidate a id env; awk 'NR==2{print} {print}' "$root/a/allocation.tsv" >"$root/x"; mv "$root/x" "$root/a/allocation.tsv"; if validate_capture "$root/a" >/dev/null 2>&1; then die 'accepted duplicate row'; fi
+ write_fixture "$root/a" candidate a id env; awk -F '\t' 'NR==2{$9="bad"}1' OFS='\t' "$root/a/allocation.tsv" >"$root/x"; mv "$root/x" "$root/a/allocation.tsv"; if validate_capture "$root/a" >/dev/null 2>&1; then die 'accepted malformed row'; fi
+ mkdir "$root/b" "$root/candidate"; write_fixture "$root/a" frozen-current a a env; write_fixture "$root/b" frozen-current b b env; write_fixture "$root/candidate" candidate a c env
+ printf 'environment fixture\n' >"$root/a/environment.tsv"; cp "$root/a/environment.tsv" "$root/b/environment.tsv"; cp "$root/a/environment.tsv" "$root/candidate/environment.tsv"
+ env_fixture=$(hash_file "$root/a/environment.tsv"); for d in "$root/a" "$root/b" "$root/candidate"; do awk -F '\t' -v OFS='\t' -v e="$env_fixture" 'NR==1{print;next}{$16=e;print}' "$d/allocation.tsv" >"$root/x"; mv "$root/x" "$d/allocation.tsv"; done
+ "$0" --derive --baseline-a "$root/a" --baseline-b "$root/b" --output "$root/manifest.tsv" >/dev/null || die 'derive self-test failed'
+ "$0" --compare --manifest "$root/manifest.tsv" --candidate "$root/candidate" >/dev/null || die 'compare self-test failed'
+ touch "$root/candidate/INCOMPLETE"; if "$0" --compare --manifest "$root/manifest.tsv" --candidate "$root/candidate" >/dev/null 2>&1; then die 'accepted incomplete candidate'; fi; rm -f "$root/candidate/INCOMPLETE"
+ awk 'NR!=2' "$root/manifest.tsv" >"$root/bad-manifest.tsv"; if "$0" --compare --manifest "$root/bad-manifest.tsv" --candidate "$root/candidate" >/dev/null 2>&1; then die 'accepted missing manifest row'; fi
+ { sed -n '1,2p' "$root/manifest.tsv"; tail -n +2 "$root/manifest.tsv"; } >"$root/bad-manifest.tsv"; if "$0" --compare --manifest "$root/bad-manifest.tsv" --candidate "$root/candidate" >/dev/null 2>&1; then die 'accepted duplicate manifest row'; fi
+ awk -F '\t' -v OFS='\t' 'NR==2{$2="bad"}1' "$root/manifest.tsv" >"$root/bad-manifest.tsv"; if "$0" --compare --manifest "$root/bad-manifest.tsv" --candidate "$root/candidate" >/dev/null 2>&1; then die 'accepted malformed manifest metadata'; fi
+ awk -F '\t' 'NR==1{print;next}{$5="0000000000000000000000000000000000000002";print}' OFS='\t' "$root/candidate/allocation.tsv" >"$root/x"; mv "$root/x" "$root/candidate/allocation.tsv"; "$0" --compare --manifest "$root/manifest.tsv" --candidate "$root/candidate" >/dev/null || die 'rejected candidate source change'
+ awk -F '\t' 'NR==2{$9=11}1' OFS='\t' "$root/candidate/allocation.tsv" >"$root/x"; mv "$root/x" "$root/candidate/allocation.tsv"; if "$0" --compare --manifest "$root/manifest.tsv" --candidate "$root/candidate" >/dev/null 2>&1; then die 'accepted threshold failure'; fi
+ write_fixture "$root/candidate" candidate a c env; awk -F '\t' -v OFS='\t' 'NR==2{$10=2}1' "$root/candidate/allocation.tsv" >"$root/x"; mv "$root/x" "$root/candidate/allocation.tsv"; if "$0" --compare --manifest "$root/manifest.tsv" --candidate "$root/candidate" >/dev/null 2>&1; then die 'accepted warmed allocation-count regression'; fi
+ write_fixture "$root/candidate" candidate a c env; awk -F '\t' -v OFS='\t' '!done&&NR>1&&$8!="warm_call"{$9=999999;done=1}1' "$root/candidate/allocation.tsv" >"$root/x"; mv "$root/x" "$root/candidate/allocation.tsv"; "$0" --compare --manifest "$root/manifest.tsv" --candidate "$root/candidate" >/dev/null || die 'blocked report-only cold bytes'
+ write_fixture "$root/candidate" candidate a c env; awk -F '\t' -v OFS='\t' '!done&&NR>1&&$8!="warm_call"{$10=2;done=1}1' "$root/candidate/allocation.tsv" >"$root/x"; mv "$root/x" "$root/candidate/allocation.tsv"; if "$0" --compare --manifest "$root/manifest.tsv" --candidate "$root/candidate" >/dev/null 2>&1; then die 'accepted cold allocation-count regression'; fi
+	write_fixture "$root/candidate" candidate a c env; awk -F '\t' -v OFS='\t' '!done&&NR>1&&$8!="warm_call"{$14=1048576;done=1}1' "$root/candidate/allocation.tsv" >"$root/x"; mv "$root/x" "$root/candidate/allocation.tsv"; "$0" --compare --manifest "$root/manifest.tsv" --candidate "$root/candidate" >/dev/null || die 'blocked bounded retained growth'
+	write_fixture "$root/candidate" candidate a c env; awk -F '\t' -v OFS='\t' '!done&&NR>1&&$8!="warm_call"{$14=999999999;done=1}1' "$root/candidate/allocation.tsv" >"$root/x"; mv "$root/x" "$root/candidate/allocation.tsv"; "$0" --compare --manifest "$root/manifest.tsv" --candidate "$root/candidate" >/dev/null || die 'blocked finite retained snapshot'
+	write_fixture "$root/b" frozen-current b a env; if "$0" --derive --baseline-a "$root/a" --baseline-b "$root/b" --output "$root/reused-id.tsv" >/dev/null 2>&1; then die 'accepted reused baseline capture ID'; fi
+	write_fixture "$root/b" frozen-current b b env
+ if "$0" --derive --baseline-a "$root/a" --baseline-b "$root/b" --output "$root/manifest.tsv" >/dev/null 2>&1; then die 'accepted reused output'; fi
+ write_fixture "$root/candidate" candidate a c env; printf 'different\n' >"$root/candidate/environment.tsv"; if "$0" --compare --manifest "$root/manifest.tsv" --candidate "$root/candidate" >/dev/null 2>&1; then die 'accepted environment mismatch'; fi
+ write_fixture "$root/candidate" frozen-current a c env; if validate_capture "$root/candidate" candidate >/dev/null 2>&1; then die 'accepted candidate role mismatch'; fi
+ printf '%s\n' 'runtime-allocation-gate self-test: PASS'
+}
+
+mode=; output=; baseline_a=; baseline_b=; manifest=; candidate=; capture_role=frozen-current; capture_pair=a
+while [ "$#" -gt 0 ]; do
+ case "$1" in
+  --capture) mode=capture; shift;;
+  --derive) mode=derive; shift;;
+  --compare) mode=compare; shift;;
+  --output) [ "$#" -ge 2 ] || die '--output requires a path'; output=$2; shift 2;;
+  --baseline-a) [ "$#" -ge 2 ] || die '--baseline-a requires a path'; baseline_a=$2; shift 2;;
+  --baseline-b) [ "$#" -ge 2 ] || die '--baseline-b requires a path'; baseline_b=$2; shift 2;;
+  --manifest) [ "$#" -ge 2 ] || die '--manifest requires a path'; manifest=$2; shift 2;;
+  --candidate) [ "$#" -ge 2 ] || die '--candidate requires a path'; candidate=$2; shift 2;;
+  --capture-role) [ "$#" -ge 2 ] || die '--capture-role requires a value'; capture_role=$2; shift 2;;
+  --capture-pair) [ "$#" -ge 2 ] || die '--capture-pair requires a value'; capture_pair=$2; shift 2;;
+  --self-test) mode=self; shift;;
+  -h|--help) printf '%s\n' 'usage: scripts/runtime-allocation-gate --capture|--derive|--compare|--self-test'; exit 0;;
+  *) die "unknown option: $1";;
+ esac
+done
+
+case "$mode" in
+ self) self_test;;
+capture)
+	[ -n "$output" ] || die 'capture requires --output'; [ ! -e "$output" ] || die 'output already exists'; [ -z "$(git status --porcelain --untracked-files=all)" ] || die 'capture requires a clean worktree'; mkdir -p "$output"; trap 'touch "$output/INCOMPLETE" 2>/dev/null || true' EXIT HUP INT TERM
+  role=${RUNTIME_ALLOCATION_CAPTURE_ROLE:-$capture_role}; pair=${RUNTIME_ALLOCATION_CAPTURE_PAIR:-$capture_pair}; id=${RUNTIME_ALLOCATION_CAPTURE_ID:-capture}
+  [ "$role" = frozen-current ] || [ "$role" = candidate ] || die 'capture role must be frozen-current or candidate'; [ "$pair" = a ] || [ "$pair" = b ] || die 'capture pair must be a or b'
+  scripts/runtime-acceptance-env --output "$output/environment.tsv" --capture-kind allocation || die 'acceptance environment rejected'
+  env_hash=$(hash_file "$output/environment.tsv"); command_name=${RUNTIME_ALLOCATION_COMMAND:-CGO_ENABLED=0 GOMAXPROCS=1 scripts/runtime-allocation-gate --capture --capture-role $role --capture-pair $pair --output $output}; source_commit=${RUNTIME_ALLOCATION_SOURCE_COMMIT:-$(git rev-parse HEAD)}; id=${RUNTIME_ALLOCATION_CAPTURE_ID:-$(printf '%s\n%s\n%s\n%s\n%s\n' "$source_commit" "$env_hash" "$role" "$pair" "$output" | shasum -a 256 | awk '{print $1}')}
+  CGO_ENABLED=0 GOMAXPROCS=1 EMBER_ALLOCATION_OUTPUT="$output/allocation.tsv" RUNTIME_ALLOCATION_CAPTURE_ROLE="$role" RUNTIME_ALLOCATION_CAPTURE_PAIR="$pair" RUNTIME_ALLOCATION_CAPTURE_ID="$id" RUNTIME_ALLOCATION_SOURCE_COMMIT="$source_commit" RUNTIME_ALLOCATION_ENVIRONMENT_SHA256="$env_hash" RUNTIME_ALLOCATION_COMMAND="$command_name" go test -run '^TestRuntimeAllocationCapture$' -benchtime=1x -count=1 . >"$output/benchmark.log" 2>&1 || { touch "$output/INCOMPLETE"; die 'allocation capture failed'; }
+  validate_capture "$output" "$role" "$pair" || die 'invalid allocation capture'; rm -f "$output/INCOMPLETE"; trap - EXIT HUP INT TERM;;
+derive)
+	[ -n "$baseline_a$baseline_b$output" ] || die 'derive requires baselines/output'; [ ! -e "$output" ] || die 'output already exists'; validate_capture "$baseline_a" frozen-current a || die 'invalid baseline A'; validate_capture "$baseline_b" frozen-current b || die 'invalid baseline B'
+	id_a=$(awk -F '\t' 'NR==2{print $4}' "$baseline_a/allocation.tsv"); id_b=$(awk -F '\t' 'NR==2{print $4}' "$baseline_b/allocation.tsv"); [ "$id_a" != "$id_b" ] || die 'baseline capture IDs must differ'; env_a=$(hash_file "$baseline_a/environment.tsv"); env_b=$(hash_file "$baseline_b/environment.tsv"); [ "$env_a" = "$env_b" ] || die 'baseline environments differ'; src=$(awk -F '\t' 'NR==2{print $5}' "$baseline_a/allocation.tsv"); [ "$src" = "$(awk -F '\t' 'NR==2{print $5}' "$baseline_b/allocation.tsv")" ] || die 'baseline source commits differ'
+  ha=$(hash_dir "$baseline_a"); hb=$(hash_dir "$baseline_b"); mkdir -p "$(dirname "$output")"; tmp="$output.tmp.$$"
+  unsorted="$tmp.unsorted"; awk -F '\t' -v OFS='\t' -v h="$manifest_header" -v ha="$ha" -v hb="$hb" -v src="$src" -v env="$env_a" 'BEGIN{print h}NR==FNR{if(NR>1){k=$6 SUBSEP $7 SUBSEP $8;if(!(k in x)){x[k]=$9;y[k]=$10;i[k]=$11;m[k]=$12;a[k]=$13;r[k]=$14}else{if($9>x[k])x[k]=$9;if($10>y[k])y[k]=$10;if($11>i[k])i[k]=$11;if($12>m[k])m[k]=$12;if($13>a[k])a[k]=$13;if($14>r[k])r[k]=$14}c[k]=$15}next}FNR>1{k=$6 SUBSEP $7 SUBSEP $8;if($9>x[k])x[k]=$9;if($10>y[k])y[k]=$10;if($11>i[k])i[k]=$11;if($12>m[k])m[k]=$12;if($13>a[k])a[k]=$13;if($14>r[k])r[k]=$14;d[k]=$15}END{for(k in x){split(k,q,SUBSEP);print 1,ha,hb,src,env,q[1],q[2],q[3],x[k],y[k],i[k],m[k],a[k],r[k],c[k],d[k]}}' "$baseline_a/allocation.tsv" "$baseline_b/allocation.tsv" >"$unsorted"; { sed -n '1p' "$unsorted"; tail -n +2 "$unsorted" | LC_ALL=C sort -t '	' -k6,6 -k7,7 -k8,8; } >"$tmp"; rm -f "$unsorted"; mv "$tmp" "$output";;
+compare)
+  [ -r "$manifest" ] || die 'compare requires manifest'; [ -n "$candidate" ] || die 'compare requires candidate'; validate_capture "$candidate" candidate || die 'invalid candidate'; [ "$(head -n 1 "$manifest")" = "$manifest_header" ] || die 'manifest header mismatch'; if [ -n "$baseline_a$baseline_b" ]; then [ -n "$baseline_a" ] && [ -n "$baseline_b" ] || die 'baseline hash verification requires both baselines'; [ "$(hash_dir "$baseline_a")" = "$(awk -F '\t' 'NR==2{print $2}' "$manifest")" ] || die 'baseline A hash mismatch'; [ "$(hash_dir "$baseline_b")" = "$(awk -F '\t' 'NR==2{print $3}' "$manifest")" ] || die 'baseline B hash mismatch'; fi; env_m=$(awk -F '\t' 'NR==2{print $5}' "$manifest"); [ "$env_m" = "$(hash_file "$candidate/environment.tsv")" ] || die 'candidate environment mismatch'
+	awk -F '\t' -v warm="$warm_ids" -v life="$life_ids" 'BEGIN{split(warm,w," ");for(i in w){split(w[i],q,"/");expected[q[1] SUBSEP q[2] SUBSEP "warm_call"]=1};split(life,l," ");for(i in l)expected["public" SUBSEP l[i] SUBSEP l[i]]=1;num="^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$";hex="^[0-9a-f]+$"}NR==FNR{if(NR==1)next;if(NF!=16||$1!="1"||length($2)!=64||$2!~hex||length($3)!=64||$3!~hex||((length($4)!=40&&length($4)!=64)||$4!~hex)||length($5)!=64||$5!~hex||$9!~num||$10!~num||$11!~num||$12!~num||$13!~num||$14!~num||$9<0||$10<0||$11<0||$12<0||$13<0||$14<0||$15==""||$16=="")bad=1;k=$6 SUBSEP $7 SUBSEP $8;if(!(k in expected)||k in seen)bad=1;seen[k]=1;mr++;if(!meta){ha=$2;hb=$3;src=$4;env=$5;meta=1}else if(ha!=$2||hb!=$3||src!=$4||env!=$5)bad=1;bytes[k]=$9;allocs[k]=$10;arena[k]=$13;root[k]=$14;next}FNR>1{k=$6 SUBSEP $7 SUBSEP $8;if(!(k in bytes))bad=1;if($8=="warm_call"&&($9>bytes[k]||$10>allocs[k]))bad=1;if($8!="warm_call"&&$10>allocs[k])bad=1;if($8!="warm_call")printf "retained\t%s/%s\tarena=%s\troot=%s\tbaseline_arena=%s\tbaseline_root=%s\n",$6,$7,$13,$14,arena[k],root[k]}END{for(k in expected)if(!(k in seen))bad=1;if(mr!=56||bad)exit 1}' "$manifest" "$candidate/allocation.tsv" || die 'allocation ceilings exceeded'; printf '%s\n' 'runtime-allocation-gate: PASS';;
+ *) die 'missing mode';;
+esac
