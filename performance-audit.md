@@ -32,6 +32,26 @@ allocation ceilings. Comparing A against B with that gate produced
 `/tmp/ember-perf-v2-a-vs-b-full.txt`: `result: PASS`, with no missing rows,
 metrics, samples, or environment fields.
 
+## Implementation-progress ledger
+
+This ledger records completed slices only; it is not a final-completion claim.
+The authoritative baseline above remains the implementation-start reference.
+
+| Slice | Commit/evidence | Decision and result |
+| --- | --- | --- |
+| 0.1 baseline capture | `204c0de4`; clean captures from `090ad905` | Two comparable five-sample captures, focused profiles, size/layout evidence, and the reproducible gate were retained. `scripts/check` passed. |
+| 0.2 audit comparison | `e53c61d3` | Comparison and manifest paths preserve precision and fail closed on incomplete or mismatched evidence. |
+| 0.3 roadmap retirement | `204c0de4` | Superseded roadmaps were retired from navigation while their durable rationale stayed in the audit and ADRs. |
+| 1.1 assignment walk | `cca4f803` | One symbol-aware dependency walk replaced repeated name walkers. Visits fell from 650 to 185 (71.5%); emit median moved 19.666 ms to 16.818 ms (~14.5%), compile 43.203 ms to 40.113 ms (~7.2%), allocations stayed at 13/191, and retained median moved 529 to 524 B. Sol accepted the design after focused assignment/fidelity/bytecode tests, the five-sample stage benchmark, CPU profiles, retained-memory clean-head comparison, and `go test ./...`. |
+| 1.2 retention decision | `cca4f803` follow-up | STOP: no second demonstrated consumer for a retained assignment fact; no speculative binder cache was added. Sol accepted the stop. |
+| 2.1 hook core | `ab6997f9` | Report collection was separated from the private runner. Report mode measured 984 B/op and 12 allocs/op versus discard mode at 904 B/op and 11 allocs/op. Focused `RunHook` tests and the race lane passed. |
+| 2.2 controller elision | `4112d8b1` | Unlimited, non-cancelable background calls elide the controller; the measured lane reached 872 B/op and 12 allocs/op. Focused limits/RunHook/callback tests plus race and checkptr passed. The required-module inherited-frame case was not covered by this focused pass and was repaired in 2.3. |
+| 2.3 invocation scope | `43fca453` | Invocation scope now travels through private runtime state; context wrappers are lazy at the context-aware host boundary. The common lane measured 904 B/op and 10 allocs/op. The inherited-frame regression was repaired by carrying frames through module/VM state and error capture, with runtime-error/context/callback/coroutine coverage. Focused tests, race/checkptr, `go test ./...`, and `scripts/check-lane root` passed; Sol accepted after revisions. |
+
+Slices 2.4 and later Phase 2 work, plus Phases 3 and 4, remain pending. The
+final `scripts/check` sweep and later performance gates are intentionally not
+claimed here.
+
 ## Noise and allocation contract
 
 For each row, the ten samples from A and B are pooled to compute `MAD`, and
