@@ -2,6 +2,8 @@ package ember_test
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,6 +20,17 @@ type top10LuauCase struct {
 	name   string
 	source string
 	want   string
+}
+
+const (
+	top10LuauSHA256  = "c921fa51dbc0d81f9acbddcfa9208aa58f039388301f9fba77d2c5a324cb42bd"
+	top10LuauVersion = "0.728"
+)
+
+type validatedTop10LuauBinary struct {
+	path    string
+	sha256  string
+	version string
 }
 
 var benchmarkEmberResultsSink []ember.Value
@@ -1407,7 +1420,7 @@ func TestClassicEmberRunAllocationBudgets(t *testing.T) {
 }
 
 func testLuauCasesMatchExpectedResults(t *testing.T, cases []top10LuauCase) {
-	luauBin, haveLuau := lookupLuauBinary()
+	luauBin, haveLuau := lookupLuauBinary(t)
 
 	for _, tc := range cases {
 		t.Run(tc.name+"/ember", func(t *testing.T) {
@@ -1513,7 +1526,7 @@ func BenchmarkScenarioLuau(b *testing.B) {
 }
 
 func benchmarkLuauCases(b *testing.B, cases []top10LuauCase) {
-	luauBin, haveLuau := lookupLuauBinary()
+	luauBin, haveLuau := lookupLuauBinary(b)
 
 	for _, tc := range cases {
 		b.Run(tc.name+"/ember_run", func(b *testing.B) {
@@ -1606,12 +1619,86 @@ func benchmarkLuauCases(b *testing.B, cases []top10LuauCase) {
 	}
 }
 
-func lookupLuauBinary() (string, bool) {
-	if path := os.Getenv("LUAU_BIN"); path != "" {
-		return path, true
+func lookupLuauBinary(tb testing.TB) (validatedTop10LuauBinary, bool) {
+	tb.Helper()
+	path := os.Getenv("LUAU_BIN")
+	if path == "" {
+		var err error
+		path, err = exec.LookPath("luau")
+		if err != nil {
+			return validatedTop10LuauBinary{}, false
+		}
 	}
-	path, err := exec.LookPath("luau")
-	return path, err == nil
+	validated, err := stageTop10LuauBinary(tb, path, top10LuauSHA256, top10LuauVersion)
+	if err != nil {
+		tb.Fatalf("validate Luau binary: %v", err)
+	}
+	return validated, true
+}
+
+func stageTop10LuauBinary(tb testing.TB, path, wantSHA256, version string) (validatedTop10LuauBinary, error) {
+	tb.Helper()
+	if version != top10LuauVersion {
+		return validatedTop10LuauBinary{}, fmt.Errorf("Luau version contract is %q, want %q", version, top10LuauVersion)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return validatedTop10LuauBinary{}, fmt.Errorf("read Luau binary: %w", err)
+	}
+	sum := sha256.Sum256(contents)
+	digest := hex.EncodeToString(sum[:])
+	if digest != wantSHA256 {
+		return validatedTop10LuauBinary{}, fmt.Errorf("Luau SHA-256 is %s, want %s for version %s", digest, wantSHA256, version)
+	}
+
+	// Execute a private copy of the bytes that were hashed. Keeping only the
+	// original path would let a replacement or symlink swap execute bytes that
+	// never passed the pinned-binary contract.
+	stagedPath := filepath.Join(tb.TempDir(), "luau")
+	if err := os.WriteFile(stagedPath, contents, 0o500); err != nil {
+		return validatedTop10LuauBinary{}, fmt.Errorf("stage Luau binary: %w", err)
+	}
+	return validatedTop10LuauBinary{path: stagedPath, sha256: digest, version: version}, nil
+}
+
+func TestTop10LuauBinaryValidation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "luau")
+	contents := []byte("not an executable; validation must not execute it")
+	if err := os.WriteFile(path, contents, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(contents)
+	wantDigest := hex.EncodeToString(digest[:])
+	staged, err := stageTop10LuauBinary(t, path, wantDigest, top10LuauVersion)
+	if err != nil {
+		t.Fatalf("stage matching digest: %v", err)
+	}
+	if staged.path == path || staged.sha256 != wantDigest || staged.version != top10LuauVersion {
+		t.Fatalf("staged binary = %#v", staged)
+	}
+	if _, err := stageTop10LuauBinary(t, path, top10LuauSHA256, top10LuauVersion); err == nil {
+		t.Fatal("accepted binary with wrong pinned digest")
+	}
+	if _, err := stageTop10LuauBinary(t, path, wantDigest, "0.729"); err == nil {
+		t.Fatal("accepted wrong Luau version contract")
+	}
+	if err := os.WriteFile(path, []byte("replacement"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stagedContents, err := os.ReadFile(staged.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stagedContents, contents) {
+		t.Fatalf("staged Luau bytes changed with original: got %q want %q", stagedContents, contents)
+	}
+	info, err := os.Stat(staged.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o500 {
+		t.Fatalf("staged Luau mode = %#o, want 0500", got)
+	}
 }
 
 func runTop10EmberCase(tb testing.TB, tc top10LuauCase) string {
@@ -1653,7 +1740,7 @@ func validateTop10EmberResult(tb testing.TB, results []ember.Value, want string)
 	}
 }
 
-func runTop10LuauCase(tb testing.TB, luauBin string, tc top10LuauCase) string {
+func runTop10LuauCase(tb testing.TB, luauBin validatedTop10LuauBinary, tc top10LuauCase) string {
 	tb.Helper()
 	return runTop10LuauScript(tb, luauBin, writeTop10LuauScript(tb, tc))
 }
@@ -1687,10 +1774,13 @@ print(__result)
 	return path
 }
 
-func runTop10LuauScript(tb testing.TB, luauBin string, path string) string {
+func runTop10LuauScript(tb testing.TB, luauBin validatedTop10LuauBinary, path string) string {
 	tb.Helper()
+	if luauBin.sha256 != top10LuauSHA256 || luauBin.version != top10LuauVersion {
+		tb.Fatal("Luau executable did not pass the pinned binary contract")
+	}
 	var stderr bytes.Buffer
-	cmd := exec.Command(luauBin, path)
+	cmd := exec.Command(luauBin.path, path)
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {

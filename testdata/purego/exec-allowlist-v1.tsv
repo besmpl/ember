@@ -1,0 +1,7 @@
+# file	owning symbol	executable class	purpose
+runtime_parity_test.go	parityCommandOutput	runner-fingerprint	Run pinned parity and fingerprint helper commands.
+runtime_parity_test.go	sampleParitySystem	runner-fingerprint	Read controlled runner load and CPU measurements.
+runtime_parity_test.go	measureParityLuau	pinned-luau	Execute the digest-validated Luau oracle.
+runtime_parity_test.go	testParityGateAcceptsArithmeticFor	runner-fingerprint	Execute the deterministic scenario ratio gate self-test.
+top10_luau_benchmark_test.go	runTop10LuauScript	pinned-luau	Execute the benchmark's pinned Luau oracle.
+vm_dispatch_structure_test.go	TestGeneratedDispatchMatchesSemanticSource	generator-check	Run the checked-in VM dispatch generator validation.

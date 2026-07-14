@@ -6,6 +6,11 @@ cd "$(dirname "$0")/.."
 CGO_ENABLED=0 go build ./...
 CGO_ENABLED=0 go test ./...
 
+# Run the structural scanner explicitly as a focused policy check. The full
+# test above also runs it, but this keeps the boundary independently visible
+# to callers and CI logs.
+go test -run '^TestPureGoBoundary$' .
+
 cgo_packages="$(CGO_ENABLED=1 go list -f '{{if .CgoFiles}}{{.ImportPath}}: {{join .CgoFiles ", "}}{{end}}' ./...)"
 if [ -n "$cgo_packages" ]; then
 	printf '%s\n' "repository packages report CgoFiles with CGO_ENABLED=1:" >&2
@@ -13,66 +18,44 @@ if [ -n "$cgo_packages" ]; then
 	exit 1
 fi
 
-cgo_imports="$(find . -type f -name '*.go' ! -path './.git/*' -exec awk '
-function strip_comments(line, start, end, slash, block_start, prefix, rest) {
-    while (1) {
-        if (in_block_comment) {
-            end = index(line, "*/")
-            if (end == 0) {
-                return ""
-            }
-            line = substr(line, end + 2)
-            in_block_comment = 0
-        }
-        block_start = index(line, "/*")
-        slash = index(line, "//")
-        if (slash > 0 && (block_start == 0 || slash < block_start)) {
-            return substr(line, 1, slash - 1)
-        }
-        if (block_start == 0) {
-            return line
-        }
-        prefix = substr(line, 1, block_start - 1)
-        rest = substr(line, block_start + 2)
-        end = index(rest, "*/")
-        if (end == 0) {
-            in_block_comment = 1
-            return prefix
-        }
-        line = prefix substr(rest, end + 2)
-    }
-}
-
-function report(line) {
-    print FILENAME ":" FNR ":" line
-}
-
-FNR == 1 {
-    in_import_block = 0
-    in_block_comment = 0
-}
-
-{
-    line = strip_comments($0)
-    if (line ~ /^[[:space:]]*import[[:space:]]*\(/) {
-        in_import_block = 1
-        next
-    }
-    if (in_import_block && line ~ /^[[:space:]]*([[:alnum:]_.]+[[:space:]]+)?"C"[[:space:]]*$/) {
-        report(line)
-        next
-    }
-    if (line ~ /^[[:space:]]*import[[:space:]]*([[:alnum:]_.]+[[:space:]]+)?"C"[[:space:]]*$/) {
-        report(line)
-        next
-    }
-    if (in_import_block && line ~ /^[[:space:]]*\)/) {
-        in_import_block = 0
-    }
-}
-' {} +)"
-if [ -n "$cgo_imports" ]; then
-	printf '%s\n' 'repository Go source imports "C":' >&2
-	printf '%s\n' "$cgo_imports" >&2
+foreign_files="$(find . -type f \( \
+	-name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' \
+	-o -name '*.m' -o -name '*.mm' -o -name '*.h' -o -name '*.hh' \
+	-o -name '*.hpp' -o -name '*.hxx' -o -name '*.a' -o -name '*.o' \
+	-o -name '*.obj' -o -name '*.so' -o -name '*.dylib' -o -name '*.dll' \
+	-o -name '*.lib' -o -name '*.syso' -o -name '*.S' \
+\) ! -path './.git/*' ! -path './testdata/purego/*' -print)"
+if [ -n "$foreign_files" ]; then
+	printf '%s\n' 'repository contains foreign source or object files:' >&2
+	printf '%s\n' "$foreign_files" >&2
 	exit 1
 fi
+
+artifact_dir="$(mktemp -d "${TMPDIR:-/tmp}/ember-purego.XXXXXX")"
+trap 'rm -rf "$artifact_dir"' EXIT HUP INT TERM
+test_binary="$artifact_dir/ember.test"
+CGO_ENABLED=0 go test -c -o "$test_binary" .
+
+go tool nm "$test_binary" > "$artifact_dir/symbols.txt"
+foreign_symbols="$(awk '
+BEGIN {
+	marker_count = split("runtime/cgo _cgoexp_ _cgo_gotypes .cgo2. plugin.open dlopen loadlibrary github.com/ebitengine/purego", markers)
+}
+{
+	symbol = tolower($NF)
+	for (i = 1; i <= marker_count; i++) {
+		if (markers[i] != "" && index(symbol, markers[i]) != 0) {
+			print
+			break
+		}
+	}
+}
+' "$artifact_dir/symbols.txt")"
+if [ -n "$foreign_symbols" ]; then
+	printf '%s\n' 'linked test binary contains forbidden cgo/loader/plugin symbols:' >&2
+	printf '%s\n' "$foreign_symbols" >&2
+	exit 1
+fi
+
+EMBER_PUREGO_LINKED_BINARY="$test_binary" CGO_ENABLED=0 \
+	go test -run '^TestPureGoLinkedBinary$' .
