@@ -209,11 +209,8 @@ type directFramePICCounts struct {
 	fixedCallArgCopies             uint64
 	fixedCallRegisterCopies        uint64
 	// fixedCallTrampolineEntries counts fixed script calls that were entered
-	// by the outer iterative frame trampoline.  fixedCallRecursiveEntries is
-	// retained as a test-only tracer while cold call paths still use the
-	// legacy inline helpers.
+	// by the outer iterative frame trampoline.
 	fixedCallTrampolineEntries uint64
-	fixedCallRecursiveEntries  uint64
 	arrayIteratorFastSteps     uint64
 	scalarEqualityFastChecks   uint64
 }
@@ -437,13 +434,6 @@ func (counts *directFramePICCounts) addFixedCallTrampolineEntry() {
 	counts.fixedCallTrampolineEntries++
 }
 
-func (counts *directFramePICCounts) addFixedCallRecursiveEntry() {
-	if counts == nil {
-		return
-	}
-	counts.fixedCallRecursiveEntries++
-}
-
 func (counts *directFramePICCounts) totalMechanismActivity() uint64 {
 	if counts == nil {
 		return 0
@@ -470,7 +460,6 @@ func (counts *directFramePICCounts) totalMechanismActivity() uint64 {
 		counts.fixedCallArgCopies +
 		counts.fixedCallRegisterCopies +
 		counts.fixedCallTrampolineEntries +
-		counts.fixedCallRecursiveEntries +
 		counts.arrayIteratorFastSteps +
 		counts.scalarEqualityFastChecks
 	for _, count := range counts.sideExits {

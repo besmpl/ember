@@ -42,9 +42,6 @@ return outer(0)
 	if snapshot.picCounts.fixedCallTrampolineEntries < 2 {
 		t.Fatalf("iterative trampoline entries = %d, want at least 2", snapshot.picCounts.fixedCallTrampolineEntries)
 	}
-	if snapshot.picCounts.fixedCallRecursiveEntries != 0 {
-		t.Fatalf("recursive fixed-call entries = %d, want zero", snapshot.picCounts.fixedCallRecursiveEntries)
-	}
 	if snapshot.picCounts.fixedCallArgCopies != 0 || snapshot.picCounts.fixedCallFrameMaterializations != 0 {
 		t.Fatalf("nested fixed-call copies/materializations = %d/%d, want zero", snapshot.picCounts.fixedCallArgCopies, snapshot.picCounts.fixedCallFrameMaterializations)
 	}
@@ -153,9 +150,6 @@ return sum(8)
 	if snapshot.picCounts.fixedCallTrampolineEntries == 0 {
 		t.Fatal("recursive call used no iterative trampoline entries")
 	}
-	if snapshot.picCounts.fixedCallRecursiveEntries != 0 {
-		t.Fatalf("recursive helper entries = %d, want zero", snapshot.picCounts.fixedCallRecursiveEntries)
-	}
 }
 
 func TestMarkedGenericOneResultCallUsesBorrowedTrampoline(t *testing.T) {
@@ -177,8 +171,8 @@ func TestMarkedGenericOneResultCallUsesBorrowedTrampoline(t *testing.T) {
 	if got, ok := results[0].Number(); !ok || got != 41 {
 		t.Fatalf("marked generic fixed call result is %v (%t), want 41", results[0], ok)
 	}
-	if snapshot.picCounts.fixedCallTrampolineEntries == 0 || snapshot.picCounts.fixedCallRecursiveEntries != 0 {
-		t.Fatalf("generic fixed-call trampoline/recursive entries = %d/%d, want iterative only", snapshot.picCounts.fixedCallTrampolineEntries, snapshot.picCounts.fixedCallRecursiveEntries)
+	if snapshot.picCounts.fixedCallTrampolineEntries == 0 {
+		t.Fatalf("generic fixed-call trampoline entries = %d, want at least one", snapshot.picCounts.fixedCallTrampolineEntries)
 	}
 	if snapshot.picCounts.fixedCallArgCopies != 0 || snapshot.picCounts.fixedCallFrameMaterializations != 0 {
 		t.Fatalf("generic fixed-call copies/materializations = %d/%d, want zero", snapshot.picCounts.fixedCallArgCopies, snapshot.picCounts.fixedCallFrameMaterializations)

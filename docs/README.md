@@ -23,7 +23,8 @@ and retire or delete it when the slice lands or is abandoned.
 - `../README.md`: project purpose, scope, and first runtime direction.
 - `principles.md`: decision rules for a Go-native Luau-compatible runtime.
 - `design.md`: runtime model and early boundaries.
-- `compatibility.md`: how Ember claims and proves Luau compatibility.
+- `compatibility.md`: the test-validated Luau compatibility manifest, levels,
+  and explicit non-goals.
 - `compiler.md`: arena representation, layout checks, and compiler allocation
   gates.
 - `public-surface.md`: initial import and API surface rules.

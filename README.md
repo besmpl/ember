@@ -89,6 +89,10 @@ Start with the small durable documentation set:
 - [docs/hearth-integration.md](docs/hearth-integration.md)
 - [docs/checks.md](docs/checks.md)
 
+The compatibility document is the maintained feature manifest: every claimed
+Luau slice points to at least one behavior test, and a package test checks that
+the referenced test names still exist.
+
 Standing future-plan docs are intentionally not kept in the repository. When a
 slice needs coordination, write the smallest temporary plan that proves useful
 and retire or delete it when the slice lands or is abandoned.
