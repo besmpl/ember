@@ -1,0 +1,149 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+root=$(mktemp -d "${TMPDIR:-/tmp}/ember-audit-v2-test.XXXXXX")
+cleanup() { rm -rf "$root"; }
+trap cleanup EXIT HUP INT TERM
+families='scenario_ember_run recursive_fibonacci sparse_grid_neighbors runtime_modes compiler_256kib'
+write_capture() {
+	dir=$1; env_fingerprint=$2; source_fingerprint=$3; ns=$4; bytes=$5; allocs=$6; wide_ns=${7:-10000}
+	rm -rf "$dir"; mkdir -p "$dir"
+	{
+		printf 'commit=commit-baseline\n'
+		printf 'source_fingerprint=%s\n' "$source_fingerprint"
+		printf 'environment_fingerprint=%s\n' "$env_fingerprint"
+		printf 'benchtime=1ms\nprofiles=0\n'
+		printf 'samples=2\n'
+	} >"$dir/metadata.txt"
+	printf '%s\n' complete >"$dir/COMPLETE"
+	for family in $families; do
+		name="BenchmarkShared/row/ember_run-8"
+		[ "$family" = compiler_256kib ] && name='BenchmarkCompilerStageMatrix/256KiB/emit-8'
+		printf '%s\n' "$name 100 ns/op $bytes B/op $allocs allocs/op" >"$dir/$family.raw.txt"
+		printf '%s\n' "$name $ns ns/op $bytes B/op $allocs allocs/op" >>"$dir/$family.raw.txt"
+		if [ "$family" = scenario_ember_run ]; then
+			printf '%s\n' 'BenchmarkScenarioLuau/wide/ember_run-8 10000 ns/op 10 B/op 1 allocs/op' >>"$dir/$family.raw.txt"
+			printf '%s\n' "BenchmarkScenarioLuau/wide/ember_run-8 $wide_ns ns/op 10 B/op 1 allocs/op" >>"$dir/$family.raw.txt"
+		fi
+		summary=-; [ "$family" = compiler_256kib ] || summary="$family.summary.md"
+		[ "$summary" = - ] || : >"$dir/$summary"
+	done
+	{
+		printf 'version=1\nsamples=2\nprofiles=0\n'
+		printf 'family\tname\traw\tsummary\tcpu_profile\talloc_profile\tprofile_log\n'
+		for family in $families; do
+			summary=-; [ "$family" = compiler_256kib ] || summary="$family.summary.md"
+			printf 'family\t%s\t%s.raw.txt\t%s\t%s.cpu.pprof\t%s.alloc.pprof\t%s.profile.log\n' "$family" "$family" "$summary" "$family" "$family" "$family"
+		done
+		for family in $families; do
+			scripts/bench-summary --format tsv --before "$dir/$family.raw.txt" | awk -F '\t' -v family="$family" '{ print "row\t" family "\t" $1 }'
+		done
+	} >"$dir/capture-facts.tsv"
+}
+
+run_fail() {
+	needle=$1; shift; out=$root/failure
+	if "$@" >"$out" 2>&1; then printf 'expected failure: %s\n' "$needle" >&2; exit 1; fi
+	grep -F "$needle" "$out" >/dev/null || { cat "$out" >&2; exit 1; }
+}
+
+write_capture "$root/base1" env source 100 10 1
+write_capture "$root/base2" env source 101 10 1
+scripts/performance-audit-derive-manifest --before "$root/base1" --after "$root/base2" --output "$root/gates.tsv" >/dev/null
+grep -F 'row	family	name	ns_max_ratio	bytes_max	allocs_max' "$root/gates.tsv" >/dev/null
+scripts/performance-audit-compare --before "$root/base1" --after "$root/base2" --manifest "$root/gates.tsv" >"$root/slower-baseline"
+grep -F 'result: PASS' "$root/slower-baseline" >/dev/null
+run_fail 'refusing to overwrite' scripts/performance-audit-derive-manifest --before "$root/base1" --after "$root/base2" --output "$root/gates.tsv"
+
+shared_gate=$(awk -F '\t' '$1 == "row" && $2 == "scenario_ember_run" && $3 == "BenchmarkShared/row/ember_run" { print $4 }' "$root/gates.tsv")
+wide_gate=$(awk -F '\t' '$1 == "row" && $2 == "scenario_ember_run" && $3 == "BenchmarkScenarioLuau/wide/ember_run" { print $4 }' "$root/gates.tsv")
+awk -v shared="$shared_gate" -v wide="$wide_gate" 'BEGIN { exit !(shared > wide) }'
+write_capture "$root/isolation" env candidate 150 10 1 12000
+run_fail 'result: FAIL' scripts/performance-audit-compare --before "$root/base1" --after "$root/isolation" --manifest "$root/gates.tsv"
+grep -F 'BenchmarkShared/row/ember_run' "$root/failure" | grep -F 'ns/op' | grep -F 'pass' >/dev/null
+grep -F 'BenchmarkScenarioLuau/wide/ember_run' "$root/failure" | grep -F 'ns/op' | grep -F 'fail' >/dev/null
+
+write_capture "$root/allocation-base1" env source 100 10 1
+write_capture "$root/allocation-base2" env source 101 11 2
+scripts/performance-audit-derive-manifest --before "$root/allocation-base1" --after "$root/allocation-base2" --output "$root/allocation-gates.tsv" >/dev/null
+write_capture "$root/allocation-candidate" env candidate 90 11 2
+scripts/performance-audit-compare --before "$root/allocation-base1" --after "$root/allocation-candidate" --manifest "$root/allocation-gates.tsv" >"$root/allocation-pass"
+grep -F 'result: PASS' "$root/allocation-pass" >/dev/null
+write_capture "$root/allocation-candidate" env candidate 90 12 3
+run_fail 'result: FAIL' scripts/performance-audit-compare --before "$root/allocation-base1" --after "$root/allocation-candidate" --manifest "$root/allocation-gates.tsv"
+
+write_capture "$root/candidate" env candidate 90 10 1
+scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/gates.tsv" >"$root/pass"
+grep -F 'result: PASS' "$root/pass" >/dev/null
+grep -F $'row\tscenario_ember_run\tBenchmarkScenarioLuau/wide/ember_run' "$root/gates.tsv" >/dev/null
+printf '%s\n' '# mutated after gate derivation' >>"$root/base1/scenario_ember_run.raw.txt"
+run_fail 'capture fingerprint mismatch' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/gates.tsv"
+write_capture "$root/base1" env source 100 10 1
+run_fail 'missing gate manifest' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/missing-gates.tsv"
+rm "$root/candidate/COMPLETE"
+run_fail 'incomplete capture' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/gates.tsv"
+printf '%s\n' 'BenchmarkScenarioLuau/extra/ember_run-8 90 ns/op 10 B/op 1 allocs/op' >>"$root/candidate/scenario_ember_run.raw.txt"
+touch "$root/candidate/COMPLETE"
+run_fail 'capture row inventory mismatch' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/gates.tsv"
+write_capture "$root/candidate" env candidate 90 10 1
+sed -i.bak '/^row\tscenario_ember_run\tBenchmarkShared\/row\/ember_run$/d' "$root/candidate/capture-facts.tsv"
+rm -f "$root/candidate/capture-facts.tsv.bak"
+run_fail 'capture row inventory mismatch' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/gates.tsv"
+
+write_capture "$root/candidate" env candidate 1000 10 1
+sed -i.bak '1s/ 100 ns\/op/ 1000 ns\/op/' "$root/candidate/scenario_ember_run.raw.txt"
+rm -f "$root/candidate/scenario_ember_run.raw.txt.bak"
+run_fail 'result: FAIL' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/gates.tsv"
+
+write_capture "$root/candidate" env candidate 90 11 2
+run_fail 'fail' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/gates.tsv"
+
+write_capture "$root/zero-base1" env source 100 0 0
+write_capture "$root/zero-base2" env source 101 0 0
+scripts/performance-audit-derive-manifest --before "$root/zero-base1" --after "$root/zero-base2" --output "$root/zero-gates.tsv" >/dev/null
+write_capture "$root/candidate" env candidate 90 0 0
+scripts/performance-audit-compare --before "$root/zero-base1" --after "$root/candidate" --manifest "$root/zero-gates.tsv" >"$root/zero"
+grep -F 'result: PASS' "$root/zero" >/dev/null
+write_capture "$root/candidate" env candidate 90 1 1
+run_fail 'fail' scripts/performance-audit-compare --before "$root/zero-base1" --after "$root/candidate" --manifest "$root/zero-gates.tsv"
+
+write_capture "$root/candidate" env candidate 90 10 1
+touch "$root/candidate/INCOMPLETE"
+run_fail 'incomplete capture' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/gates.tsv"
+rm "$root/candidate/INCOMPLETE"
+
+for family in $families; do
+	: >"$root/candidate/$family.cpu.pprof"
+	: >"$root/candidate/$family.alloc.pprof"
+	: >"$root/candidate/$family.profile.log"
+done
+sed -i.bak 's/^profiles=0$/profiles=1/' "$root/candidate/capture-facts.tsv"
+rm -f "$root/candidate/runtime_modes.alloc.pprof.bak"
+rm "$root/candidate/runtime_modes.alloc.pprof"
+run_fail 'missing profile artifact' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/gates.tsv"
+rm -f "$root/candidate/capture-facts.tsv.bak"
+
+printf '%s\n' 'samples=3' >>"$root/candidate/capture-facts.tsv"
+run_fail 'sample mismatch' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/gates.tsv"
+
+write_capture "$root/candidate" changed candidate 90 10 1
+run_fail 'environment mismatch' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/gates.tsv"
+write_capture "$root/candidate" env candidate 90 10 1
+cp "$root/gates.tsv" "$root/malformed-metadata.tsv"
+sed -i.bak 's/^samples=2$/samples=bad/' "$root/malformed-metadata.tsv"
+rm -f "$root/malformed-metadata.tsv.bak"
+run_fail 'invalid gate manifest sample count' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/malformed-metadata.tsv"
+cp "$root/gates.tsv" "$root/duplicate-metadata.tsv"
+printf '%s\n' 'samples=2' >>"$root/duplicate-metadata.tsv"
+run_fail 'invalid gate manifest samples' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/duplicate-metadata.tsv"
+printf 'row\tscenario_ember_run\tBenchmarkShared/row/ember_run\t1.1\texact\texact\n' >>"$root/gates.tsv"
+run_fail 'invalid gate manifest rows' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/gates.tsv"
+
+write_capture "$root/base2" env changed 101 10 1
+run_fail 'incompatible source_fingerprint' scripts/performance-audit-derive-manifest --before "$root/base1" --after "$root/base2" --output "$root/bad-gates.tsv"
+write_capture "$root/base2" env source 101 10 1
+sed -i.bak 's/^benchtime=1ms$/benchtime=5s/' "$root/base2/metadata.txt"
+rm -f "$root/base2/metadata.txt.bak"
+run_fail 'incompatible benchtime' scripts/performance-audit-derive-manifest --before "$root/base1" --after "$root/base2" --output "$root/bad-benchtime-gates.tsv"
+
+printf '%s\n' 'performance-audit-compare-test: ok'

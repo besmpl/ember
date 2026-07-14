@@ -18,6 +18,7 @@ for script in scripts/*; do
 done
 
 scripts/bench-summary-test
+scripts/performance-audit-compare-test
 
 go test -count=1 ./...
 

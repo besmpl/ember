@@ -26,16 +26,41 @@ Scenario Ember, recursive Fibonacci, sparse-grid, 256 KiB compiler-stage, and
 runtime-mode benchmark families:
 
 ```sh
-scripts/performance-audit --output /tmp/ember-audit-before
-scripts/performance-audit --output /tmp/ember-audit-after --profiles
+scripts/performance-audit --output /tmp/ember-audit-baseline-a --profiles
+scripts/performance-audit --output /tmp/ember-audit-baseline-b --profiles
 ```
+
+Derive a gate manifest from two complete captures of the same source and
+environment, then compare a candidate capture against either baseline:
+
+```sh
+scripts/performance-audit-derive-manifest \
+  --before /tmp/ember-audit-baseline-a \
+  --after /tmp/ember-audit-baseline-b \
+  --output /tmp/ember-audit-gates.tsv
+
+scripts/performance-audit-compare \
+  --before /tmp/ember-audit-baseline-a \
+  --after /tmp/ember-audit-candidate \
+  --manifest /tmp/ember-audit-gates.tsv
+```
+
+The runner retains one raw benchmark file for each of the five families. The
+manifest derives a separate robust timing envelope and observed allocation
+ceiling for every benchmark row from both baseline captures. It also binds the
+gate to hashes of each baseline's metadata, capture facts, and five raw files;
+profiles and human-readable summaries are evidence, but not gate inputs. The
+comparison command parses retained raw files through `scripts/bench-summary`,
+reports runtime timing, compiler timing, B/op, and allocs/op separately, and fails
+closed for missing rows or metrics, incomplete captures, source or baseline
+commit mismatches, incompatible environments, or capture-contract drift.
 
 The output directory must not already exist. The runner requires a clean
 worktree; pass `--allow-dirty` when the current changes are intentionally part
 of the capture. Set `BENCHTIME` to shorten exploratory runs. `--profiles`
 writes unique CPU and allocation profiles for each family and never overwrites
-an existing capture. The compiler-stage family is retained as raw `go test`
-output because `scripts/bench-summary` only formats runtime and parity rows.
+an existing capture. Raw `go test` output is retained for all five families;
+`scripts/bench-summary` provides the shared table and TSV parsing contract.
 Failed runs leave an `INCOMPLETE` marker in the newly created directory.
 
 ## Scheduled evidence

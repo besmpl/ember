@@ -1,0 +1,256 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+
+usage() {
+	cat >&2 <<'EOF'
+usage: scripts/performance-audit-compare --before DIR --after DIR --manifest PATH
+
+The manifest is explicit and immutable. Its capture fingerprints cover
+metadata.txt, capture-facts.tsv, and the five raw family files (not summaries
+or profiles); --before must match the recorded baseline fingerprint.
+EOF
+}
+
+before= after= manifest=
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+	--before) [ "$#" -ge 2 ] || { usage; exit 2; }; before=$2; shift 2 ;;
+	--after) [ "$#" -ge 2 ] || { usage; exit 2; }; after=$2; shift 2 ;;
+	--manifest|--gates) [ "$#" -ge 2 ] || { usage; exit 2; }; manifest=$2; shift 2 ;;
+	-h|--help) usage; exit 0 ;;
+	*) usage; exit 2 ;;
+	esac
+done
+[ -n "$before" ] && [ -n "$after" ] && [ -n "$manifest" ] || { usage; exit 2; }
+
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/ember-audit-compare.XXXXXX")
+cleanup() { rm -rf "$tmp_dir"; }
+trap cleanup EXIT HUP INT TERM
+issues=$tmp_dir/issues
+metrics=$tmp_dir/metrics
+: >"$issues"
+: >"$metrics"
+
+metadata_value() { awk -F= -v wanted="$2" '$1 == wanted { print substr($0, index($0, "=") + 1); exit }' "$1"; }
+capture_fingerprint() {
+	dir=$1
+	{
+		printf 'FILE metadata.txt\n'; cat "$dir/metadata.txt"
+		printf 'FILE capture-facts.tsv\n'; cat "$dir/capture-facts.tsv"
+		for family in scenario_ember_run recursive_fibonacci sparse_grid_neighbors runtime_modes compiler_256kib; do
+			printf 'FILE %s.raw.txt\n' "$family"
+			cat "$dir/$family.raw.txt"
+		done
+	} | shasum -a 256 | awk '{print $1}'
+}
+capture_check() {
+	dir=$1
+	[ -f "$dir/COMPLETE" ] || printf 'incomplete capture: %s missing COMPLETE\n' "$dir" >>"$issues"
+	[ ! -e "$dir/INCOMPLETE" ] || printf 'incomplete capture: %s has INCOMPLETE\n' "$dir" >>"$issues"
+	[ -r "$dir/capture-facts.tsv" ] || printf 'missing capture facts: %s\n' "$dir" >>"$issues"
+	[ -r "$dir/metadata.txt" ] || printf 'missing metadata: %s\n' "$dir" >>"$issues"
+}
+capture_check "$before"
+capture_check "$after"
+[ -r "$manifest" ] || { printf 'missing gate manifest: %s\n' "$manifest" >&2; exit 2; }
+
+validate_facts() {
+	dir=$1
+	facts=$dir/capture-facts.tsv
+	[ -r "$facts" ] || return
+	samples=$(awk -F= '$1 == "samples" { print $2; count++ } END { if (count != 1) exit 1 }' "$facts") || { printf 'malformed capture samples: %s\n' "$dir" >>"$issues"; return; }
+	case "$samples" in ''|*[!0-9]*) printf 'malformed capture samples: %s\n' "$dir" >>"$issues" ;; esac
+	[ "$samples" -gt 0 ] 2>/dev/null || printf 'malformed capture samples: %s\n' "$dir" >>"$issues"
+	if [ "$dir" = "$before" ]; then before_capture_samples=$samples; else after_capture_samples=$samples; fi
+	version=$(awk -F= '$1 == "version" { print $2; count++ } END { if (count != 1) exit 1 }' "$facts") || { printf 'malformed capture version: %s\n' "$dir" >>"$issues"; return; }
+	[ "$version" = 1 ] || printf 'malformed capture version: %s\n' "$dir" >>"$issues"
+	profiles=$(awk -F= '$1 == "profiles" { print $2; count++ } END { if (count != 1) exit 1 }' "$facts") || { printf 'malformed capture profiles: %s\n' "$dir" >>"$issues"; return; }
+	case "$profiles" in
+	0|1) ;;
+	*) printf 'malformed capture profiles: %s\n' "$dir" >>"$issues" ;;
+	esac
+	awk -F '\t' 'BEGIN {
+        expected["scenario_ember_run"] = 1
+        expected["recursive_fibonacci"] = 1
+        expected["sparse_grid_neighbors"] = 1
+        expected["runtime_modes"] = 1
+        expected["compiler_256kib"] = 1
+        header=0; count=0; row_count=0; bad=0
+    }
+    $1 == "family" && $2 == "name" { header++; next }
+    $1 == "family" {
+        count++
+        if (!(($2 in expected) && !seen_family[$2]++) || NF != 7 || $3 == "") bad=1
+        next
+    }
+    $1 == "row" && $2 == "family" { next }
+    $1 == "row" {
+        row_count++
+        if (NF != 3 || !($2 in expected) || $3 == "") bad=1
+        next
+    }
+    $1 ~ /^(version|samples|profiles)=/ { next }
+    NF != 0 { bad=1 }
+    END {
+        for (family in expected) if (!seen_family[family]) bad=1
+        if (header != 1 || count != 5 || row_count == 0 || bad) exit 1
+    }' "$facts" || printf 'malformed capture family inventory: %s\n' "$dir" >>"$issues"
+	while IFS=: read -r name raw summary cpu alloc log; do
+		[ -n "$name" ] || continue
+		[ -f "$dir/$raw" ] || printf 'missing capture raw artifact: %s/%s\n' "$dir" "$raw" >>"$issues"
+		[ "$summary" = - ] || [ -f "$dir/$summary" ] || printf 'missing capture summary artifact: %s/%s\n' "$dir" "$summary" >>"$issues"
+		if [ "$profiles" = 1 ]; then
+			[ -s "$dir/$cpu" ] || printf 'missing profile artifact: %s/%s\n' "$dir" "$cpu" >>"$issues"
+			[ -s "$dir/$alloc" ] || printf 'missing profile artifact: %s/%s\n' "$dir" "$alloc" >>"$issues"
+			[ -s "$dir/$log" ] || printf 'missing profile artifact: %s/%s\n' "$dir" "$log" >>"$issues"
+		fi
+	done <<EOF
+	$(awk -F '\t' '$1 == "family" && $2 != "name" { print $2 ":" $3 ":" $4 ":" $5 ":" $6 ":" $7 }' "$facts")
+EOF
+	for family in scenario_ember_run recursive_fibonacci sparse_grid_neighbors runtime_modes compiler_256kib; do
+		raw=$dir/$family.raw.txt
+		[ -r "$raw" ] || continue
+		awk -F '\t' -v family="$family" '$1 == "row" && $2 == family { print $3 }' "$facts" | sort >"$tmp_dir/facts-rows"
+		if ! scripts/bench-summary --format tsv --before "$raw" | cut -f1 | sort >"$tmp_dir/raw-rows"; then
+			printf 'unparseable capture raw family: %s/%s\n' "$dir" "$family" >>"$issues"
+		elif ! cmp -s "$tmp_dir/facts-rows" "$tmp_dir/raw-rows"; then
+			printf 'capture row inventory mismatch: %s/%s\n' "$dir" "$family" >>"$issues"
+		fi
+	done
+	metadata_samples=$(metadata_value "$dir/metadata.txt" samples)
+	metadata_profiles=$(metadata_value "$dir/metadata.txt" profiles)
+	metadata_benchtime=$(metadata_value "$dir/metadata.txt" benchtime)
+	[ "$metadata_samples" = "$samples" ] || printf 'capture facts/metadata samples mismatch: %s\n' "$dir" >>"$issues"
+	[ "$metadata_profiles" = "$profiles" ] || printf 'capture facts/metadata profiles mismatch: %s\n' "$dir" >>"$issues"
+	[ -n "$metadata_benchtime" ] || printf 'missing capture benchtime: %s\n' "$dir" >>"$issues"
+	if [ "$dir" = "$before" ]; then before_benchtime=$metadata_benchtime; before_profiles=$profiles; else after_benchtime=$metadata_benchtime; after_profiles=$profiles; fi
+}
+validate_facts "$before"
+validate_facts "$after"
+
+
+gate_samples=$(awk -F= '$1 == "samples" { print $2; count++ } END { if (count != 1) exit 1 }' "$manifest") || { printf '%s\n' 'invalid gate manifest samples' >&2; exit 1; }
+case "$gate_samples" in ''|*[!0-9]*) printf '%s\n' 'invalid gate manifest sample count' >&2; exit 1 ;; esac
+[ "$gate_samples" -gt 0 ] || { printf '%s\n' 'invalid gate manifest sample count' >&2; exit 1; }
+[ "${before_capture_samples:-}" = "$gate_samples" ] || printf 'sample mismatch: baseline facts vs gate manifest\n' >>"$issues"
+[ "${after_capture_samples:-}" = "$gate_samples" ] || printf 'sample mismatch: candidate facts vs gate manifest\n' >>"$issues"
+awk -F= 'BEGIN { want["version"]=1; want["samples"]=1; want["baseline_source_fingerprint"]=1; want["baseline_environment_fingerprint"]=1; want["baseline_commit"]=1; want["baseline_benchtime"]=1 } $1 in want { seen[$1]++; if (($1 == "version" && $2 != "1") || $2 == "") bad=1 } END { for (key in want) if (seen[key] != 1) bad=1; if (bad) exit 1 }' "$manifest" || { printf '%s\n' 'invalid gate manifest metadata' >&2; exit 1; }
+gate_source=$(awk -F= '$1 == "baseline_source_fingerprint" { print $2; count++ } END { if (count != 1) exit 1 }' "$manifest") || { printf '%s\n' 'invalid gate manifest source fingerprint' >&2; exit 1; }
+gate_environment=$(awk -F= '$1 == "baseline_environment_fingerprint" { print $2; count++ } END { if (count != 1) exit 1 }' "$manifest") || { printf '%s\n' 'invalid gate manifest environment fingerprint' >&2; exit 1; }
+gate_commit=$(awk -F= '$1 == "baseline_commit" { print $2; count++ } END { if (count != 1) exit 1 }' "$manifest") || { printf '%s\n' 'invalid gate manifest commit' >&2; exit 1; }
+gate_benchtime=$(awk -F= '$1 == "baseline_benchtime" { print $2; count++ } END { if (count != 1) exit 1 }' "$manifest") || { printf '%s\n' 'invalid gate manifest benchtime' >&2; exit 1; }
+gate_capture=$(awk -F= '$1 == "baseline_capture_fingerprint" { print $2; count++ } END { if (count != 1) exit 1 }' "$manifest") || { printf '%s\n' 'invalid gate manifest baseline capture fingerprint' >&2; exit 1; }
+repeat_capture=$(awk -F= '$1 == "repeat_capture_fingerprint" { print $2; count++ } END { if (count != 1) exit 1 }' "$manifest") || { printf '%s\n' 'invalid gate manifest repeat capture fingerprint' >&2; exit 1; }
+[ "$gate_capture" != "" ] && [ "$repeat_capture" != "" ] || { printf '%s\n' 'invalid gate manifest capture fingerprints' >&2; exit 1; }
+awk -F '\t' 'BEGIN {
+        expected["scenario_ember_run"] = 1
+        expected["recursive_fibonacci"] = 1
+        expected["sparse_grid_neighbors"] = 1
+        expected["runtime_modes"] = 1
+        expected["compiler_256kib"] = 1
+        header=0; bad=0
+    }
+    $1 == "row" && $2 == "family" { header++; next }
+    function nonnegative(value) { return value ~ /^[0-9]+([.][0-9]*)?([eE][+-]?[0-9]+)?$/ && value + 0 >= 0 }
+    $1 == "row" {
+        key=$2 SUBSEP $3
+        if (seen[key]++ || !($2 in expected) || $3 == "") bad=1
+        if (!nonnegative($4) || $4 < 1 || !nonnegative($5) || !nonnegative($6)) bad=1
+        next
+    }
+    $1 ~ /^(version|samples|baseline_source_fingerprint|baseline_environment_fingerprint|baseline_commit|baseline_benchtime|baseline_capture_fingerprint|repeat_capture_fingerprint)=/ { next }
+    NF != 0 { bad=1 }
+    END { if (bad || header != 1) exit 1 }' "$manifest" || { printf '%s\n' 'invalid gate manifest rows' >&2; exit 1; }
+
+if [ -r "$before/metadata.txt" ] && [ -r "$after/metadata.txt" ]; then
+	before_env=$(metadata_value "$before/metadata.txt" environment_fingerprint)
+	after_env=$(metadata_value "$after/metadata.txt" environment_fingerprint)
+	[ "$(metadata_value "$before/metadata.txt" samples)" = "$gate_samples" ] || printf 'sample mismatch: baseline metadata vs gate manifest\n' >>"$issues"
+	[ "$(metadata_value "$after/metadata.txt" samples)" = "$gate_samples" ] || printf 'sample mismatch: candidate metadata vs gate manifest\n' >>"$issues"
+	[ -n "$before_env" ] && [ "$before_env" = "$after_env" ] || printf 'environment mismatch: %s != %s\n' "$before_env" "$after_env" >>"$issues"
+	[ "$before_env" = "$gate_environment" ] || printf 'environment mismatch: baseline does not match gate manifest\n' >>"$issues"
+	before_source=$(metadata_value "$before/metadata.txt" source_fingerprint)
+	after_source=$(metadata_value "$after/metadata.txt" source_fingerprint)
+	before_commit=$(metadata_value "$before/metadata.txt" commit)
+	before_capture=$(capture_fingerprint "$before")
+	[ "$before_source" = "$gate_source" ] || printf 'source mismatch: baseline does not match gate manifest\n' >>"$issues"
+	[ "$before_commit" = "$gate_commit" ] || printf 'commit mismatch: baseline does not match gate manifest\n' >>"$issues"
+	[ -n "$before_source" ] && [ -n "$after_source" ] || printf 'missing source fingerprint: candidate or baseline\n' >>"$issues"
+	[ -n "$before_commit" ] && [ -n "$(metadata_value "$after/metadata.txt" commit)" ] || printf 'missing commit: candidate or baseline\n' >>"$issues"
+	[ "$before_capture" = "$gate_capture" ] || printf 'capture fingerprint mismatch: baseline does not match gate manifest\n' >>"$issues"
+	[ "${before_benchtime:-}" = "$gate_benchtime" ] || printf 'benchtime mismatch: baseline does not match gate manifest\n' >>"$issues"
+	[ "${before_benchtime:-}" = "${after_benchtime:-}" ] || printf 'benchtime mismatch: %s != %s\n' "${before_benchtime:-}" "${after_benchtime:-}" >>"$issues"
+	[ "${before_profiles:-}" = "${after_profiles:-}" ] || printf 'profiles mismatch: %s != %s\n' "${before_profiles:-}" "${after_profiles:-}" >>"$issues"
+	printf 'source fingerprints: baseline=%s candidate=%s\n' "$before_source" "$after_source"
+fi
+
+families='scenario_ember_run:runtime
+recursive_fibonacci:runtime
+sparse_grid_neighbors:runtime
+runtime_modes:runtime
+compiler_256kib:compiler'
+
+gate_rows=$tmp_dir/gates.tsv
+awk -F '\t' '$1 == "row" && $2 != "family" { print $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6 }' "$manifest" >"$gate_rows"
+while IFS=: read -r family set_name; do
+	[ -n "$family" ] || continue
+	for dir in "$before" "$after"; do
+		raw=$dir/$family.raw.txt
+		if [ ! -r "$raw" ]; then
+			printf 'missing raw family: %s/%s\n' "$dir" "$family" >>"$issues"
+			continue
+		fi
+		capture_label=after
+		[ "$dir" = "$before" ] && capture_label=before
+		scripts/bench-summary --format tsv --before "$raw" >"$tmp_dir/$family.$capture_label.tsv" || printf 'unparseable raw family: %s/%s\n' "$dir" "$family" >>"$issues"
+	done
+done <<EOF
+$families
+EOF
+
+while IFS=: read -r family set_name; do
+	[ -n "$family" ] || continue
+	base_file=$tmp_dir/$family.before.tsv
+	after_file=$tmp_dir/$family.after.tsv
+	[ -s "$base_file" ] && [ -s "$after_file" ] || continue
+	awk -F '\t' -v family="$family" -v samples="$gate_samples" -v gate="$gate_rows" -v issues="$issues" -v metrics="$metrics" '
+FILENAME == gate { if ($1 == family) { g[$2] = $3; bytes_gate[$2] = $4; allocs_gate[$2] = $5 } next }
+FILENAME == ARGV[2] { b[$1] = $0; next }
+{ a[$1] = $0 }
+END {
+    for (row in g) {
+        if (!(row in b) || !(row in a)) { printf "missing row\t%s\t%s\n", family, row >> issues; continue }
+        split(b[row], x, FS); split(a[row], y, FS)
+        if (x[2] != samples || y[2] != samples || x[4] != samples || y[4] != samples || x[6] != samples || y[6] != samples) { printf "sample mismatch\t%s\t%s\n", family, row >> issues; continue }
+        if (x[3] <= 0 || y[3] <= 0 || x[5] < 0 || y[5] < 0 || x[7] < 0 || y[7] < 0) { printf "missing metric\t%s\t%s\n", family, row >> issues; continue }
+        ratio = y[3] / x[3]; status = ratio <= g[row] + 1e-9 ? "pass" : "fail"
+        printf "%s\t%s\tns/op\t%.9g\t%.9g\t%.9g\t%s\n", family, row, x[3], y[3], ratio, status >> metrics
+        bstatus = y[5] <= bytes_gate[row] ? "pass" : "fail"
+        astatus = y[7] <= allocs_gate[row] ? "pass" : "fail"
+        printf "%s\t%s\tB/op\t%.9g\t%.9g\t%s\n", family, row, x[5], y[5], bstatus >> metrics
+        printf "%s\t%s\tallocs/op\t%.9g\t%.9g\t%s\n", family, row, x[7], y[7], astatus >> metrics
+    }
+    for (row in b) if (!(row in g)) printf "extra row\t%s\t%s\n", family, row >> issues
+    for (row in a) if (!(row in g)) printf "extra row\t%s\t%s\n", family, row >> issues
+}
+' "$gate_rows" "$base_file" "$after_file"
+done <<EOF
+$families
+EOF
+
+printf 'runtime:\n'
+awk -F '\t' '$1 != "compiler_256kib" && $3 == "ns/op" { print }' "$metrics" 2>/dev/null || true
+printf 'compiler:\n'
+awk -F '\t' '$1 == "compiler_256kib" && $3 == "ns/op" { print }' "$metrics" 2>/dev/null || true
+printf 'B/op: baseline-envelope ceiling\n'
+awk -F '\t' '$3 == "B/op" { print }' "$metrics" 2>/dev/null || true
+printf 'allocs/op: baseline-envelope ceiling\n'
+awk -F '\t' '$3 == "allocs/op" { print }' "$metrics" 2>/dev/null || true
+printf 'missing rows/metrics/samples/environment:\n'
+[ -s "$issues" ] && cat "$issues" || printf 'none\n'
+if [ -s "$issues" ] || awk -F '\t' '$NF == "fail" { found=1 } END { exit !found }' "$metrics"; then
+	printf 'result: FAIL\n'
+	exit 1
+fi
+printf 'result: PASS\n'

@@ -69,11 +69,13 @@ if ! mkdir "$output"; then
 	exit 1
 fi
 audit_output_created=1
+printf '%s\n' 'audit capture is incomplete' >"$output/INCOMPLETE"
+output_abs=$(cd "$(dirname "$output")" && pwd)/$(basename "$output")
 
 audit_exit() {
 	audit_status=$?
 	if [ "$audit_output_created" -eq 1 ] && [ "$audit_status" -ne 0 ]; then
-		printf 'audit did not complete successfully\n' >"$output/INCOMPLETE"
+		[ -e "$output/INCOMPLETE" ] || printf 'audit capture is incomplete\n' >"$output/INCOMPLETE"
 	fi
 	exit "$audit_status"
 }
@@ -83,20 +85,60 @@ benchtime=${BENCHTIME:-500ms}
 samples=5
 pkg=.
 
-source_fingerprint=$(
+source_fingerprint_for_tree() {
 	{
 		git diff --binary HEAD
 		git ls-files --others --exclude-standard |
 		while IFS= read -r path; do
+			path_abs=$repo_root/$path
+			case "$path_abs/" in "$output_abs"/*) continue ;; esac
 			printf 'untracked:%s\n' "$path"
 			shasum -a 256 -- "$path"
 		done
 	} | shasum -a 256 | awk '{print $1}'
+}
+source_fingerprint=$(source_fingerprint_for_tree)
+
+cpu_model=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || sysctl -n hw.model 2>/dev/null || uname -p 2>/dev/null || printf unknown)
+os_kernel=$(uname -srv 2>/dev/null || printf unknown)
+effective_gomaxprocs=${GOMAXPROCS:-default}
+logical_cpus=$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || printf unknown)
+power_mode=${POWER_MODE:-unknown}
+
+environment_fingerprint=$(
+	{
+		printf 'go_version=%s\n' "$(go version)"
+		printf 'goos=%s\n' "$(go env GOOS)"
+		printf 'goarch=%s\n' "$(go env GOARCH)"
+		printf 'cpu_model=%s\n' "$cpu_model"
+		printf 'os_kernel=%s\n' "$os_kernel"
+		printf 'gomaxprocs=%s\n' "$effective_gomaxprocs"
+		printf 'logical_cpus=%s\n' "$logical_cpus"
+		printf 'goflags=%s\n' "${GOFLAGS-}"
+		printf 'godebug=%s\n' "${GODEBUG-}"
+		printf 'luau_bin=%s\n' "${LUAU_BIN-}"
+		printf 'power_mode=%s\n' "$power_mode"
+	} | shasum -a 256 | awk '{print $1}'
 )
+
+git status --porcelain=v1 >"$output/git-status.txt"
+git diff --binary HEAD >"$output/tracked-diff.patch"
+git ls-files --others --exclude-standard | while IFS= read -r path; do
+	path_abs=$repo_root/$path
+	case "$path_abs/" in "$output_abs"/*) continue ;; esac
+	printf '%s\t' "$path"
+	shasum -a 256 -- "$path" | awk '{print $1}'
+done >"$output/untracked-files.tsv"
 
 {
 	printf 'commit=%s\n' "$(git rev-parse HEAD)"
 	printf 'source_fingerprint=%s\n' "$source_fingerprint"
+	printf 'environment_fingerprint=%s\n' "$environment_fingerprint"
+	printf 'cpu_model=%s\n' "$cpu_model"
+	printf 'os_kernel=%s\n' "$os_kernel"
+	printf 'effective_gomaxprocs=%s\n' "$effective_gomaxprocs"
+	printf 'logical_cpus=%s\n' "$logical_cpus"
+	printf 'power_mode=%s\n' "$power_mode"
 	printf 'go_version=%s\n' "$(go version)"
 	printf 'goos=%s\n' "$(go env GOOS)"
 	printf 'goarch=%s\n' "$(go env GOARCH)"
@@ -113,19 +155,20 @@ source_fingerprint=$(
 run_summary() {
 	run_name=$1
 	run_bench=$2
+	run_raw "$run_name" "$run_bench"
 	run_summary_path=$output/$run_name.summary.md
 	run_summary_tmp=$run_summary_path.tmp.$$
 	[ ! -e "$run_summary_path" ] || {
 		printf 'performance-audit: refusing to overwrite %s\n' "$run_summary_path" >&2
 		exit 1
 	}
-	printf 'summary %s: BENCH=%s BENCHTIME=%s COUNT=%s PKG=%s\n' "$run_name" "$run_bench" "$benchtime" "$samples" "$pkg" >>"$output/commands.txt"
-	if ! BENCH="$run_bench" BENCHTIME="$benchtime" COUNT="$samples" PKG="$pkg" scripts/bench-summary >"$run_summary_tmp"; then
+	printf 'summary %s: raw=%s\n' "$run_name" "$run_name.raw.txt" >>"$output/commands.txt"
+	if ! scripts/bench-summary --before "$output/$run_name.raw.txt" >"$run_summary_tmp"; then
 		rm -f "$run_summary_tmp"
-		printf 'performance-audit: benchmark family failed: %s\n' "$run_name" >&2
+		printf 'performance-audit: benchmark summary failed: %s\n' "$run_name" >&2
 		exit 1
 	fi
-	if ! grep -q '^| Benchmark' "$run_summary_tmp"; then
+	if ! grep -q '^| Suite |' "$run_summary_tmp"; then
 		rm -f "$run_summary_tmp"
 		printf 'performance-audit: benchmark family produced no rows: %s\n' "$run_name" >&2
 		exit 1
@@ -185,7 +228,7 @@ run_profiles() {
 		printf 'performance-audit: profile capture failed: %s\n' "$run_name" >&2
 		exit 1
 	fi
-	if [ ! -s "$run_cpu_tmp" ] || [ ! -s "$run_mem_tmp" ]; then
+	if [ ! -s "$run_cpu_tmp" ] || [ ! -s "$run_mem_tmp" ] || [ ! -s "$run_log_tmp" ]; then
 		rm -f "$run_cpu_tmp" "$run_mem_tmp" "$run_log_tmp"
 		printf 'performance-audit: profile capture produced an empty profile: %s\n' "$run_name" >&2
 		exit 1
@@ -196,6 +239,26 @@ run_profiles() {
 		exit 1
 	fi
 	rm "$run_cpu_tmp" "$run_mem_tmp" "$run_log_tmp"
+}
+
+validate_raw_metrics() {
+	raw=$1
+	validation=$output/raw-validation.tsv.tmp.$$
+	if ! scripts/bench-summary --format samples-tsv --before "$raw" >"$validation"; then
+		rm -f "$validation"
+		printf 'performance-audit: cannot parse raw metrics: %s\n' "$raw" >&2
+		exit 1
+	fi
+	if ! awk -F '\t' -v samples="$samples" '
+        NF != 5 || $1 == "" || $2 !~ /^[0-9]+$/ || $3 <= 0 || $4 < 0 || $5 < 0 { bad=1 }
+        { count[$1]++; any=1 }
+        END { for (row in count) if (count[row] != samples) bad=1; if (!any || bad) exit 1 }
+    ' "$validation"; then
+		rm -f "$validation"
+		printf 'performance-audit: raw metrics are incomplete or invalid: %s\n' "$raw" >&2
+		exit 1
+	fi
+	rm -f "$validation"
 }
 
 : >"$output/commands.txt"
@@ -212,5 +275,52 @@ if [ "$profiles" -eq 1 ]; then
 	run_profiles compiler_256kib '^BenchmarkCompilerStageMatrix/256KiB/.*$'
 	run_profiles runtime_modes '^BenchmarkRuntimeLane(StatelessRun|PersistentRuntimeRunHook|BoundedRuntimeRunHook|CancelableRuntimeRunHook)/.*$'
 fi
+
+for family in scenario_ember_run recursive_fibonacci sparse_grid_neighbors compiler_256kib runtime_modes; do
+	validate_raw_metrics "$output/$family.raw.txt"
+done
+
+final_commit=$(git rev-parse HEAD)
+final_source_fingerprint=$(source_fingerprint_for_tree)
+[ "$final_commit" = "$(awk -F= '$1 == "commit" { print $2; exit }' "$output/metadata.txt")" ] || {
+	printf '%s\n' 'performance-audit: HEAD changed during capture' >&2
+	exit 1
+}
+[ "$final_source_fingerprint" = "$source_fingerprint" ] || {
+	printf '%s\n' 'performance-audit: source changed during capture' >&2
+	exit 1
+}
+
+facts_tmp=$output/capture-facts.tsv.tmp.$$
+{
+	printf 'version=1\n'
+	printf 'samples=%s\n' "$samples"
+	printf 'profiles=%s\n' "$profiles"
+	printf 'family\tname\traw\tsummary\tcpu_profile\talloc_profile\tprofile_log\n'
+	for family in scenario_ember_run recursive_fibonacci sparse_grid_neighbors compiler_256kib runtime_modes; do
+		summary="$family.summary.md"
+		[ "$family" = compiler_256kib ] && summary=-
+		printf 'family\t%s\t%s.raw.txt\t%s\t%s.cpu.pprof\t%s.alloc.pprof\t%s.profile.log\n' "$family" "$family" "$summary" "$family" "$family" "$family"
+	done
+	printf 'row\tfamily\tname\n'
+	for family in scenario_ember_run recursive_fibonacci sparse_grid_neighbors compiler_256kib runtime_modes; do
+		scripts/bench-summary --format tsv --before "$output/$family.raw.txt" | awk -F '\t' -v family="$family" '{ print "row\t" family "\t" $1 }'
+	done
+} >"$facts_tmp"
+mv "$facts_tmp" "$output/capture-facts.tsv"
+
+for artifact in metadata.txt git-status.txt tracked-diff.patch untracked-files.tsv capture-facts.tsv commands.txt; do
+	[ -f "$output/$artifact" ] || { printf 'performance-audit: missing artifact: %s\n' "$artifact" >&2; exit 1; }
+done
+if [ "$profiles" -eq 1 ]; then
+	for family in scenario_ember_run recursive_fibonacci sparse_grid_neighbors compiler_256kib runtime_modes; do
+		for suffix in cpu.pprof alloc.pprof profile.log; do
+			[ -s "$output/$family.$suffix" ] || { printf 'performance-audit: missing profile artifact: %s.%s\n' "$family" "$suffix" >&2; exit 1; }
+		done
+	done
+fi
+
+rm -f "$output/INCOMPLETE"
+printf '%s\n' 'audit capture complete' >"$output/COMPLETE"
 
 printf 'performance audit written to %s\n' "$output"
