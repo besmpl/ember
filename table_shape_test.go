@@ -8,8 +8,8 @@ import (
 )
 
 func TestPropertyICIsCompactAndDoesNotRetainReceiverOrKey(t *testing.T) {
-	if got, want := unsafe.Sizeof(propertyIC{}), uintptr(16); got != want {
-		t.Fatalf("propertyIC size = %d bytes, want %d", got, want)
+	if got, want := unsafe.Sizeof(propertyIC{}), expectedArchitectureLayoutSize(12, 16); got != want {
+		t.Fatalf("propertyIC size = %d bytes, want %d for this pointer width", got, want)
 	}
 
 	cacheType := reflect.TypeOf(propertyIC{})

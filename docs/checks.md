@@ -67,6 +67,18 @@ go test -race -count=1 ./...
 go test -gcflags=all=-d=checkptr=2 -count=1 ./...
 ```
 
+Platform coverage is explicit in CI: Linux amd64 runs the standard checks,
+macOS and Linux arm64 run the test suite (arm64 also builds), and the Linux
+386 lane uses the compile-only command below:
+
+```sh
+GOOS=linux GOARCH=386 go test -run '^$' ./...
+```
+
+Although this command is compile-only by test selection, `go test` still starts
+the produced test binary. Run it on a Linux host; a Darwin host reports
+`exec format error` after successfully compiling the 386 packages.
+
 Allocation-budget tests that cannot produce meaningful numbers under pointer
 instrumentation skip only their measurement section; semantic checks remain
 active.

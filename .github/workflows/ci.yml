@@ -32,6 +32,65 @@ jobs:
       - name: Build packages
         run: go build ./...
 
+  macos:
+    name: macos
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run macOS tests
+        run: go test -count=1 ./...
+
+  linux-arm64:
+    name: linux-arm64
+    # GitHub-hosted ARM64 Linux is a public-preview runner. Keep this job
+    # explicit so unavailable runner capacity is visible rather than omitted.
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run Linux arm64 tests
+        run: go test -count=1 ./...
+
+      - name: Build Linux arm64 packages
+        run: go build ./...
+
+  linux-386:
+    name: linux-386-compile
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Compile Linux 386 packages
+        # go test builds and then executes the 386 test binary; run this lane
+        # on Linux so the host can execute it. On Darwin this ends at exec
+        # format error after the cross-compile succeeds.
+        run: GOOS=linux GOARCH=386 go test -run '^$' ./...
+
   vet:
     name: vet
     runs-on: ubuntu-latest

@@ -8,8 +8,8 @@ import (
 
 func TestVMFrameRecordFitsCompactCallStateBudget(t *testing.T) {
 	typeOfRecord := reflect.TypeOf(vmFrameRecord{})
-	if got, want := unsafe.Sizeof(vmFrameRecord{}), uintptr(48); got != want {
-		t.Fatalf("vmFrameRecord size = %d bytes, want exactly %d", got, want)
+	if got, want := unsafe.Sizeof(vmFrameRecord{}), expectedArchitectureLayoutSize(44, 48); got != want {
+		t.Fatalf("vmFrameRecord size = %d bytes, want exactly %d for this pointer width", got, want)
 	}
 
 	pointers := 0

@@ -9,9 +9,10 @@ import (
 	"testing"
 )
 
-func TestValueLayoutIsExactlySixteenBytes(t *testing.T) {
-	if got := reflect.TypeOf(Value{}).Size(); got != 16 {
-		t.Fatalf("Value size = %d bytes, want exactly 16", got)
+func TestValueLayoutMatchesPointerWidth(t *testing.T) {
+	want := expectedArchitectureLayoutSize(12, 16)
+	if got := reflect.TypeOf(Value{}).Size(); got != want {
+		t.Fatalf("Value size = %d bytes, want exactly %d for this pointer width", got, want)
 	}
 }
 

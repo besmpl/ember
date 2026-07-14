@@ -100,8 +100,9 @@ func TestFinalizeProtoRejectsWordcodeRegisterOverflow(t *testing.T) {
 }
 
 func TestValueSizeBudgetSafeLayout(t *testing.T) {
-	if got, want := reflect.TypeOf(Value{}).Size(), uintptr(16); got != want {
-		t.Fatalf("Value size is %d bytes, want exactly %d", got, want)
+	want := expectedArchitectureLayoutSize(12, 16)
+	if got := reflect.TypeOf(Value{}).Size(); got != want {
+		t.Fatalf("Value size is %d bytes, want exactly %d for this pointer width", got, want)
 	}
 }
 
@@ -389,8 +390,9 @@ func measuredRunWithGlobalsAllocBytes(t *testing.T, proto *Proto, globals map[st
 }
 
 func TestValueUnsafeLayoutSizeBudget(t *testing.T) {
-	if got, want := reflect.TypeOf(Value{}).Size(), uintptr(16); got != want {
-		t.Fatalf("unsafe Value size is %d bytes, want exactly %d", got, want)
+	want := expectedArchitectureLayoutSize(12, 16)
+	if got := reflect.TypeOf(Value{}).Size(); got != want {
+		t.Fatalf("unsafe Value size is %d bytes, want exactly %d for this pointer width", got, want)
 	}
 }
 
