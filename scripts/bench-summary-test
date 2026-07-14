@@ -78,13 +78,10 @@ grep -F 'missing required scaling row: BenchmarkCompileMatrix/straight_line/1000
 
 awk '
     /^BenchmarkCompileMatrix\/straight_line\/1000-/ {
-        for (i = 2; i < NF; i++) {
-            if ($(i + 1) == "B/op") {
-                $i = ""
-                $(i + 1) = ""
-                break
-            }
-        }
+        # Rewrite the raw record, rather than clearing fields.  Clearing
+        # fields leaves awk implementations free to retain stale NF/$0
+        # state, which can accidentally make a missing metric look present.
+        sub(/[[:space:]][^[:space:]]+[[:space:]]B\/op([[:space:]]|$)/, " ")
     }
     { print }
 ' "$after" >"$missing_metric_after"

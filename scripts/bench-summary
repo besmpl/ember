@@ -213,6 +213,20 @@ function process_sample(which, name) {
     } else {
         after_rows[name] = 1
     }
+    # Keep a lexical presence record for each required metric.  The numeric
+    # parser below intentionally returns -1 for absent values, but a few awk
+    # implementations rebuild fields differently after empty-field edits.
+    # Checking the original row text as well keeps required gates fail-closed
+    # across awk implementations.
+    if ($0 ~ "(^|[[:space:]])ns/op([[:space:]]|$)") {
+        if (which == "before") { b_metric_seen[name, "ns"] = 1 } else { a_metric_seen[name, "ns"] = 1 }
+    }
+    if ($0 ~ "(^|[[:space:]])B/op([[:space:]]|$)") {
+        if (which == "before") { b_metric_seen[name, "bytes"] = 1 } else { a_metric_seen[name, "bytes"] = 1 }
+    }
+    if ($0 ~ "(^|[[:space:]])allocs/op([[:space:]]|$)") {
+        if (which == "before") { b_metric_seen[name, "allocs"] = 1 } else { a_metric_seen[name, "allocs"] = 1 }
+    }
     add_sample(which, name, metric("ns/op"), metric("B/op"), metric("allocs/op"), metric("instructions/op"), metric("register_slots/op"), metric("packed_B/op"))
 }
 
@@ -323,26 +337,31 @@ function average_after(metric_name, unused, name) {
     return sample_median("after", metric_name, name)
 }
 
-function check_required_row(name, label, missing_count) {
-    missing_count = 0
+function required_metric_seen(which, name, metric_name) {
+    if (which == "before") {
+        return (name SUBSEP metric_name) in b_metric_seen
+    }
+    return (name SUBSEP metric_name) in a_metric_seen
+}
+
+function check_required_row(name, label) {
     if (!(name in before_rows) || !(name in after_rows)) {
         printf "missing %s row: %s\n", label, name
         failures++
         return
     }
-    if (b_ns_count[name] <= 0 || a_ns_count[name] <= 0) {
+    if (!required_metric_seen("before", name, "ns") || !required_metric_seen("after", name, "ns") || b_ns_count[name] <= 0 || a_ns_count[name] <= 0) {
         printf "missing %s ns/op metric: %s\n", label, name
-        missing_count++
+        failures++
     }
-    if (b_bytes_count[name] <= 0 || a_bytes_count[name] <= 0) {
+    if (!required_metric_seen("before", name, "bytes") || !required_metric_seen("after", name, "bytes") || b_bytes_count[name] <= 0 || a_bytes_count[name] <= 0) {
         printf "missing %s B/op metric: %s\n", label, name
-        missing_count++
+        failures++
     }
-    if (b_allocs_count[name] <= 0 || a_allocs_count[name] <= 0) {
+    if (!required_metric_seen("before", name, "allocs") || !required_metric_seen("after", name, "allocs") || b_allocs_count[name] <= 0 || a_allocs_count[name] <= 0) {
         printf "missing %s allocs/op metric: %s\n", label, name
-        missing_count++
+        failures++
     }
-    if (missing_count > 0) { failures++ }
 }
 
 function print_scaling_pair(label, left, right, left_value, right_value, left_bytes, right_bytes, left_allocs, right_allocs, ratio, bytes_ratio, allocs_ratio, status) {
@@ -444,14 +463,14 @@ END {
     emit_set("compile-other", "compile-other")
 
     for (name in cold) {
-        if (require_fixed_core != 0) { check_required_row(name, "fixed cold-core", 0) }
+        if (require_fixed_core != 0) { check_required_row(name, "fixed cold-core") }
     }
 
     required_scaling["BenchmarkCompileMatrix/straight_line/100"] = 1
     required_scaling["BenchmarkCompileMatrix/straight_line/1000"] = 1
     required_scaling["BenchmarkCompileMatrix/straight_line/10000"] = 1
     for (name in required_scaling) {
-        check_required_row(name, "required scaling", 0)
+        check_required_row(name, "required scaling")
     }
 
     print ""
