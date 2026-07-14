@@ -166,9 +166,11 @@ Why this is slow:
   booleans use GC-visible pointer sentinels, so `valueKind` compares the
   reference against scalar sentinels before reading tag bits. Typed opcode
   guards repeat that classification throughout the loop.
-- Cacheable property operations derive a compact cache ID from the physical
-  program counter rather than loading a direct per-instruction ID. The compact
-  sidecar saves code space but costs rank/index work in the hot path.
+- Cacheable property operations load `cacheID+1` from the immutable direct
+  per-word sidecar, then use that ID to load the descriptor. This is the D8
+  winner: the retired rank/popcount index saved memory but lost the measured
+  cache-heavy gate. On darwin-arm64 the 128-word/128-site reference fixture is
+  1,592 bytes, 460 bytes (+40.6%) above the retired rank estimate.
 
 Useful experiments, in increasing blast radius:
 
@@ -176,8 +178,9 @@ Useful experiments, in increasing blast radius:
    a cold helper. Measure bounded and cancelable runtime rows separately.
 2. Cache or encode only the immutable type facts already proved by the
    compiler so numeric/table opcode bodies do not repeat `valueKind` calls.
-3. Compare the compact cache-rank sidecar with a direct immutable per-PC cache
-   ID table, including its memory cost.
+3. Measure whether `cacheIDAt` and `cacheSiteAt` can be collapsed or inlined at
+   generated property opcodes without changing the direct sidecar's validated
+   layout or increasing its recorded memory cost.
 
 Proof signal: `stepInstruction`, `valueKind`, and cache-index flat samples fall
 across the full Scenario family, not only scalar microbenchmarks. Wordcode and
