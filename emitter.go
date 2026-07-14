@@ -1237,265 +1237,239 @@ func (c *compiler) canCompileSingleLocalAssignmentInPlace(stmt arenaAssignStatem
 	if !ok || ref.kind != variableLocal {
 		return false
 	}
-	name, ok := resolveArenaName(c.tree, value.name)
-	if !ok {
+	targetSymbol := c.bind.useClassification(value.id)
+	if targetSymbol < 0 {
 		return false
 	}
-	return expressionCanAssignToNameInPlace(c.tree, values[item.source], name)
+	return !c.assignmentDependency(values[item.source], targetSymbol).unsafe
 }
 
-func expressionCanAssignToNameInPlace(tree syntaxTree, expr expressionID, name string) bool {
-	if !expressionReferencesName(tree, expr, name) {
-		return true
-	}
-	terms, ok := tree.expressionTerms(expr)
+// assignmentDependency is the one target-dependent walk used to decide
+// whether an assignment may compile its RHS directly into the target register.
+// A reference is safe only when every subsequent operation reads from a
+// register that has not yet been overwritten. An unsafe result always implies
+// references=true.
+type assignmentDependency struct {
+	references bool
+	unsafe     bool
+}
+
+func (c *compiler) assignmentDependency(expr expressionID, target boundUseClassification) assignmentDependency {
+	terms, ok := c.tree.expressionTerms(expr)
 	if !ok || len(terms) == 0 {
-		return true
+		return assignmentDependency{}
 	}
-	if !andExpressionCanAssignToNameInPlace(tree, terms[0], name) {
-		return false
+	result := c.assignmentAndDependency(terms[0], target)
+	if result.unsafe {
+		return result
 	}
 	for _, term := range terms[1:] {
-		if andExpressionReferencesName(tree, term, name) {
-			return false
+		next := c.assignmentAndDependency(term, target)
+		result.references = result.references || next.references
+		if next.references {
+			result.unsafe = true
+			return result
 		}
 	}
-	return true
+	return result
 }
 
-func andExpressionCanAssignToNameInPlace(tree syntaxTree, expr andExpressionID, name string) bool {
-	if !andExpressionReferencesName(tree, expr, name) {
-		return true
-	}
-	terms, ok := tree.andTerms(expr)
+func (c *compiler) assignmentAndDependency(expr andExpressionID, target boundUseClassification) assignmentDependency {
+	terms, ok := c.tree.andTerms(expr)
 	if !ok || len(terms) == 0 {
-		return true
+		return assignmentDependency{}
 	}
-	if !comparisonExpressionCanAssignToNameInPlace(tree, terms[0], name) {
-		return false
+	result := c.assignmentComparisonDependency(terms[0], target)
+	if result.unsafe {
+		return result
 	}
 	for _, term := range terms[1:] {
-		if comparisonExpressionReferencesName(tree, term, name) {
-			return false
+		next := c.assignmentComparisonDependency(term, target)
+		result.references = result.references || next.references
+		if next.references {
+			result.unsafe = true
+			return result
 		}
 	}
-	return true
+	return result
 }
 
-func comparisonExpressionCanAssignToNameInPlace(tree syntaxTree, expr comparisonExpressionID, name string) bool {
-	if !comparisonExpressionReferencesName(tree, expr, name) {
-		return true
+func (c *compiler) assignmentComparisonDependency(expr comparisonExpressionID, target boundUseClassification) assignmentDependency {
+	result := c.assignmentConcatDependency(c.tree.comparisonLeft(expr), target)
+	if result.unsafe {
+		return result
 	}
-	if !concatExpressionCanAssignToNameInPlace(tree, tree.comparisonLeft(expr), name) {
-		return false
+	if right := c.tree.comparisonRight(expr); right != 0 {
+		next := c.assignmentConcatDependency(right, target)
+		result.references = result.references || next.references
+		if next.references {
+			result.unsafe = true
+		}
 	}
-	right := tree.comparisonRight(expr)
-	return right == 0 || !concatExpressionReferencesName(tree, right, name)
+	return result
 }
 
-func concatExpressionCanAssignToNameInPlace(tree syntaxTree, expr concatExpressionID, name string) bool {
-	if !concatExpressionReferencesName(tree, expr, name) {
-		return true
+func (c *compiler) assignmentConcatDependency(expr concatExpressionID, target boundUseClassification) assignmentDependency {
+	result := c.assignmentAdditiveDependency(c.tree.concatFirst(expr), target)
+	if result.unsafe {
+		return result
 	}
-	if !additiveExpressionCanAssignToNameInPlace(tree, tree.concatFirst(expr), name) {
-		return false
-	}
-	parts, _ := tree.concatRest(expr)
+	parts, _ := c.tree.concatRest(expr)
 	for _, part := range parts {
-		if additiveExpressionReferencesName(tree, part, name) {
-			return false
+		next := c.assignmentAdditiveDependency(part, target)
+		result.references = result.references || next.references
+		if next.references {
+			result.unsafe = true
+			return result
 		}
 	}
-	return true
+	return result
 }
 
-func additiveExpressionCanAssignToNameInPlace(tree syntaxTree, expr additiveExpressionID, name string) bool {
-	if !additiveExpressionReferencesName(tree, expr, name) {
-		return true
+func (c *compiler) assignmentAdditiveDependency(expr additiveExpressionID, target boundUseClassification) assignmentDependency {
+	result := c.assignmentMultiplicativeDependency(c.tree.additiveFirst(expr), target)
+	if result.unsafe {
+		return result
 	}
-	if !multiplicativeExpressionCanAssignToNameInPlace(tree, tree.additiveFirst(expr), name) {
-		return false
-	}
-	parts, _ := tree.additiveRest(expr)
+	parts, _ := c.tree.additiveRest(expr)
 	for _, part := range parts {
-		if multiplicativeExpressionReferencesName(tree, tree.additivePartValue(part), name) {
-			return false
+		next := c.assignmentMultiplicativeDependency(c.tree.additivePartValue(part), target)
+		result.references = result.references || next.references
+		if next.references {
+			result.unsafe = true
+			return result
 		}
 	}
-	return true
+	return result
 }
 
-func multiplicativeExpressionCanAssignToNameInPlace(tree syntaxTree, expr multiplicativeExpressionID, name string) bool {
-	if !multiplicativeExpressionReferencesName(tree, expr, name) {
-		return true
+func (c *compiler) assignmentMultiplicativeDependency(expr multiplicativeExpressionID, target boundUseClassification) assignmentDependency {
+	result := c.assignmentTermDependency(c.tree.multiplicativeFirst(expr), target)
+	if result.unsafe {
+		return result
 	}
-	if !termCanAssignToNameInPlace(tree, tree.multiplicativeFirst(expr), name) {
-		return false
-	}
-	parts, _ := tree.multiplicativeRest(expr)
+	parts, _ := c.tree.multiplicativeRest(expr)
 	for _, part := range parts {
-		if termReferencesName(tree, tree.multiplicativePartValue(part), name) {
-			return false
+		next := c.assignmentTermDependency(c.tree.multiplicativePartValue(part), target)
+		result.references = result.references || next.references
+		if next.references {
+			result.unsafe = true
+			return result
 		}
 	}
-	return true
+	return result
 }
 
-func termCanAssignToNameInPlace(tree syntaxTree, term termID, name string) bool {
-	if !termReferencesName(tree, term, name) {
-		return true
+func (c *compiler) assignmentTermDependency(term termID, target boundUseClassification) assignmentDependency {
+	if term == 0 {
+		return assignmentDependency{}
 	}
-	if tree.termName(term) == name {
-		selectors, _ := tree.termSelectors(term)
-		for _, selector := range selectors {
-			if index := tree.termSelectorIndex(selector); index != 0 && expressionReferencesName(tree, index, name) {
-				return false
+	selectors, _ := c.tree.termSelectors(term)
+	// Casts retain the name term's syntax ID while syntaxTermKind reports the
+	// cast wrapper. Use the binding classification directly so a casted target
+	// is still recognized as the same symbol (and cannot be overwritten before
+	// a later operand reads it).
+	if c.tree.termName(term) != "" && c.bind.useClassification(c.tree.termID(term)) == target {
+		result := assignmentDependency{references: true}
+		return c.assignmentSelectorDependency(result, selectors, target)
+	}
+
+	var result assignmentDependency
+	if table, ok := c.tree.termTable(term); ok {
+		fields, _ := c.tree.tableFields(table)
+		for _, field := range fields {
+			if key := c.tree.tableFieldKey(field); key != 0 {
+				result = c.assignmentNestedDependency(result, c.assignmentDependency(key, target))
+				if result.unsafe {
+					return result
+				}
+			}
+			result = c.assignmentNestedDependency(result, c.assignmentDependency(c.tree.tableFieldValue(field), target))
+			if result.unsafe {
+				return result
 			}
 		}
-		return true
-	}
-	if child, ok := tree.termChild(term); ok {
-		return termCanAssignToNameInPlace(tree, child, name)
-	}
-	if power, ok := tree.termPower(term); ok {
-		return termCanAssignToNameInPlace(tree, tree.powerBase(power), name) &&
-			!termReferencesName(tree, tree.powerExponent(power), name)
-	}
-	if group, ok := tree.termGroup(term); ok {
-		return expressionCanAssignToNameInPlace(tree, group, name)
-	}
-	return false
-}
-
-func expressionReferencesName(tree syntaxTree, expr expressionID, name string) bool {
-	terms, _ := tree.expressionTerms(expr)
-	for _, term := range terms {
-		if andExpressionReferencesName(tree, term, name) {
-			return true
+	} else if ifExpr, ok := c.tree.termIf(term); ok {
+		for _, expr := range []expressionID{
+			c.tree.ifExpressionCondition(ifExpr),
+			c.tree.ifExpressionThen(ifExpr),
+			c.tree.ifExpressionElse(ifExpr),
+		} {
+			result = c.assignmentNestedDependency(result, c.assignmentDependency(expr, target))
+			if result.unsafe {
+				return result
+			}
 		}
-	}
-	return false
-}
-
-func andExpressionReferencesName(tree syntaxTree, expr andExpressionID, name string) bool {
-	terms, _ := tree.andTerms(expr)
-	for _, term := range terms {
-		if comparisonExpressionReferencesName(tree, term, name) {
-			return true
+	} else if call, ok := c.tree.termCall(term); ok {
+		result = c.assignmentNestedTermDependency(result, c.assignmentTermDependency(c.tree.callTarget(call), target))
+		if result.unsafe {
+			return result
 		}
-	}
-	return false
-}
-
-func comparisonExpressionReferencesName(tree syntaxTree, expr comparisonExpressionID, name string) bool {
-	if concatExpressionReferencesName(tree, tree.comparisonLeft(expr), name) {
-		return true
-	}
-	right := tree.comparisonRight(expr)
-	return right != 0 && concatExpressionReferencesName(tree, right, name)
-}
-
-func concatExpressionReferencesName(tree syntaxTree, expr concatExpressionID, name string) bool {
-	if additiveExpressionReferencesName(tree, tree.concatFirst(expr), name) {
-		return true
-	}
-	parts, _ := tree.concatRest(expr)
-	for _, part := range parts {
-		if additiveExpressionReferencesName(tree, part, name) {
-			return true
+		if receiver := c.tree.callReceiver(call); receiver != 0 {
+			result = c.assignmentNestedTermDependency(result, c.assignmentTermDependency(receiver, target))
+			if result.unsafe {
+				return result
+			}
 		}
-	}
-	return false
-}
-
-func additiveExpressionReferencesName(tree syntaxTree, expr additiveExpressionID, name string) bool {
-	if multiplicativeExpressionReferencesName(tree, tree.additiveFirst(expr), name) {
-		return true
-	}
-	parts, _ := tree.additiveRest(expr)
-	for _, part := range parts {
-		if multiplicativeExpressionReferencesName(tree, tree.additivePartValue(part), name) {
-			return true
+		args, _ := c.tree.callArgs(call)
+		for _, arg := range args {
+			result = c.assignmentNestedDependency(result, c.assignmentDependency(arg, target))
+			if result.unsafe {
+				return result
+			}
 		}
-	}
-	return false
-}
-
-func multiplicativeExpressionReferencesName(tree syntaxTree, expr multiplicativeExpressionID, name string) bool {
-	if termReferencesName(tree, tree.multiplicativeFirst(expr), name) {
-		return true
-	}
-	parts, _ := tree.multiplicativeRest(expr)
-	for _, part := range parts {
-		if termReferencesName(tree, tree.multiplicativePartValue(part), name) {
-			return true
+	} else if child, ok := c.tree.termChild(term); ok {
+		result = c.assignmentTermDependency(child, target)
+	} else if power, ok := c.tree.termPower(term); ok {
+		result = c.assignmentTermDependency(c.tree.powerBase(power), target)
+		if result.unsafe {
+			return result
 		}
+		exponent := c.assignmentTermDependency(c.tree.powerExponent(power), target)
+		result.references = result.references || exponent.references
+		if exponent.references {
+			result.unsafe = true
+			return result
+		}
+	} else if group, ok := c.tree.termGroup(term); ok {
+		result = c.assignmentDependency(group, target)
 	}
-	return false
+	return c.assignmentSelectorDependency(result, selectors, target)
 }
 
-func termReferencesName(tree syntaxTree, term termID, name string) bool {
-	if tree.termName(term) == name {
-		return true
+func (c *compiler) assignmentSelectorDependency(result assignmentDependency, selectors []arenaSelector, target boundUseClassification) assignmentDependency {
+	if result.unsafe {
+		return result
 	}
-	if table, ok := tree.termTable(term); ok && tableExpressionReferencesName(tree, table, name) {
-		return true
-	}
-	if ifExpr, ok := tree.termIf(term); ok &&
-		(expressionReferencesName(tree, tree.ifExpressionCondition(ifExpr), name) ||
-			expressionReferencesName(tree, tree.ifExpressionThen(ifExpr), name) ||
-			expressionReferencesName(tree, tree.ifExpressionElse(ifExpr), name)) {
-		return true
-	}
-	if call, ok := tree.termCall(term); ok && callExpressionReferencesName(tree, call, name) {
-		return true
-	}
-	if child, ok := tree.termChild(term); ok && termReferencesName(tree, child, name) {
-		return true
-	}
-	if power, ok := tree.termPower(term); ok &&
-		(termReferencesName(tree, tree.powerBase(power), name) || termReferencesName(tree, tree.powerExponent(power), name)) {
-		return true
-	}
-	if group, ok := tree.termGroup(term); ok && expressionReferencesName(tree, group, name) {
-		return true
-	}
-	selectors, _ := tree.termSelectors(term)
 	for _, selector := range selectors {
-		if index := tree.termSelectorIndex(selector); index != 0 && expressionReferencesName(tree, index, name) {
-			return true
+		index := c.tree.termSelectorIndex(selector)
+		if index == 0 {
+			continue
+		}
+		next := c.assignmentDependency(index, target)
+		result.references = result.references || next.references
+		if next.references {
+			result.unsafe = true
+			return result
 		}
 	}
-	return false
+	return result
 }
 
-func tableExpressionReferencesName(tree syntaxTree, table arenaTableID, name string) bool {
-	fields, _ := tree.tableFields(table)
-	for _, field := range fields {
-		if key := tree.tableFieldKey(field); key != 0 && expressionReferencesName(tree, key, name) {
-			return true
-		}
-		if value := tree.tableFieldValue(field); value != 0 && expressionReferencesName(tree, value, name) {
-			return true
-		}
+func (c *compiler) assignmentNestedDependency(result, nested assignmentDependency) assignmentDependency {
+	result.references = result.references || nested.references
+	if nested.references {
+		result.unsafe = true
 	}
-	return false
+	return result
 }
 
-func callExpressionReferencesName(tree syntaxTree, call arenaCallID, name string) bool {
-	if termReferencesName(tree, tree.callTarget(call), name) {
-		return true
+func (c *compiler) assignmentNestedTermDependency(result, nested assignmentDependency) assignmentDependency {
+	result.references = result.references || nested.references
+	if nested.references {
+		result.unsafe = true
 	}
-	if receiver := tree.callReceiver(call); receiver != 0 && termReferencesName(tree, receiver, name) {
-		return true
-	}
-	args, _ := tree.callArgs(call)
-	for _, arg := range args {
-		if expressionReferencesName(tree, arg, name) {
-			return true
-		}
-	}
-	return false
+	return result
 }
 
 type addStringFieldAssignment struct {
