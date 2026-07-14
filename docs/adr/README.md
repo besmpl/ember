@@ -16,3 +16,5 @@ Current runtime decisions:
   lifetime.
 - `0004-runtime-slot-handle-ownership.md`: private slot/handle ownership when
   measured internal VM pressure justifies a runtime heap.
+- `0005-execution-path-retention.md`: retain one canonical direct VM and delete
+  the narrow slot, compact-call, and loop-kernel experiments.
