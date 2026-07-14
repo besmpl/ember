@@ -42,6 +42,15 @@ and retire or delete it when the slice lands or is abandoned.
 
 - `adr/`: architecture decision records for compatibility, runtime, and public
   interface decisions.
+- `../performance-audit.md`: current reproducible performance evidence and
+  noise envelope.
+- `../performance-optimization-implementation-plan.md`: active, temporary
+  performance coordination plan. It is evidence-gated and should be retired
+  when the program lands, is abandoned, or is replaced.
+
+Historical performance execution plans are intentionally not part of the
+navigation. Their durable decisions remain in the performance audit and ADRs;
+the retired files are available through Git history for archaeology.
 
 ## First-Contact Rule
 
