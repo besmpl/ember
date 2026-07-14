@@ -1,6 +1,11 @@
 # Ember Performance Optimization Implementation Plan
 
-Status: proposed, evidence-gated execution plan
+Status: historical; superseded for future runtime work by
+[`runtime-speed-2x-no-cgo-production-migration-implementation-plan.md`](runtime-speed-2x-no-cgo-production-migration-implementation-plan.md)
+
+The compiler and already-landed runtime evidence in this document remains
+useful history. Do not execute its conditional runtime architecture campaigns
+in parallel with the active production migration plan.
 
 Repository inspected at: `cb913dee73f626d0ddb08bfa54c47a487256009a`
 

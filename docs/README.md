@@ -44,9 +44,9 @@ and retire or delete it when the slice lands or is abandoned.
   interface decisions.
 - `../performance-audit.md`: current reproducible performance evidence and
   noise envelope.
-- `../performance-optimization-implementation-plan.md`: active, temporary
-  performance coordination plan. It is evidence-gated and should be retired
-  when the program lands, is abandoned, or is replaced.
+- `../runtime-speed-2x-no-cgo-production-migration-implementation-plan.md`:
+  active production-first runtime migration plan. It replaces the abandoned
+  proof and earlier incremental runtime-speed plans.
 
 Historical performance execution plans are intentionally not part of the
 navigation. Their durable decisions remain in the performance audit and ADRs;

@@ -177,7 +177,8 @@ The tracked files `docs/exec-plans/interpreter-core-speed.md`,
 `docs/exec-plans/general-optimization.md`, and
 `docs/exec-plans/massive-optimization.md` are retired temporary roadmaps.
 Their durable rationale remains in this audit and ADRs 0004, 0005, and 0006.
-The active coordination document is
-[`performance-optimization-implementation-plan.md`](performance-optimization-implementation-plan.md);
-retire it when this evidence-gated program lands, is abandoned, or is
-replaced.
+The active runtime coordination document is
+[`runtime-speed-2x-no-cgo-production-migration-implementation-plan.md`](runtime-speed-2x-no-cgo-production-migration-implementation-plan.md).
+The earlier `performance-optimization-implementation-plan.md` is historical;
+its durable measurements and retained decisions remain in this audit and the
+ADRs.
