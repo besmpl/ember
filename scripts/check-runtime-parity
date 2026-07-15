@@ -27,7 +27,11 @@ quiet_sample() {
 sample_is_quiet() {
 	awk -v load="$1" -v cpu="$2" 'BEGIN {
 		n = "^[0-9]+([.][0-9]+)?$"
-		exit !((load ~ n) && (cpu ~ n) && load <= 2.0 && cpu <= 100.0)
+		# The pinned M1 has eight logical CPUs. Limit external activity to two
+		# cores and reject a sustained full-host run queue; a one-core
+		# system-wide limit made normal macOS daemons indistinguishable from
+		# benchmark interference.
+		exit !((load ~ n) && (cpu ~ n) && load <= 8.0 && cpu <= 200.0)
 	}'
 }
 
@@ -126,10 +130,14 @@ self_test() {
 	[ "$(phase_cases dispatch)" = top10/arithmetic_for ] || die 'dispatch case changed'
 	q=$(mktemp -d "${TMPDIR:-/tmp}/runtime-parity.XXXXXX")
 	trap 'rm -rf "$q"' EXIT HUP INT TERM
-	printf '%s\n' '3 0' '1 0' '3 0' '1 0' >"$q/busy"
+	printf '%s\n' '9 0' '1 0' '9 0' '1 0' >"$q/busy"
 	if wait_for_quiet "$q/busy" 4 0; then die 'busy fixture unlocked'; fi
+	printf '%s\n' '1 201' '1 0' '1 201' '1 0' >"$q/busy-cpu"
+	if wait_for_quiet "$q/busy-cpu" 4 0; then die 'busy CPU fixture unlocked'; fi
 	printf '%s\n' '1 0' '1 0' '1 0' >"$q/quiet"
 	wait_for_quiet "$q/quiet" 3 0 || die 'quiet fixture stayed locked'
+	printf '%s\n' '4.9 150' '4.9 150' '4.9 150' >"$q/available-capacity"
+	wait_for_quiet "$q/available-capacity" 3 0 || die 'available M1 capacity stayed locked'
 	mkdir "$q/existing"
 	if output_is_available "$q/existing"; then die 'accepted reused output'; fi
 	cat >"$q/failing-slopes.tsv" <<'EOF'

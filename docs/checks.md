@@ -89,6 +89,13 @@ future 2x target is missed. It does not waive environment, result, row,
 contamination, or slope validation. Gate two independent captures and derive
 their immutable manifest separately:
 
+On the pinned eight-logical-CPU M1, acquisition starts after three samples with
+one-minute load at most 8.0 and aggregate CPU at most 200%. Live before/after
+probes apply the same limits to external processes while excluding the measuring
+Go process. This limits external activity to two cores, leaving at least five
+logical CPUs free while the single-threaded benchmark runs, without treating
+Ember's own timed work or ordinary single-core macOS daemons as contamination.
+
 ```sh
 scripts/runtime-ratio-gate --derive \
   --baseline-a /tmp/ember-speed2x-a \

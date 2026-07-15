@@ -31,8 +31,11 @@ const (
 	parityRawDefault  = "tmp/runtime-parity/raw.tsv"
 	parityRepeatCount = 3
 
-	parityLoadMax = 2.0
-	parityCPUMax  = 100.0
+	// The acceptance host has eight logical CPUs. These limits cap external
+	// activity at two cores while rejecting a sustained full-host run queue.
+	// The live CPU sample excludes this measuring process.
+	parityLoadMax = 8.0
+	parityCPUMax  = 200.0
 )
 
 var parityIterations = [...]int{1, 10, 100, 1000}
@@ -458,24 +461,42 @@ func sampleParitySystem() (paritySystemSample, error) {
 		return paritySystemSample{}, fmt.Errorf("parity system load: invalid value %q", loadFields[0])
 	}
 
-	cpuCommand := exec.Command("ps", "-A", "-o", "%cpu=")
+	cpuCommand := exec.Command("ps", "-A", "-o", "pid=,%cpu=")
 	cpuCommand.Env = append(os.Environ(), "LC_ALL=C")
 	cpuOutput, err := cpuCommand.Output()
 	if err != nil {
 		return paritySystemSample{}, fmt.Errorf("parity system CPU: %w", err)
 	}
-	var cpu float64
-	for _, field := range strings.Fields(string(cpuOutput)) {
-		value, err := strconv.ParseFloat(field, 64)
-		if err != nil || !finiteParityFloat(value) || value < 0 {
-			return paritySystemSample{}, fmt.Errorf("parity system CPU: invalid value %q", field)
-		}
-		cpu += value
-	}
-	if !finiteParityFloat(cpu) {
-		return paritySystemSample{}, fmt.Errorf("parity system CPU: invalid total %v", cpu)
+	cpu, err := parseParityProcessCPU(string(cpuOutput), os.Getpid())
+	if err != nil {
+		return paritySystemSample{}, fmt.Errorf("parity system CPU: %w", err)
 	}
 	return paritySystemSample{Load: load, CPU: cpu}, nil
+}
+
+func parseParityProcessCPU(output string, selfPID int) (float64, error) {
+	fields := strings.Fields(output)
+	if len(fields)%2 != 0 {
+		return 0, fmt.Errorf("invalid process sample %q", output)
+	}
+	var total float64
+	for index := 0; index < len(fields); index += 2 {
+		pid, err := strconv.Atoi(fields[index])
+		if err != nil || pid <= 0 {
+			return 0, fmt.Errorf("invalid process ID %q", fields[index])
+		}
+		cpu, err := strconv.ParseFloat(fields[index+1], 64)
+		if err != nil || !finiteParityFloat(cpu) || cpu < 0 {
+			return 0, fmt.Errorf("invalid process CPU %q", fields[index+1])
+		}
+		if pid != selfPID {
+			total += cpu
+		}
+	}
+	if !finiteParityFloat(total) {
+		return 0, fmt.Errorf("invalid process CPU total %v", total)
+	}
+	return total, nil
 }
 
 func paritySystemSampleClean(sample paritySystemSample) bool {
@@ -714,7 +735,7 @@ func TestRuntimeParityHarness(t *testing.T) {
 	if _, _, err := summarizeParityRepeatRatios([]float64{0.9, math.NaN(), 1.0}); err == nil {
 		t.Fatal("accepted non-finite repeat ratio")
 	}
-	if !paritySystemSampleClean(paritySystemSample{Load: 1.0, CPU: 50.0}) {
+	if !paritySystemSampleClean(paritySystemSample{Load: 7.5, CPU: 150.0}) {
 		t.Fatal("rejected clean system sample")
 	}
 	for _, contaminated := range []paritySystemSample{
@@ -726,6 +747,13 @@ func TestRuntimeParityHarness(t *testing.T) {
 		if paritySystemSampleClean(contaminated) {
 			t.Fatalf("accepted contaminated system sample: %+v", contaminated)
 		}
+	}
+	externalCPU, err := parseParityProcessCPU("42 99.5\n7 125.25\n", 42)
+	if err != nil || externalCPU != 125.25 {
+		t.Fatalf("external process CPU = %v, %v; want 125.25", externalCPU, err)
+	}
+	if _, err := parseParityProcessCPU("42 nope\n", 42); err == nil {
+		t.Fatal("accepted invalid process CPU sample")
 	}
 
 	for pair := 1; pair <= parityPairCount; pair++ {
