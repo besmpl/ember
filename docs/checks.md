@@ -89,15 +89,14 @@ future 2x target is missed. It does not waive environment, result, row,
 contamination, or slope validation. Gate two independent captures and derive
 their immutable manifest separately:
 
-On the pinned eight-logical-CPU M1, acquisition starts after three samples with
-one-minute load at most 8.0 and aggregate CPU at most 300%. Live before/after
-probes apply the same limits to external processes while excluding the measuring
-Go process. This limits external activity to three cores, leaving at least half
-the host free while the single-threaded benchmark runs, without treating
-Ember's own timed work or ordinary single-core macOS daemons as contamination.
-A live point whose before or after probe is contaminated is discarded and
-retried after one second, up to 60 attempts; only clean paired rows are emitted,
-and exhaustion still fails the capture.
+On the pinned eight-logical-CPU M1, acquisition starts after three one-second
+samples with aggregate CPU at most 300%. One-minute load remains diagnostic but
+is not an admission gate: it is lagging, core-count-blind, and includes blocked
+work that may not compete with this single-threaded benchmark. Live before/after
+probes cap external processes at three cores while excluding the measuring Go
+process. A live point whose before or after probe is contaminated is discarded
+and retried after one second, up to 60 attempts; only clean paired rows are
+emitted, and exhaustion still fails the capture.
 
 ```sh
 scripts/runtime-ratio-gate --derive \

@@ -31,11 +31,9 @@ const (
 	parityRawDefault  = "tmp/runtime-parity/raw.tsv"
 	parityRepeatCount = 3
 
-	// The acceptance host has eight logical CPUs. These limits cap external
-	// activity at three cores while rejecting a sustained full-host run queue.
-	// The live CPU sample excludes this measuring process.
-	parityLoadMax = 8.0
-	parityCPUMax  = 300.0
+	// The acceptance host has eight logical CPUs. This caps external activity
+	// at three cores. The live CPU sample excludes this measuring process.
+	parityCPUMax = 300.0
 
 	parityPointAttemptLimit = 60
 	parityPointRetryDelay   = time.Second
@@ -505,7 +503,7 @@ func parseParityProcessCPU(output string, selfPID int) (float64, error) {
 func paritySystemSampleClean(sample paritySystemSample) bool {
 	return finiteParityFloat(sample.Load) && finiteParityFloat(sample.CPU) &&
 		sample.Load >= 0 && sample.CPU >= 0 &&
-		sample.Load <= parityLoadMax && sample.CPU <= parityCPUMax
+		sample.CPU <= parityCPUMax
 }
 
 type parityPointMeasurement struct {
@@ -788,11 +786,10 @@ func TestRuntimeParityHarness(t *testing.T) {
 	if _, _, err := summarizeParityRepeatRatios([]float64{0.9, math.NaN(), 1.0}); err == nil {
 		t.Fatal("accepted non-finite repeat ratio")
 	}
-	if !paritySystemSampleClean(paritySystemSample{Load: 7.5, CPU: 250.0}) {
+	if !paritySystemSampleClean(paritySystemSample{Load: 250.0, CPU: 250.0}) {
 		t.Fatal("rejected clean system sample")
 	}
 	for _, contaminated := range []paritySystemSample{
-		{Load: parityLoadMax + 0.01, CPU: 50},
 		{Load: 1, CPU: parityCPUMax + 0.01},
 		{Load: math.NaN(), CPU: 50},
 		{Load: 1, CPU: math.Inf(1)},
@@ -809,7 +806,7 @@ func TestRuntimeParityHarness(t *testing.T) {
 		t.Fatal("accepted invalid process CPU sample")
 	}
 	pointSamples := []paritySystemSample{
-		{Load: parityLoadMax + 1, CPU: 0},
+		{Load: 1, CPU: parityCPUMax + 1},
 		{Load: 1, CPU: 0},
 		{Load: 1, CPU: parityCPUMax + 1},
 		{Load: 1, CPU: 0},
@@ -832,7 +829,7 @@ func TestRuntimeParityHarness(t *testing.T) {
 		t.Fatalf("retried point = %#v, measures=%d waits=%d error=%v", point, measureCount, waitCount, err)
 	}
 	if _, err := acquireCleanParityPoint(2, func() (paritySystemSample, error) {
-		return paritySystemSample{Load: parityLoadMax + 1}, nil
+		return paritySystemSample{Load: 1, CPU: parityCPUMax + 1}, nil
 	}, func() ([]parityPointMeasurement, error) {
 		t.Fatal("measured a contaminated point")
 		return nil, nil
