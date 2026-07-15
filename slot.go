@@ -38,6 +38,7 @@ const (
 	slotTagHostCallable
 	slotTagNativeID
 	slotTagBoxedNumber
+	slotTagCoroutine
 )
 
 const (
@@ -77,6 +78,8 @@ func slotValueKind(value slot) ValueKind {
 	case slotTagClosure:
 		return FunctionKind
 	case slotTagUserdata:
+		return UserDataKind
+	case slotTagCoroutine:
 		return UserDataKind
 	case slotTagHostCallable, slotTagNativeID:
 		return HostFuncKind
@@ -118,7 +121,7 @@ func slotImmediatePayloadZero(value slot) bool {
 
 func slotHandleKind(kind slotTag) bool {
 	switch kind {
-	case slotTagString, slotTagTable, slotTagClosure, slotTagUpvalue, slotTagUserdata, slotTagHostCallable, slotTagBoxedNumber:
+	case slotTagString, slotTagTable, slotTagClosure, slotTagUpvalue, slotTagUserdata, slotTagHostCallable, slotTagBoxedNumber, slotTagCoroutine:
 		return true
 	default:
 		return false
@@ -127,7 +130,7 @@ func slotHandleKind(kind slotTag) bool {
 
 func slotTypedReferenceKind(kind slotTag) bool {
 	switch kind {
-	case slotTagString, slotTagTable, slotTagClosure, slotTagUpvalue, slotTagUserdata, slotTagHostCallable:
+	case slotTagString, slotTagTable, slotTagClosure, slotTagUpvalue, slotTagUserdata, slotTagHostCallable, slotTagCoroutine:
 		return true
 	default:
 		return false

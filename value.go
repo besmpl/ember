@@ -82,6 +82,10 @@ const (
 	nativeFuncNext
 	nativeFuncArrayNext
 	nativeFuncTableNext
+	nativeFuncSetMetatable
+	nativeFuncGetMetatable
+	nativeFuncCoroutineCreate
+	nativeFuncCoroutineYield
 )
 
 // Value is an Ember runtime value.
@@ -107,6 +111,7 @@ const (
 	valueNativeIDShift              = 8
 	valueNativeIDBits               = uint64(0xff) << valueNativeIDShift
 	valueTransientScriptCallableTag = uint64(1) << 8
+	valueMachineCoroutineTag        = uint64(1) << 8
 )
 
 func valueKind(v Value) ValueKind {
@@ -173,12 +178,22 @@ type transientScriptCallablePayload struct {
 	handle scriptCallableHandle
 }
 
+// machineCoroutineValuePayload carries an owner-bearing handle across the
+// public Value boundary. Compact slots deliberately omit the owner cookie;
+// the receiving Machine controller restores and validates it before use.
+type machineCoroutineValuePayload struct {
+	handle machineCoroutineHandle
+}
+
 type scriptCallableHandleValidator func(scriptCallableHandle) bool
 
 var (
-	errScriptCallableValueInvalid    = errors.New("script callable: invalid value")
-	errScriptCallableValueCrossOwner = errors.New("script callable: cross-owner value")
-	errScriptCallableValueStale      = errors.New("script callable: stale value")
+	errScriptCallableValueInvalid      = errors.New("script callable: invalid value")
+	errScriptCallableValueCrossOwner   = errors.New("script callable: cross-owner value")
+	errScriptCallableValueStale        = errors.New("script callable: stale value")
+	errMachineCoroutineValueInvalid    = errors.New("machine coroutine: invalid value")
+	errMachineCoroutineValueCrossOwner = errors.New("machine coroutine: cross-owner value")
+	errMachineCoroutineValueStale      = errors.New("machine coroutine: stale value")
 )
 
 type hostCallable struct {
@@ -1088,6 +1103,35 @@ func decodeTransientScriptCallableValue(value Value, owner uint64, validate scri
 	return handle, nil
 }
 
+func machineCoroutineValue(handle machineCoroutineHandle) (Value, error) {
+	if handle.owner == 0 || handle.index == 0 || handle.generation == 0 {
+		return Value{}, errMachineCoroutineValueInvalid
+	}
+	payload := &machineCoroutineValuePayload{handle: handle}
+	return Value{
+		ref:  unsafe.Pointer(payload),
+		bits: uint64(UserDataKind) | valueMachineCoroutineTag,
+	}, nil
+}
+
+func decodeMachineCoroutineValue(value Value, owner uint64, validate func(machineCoroutineHandle) bool) (machineCoroutineHandle, error) {
+	if owner == 0 || valueKind(value) != UserDataKind ||
+		value.bits != uint64(UserDataKind)|valueMachineCoroutineTag || valueRef(value) == nil {
+		return machineCoroutineHandle{}, errMachineCoroutineValueInvalid
+	}
+	handle := (*machineCoroutineValuePayload)(valueRef(value)).handle
+	if handle.owner == 0 || handle.index == 0 || handle.generation == 0 {
+		return machineCoroutineHandle{}, errMachineCoroutineValueInvalid
+	}
+	if handle.owner != owner {
+		return machineCoroutineHandle{}, errMachineCoroutineValueCrossOwner
+	}
+	if validate == nil || !validate(handle) {
+		return machineCoroutineHandle{}, errMachineCoroutineValueStale
+	}
+	return handle, nil
+}
+
 // Kind returns the value kind.
 func (v Value) Kind() ValueKind {
 	return valueKind(v)
@@ -1175,7 +1219,7 @@ func (v Value) UserData() (*UserData, bool) {
 }
 
 func (v Value) userdataRef() *UserData {
-	if valueKind(v) != UserDataKind || valueRef(v) == nil {
+	if valueKind(v) != UserDataKind || v.bits != uint64(UserDataKind) || valueRef(v) == nil {
 		return nil
 	}
 	return (*UserData)(valueRef(v))

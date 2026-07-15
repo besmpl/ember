@@ -5,7 +5,8 @@ import "fmt"
 func runScalarMachineLoop(machine *scalarMachine) (int, error) {
 	protoID := machine.activeProto
 	base := machine.activeBase
-	pc := 0
+	pc := machine.restartPC
+	machine.restartPC = 0
 	for {
 		if protoID < 0 || int(protoID) >= len(machine.image.prototypes) {
 			return pc, fmt.Errorf("compact Machine prototype %d is out of range", protoID)
@@ -59,28 +60,73 @@ func runScalarMachineLoop(machine *scalarMachine) (int, error) {
 			}
 
 		case opSetField:
-			if err := machine.setConstantFieldStopped(a, rawB, c); err != nil {
+			targetID, targetBase, err := machine.setConstantFieldStopped(a, rawB, c, next)
+			if err != nil {
 				return pc, err
+			}
+			if targetID >= 0 {
+				protoID, base, pc = targetID, targetBase, 0
+				continue
 			}
 
 		case opSetStringField:
-			if err := machine.setStringFieldStopped(a, rawB, c); err != nil {
+			targetID, targetBase, err := machine.setStringFieldStopped(a, rawB, c, next)
+			if err != nil {
 				return pc, err
+			}
+			if targetID >= 0 {
+				protoID, base, pc = targetID, targetBase, 0
+				continue
+			}
+
+		case opSetStringFieldIndex:
+			targetID, targetBase, err := machine.setStringFieldIndex(a, rawB, c, base+rawD, pc, next)
+			if err != nil {
+				return pc, err
+			}
+			if targetID >= 0 {
+				protoID, base, pc = targetID, targetBase, 0
+				continue
 			}
 
 		case opGetStringField:
-			if err := machine.getStringField(a, b, rawC); err != nil {
+			targetID, targetBase, err := machine.getStringField(a, b, rawC, next)
+			if err != nil {
 				return pc, err
+			}
+			if targetID >= 0 {
+				protoID, base, pc = targetID, targetBase, 0
+				continue
+			}
+
+		case opGetStringFieldIndex:
+			targetID, targetBase, err := machine.getStringFieldIndex(a, b, rawC, base+rawD, pc, next)
+			if err != nil {
+				return pc, err
+			}
+			if targetID >= 0 {
+				protoID, base, pc = targetID, targetBase, 0
+				continue
 			}
 
 		case opSetIndex:
-			if err := machine.setIndexStopped(a, b, c); err != nil {
+			targetID, targetBase, err := machine.setIndexStopped(a, b, c, next)
+			if err != nil {
 				return pc, err
+			}
+			if targetID >= 0 {
+				protoID, base, pc = targetID, targetBase, 0
+				continue
 			}
 
 		case opGetIndex:
-			if err := machine.getIndex(a, b, c); err != nil {
+			targetID, targetBase, err := machine.getIndex(a, b, c, next)
+			if err != nil {
 				return pc, err
+			}
+			if targetID >= 0 {
+				protoID, base, pc = targetID, targetBase, 0
+				continue
 			}
 
 		case opClosure:
@@ -103,6 +149,31 @@ func runScalarMachineLoop(machine *scalarMachine) (int, error) {
 				return pc, err
 			}
 
+		case opPrepareIter:
+			targetID, targetBase, err := machine.prepareIteratorRegisters(a, b, c, next)
+			if err != nil {
+				return pc, err
+			}
+			if targetID >= 0 {
+				protoID, base, pc = targetID, targetBase, 0
+				continue
+			}
+
+		case opArrayNext:
+			if _, err := machine.iteratorStepRegisters(a, b, c, rawD); err != nil {
+				return pc, err
+			}
+
+		case opArrayNextJump2:
+			_, jump, err := machine.arrayNextJump2Registers(a, b, c)
+			if err != nil {
+				return pc, err
+			}
+			if jump {
+				pc = rawD
+				continue
+			}
+
 		case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow:
 			if err := machine.binaryRegisters(operation.op, a, b, c); err != nil {
 				return pc, err
@@ -115,6 +186,16 @@ func runScalarMachineLoop(machine *scalarMachine) (int, error) {
 
 		case opNeg:
 			if err := machine.negate(a, b); err != nil {
+				return pc, err
+			}
+
+		case opConcat:
+			if err := machine.concat(a, machine.registers[b], machine.registers[c]); err != nil {
+				return pc, err
+			}
+
+		case opConcatChain:
+			if err := machine.concatRegisters(a, b, rawC); err != nil {
 				return pc, err
 			}
 
@@ -178,6 +259,16 @@ func runScalarMachineLoop(machine *scalarMachine) (int, error) {
 				continue
 			}
 
+		case opJumpIfTableHasMetatable:
+			jump, err := machine.tables.jumpIfTableHasMetatable(machine.registers[a])
+			if err != nil {
+				return pc, err
+			}
+			if jump {
+				pc = rawD
+				continue
+			}
+
 		case opJumpIfFalse:
 			if !machineTruthy(machine.registers[a]) {
 				pc = rawB
@@ -188,8 +279,28 @@ func runScalarMachineLoop(machine *scalarMachine) (int, error) {
 			pc = rawB
 			continue
 
+		case opFastCall:
+			if err := machine.fastCall(operation, next); err != nil {
+				return pc, err
+			}
+
 		case opCall, opCallOne, opCallLocalOne, opCallUpvalueOne:
 			targetID, targetBase, err := machine.enterCall(operation, next)
+			if err != nil {
+				machine.refundTailCharge(operation)
+				return pc, err
+			}
+			if targetID < 0 {
+				pc = next
+				continue
+			}
+			protoID = targetID
+			base = targetBase
+			pc = 0
+			continue
+
+		case opCallMethodOne:
+			targetID, targetBase, err := machine.enterMethodOne(operation, pc, next)
 			if err != nil {
 				return pc, err
 			}

@@ -36,8 +36,8 @@ func baseGlobalDefinitions() []baseGlobalDefinition {
 			{name: "type", value: func() Value { return HostFuncValue(baseType) }, summary: baseTypeSummary},
 			{name: "tonumber", value: func() Value { return HostFuncValue(baseToNumber) }},
 			{name: "tostring", value: func() Value { return nativeFuncValueWithID(baseToString, nativeFuncToString) }},
-			{name: "setmetatable", value: func() Value { return nativeFuncValue(baseSetMetatable) }},
-			{name: "getmetatable", value: func() Value { return nativeFuncValue(baseGetMetatable) }},
+			{name: "setmetatable", value: func() Value { return nativeFuncValueWithID(baseSetMetatable, nativeFuncSetMetatable) }},
+			{name: "getmetatable", value: func() Value { return nativeFuncValueWithID(baseGetMetatable, nativeFuncGetMetatable) }},
 			{name: "next", value: func() Value { return nativeFuncValueWithID(baseNextNative, nativeFuncNext) }},
 			{name: "pairs", value: func() Value { return HostFuncValue(basePairs) }},
 			{name: "ipairs", value: func() Value { return HostFuncValue(baseIPairs) }},
@@ -66,11 +66,16 @@ func baseFieldIntrinsics() []baseFieldIntrinsicDefinition {
 		}
 		nativeFuncDefinitionsCache = []nativeFuncDefinition{
 			{id: nativeFuncSelect, name: "SELECT"},
+			{id: nativeFuncCoroutineStatus, name: "COROUTINE_STATUS"},
 			{id: nativeFuncRawLen, name: "RAW_LEN"},
 			{id: nativeFuncToString, name: "TOSTRING"},
 			{id: nativeFuncNext, name: "NEXT"},
 			{id: nativeFuncArrayNext, name: "ARRAY_NEXT"},
 			{id: nativeFuncTableNext, name: "TABLE_NEXT"},
+			{id: nativeFuncSetMetatable, name: "SET_METATABLE"},
+			{id: nativeFuncGetMetatable, name: "GET_METATABLE"},
+			{id: nativeFuncCoroutineCreate, name: "COROUTINE_CREATE"},
+			{id: nativeFuncCoroutineYield, name: "COROUTINE_YIELD"},
 		}
 		for _, intrinsic := range baseFieldIntrinsicsCache {
 			nativeFuncDefinitionsCache = append(nativeFuncDefinitionsCache, nativeFuncDefinition{
@@ -134,6 +139,14 @@ func nativeFuncByID(nativeID nativeFuncID) (nativeFunc, bool) {
 		return baseArrayNextNative, true
 	case nativeFuncTableNext:
 		return baseTableNextNative, true
+	case nativeFuncSetMetatable:
+		return baseSetMetatable, true
+	case nativeFuncGetMetatable:
+		return baseGetMetatable, true
+	case nativeFuncCoroutineCreate:
+		return baseCoroutineCreate, true
+	case nativeFuncCoroutineYield:
+		return baseCoroutineYield, true
 	default:
 		return nil, false
 	}

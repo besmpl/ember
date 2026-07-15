@@ -23,6 +23,75 @@ func TestMachineCallbackCloseInvalidatesCopies(t *testing.T) {
 	}
 }
 
+func TestMachineCallbackRootsCapturedCoroutineAcrossUnrelatedRun(t *testing.T) {
+	t.Setenv(runtimeEngineEnvironment, "machine")
+	entry := LogicalModule("machine/callback-coroutine-root")
+	program, _, err := LoadProgram(context.Background(), machineRuntimeTestLoader{
+		entry.String(): `
+return {
+    startup = function()
+        local co = coroutine.create(function() end)
+        coroutine.resume(co)
+        capture(function() return coroutine.status(co) end)
+    end,
+    noop = function() return 0 end,
+}
+`,
+	}, ProgramOptions{Entrypoints: []Entrypoint{{Name: "main", Module: entry}}, Parallelism: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var callback Callback
+	runtime, err := program.NewRuntime(RuntimeOptions{Host: RuntimeHostFunc(func(context.Context, HostCall) (map[string]Value, error) {
+		return map[string]Value{
+			"capture": ContextHostFuncValue(func(ctx context.Context, args []Value) ([]Value, error) {
+				var captureErr error
+				callback, captureErr = CaptureCallback(ctx, args[0])
+				return nil, captureErr
+			}),
+		}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	if _, err := runtime.RunHook(context.Background(), "startup"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.RunHook(context.Background(), "noop"); err != nil {
+		t.Fatal(err)
+	}
+	values, err := callback.Call(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 {
+		t.Fatalf("callback values = %#v, want one status", values)
+	}
+	if status, ok := values[0].String(); !ok || status != "dead" {
+		t.Fatalf("callback status = %#v, want dead", values[0])
+	}
+
+	if err := callback.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := callback.Close(); err != nil {
+		t.Fatalf("repeated Callback.Close: %v", err)
+	}
+	if _, err := runtime.RunHook(context.Background(), "noop"); err != nil {
+		t.Fatal(err)
+	}
+	execution := runtime.execution.(*machineRuntimeExecution)
+	execution.owner.coroutines.mu.Lock()
+	recordLive := len(execution.owner.coroutines.arena.records) != 0 && execution.owner.coroutines.arena.records[0].live != 0
+	execution.owner.coroutines.mu.Unlock()
+	if recordLive {
+		t.Fatal("closed callback kept captured coroutine rooted")
+	}
+}
+
 func TestMachineCallbackCallAfterRuntimeCloseFailsClosed(t *testing.T) {
 	runtime, callback := captureMachineRuntimeCallback(t, `function() return 7 end`)
 	if err := runtime.Close(); err != nil {

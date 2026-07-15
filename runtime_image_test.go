@@ -93,7 +93,7 @@ func TestPrepareCodeImageMarksOwnerAndDetachRequirements(t *testing.T) {
 	}
 }
 
-func TestPrepareCodeImageRejectsUnprovenNumericStringFromTable(t *testing.T) {
+func TestPrepareCodeImageAllowsHelperBackedNumericStringFromTable(t *testing.T) {
 	proto, err := Compile(`local values = {amount = "40"} return values.amount + 2`)
 	if err != nil {
 		t.Fatal(err)
@@ -102,8 +102,11 @@ func TestPrepareCodeImageRejectsUnprovenNumericStringFromTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if image.eligible || image.rejectReason == "" {
-		t.Fatalf("image = eligible:%t reason:%q, want conservative numeric-string rejection", image.eligible, image.rejectReason)
+	if !image.eligible || image.rejectReason != "" {
+		t.Fatalf("image = eligible:%t reason:%q, want helper-backed numeric-string eligibility", image.eligible, image.rejectReason)
+	}
+	if !image.requiresNumericCoercion {
+		t.Fatal("image did not record its numeric-coercion executor requirement")
 	}
 	values, err := Run(proto)
 	if err != nil {
@@ -114,6 +117,91 @@ func TestPrepareCodeImageRejectsUnprovenNumericStringFromTable(t *testing.T) {
 	}
 	if number, ok := values[0].Number(); !ok || number != 42 {
 		t.Fatalf("Run result = %v (%t), want old-VM coercion result 42", number, ok)
+	}
+}
+
+func TestPrepareCodeImageRecordsHelperRequirementsWithoutWorkloadIdentity(t *testing.T) {
+	tests := []struct {
+		name          string
+		source        string
+		wantCoercion  bool
+		wantGenerated bool
+		wantEligible  bool
+	}{
+		{
+			name:         "proven numeric with unrelated string",
+			source:       `local label = "hp" local value = 40 return value + 2, label`,
+			wantEligible: true,
+		},
+		{
+			name:         "string comparison is not numeric coercion",
+			source:       `local values = {"10", "2"} return values[1] < values[2]`,
+			wantEligible: true,
+		},
+		{
+			name: "table_fields",
+			source: `
+local player = {stats = {hp = 100, shield = 25}, inventory = {coins = 3}}
+local i = 0
+while i < 80 do
+    i = i + 1
+    player.stats.hp = player.stats.hp + player.stats.shield - player.inventory.coins
+end
+return player.stats.hp
+`,
+			wantCoercion: true,
+			wantEligible: true,
+		},
+		{
+			name: "behavior_tree",
+			source: `
+local blackboard = {hp = 65, ammo = 6}
+local nodes = {
+    {kind = "condition", key = "hp", threshold = 35, pass = 2},
+    {kind = "action", weight = 15},
+}
+local node = nodes[1]
+local value = blackboard[node.key]
+if node.kind == "condition" and value > node.threshold then
+    blackboard.ammo = blackboard.ammo - 1
+end
+return blackboard.ammo + nodes[2].weight
+`,
+			wantCoercion: true,
+			wantEligible: true,
+		},
+		{
+			name:          "generated concat",
+			source:        `local values = {25} return "hp:" .. values[1] .. "/ready"`,
+			wantGenerated: true,
+			wantEligible:  true,
+		},
+		{
+			name:          "numeric tostring",
+			source:        `return tostring(123456)`,
+			wantGenerated: true,
+			wantEligible:  true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			proto, err := Compile(test.source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			image, err := prepareCodeImage(proto)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if image.requiresNumericCoercion != test.wantCoercion || image.requiresGeneratedStrings != test.wantGenerated {
+				t.Fatalf("facts = coercion:%t generated:%t, want coercion:%t generated:%t (eligible:%t reason:%q operations:%#v)",
+					image.requiresNumericCoercion, image.requiresGeneratedStrings,
+					test.wantCoercion, test.wantGenerated, image.eligible, image.rejectReason, image.operations)
+			}
+			if image.eligible != test.wantEligible {
+				t.Fatalf("eligible = %t, want %t (reason %q)", image.eligible, test.wantEligible, image.rejectReason)
+			}
+		})
 	}
 }
 

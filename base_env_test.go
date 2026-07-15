@@ -43,6 +43,28 @@ func TestGlobalEnvVersionIgnoresBaseGlobalCache(t *testing.T) {
 	}
 }
 
+func TestBaseMetatableGlobalsCarryStableNativeIDs(t *testing.T) {
+	tests := []struct {
+		name string
+		id   nativeFuncID
+	}{
+		{name: "setmetatable", id: nativeFuncSetMetatable},
+		{name: "getmetatable", id: nativeFuncGetMetatable},
+	}
+	for _, test := range tests {
+		value, ok := baseGlobalValue(test.name)
+		if !ok {
+			t.Fatalf("base global %s is missing", test.name)
+		}
+		if got := valueNativeID(value); got != test.id {
+			t.Fatalf("base global %s native ID = %d, want %d", test.name, got, test.id)
+		}
+		if _, ok := nativeFuncByID(test.id); !ok {
+			t.Fatalf("native ID %d has no VM callback", test.id)
+		}
+	}
+}
+
 func TestBaseFieldIntrinsicCalleeRefreshesNativeOwnField(t *testing.T) {
 	mathTable := NewTable()
 	mathTable.setRawStringField("min", nativeFuncValueWithID(baseMathMinNative, nativeFuncMathMin))

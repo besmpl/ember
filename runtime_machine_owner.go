@@ -33,6 +33,18 @@ type machineOwnerStringRange struct {
 	count  uint32
 }
 
+type machineBaseTableEntry struct {
+	key   machineTableKey
+	value slot
+}
+
+type machineBaseTableSnapshot struct {
+	id         machineTableID
+	metatable  machineTableID
+	protection slot
+	entries    []machineBaseTableEntry
+}
+
 // machineOwner is the persistent owner-bound state shell for one immutable
 // Program image. The image is the only pointer capability retained by this
 // shell; all mutable records and translations are scalar arena data.
@@ -46,14 +58,20 @@ type machineOwner struct {
 
 	scalarMachine
 
-	globals machineGlobalArena
-	modules machineModuleArena
-	hosts   machineHostCallableArena
+	globals    machineGlobalArena
+	modules    machineModuleArena
+	hosts      machineHostCallableArena
+	coroutines machineCoroutineController
 
 	stringRanges       []machineOwnerStringRange
 	stringTranslations []machineStringID
 	globalRanges       []machineOwnerStringRange
 	globalTranslations []uint32
+	baseGlobals        []slot
+	basePresent        []uint8
+	baseTableIndexes   []uint32
+	baseTables         []machineBaseTableSnapshot
+	callbackRoots      map[machineClosureHandle]uint32
 }
 
 // machineRunLease serializes one active owner run. Its end operation is
@@ -74,6 +92,11 @@ func newMachineOwner(image *programImage) (*machineOwner, error) {
 		return nil, fmt.Errorf("bind machine owner modules: %w", err)
 	}
 	if err := owner.bindImageStrings(); err != nil {
+		owner.modules.close()
+		owner.strings.close()
+		return nil, err
+	}
+	if err := owner.scalarMachine.bindSemanticStringsStopped(); err != nil {
 		owner.modules.close()
 		owner.strings.close()
 		return nil, err
@@ -105,6 +128,14 @@ func newMachineOwner(image *programImage) (*machineOwner, error) {
 	if err := owner.hosts.bindStopped(ownerCookie); err != nil {
 		owner.closeStopped()
 		return nil, fmt.Errorf("bind machine owner host callables: %w", err)
+	}
+	if err := owner.coroutines.bindStopped(ownerCookie, 0); err != nil {
+		owner.closeStopped()
+		return nil, fmt.Errorf("bind machine owner coroutines: %w", err)
+	}
+	if err := owner.bindBaseGlobalsStopped(); err != nil {
+		owner.closeStopped()
+		return nil, err
 	}
 	owner.registers = make([]slot, 0, maxRegisters)
 	owner.results = make([]slot, 0, maxResults)
@@ -379,8 +410,17 @@ func (owner *machineOwner) executeStopped(moduleID programModuleID, protoID int3
 	machine.continuations = machine.continuations[:0]
 	machine.transfer = machine.transfer[:0]
 	machine.captureScratch = machine.captureScratch[:0]
+	machine.stringScratch = machine.stringScratch[:0]
+	machine.operandScratch = machine.operandScratch[:0]
+	machine.callScratch = machine.callScratch[:0]
+	machine.generatedStrings = machine.generatedStrings[:0]
 	machine.resultCount = 0
 	machine.skipCharge = 0
+	machine.resume = machineSemanticResume{}
+	machine.restartPC = 0
+	machine.activeCoroutine = machineCoroutineHandle{}
+	clear(machine.coroutineTransfer)
+	machine.coroutineTransfer = machine.coroutineTransfer[:0]
 	machine.scratch = slotNil
 	machine.activeVarargStart = target.registers
 	machine.activeVarargCount = varargCount
@@ -397,6 +437,9 @@ func (owner *machineOwner) executeStopped(moduleID programModuleID, protoID int3
 		if err := machine.copySlot(target.registers+index, args[target.params+index]); err != nil {
 			return err
 		}
+	}
+	if err := owner.reclaimDeadCoroutinesStopped(); err != nil {
+		return err
 	}
 	machine.window = newExecutionWindow(controller)
 	machine.effects = effects
@@ -422,6 +465,186 @@ func (owner *machineOwner) executeStopped(moduleID programModuleID, protoID int3
 		return machine.wrapError(errorPC, err)
 	}
 	return nil
+}
+
+func (owner *machineOwner) reclaimDeadCoroutinesStopped() error {
+	if !owner.coroutines.hasDeadStopped() {
+		return nil
+	}
+	reachable := make(map[slot]struct{})
+	seenTables := make(map[machineTableID]struct{})
+	seenClosures := make(map[slot]struct{})
+	queue := make([]slot, 0)
+	enqueue := func(values ...slot) { queue = append(queue, values...) }
+	enqueueClosure := func(handle machineClosureHandle) error {
+		if handle.index == 0 {
+			return nil
+		}
+		value, err := slotPackHandle(slotTagClosure, handle.index, handle.generation)
+		if err != nil {
+			return err
+		}
+		enqueue(value)
+		return nil
+	}
+	machine := &owner.scalarMachine
+	enqueue(machine.registers...)
+	enqueue(machine.results...)
+	enqueue(machine.callScratch...)
+	enqueue(machine.scratch)
+	for _, value := range machine.transfer {
+		enqueue(value.value)
+	}
+	for _, value := range machine.coroutineTransfer {
+		enqueue(value.value)
+	}
+	enqueue(owner.globals.values...)
+	enqueue(owner.modules.exports...)
+	enqueue(owner.baseGlobals...)
+	enqueue(owner.coroutines.pinnedSlotsStopped()...)
+	for _, callback := range owner.callbackRootHandlesStopped() {
+		if err := enqueueClosure(callback); err != nil {
+			return err
+		}
+	}
+	if err := enqueueClosure(machine.activeClosure); err != nil {
+		return err
+	}
+	for _, continuation := range machine.continuations {
+		if err := enqueueClosure(continuation.closure); err != nil {
+			return err
+		}
+	}
+	for len(queue) != 0 {
+		value := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		switch slotTagOf(value) {
+		case slotTagCoroutine:
+			if _, ok := reachable[value]; ok {
+				continue
+			}
+			reachable[value] = struct{}{}
+			values, closures, err := owner.coroutines.referencedSlotsStopped(value)
+			if err != nil {
+				return err
+			}
+			enqueue(values...)
+			for _, closure := range closures {
+				if err := enqueueClosure(closure); err != nil {
+					return err
+				}
+			}
+		case slotTagTable:
+			id, err := machine.tableID(value)
+			if err != nil {
+				return err
+			}
+			if _, ok := seenTables[id]; ok {
+				continue
+			}
+			seenTables[id] = struct{}{}
+			record, _ := machine.tables.lookup(id)
+			enqueue(record.protection)
+			if record.metatable != invalidMachineTableID {
+				metatable, err := slotPackHandle(slotTagTable, uint32(record.metatable), 1)
+				if err != nil {
+					return err
+				}
+				enqueue(metatable)
+			}
+			cursor := machineTableCursor{}
+			for {
+				key, stored, next, present, err := machine.tables.next(id, cursor)
+				if err != nil {
+					return err
+				}
+				if !present {
+					break
+				}
+				if key.kind == machineTableKeySlot {
+					enqueue(key.value)
+				}
+				enqueue(stored)
+				cursor = next
+			}
+		case slotTagClosure:
+			if _, ok := seenClosures[value]; ok {
+				continue
+			}
+			seenClosures[value] = struct{}{}
+			index, generation, err := slotValidateHandle(value, slotTagClosure)
+			if err != nil {
+				return err
+			}
+			handle := machineClosureHandle{owner: machine.closures.owner, index: index, generation: generation}
+			record, err := machine.closures.closureRecord(handle)
+			if err != nil {
+				return err
+			}
+			for capture := uint32(0); capture < record.captureCount; capture++ {
+				cellID := machine.closures.captureCells[int(record.captureStart+capture)]
+				if cellID == 0 || uint64(cellID) > uint64(len(machine.closures.cells)) {
+					return errMachineClosureCapture
+				}
+				cell := machine.closures.cells[cellID-1]
+				if cell.live != 0 {
+					enqueue(cell.value)
+				}
+			}
+		default:
+			continue
+		}
+	}
+	return owner.coroutines.reclaimUnreachableDeadStopped(reachable)
+}
+
+func (owner *machineOwner) pinCallbackRoot(handle machineClosureHandle) error {
+	if owner == nil {
+		return errMachineOwnerReleased
+	}
+	if _, err := owner.closures.closureRecord(handle); err != nil {
+		return err
+	}
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if owner.state == machineOwnerClosed {
+		return errMachineOwnerClosed
+	}
+	if owner.callbackRoots == nil {
+		owner.callbackRoots = make(map[machineClosureHandle]uint32)
+	}
+	if owner.callbackRoots[handle] == math.MaxUint32 {
+		return errors.New("machine callback root count overflows uint32")
+	}
+	owner.callbackRoots[handle]++
+	return nil
+}
+
+func (owner *machineOwner) unpinCallbackRoot(handle machineClosureHandle) {
+	if owner == nil {
+		return
+	}
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	count := owner.callbackRoots[handle]
+	if count <= 1 {
+		delete(owner.callbackRoots, handle)
+		return
+	}
+	owner.callbackRoots[handle] = count - 1
+}
+
+func (owner *machineOwner) callbackRootHandlesStopped() []machineClosureHandle {
+	if owner == nil {
+		return nil
+	}
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	handles := make([]machineClosureHandle, 0, len(owner.callbackRoots))
+	for handle := range owner.callbackRoots {
+		handles = append(handles, handle)
+	}
+	return handles
 }
 
 func (owner *machineOwner) resultAt(index int) (slot, error) {
@@ -525,6 +748,11 @@ func (owner *machineOwner) close() error {
 	owner.stringTranslations = nil
 	owner.globalRanges = nil
 	owner.globalTranslations = nil
+	owner.baseGlobals = nil
+	owner.basePresent = nil
+	owner.baseTableIndexes = nil
+	owner.baseTables = nil
+	owner.callbackRoots = nil
 	owner.closeStopped()
 	return nil
 }
@@ -538,12 +766,19 @@ func (owner *machineOwner) closeStopped() {
 	owner.captureScratch = nil
 	owner.numberBits = nil
 	owner.tableNumbers = nil
+	owner.generatedStrings = nil
+	owner.baseGlobals = nil
+	owner.basePresent = nil
+	owner.baseTableIndexes = nil
+	owner.baseTables = nil
+	owner.callbackRoots = nil
 	owner.strings.close()
 	owner.globals.close()
 	owner.tables.close()
 	owner.closures.close()
 	owner.modules.close()
 	owner.hosts.close()
+	owner.coroutines.close()
 	owner.scalarMachine.persistentOwner = nil
 	owner.scalarMachine.bound = false
 }

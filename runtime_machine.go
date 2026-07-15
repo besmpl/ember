@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
+	"strings"
 	"sync"
 )
 
@@ -19,6 +21,10 @@ type scalarMachine struct {
 	continuations     []machineContinuation
 	transfer          []machineTransferValue
 	captureScratch    []machineCaptureDescriptor
+	stringScratch     []byte
+	operandScratch    []machineScalarOperand
+	callScratch       []slot
+	generatedStrings  []machineStringID
 	scratch           slot
 	numberBits        []uint64
 	tableNumbers      []uint64
@@ -37,6 +43,33 @@ type scalarMachine struct {
 	window            executionWindow
 	bound             bool
 	skipCharge        uint8
+	resume            machineSemanticResume
+	restartPC         int
+	activeCoroutine   machineCoroutineHandle
+	coroutineTransfer []machineTransferValue
+	indexName         machineStringID
+	newIndexName      machineStringID
+	iterName          machineStringID
+	callName          machineStringID
+	metatableName     machineStringID
+}
+
+type machineSemanticResumeKind uint8
+
+const (
+	machineResumeNone machineSemanticResumeKind = iota
+	machineResumeMethodLookup
+	machineResumeGetStringFieldIndex
+	machineResumeSetStringFieldIndex
+)
+
+type machineSemanticResume struct {
+	fieldIndex   machineStringFieldIndexContinuation
+	method       machineMethodOneAction
+	temporaryReg int32
+	stackLength  int32
+	kind         machineSemanticResumeKind
+	_            [3]byte
 }
 
 // machineContinuation is the pointer-free caller state needed to resume one
@@ -55,6 +88,7 @@ type machineContinuation struct {
 	varargStart int32
 	varargCount int32
 	cellStart   int32
+	resume      machineSemanticResume
 }
 
 // machineTransferValue carries one call result across stack truncation without
@@ -110,6 +144,10 @@ func bindScalarMachine(image *codeImage, controller *executionController) (*scal
 	machine.continuations = machine.continuations[:0]
 	machine.transfer = machine.transfer[:0]
 	machine.captureScratch = machine.captureScratch[:0]
+	machine.stringScratch = machine.stringScratch[:0]
+	machine.operandScratch = machine.operandScratch[:0]
+	machine.callScratch = machine.callScratch[:0]
+	machine.generatedStrings = machine.generatedStrings[:0]
 	machine.numberBits = resizeUint64s(machine.numberBits, numberCells)
 	machine.tableNumbers = machine.tableNumbers[:0]
 	machine.strings.reset()
@@ -124,9 +162,19 @@ func bindScalarMachine(image *codeImage, controller *executionController) (*scal
 	}
 	machine.bound = true
 	machine.skipCharge = 0
+	machine.resume = machineSemanticResume{}
+	machine.restartPC = 0
+	machine.activeCoroutine = machineCoroutineHandle{}
+	machine.coroutineTransfer = machine.coroutineTransfer[:0]
 	if err := machine.bindImageStrings(image); err != nil {
 		releaseScalarMachine(machine)
 		return nil, err
+	}
+	if machineNeedsSemanticStrings(image) {
+		if err := machine.bindSemanticStringsStopped(); err != nil {
+			releaseScalarMachine(machine)
+			return nil, err
+		}
 	}
 	machine.resultCount = 0
 	machine.scratch = 0
@@ -154,6 +202,10 @@ func releaseScalarMachine(machine *scalarMachine) {
 	machine.continuations = machine.continuations[:0]
 	machine.transfer = machine.transfer[:0]
 	machine.captureScratch = machine.captureScratch[:0]
+	machine.stringScratch = machine.stringScratch[:0]
+	machine.operandScratch = machine.operandScratch[:0]
+	machine.callScratch = machine.callScratch[:0]
+	machine.generatedStrings = machine.generatedStrings[:0]
 	machine.numberBits = machine.numberBits[:0]
 	machine.tableNumbers = machine.tableNumbers[:0]
 	machine.strings.reset()
@@ -172,6 +224,16 @@ func releaseScalarMachine(machine *scalarMachine) {
 	machine.window = executionWindow{}
 	machine.bound = false
 	machine.skipCharge = 0
+	machine.resume = machineSemanticResume{}
+	machine.restartPC = 0
+	machine.activeCoroutine = machineCoroutineHandle{}
+	clear(machine.coroutineTransfer)
+	machine.coroutineTransfer = machine.coroutineTransfer[:0]
+	machine.indexName = invalidMachineStringID
+	machine.newIndexName = invalidMachineStringID
+	machine.iterName = invalidMachineStringID
+	machine.callName = invalidMachineStringID
+	machine.metatableName = invalidMachineStringID
 	scalarMachinePool.Put(machine)
 }
 
@@ -197,6 +259,46 @@ func (machine *scalarMachine) bindImageStrings(image *codeImage) error {
 		}
 	}
 	return nil
+}
+
+func (machine *scalarMachine) bindSemanticStringsStopped() error {
+	if machine == nil {
+		return fmt.Errorf("bind compact Machine semantic strings: nil machine")
+	}
+	var err error
+	if machine.indexName, err = machine.strings.internStringStopped("__index"); err != nil {
+		return fmt.Errorf("bind compact Machine __index: %w", err)
+	}
+	if machine.newIndexName, err = machine.strings.internStringStopped("__newindex"); err != nil {
+		return fmt.Errorf("bind compact Machine __newindex: %w", err)
+	}
+	if machine.iterName, err = machine.strings.internStringStopped("__iter"); err != nil {
+		return fmt.Errorf("bind compact Machine __iter: %w", err)
+	}
+	if machine.callName, err = machine.strings.internStringStopped("__call"); err != nil {
+		return fmt.Errorf("bind compact Machine __call: %w", err)
+	}
+	if machine.metatableName, err = machine.strings.internStringStopped("__metatable"); err != nil {
+		return fmt.Errorf("bind compact Machine __metatable: %w", err)
+	}
+	return nil
+}
+
+func machineNeedsSemanticStrings(image *codeImage) bool {
+	if image == nil {
+		return false
+	}
+	for _, proto := range image.prototypes {
+		for _, operation := range proto.operations {
+			switch operation.op {
+			case opPrepareIter, opSetField, opSetStringField, opSetStringFieldIndex,
+				opGetStringField, opGetStringFieldIndex, opSetIndex, opGetIndex,
+				opCall, opCallOne, opCallLocalOne, opCallUpvalueOne, opCallMethodOne:
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func resizeSlots(values []slot, length int) []slot {
@@ -255,6 +357,14 @@ func (machine *scalarMachine) charge(operation machineOperation) error {
 		}
 	}
 	return nil
+}
+
+func (machine *scalarMachine) refundTailCharge(operation machineOperation) {
+	if machine == nil || machine.window.controller == nil || machine.window.remaining < 0 || operation.tailCharge == 0 {
+		return
+	}
+	machine.window.remaining += int64(operation.tailCharge)
+	machine.window.pollLeft += uint32(operation.tailCharge)
 }
 
 func (machine *scalarMachine) wrapError(pc int, err error) error {
@@ -364,83 +474,393 @@ func (machine *scalarMachine) newTableStopped(destination, arrayCapacity, fieldC
 	return nil
 }
 
-func (machine *scalarMachine) setConstantFieldStopped(tableRegister, constant, valueRegister int) error {
+func (machine *scalarMachine) setConstantFieldStopped(tableRegister, constant, valueRegister, nextPC int) (int32, int, error) {
 	if machine == nil || tableRegister < 0 || tableRegister >= len(machine.registers) ||
 		valueRegister < 0 || valueRegister >= len(machine.registers) {
-		return fmt.Errorf("compact Machine SET_FIELD operands are out of range")
+		return 0, 0, fmt.Errorf("compact Machine SET_FIELD operands are out of range")
 	}
 	key, err := machine.constantSlot(constant, tableRegister)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
-	return machine.setTableIndexStopped(machine.registers[tableRegister], key, machine.registers[valueRegister])
+	return machine.setTableIndexSemanticStopped(machine.registers[tableRegister], key, machine.registers[valueRegister], tableRegister, nextPC)
 }
 
-func (machine *scalarMachine) setStringFieldStopped(tableRegister, constant, valueRegister int) error {
+func (machine *scalarMachine) setStringFieldStopped(tableRegister, constant, valueRegister, nextPC int) (int32, int, error) {
 	if machine == nil || tableRegister < 0 || tableRegister >= len(machine.registers) ||
 		valueRegister < 0 || valueRegister >= len(machine.registers) {
-		return fmt.Errorf("compact Machine SET_STRING_FIELD operands are out of range")
+		return 0, 0, fmt.Errorf("compact Machine SET_STRING_FIELD operands are out of range")
 	}
 	if _, err := machine.tableID(machine.registers[tableRegister]); err != nil {
-		return fmt.Errorf("run: set field target is %s, want table", slotValueKind(machine.registers[tableRegister]))
+		return 0, 0, fmt.Errorf("run: set field target is %s, want table", slotValueKind(machine.registers[tableRegister]))
 	}
-	return machine.setConstantFieldStopped(tableRegister, constant, valueRegister)
+	return machine.setConstantFieldStopped(tableRegister, constant, valueRegister, nextPC)
 }
 
-func (machine *scalarMachine) setIndexStopped(tableRegister, keyRegister, valueRegister int) error {
+func (machine *scalarMachine) setIndexStopped(tableRegister, keyRegister, valueRegister, nextPC int) (int32, int, error) {
 	if machine == nil || tableRegister < 0 || tableRegister >= len(machine.registers) ||
 		keyRegister < 0 || keyRegister >= len(machine.registers) ||
 		valueRegister < 0 || valueRegister >= len(machine.registers) {
-		return fmt.Errorf("compact Machine SET_INDEX operands are out of range")
+		return 0, 0, fmt.Errorf("compact Machine SET_INDEX operands are out of range")
 	}
-	return machine.setTableIndexStopped(
+	return machine.setTableIndexSemanticStopped(
 		machine.registers[tableRegister],
 		machine.registers[keyRegister],
 		machine.registers[valueRegister],
+		tableRegister,
+		nextPC,
 	)
 }
 
-func (machine *scalarMachine) getIndex(destination, tableRegister, keyRegister int) error {
+func (machine *scalarMachine) getIndex(destination, tableRegister, keyRegister, nextPC int) (int32, int, error) {
 	if machine == nil || destination < 0 || destination >= len(machine.registers) ||
 		tableRegister < 0 || tableRegister >= len(machine.registers) ||
 		keyRegister < 0 || keyRegister >= len(machine.registers) {
-		return fmt.Errorf("compact Machine GET_INDEX operands are out of range")
+		return 0, 0, fmt.Errorf("compact Machine GET_INDEX operands are out of range")
 	}
-	return machine.getTableIndex(destination, machine.registers[tableRegister], machine.registers[keyRegister])
+	return machine.getTableIndexSemantic(destination, machine.registers[tableRegister], machine.registers[keyRegister], nextPC)
 }
 
-func (machine *scalarMachine) getStringField(destination, tableRegister, constant int) error {
+func (machine *scalarMachine) getStringField(destination, tableRegister, constant, nextPC int) (int32, int, error) {
 	if machine == nil || destination < 0 || destination >= len(machine.registers) ||
 		tableRegister < 0 || tableRegister >= len(machine.registers) {
-		return fmt.Errorf("compact Machine GET_STRING_FIELD operands are out of range")
+		return 0, 0, fmt.Errorf("compact Machine GET_STRING_FIELD operands are out of range")
 	}
 	if _, err := machine.tableID(machine.registers[tableRegister]); err != nil {
-		return fmt.Errorf("run: get field target is %s, want table", slotValueKind(machine.registers[tableRegister]))
+		return 0, 0, fmt.Errorf("run: get field target is %s, want table", slotValueKind(machine.registers[tableRegister]))
 	}
 	key, err := machine.constantSlot(constant, destination)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
-	return machine.getTableIndex(destination, machine.registers[tableRegister], key)
+	return machine.getTableIndexSemantic(destination, machine.registers[tableRegister], key, nextPC)
 }
 
-func (machine *scalarMachine) getTableIndex(destination int, tableValue, keyValue slot) error {
+func (machine *scalarMachine) prepareIteratorRegisters(generator, state, control, nextPC int) (int32, int, error) {
+	if machine == nil || generator < 0 || state < 0 || control < 0 ||
+		generator >= len(machine.registers) || state >= len(machine.registers) || control >= len(machine.registers) {
+		return 0, 0, fmt.Errorf("compact Machine PREPARE_ITER operands are out of range")
+	}
+	plan, err := machine.tables.prepareIterator(machine.registers[generator], machine.iterName)
+	if err != nil {
+		return 0, 0, fmt.Errorf("run: prepare iterator failed: %w", err)
+	}
+	if plan.action.kind == machineTableActionCall {
+		arguments := [...]slot{plan.action.value}
+		target, base, err := machine.enterExplicitCall(machineCallRequest{
+			callable: plan.action.callable, arguments: arguments[:], destination: generator,
+			resultCount: 3, returnPC: nextPC,
+		})
+		if err != nil {
+			return 0, 0, fmt.Errorf("run: prepare iterator failed: %w", err)
+		}
+		return target, base, nil
+	}
+	if plan.ready == 0 {
+		return -1, machine.activeBase, nil
+	}
+	machine.registers[generator] = plan.generator
+	machine.registers[state] = plan.state
+	machine.registers[control] = plan.control
+	return -1, machine.activeBase, nil
+}
+
+func (machine *scalarMachine) iteratorStepRegisters(destination, generator, state, count int) (machineIteratorStep, error) {
+	step, _, err := machine.iteratorStep(destination, generator, state, count, false)
+	return step, err
+}
+
+func (machine *scalarMachine) arrayNextJump2Registers(destination, generator, state int) (machineIteratorStep, bool, error) {
+	return machine.iteratorStep(destination, generator, state, 2, true)
+}
+
+func (machine *scalarMachine) iteratorStep(destination, generator, state, count int, fusedJump bool) (machineIteratorStep, bool, error) {
+	if destination < 0 || generator < 0 || state < 0 || count <= 0 ||
+		destination+count > len(machine.registers) || generator >= len(machine.registers) || state >= len(machine.registers) {
+		return machineIteratorStep{}, false, fmt.Errorf("compact Machine iterator operands are out of range")
+	}
+	nativeID, err := slotNativeIDValue(machine.registers[generator])
+	if err != nil {
+		return machineIteratorStep{}, false, fmt.Errorf("run: call failed: compact Machine iterator callable is unsupported")
+	}
+	mode := machineIteratorInvalid
+	switch nativeID {
+	case nativeFuncArrayNext:
+		mode = machineIteratorArray
+	case nativeFuncTableNext, nativeFuncNext:
+		mode = machineIteratorGeneric
+	default:
+		return machineIteratorStep{}, false, fmt.Errorf("run: call failed: compact Machine iterator native ID %d is unsupported", nativeID)
+	}
+	table, err := machine.tableID(machine.registers[state])
+	if err != nil {
+		name := "table iterator"
+		if mode == machineIteratorArray {
+			name = "array iterator"
+		}
+		return machineIteratorStep{}, false, fmt.Errorf("run: call failed: host function failed: %s: argument #1 is %s, want table", name, slotValueKind(machine.registers[state]))
+	}
+	cursor, err := machine.iteratorCursor(mode, machine.registers[destination])
+	if err != nil {
+		return machineIteratorStep{}, false, fmt.Errorf("run: call failed: host function failed: %w", err)
+	}
+	var step machineIteratorStep
+	jump := false
+	if fusedJump {
+		step, jump, err = machine.tables.arrayNextJump2(mode, table, cursor)
+	} else {
+		step, err = machine.tables.iteratorNext(mode, table, cursor)
+	}
+	if err != nil {
+		return machineIteratorStep{}, false, fmt.Errorf("run: call failed: host function failed: %w", err)
+	}
+	for index := 0; index < count; index++ {
+		value := slotNil
+		if index == 0 && step.count > 0 {
+			value = step.key
+		} else if index == 1 && step.count > 1 {
+			value = step.value
+		}
+		if err := machine.copySlot(destination+index, value); err != nil {
+			return machineIteratorStep{}, false, err
+		}
+	}
+	return step, jump, nil
+}
+
+func (machine *scalarMachine) iteratorCursor(mode machineIteratorMode, control slot) (machineTableCursor, error) {
+	if control == slotNil {
+		return machineTableCursor{}, nil
+	}
+	key, err := machine.tableKey(control)
+	if err != nil {
+		return machineTableCursor{}, err
+	}
+	if mode == machineIteratorArray && key.kind != machineTableKeyArray {
+		return machineTableCursor{}, fmt.Errorf("array iterator: index is %s, want number or nil", slotValueKind(control))
+	}
+	return machineTableCursor{key: key, set: 1}, nil
+}
+
+func (machine *scalarMachine) getStringFieldIndex(destination, base, constant, keyRegister, pc, nextPC int) (int32, int, error) {
+	if destination < 0 || base < 0 || keyRegister < 0 || destination >= len(machine.registers) || base >= len(machine.registers) || keyRegister >= len(machine.registers) {
+		return 0, 0, fmt.Errorf("compact Machine GET_STRING_FIELD_INDEX operands are out of range")
+	}
+	var action machineTableAction
+	if machine.resume.kind == machineResumeGetStringFieldIndex {
+		resume := machine.resume
+		machine.resume = machineSemanticResume{}
+		var err error
+		action, err = machine.tables.resumeStringFieldIndex(resume.fieldIndex, machine.registers[destination])
+		if err != nil {
+			return 0, 0, fmt.Errorf("run: get index failed: %w", err)
+		}
+	} else {
+		baseID, err := machine.tableID(machine.registers[base])
+		if err != nil {
+			return 0, 0, fmt.Errorf("run: get field target is %s, want table", slotValueKind(machine.registers[base]))
+		}
+		fieldValue, err := machine.constantSlot(constant, destination)
+		if err != nil {
+			return 0, 0, err
+		}
+		field, err := machine.stringID(fieldValue)
+		if err != nil {
+			return 0, 0, err
+		}
+		key, err := machine.tableKey(machine.registers[keyRegister])
+		if err != nil {
+			return 0, 0, fmt.Errorf("run: get index failed: %w", err)
+		}
+		continuation := machineStringFieldIndexContinuation{}
+		action, continuation, err = machine.tables.decideGetStringFieldIndex(baseID, field, key, machine.indexName)
+		if err != nil {
+			return 0, 0, fmt.Errorf("run: get index failed: %w", err)
+		}
+		if continuation.active != 0 {
+			resume := machineSemanticResume{kind: machineResumeGetStringFieldIndex, fieldIndex: continuation}
+			targetID, targetBase, err := machine.enterTableAction(action, destination, 1, pc, resume)
+			if err != nil || targetID >= 0 {
+				return targetID, targetBase, err
+			}
+			action, err = machine.tables.resumeStringFieldIndex(continuation, machine.registers[destination])
+			if err != nil {
+				return 0, 0, fmt.Errorf("run: get index failed: %w", err)
+			}
+		}
+	}
+	switch action.kind {
+	case machineTableActionReturn:
+		return -1, machine.activeBase, machine.copySlot(destination, action.value)
+	case machineTableActionCall:
+		return machine.enterTableAction(action, destination, 1, nextPC, machineSemanticResume{})
+	default:
+		return 0, 0, fmt.Errorf("run: get index failed: invalid compact Machine table action")
+	}
+}
+
+func (machine *scalarMachine) setStringFieldIndex(base, constant, keyRegister, valueRegister, pc, nextPC int) (int32, int, error) {
+	if base < 0 || keyRegister < 0 || valueRegister < 0 || base >= len(machine.registers) || keyRegister >= len(machine.registers) || valueRegister >= len(machine.registers) {
+		return 0, 0, fmt.Errorf("compact Machine SET_STRING_FIELD_INDEX operands are out of range")
+	}
+	var action machineTableAction
+	if machine.resume.kind == machineResumeSetStringFieldIndex {
+		resume := machine.resume
+		machine.resume = machineSemanticResume{}
+		if resume.temporaryReg < 0 || int(resume.temporaryReg) >= len(machine.registers) || resume.stackLength < 0 || int(resume.stackLength) > len(machine.registers) {
+			return 0, 0, fmt.Errorf("compact Machine SET_STRING_FIELD_INDEX resume is invalid")
+		}
+		first := machine.registers[resume.temporaryReg]
+		machine.registers = machine.registers[:resume.stackLength]
+		var err error
+		action, err = machine.tables.resumeStringFieldIndex(resume.fieldIndex, first)
+		if err != nil {
+			return 0, 0, fmt.Errorf("run: set index failed: %w", err)
+		}
+	} else {
+		baseID, err := machine.tableID(machine.registers[base])
+		if err != nil {
+			return 0, 0, fmt.Errorf("run: set field target is %s, want table", slotValueKind(machine.registers[base]))
+		}
+		fieldValue, err := machine.constantSlot(constant, base)
+		if err != nil {
+			return 0, 0, err
+		}
+		field, err := machine.stringID(fieldValue)
+		if err != nil {
+			return 0, 0, err
+		}
+		key, err := machine.tableKey(machine.registers[keyRegister])
+		if err != nil {
+			return 0, 0, fmt.Errorf("run: set index failed: %w", err)
+		}
+		stable, err := machine.stableTableValueStopped(machine.registers[valueRegister])
+		if err != nil {
+			return 0, 0, err
+		}
+		continuation := machineStringFieldIndexContinuation{}
+		action, continuation, err = machine.tables.decideSetStringFieldIndex(baseID, field, key, stable, machine.indexName, machine.newIndexName)
+		if err != nil {
+			return 0, 0, fmt.Errorf("run: set index failed: %w", err)
+		}
+		if continuation.active != 0 {
+			stackLength := len(machine.registers)
+			if err := machine.ensureStack(stackLength + 1); err != nil {
+				return 0, 0, err
+			}
+			resume := machineSemanticResume{
+				kind: machineResumeSetStringFieldIndex, fieldIndex: continuation,
+				temporaryReg: int32(stackLength), stackLength: int32(stackLength),
+			}
+			targetID, targetBase, err := machine.enterTableAction(action, stackLength, 1, pc, resume)
+			if err != nil || targetID >= 0 {
+				return targetID, targetBase, err
+			}
+			first := machine.registers[stackLength]
+			machine.registers = machine.registers[:stackLength]
+			action, err = machine.tables.resumeStringFieldIndex(continuation, first)
+			if err != nil {
+				return 0, 0, fmt.Errorf("run: set index failed: %w", err)
+			}
+		}
+	}
+	switch action.kind {
+	case machineTableActionStore:
+		return -1, machine.activeBase, machine.applyTableStoreStopped(action)
+	case machineTableActionCall:
+		return machine.enterTableAction(action, base, 0, nextPC, machineSemanticResume{})
+	default:
+		return 0, 0, fmt.Errorf("run: set index failed: invalid compact Machine table action")
+	}
+}
+
+func (machine *scalarMachine) enterTableAction(action machineTableAction, destination, resultCount, returnPC int, resume machineSemanticResume) (int32, int, error) {
+	arguments, err := machineTableActionArguments(action)
+	if err != nil {
+		return 0, 0, err
+	}
+	values := [...]slot{arguments.first, arguments.second, arguments.third}
+	return machine.enterExplicitCall(machineCallRequest{
+		callable: action.callable, arguments: values[:arguments.count], destination: destination,
+		resultCount: resultCount, returnPC: returnPC, resume: resume,
+	})
+}
+
+func (machine *scalarMachine) getTableIndexSemantic(destination int, tableValue, keyValue slot, nextPC int) (int32, int, error) {
 	id, err := machine.tableID(tableValue)
 	if err != nil {
-		return fmt.Errorf("run: get index target is %s, want table", slotValueKind(tableValue))
+		return 0, 0, fmt.Errorf("run: get index target is %s, want table", slotValueKind(tableValue))
 	}
 	key, err := machine.tableKey(keyValue)
 	if err != nil {
-		return fmt.Errorf("run: get index failed: %w", err)
+		return 0, 0, fmt.Errorf("run: get index failed: %w", err)
 	}
-	value, ok := machine.tableValue(id, key)
-	if !ok {
-		machine.registers[destination] = slotNil
-		return nil
+	action, err := machine.tables.decideIndex(id, key, machine.indexName)
+	if err != nil {
+		return 0, 0, fmt.Errorf("run: get index failed: %w", err)
 	}
-	return machine.copySlot(destination, value)
+	switch action.kind {
+	case machineTableActionReturn:
+		return -1, machine.activeBase, machine.copySlot(destination, action.value)
+	case machineTableActionCall:
+		return machine.enterTableAction(action, destination, 1, nextPC, machineSemanticResume{})
+	default:
+		return 0, 0, fmt.Errorf("run: get index failed: invalid compact Machine table action")
+	}
 }
 
+func (machine *scalarMachine) setTableIndexSemanticStopped(tableValue, keyValue, value slot, destination, nextPC int) (int32, int, error) {
+	id, err := machine.tableID(tableValue)
+	if err != nil {
+		return 0, 0, fmt.Errorf("run: set index target is %s, want table", slotValueKind(tableValue))
+	}
+	key, err := machine.tableKey(keyValue)
+	if err != nil {
+		return 0, 0, fmt.Errorf("run: set index failed: %w", err)
+	}
+	stable, err := machine.stableTableValueStopped(value)
+	if err != nil {
+		return 0, 0, fmt.Errorf("run: set index failed: %w", err)
+	}
+	action, err := machine.tables.decideNewIndex(id, key, stable, machine.newIndexName)
+	if err != nil {
+		return 0, 0, fmt.Errorf("run: set index failed: %w", err)
+	}
+	switch action.kind {
+	case machineTableActionStore:
+		return -1, machine.activeBase, machine.applyTableStoreStopped(action)
+	case machineTableActionCall:
+		return machine.enterTableAction(action, destination, 0, nextPC, machineSemanticResume{})
+	default:
+		return 0, 0, fmt.Errorf("run: set index failed: invalid compact Machine table action")
+	}
+}
+
+func (machine *scalarMachine) applyTableStoreStopped(action machineTableAction) error {
+	limit := uint64(0)
+	if machine.window.controller != nil {
+		limit = machine.window.controller.limits.MaxTableEntriesPerTable
+	}
+	key := action.key
+	if key.kind == machineTableKeyArray {
+		recordKey := machineTableArrayRecordKey(key.id)
+		if _, exists := machine.tables.getSlot(action.table, recordKey.value); exists {
+			action.key = recordKey
+		} else {
+			record, ok := machine.tables.lookup(action.table)
+			if !ok {
+				return errMachineTableInvalidID
+			}
+			if _, exists := machine.tables.getArray(action.table, key.id); !exists && key.id > record.arrayCapacity && key.id > record.arrayLength+1 {
+				action.key = recordKey
+			}
+		}
+	}
+	return machine.tables.rawSetMetatableAwareStopped(action.table, action.key, action.value, machine.metatableName, limit)
+}
+
+// setTableIndexStopped is the raw import/build seam. Runtime opcode writes use
+// setTableIndexSemanticStopped so __newindex remains observable.
 func (machine *scalarMachine) setTableIndexStopped(tableValue, keyValue, value slot) error {
 	id, err := machine.tableID(tableValue)
 	if err != nil {
@@ -454,28 +874,7 @@ func (machine *scalarMachine) setTableIndexStopped(tableValue, keyValue, value s
 	if err != nil {
 		return fmt.Errorf("run: set index failed: %w", err)
 	}
-	if key.kind == machineTableKeyArray {
-		recordKey := machineTableArrayRecordKey(key.id)
-		if _, exists := machine.tables.getSlot(id, recordKey.value); exists {
-			return machine.tables.setSlotStopped(id, recordKey.value, stable)
-		}
-		record, ok := machine.tables.lookup(id)
-		if !ok {
-			return errMachineTableInvalidID
-		}
-		if _, exists := machine.tables.getArray(id, key.id); exists || key.id <= record.arrayCapacity || key.id <= record.arrayLength+1 {
-			return machine.tables.setArrayStopped(id, key.id, stable)
-		}
-		return machine.tables.setSlotStopped(id, recordKey.value, stable)
-	}
-	switch key.kind {
-	case machineTableKeySlot:
-		return machine.tables.setSlotStopped(id, key.value, stable)
-	case machineTableKeyString:
-		return machine.tables.setStringStopped(id, machineStringID(key.id), stable)
-	default:
-		return errMachineTableInvalidKey
-	}
+	return machine.applyTableStoreStopped(machineTableAction{kind: machineTableActionStore, table: id, key: key, value: stable})
 }
 
 func (machine *scalarMachine) tableValue(id machineTableID, key machineTableKey) (slot, bool) {
@@ -536,6 +935,14 @@ func (machine *scalarMachine) tableKey(value slot) (machineTableKey, error) {
 			return machineTableKey{}, err
 		}
 		return machineTableSlotKey(value), nil
+	case UserDataKind:
+		if machine.persistentOwner == nil || slotTagOf(value) != slotTagCoroutine {
+			return machineTableKey{}, fmt.Errorf("table key kind %s is unsupported", slotValueKind(value))
+		}
+		if _, err := machine.persistentOwner.coroutines.handleFromSlot(value); err != nil {
+			return machineTableKey{}, err
+		}
+		return machineTableSlotKey(value), nil
 	default:
 		return machineTableKey{}, fmt.Errorf("table key kind %s is unsupported", slotValueKind(value))
 	}
@@ -548,6 +955,14 @@ func (machine *scalarMachine) stableTableValueStopped(value slot) (slot, error) 
 	case FunctionKind:
 		if _, _, _, err := machine.closureTarget(value); err != nil {
 			return 0, err
+		}
+		return value, nil
+	case UserDataKind:
+		if machine.persistentOwner == nil || slotTagOf(value) != slotTagCoroutine {
+			return slotNil, fmt.Errorf("compact Machine value kind %s cannot cross a call boundary", slotValueKind(value))
+		}
+		if _, err := machine.persistentOwner.coroutines.handleFromSlot(value); err != nil {
+			return slotNil, err
 		}
 		return value, nil
 	case NumberKind:
@@ -577,6 +992,24 @@ func (machine *scalarMachine) stableTableValueStopped(value slot) (slot, error) 
 			return 0, err
 		}
 		return value, nil
+	case HostFuncKind:
+		switch slotTagOf(value) {
+		case slotTagNativeID:
+			if _, err := slotNativeIDValue(value); err != nil {
+				return 0, err
+			}
+			return value, nil
+		case slotTagHostCallable:
+			if machine.persistentOwner == nil {
+				return 0, errors.New("compact Machine host callable has no persistent owner")
+			}
+			if _, err := machine.persistentOwner.hosts.lookup(value); err != nil {
+				return 0, err
+			}
+			return value, nil
+		default:
+			return 0, errors.New("compact Machine host callable is invalid")
+		}
 	default:
 		return 0, fmt.Errorf("table value kind %s is unsupported", slotValueKind(value))
 	}
@@ -698,9 +1131,128 @@ func (machine *scalarMachine) enterCall(operation machineOperation, nextPC int) 
 	if err != nil {
 		return 0, 0, err
 	}
-	if slotTagOf(callable) == slotTagHostCallable {
-		if err := machine.callHostStopped(operation, callable); err != nil {
+	arguments, err := machine.callArguments(operation)
+	if err != nil {
+		return 0, 0, err
+	}
+	targetID, targetBase, err := machine.enterExplicitCall(machineCallRequest{
+		callable:    callable,
+		arguments:   arguments,
+		destination: machine.activeBase + int(operation.a),
+		resultCount: int(operation.callResults),
+		returnPC:    nextPC,
+		tailCall:    operation.tailCall,
+	})
+	if err != nil && !strings.HasPrefix(err.Error(), "run: call failed:") {
+		err = fmt.Errorf("run: call failed: %w", err)
+	}
+	return targetID, targetBase, err
+}
+
+func (machine *scalarMachine) enterMethodOne(operation machineOperation, pc, nextPC int) (int32, int, error) {
+	destination := machine.activeBase + int(operation.a)
+	receiverRegister := machine.activeBase + int(operation.b)
+	argStart := machine.activeBase + int(operation.callArgStart)
+	argCount := int(operation.callArgCount)
+	if destination < machine.activeBase || destination+1 >= len(machine.registers) ||
+		receiverRegister < machine.activeBase || receiverRegister >= len(machine.registers) ||
+		argStart != destination+1 || argCount < 1 || argStart+argCount > len(machine.registers) {
+		return 0, 0, fmt.Errorf("compact Machine CALL_METHOD_ONE operands are out of range")
+	}
+	var action machineMethodOneAction
+	if machine.resume.kind == machineResumeMethodLookup {
+		resume := machine.resume
+		machine.resume = machineSemanticResume{}
+		var err error
+		action, err = machine.tables.resumeMethodOneLookup(resume.method, machine.registers[destination], 1)
+		if err != nil {
 			return 0, 0, err
+		}
+	} else {
+		keyValue, err := machine.constantSlot(int(operation.c), destination)
+		if err != nil {
+			return 0, 0, err
+		}
+		key, err := machine.stringID(keyValue)
+		if err != nil {
+			return 0, 0, err
+		}
+		action, err = machine.tables.prepareMethodOne(machine.registers[receiverRegister], key, machine.indexName, machine.callName)
+		if err != nil {
+			return 0, 0, err
+		}
+		if action.kind == machineMethodOneLookup {
+			resume := machineSemanticResume{kind: machineResumeMethodLookup, method: action}
+			targetID, targetBase, err := machine.enterTableAction(action.lookup, destination, 1, pc, resume)
+			if err != nil || targetID >= 0 {
+				return targetID, targetBase, err
+			}
+			action, err = machine.tables.resumeMethodOneLookup(action, machine.registers[destination], 1)
+			if err != nil {
+				return 0, 0, err
+			}
+		}
+	}
+	if action.kind != machineMethodOneScript && action.kind != machineMethodOneHost && action.kind != machineMethodOneMetamethod {
+		return 0, 0, fmt.Errorf("compact Machine CALL_METHOD_ONE action is invalid")
+	}
+	if err := machine.copySlot(destination+1, action.receiver); err != nil {
+		return 0, 0, err
+	}
+	return machine.enterExplicitCall(machineCallRequest{
+		callable: action.callee, arguments: machine.registers[argStart : argStart+argCount],
+		destination: destination, resultCount: 1, returnPC: nextPC,
+	})
+}
+
+type machineCallRequest struct {
+	callable    slot
+	arguments   []slot
+	destination int
+	resultCount int
+	returnPC    int
+	resume      machineSemanticResume
+	tailCall    uint8
+}
+
+func (machine *scalarMachine) callArguments(operation machineOperation) ([]slot, error) {
+	argStart := machine.activeBase + int(operation.callArgStart)
+	argCount := int(operation.callArgCount)
+	if argCount < 0 {
+		openStart := argStart + int(operation.callPrefix)
+		if openStart != machine.activeOpenStart || machine.activeOpenCount < 0 {
+			return nil, fmt.Errorf("compact Machine open call argument window is unavailable")
+		}
+		argCount = int(operation.callPrefix) + machine.activeOpenCount
+	}
+	if argStart < machine.activeBase || argCount < 0 || argStart+argCount > len(machine.registers) {
+		return nil, fmt.Errorf("compact Machine call argument window is out of range")
+	}
+	return machine.registers[argStart : argStart+argCount], nil
+}
+
+func (machine *scalarMachine) enterExplicitCall(request machineCallRequest) (int32, int, error) {
+	callable, arguments, err := machine.resolveCallable(request.callable, request.arguments)
+	if err != nil {
+		return 0, 0, err
+	}
+	request.callable = callable
+	request.arguments = arguments
+	if slotTagOf(callable) == slotTagNativeID {
+		if err := machine.callNativeArgumentsStopped(callable, arguments, request.destination, request.resultCount, request.returnPC); err != nil {
+			return 0, 0, err
+		}
+		if request.tailCall != 0 {
+			machine.skipCharge = 1
+		}
+		return -1, machine.activeBase, nil
+	}
+	if slotTagOf(callable) == slotTagHostCallable {
+		if err := machine.callFastHostStopped(callable, arguments, request.destination, request.resultCount); err != nil {
+			return 0, 0, err
+		}
+		if request.tailCall != 0 {
+			machine.skipCharge = 1
 		}
 		return -1, machine.activeBase, nil
 	}
@@ -717,25 +1269,14 @@ func (machine *scalarMachine) enterCall(operation machineOperation, nextPC int) 
 		return 0, 0, fmt.Errorf("compact Machine call target has no operations")
 	}
 	callerBase := machine.activeBase
-	argStart := callerBase + int(operation.callArgStart)
-	argCount := int(operation.callArgCount)
-	if argCount < 0 {
-		openStart := argStart + int(operation.callPrefix)
-		if openStart != machine.activeOpenStart || machine.activeOpenCount < 0 {
-			return 0, 0, fmt.Errorf("compact Machine open call argument window is unavailable")
-		}
-		argCount = int(operation.callPrefix) + machine.activeOpenCount
-	}
-	if argStart < callerBase || argCount < 0 || argStart+argCount > len(machine.registers) {
-		return 0, 0, fmt.Errorf("compact Machine call argument window is out of range")
-	}
+	argCount := len(arguments)
 	calleeBase := len(machine.registers)
 	varargCount := 0
 	if target.variadic && argCount > target.params {
 		varargCount = argCount - target.params
 	}
-	if operation.tailCall != 0 {
-		return machine.enterTailCall(targetModule, targetID, closure, target, argStart, argCount, varargCount)
+	if request.tailCall != 0 && request.resume.kind == machineResumeNone {
+		return machine.enterTailCall(targetModule, targetID, closure, target, arguments, varargCount)
 	}
 	if err := machine.ensureStack(calleeBase + target.registers + varargCount); err != nil {
 		return 0, 0, err
@@ -744,13 +1285,13 @@ func (machine *scalarMachine) enterCall(operation machineOperation, nextPC int) 
 		machine.registers[index] = slotNil
 	}
 	for index := 0; index < target.params && index < argCount; index++ {
-		if err := machine.copySlot(calleeBase+index, machine.registers[argStart+index]); err != nil {
+		if err := machine.copySlot(calleeBase+index, arguments[index]); err != nil {
 			return 0, 0, err
 		}
 	}
 	varargStart := calleeBase + target.registers
 	for index := 0; index < varargCount; index++ {
-		if err := machine.copySlot(varargStart+index, machine.registers[argStart+target.params+index]); err != nil {
+		if err := machine.copySlot(varargStart+index, arguments[target.params+index]); err != nil {
 			return 0, 0, err
 		}
 	}
@@ -763,15 +1304,16 @@ func (machine *scalarMachine) enterCall(operation machineOperation, nextPC int) 
 		moduleID:    machine.activeModule,
 		protoID:     machine.activeProto,
 		base:        int32(callerBase),
-		returnPC:    int32(nextPC),
+		returnPC:    int32(request.returnPC),
 		returnBase:  int32(callerBase),
-		returnReg:   int32(callerBase + int(operation.a)),
-		returnCount: operation.callResults,
+		returnReg:   int32(request.destination),
+		returnCount: int32(request.resultCount),
 		stackLength: int32(calleeBase),
 		closure:     machine.activeClosure,
 		varargStart: int32(machine.activeVarargStart),
 		varargCount: int32(machine.activeVarargCount),
 		cellStart:   int32(machine.activeCellStart),
+		resume:      request.resume,
 	})
 	machine.activeModule = targetModule
 	machine.image = targetImage
@@ -786,10 +1328,245 @@ func (machine *scalarMachine) enterCall(operation machineOperation, nextPC int) 
 	return targetID, calleeBase, nil
 }
 
-func (machine *scalarMachine) enterTailCall(targetModule programModuleID, targetID int32, closure machineClosureHandle, target *machineProto, argStart, argCount, varargCount int) (int32, int, error) {
+func (machine *scalarMachine) resolveCallable(callable slot, arguments []slot) (slot, []slot, error) {
+	if slotValueKind(callable) != TableKind {
+		if !machineTableCallable(callable) {
+			return slotNil, nil, fmt.Errorf("call target is %s, want function", slotValueKind(callable))
+		}
+		return callable, arguments, nil
+	}
+	machine.callScratch = machine.callScratch[:0]
+	for slotValueKind(callable) == TableKind {
+		for _, seen := range machine.callScratch {
+			if seen == callable {
+				return slotNil, nil, fmt.Errorf("cyclic __call chain")
+			}
+		}
+		if len(machine.callScratch) >= len(machine.tables.tables) {
+			return slotNil, nil, fmt.Errorf("cyclic __call chain")
+		}
+		machine.callScratch = append(machine.callScratch, callable)
+		table, err := machine.tableID(callable)
+		if err != nil {
+			return slotNil, nil, err
+		}
+		metamethod, found, err := machine.tables.metamethod(table, machine.callName)
+		if err != nil {
+			return slotNil, nil, err
+		}
+		if !found {
+			return slotNil, nil, fmt.Errorf("call target is table, want function")
+		}
+		if !machineTableCallable(metamethod) && slotValueKind(metamethod) != TableKind {
+			return slotNil, nil, fmt.Errorf("__call is %s, want function", slotValueKind(metamethod))
+		}
+		callable = metamethod
+	}
+	if !machineTableCallable(callable) {
+		return slotNil, nil, fmt.Errorf("call target is %s, want function", slotValueKind(callable))
+	}
+	for left, right := 0, len(machine.callScratch)-1; left < right; left, right = left+1, right-1 {
+		machine.callScratch[left], machine.callScratch[right] = machine.callScratch[right], machine.callScratch[left]
+	}
+	machine.callScratch = append(machine.callScratch, arguments...)
+	return callable, machine.callScratch, nil
+}
+
+func (machine *scalarMachine) callNativeArgumentsStopped(callable slot, arguments []slot, destination, resultCount, returnPC int) error {
+	nativeID, err := slotNativeIDValue(callable)
+	if err != nil {
+		return err
+	}
+	if nativeID == nativeFuncToString {
+		value := slotNil
+		if len(arguments) > 0 {
+			value = arguments[0]
+		}
+		if err := machine.toString(destination, value); err != nil {
+			return fmt.Errorf("run: call failed: host function failed: %w", err)
+		}
+		return machine.fillFixedCallResults(destination, resultCount, 1)
+	}
+	if nativeID == nativeFuncSelect {
+		return machine.callNativeAdapterArgumentsStopped(nativeID, arguments, destination, resultCount)
+	}
+	if nativeID == nativeFuncCoroutineCreate || nativeID == nativeFuncCoroutineStatus || nativeID == nativeFuncCoroutineResume || nativeID == nativeFuncCoroutineYield {
+		return machine.callCoroutineNativeStopped(nativeID, arguments, destination, resultCount, returnPC)
+	}
+	if nativeID == nativeFuncSetMetatable || nativeID == nativeFuncGetMetatable {
+		first, second := slotNil, slotNil
+		if len(arguments) > 0 {
+			first = arguments[0]
+		}
+		if len(arguments) > 1 {
+			second = arguments[1]
+		}
+		outcome, err := runMachineGuardedMetatableIntrinsicStopped(&machine.tables, machineMetatableIntrinsicRequest{
+			callee: callable, first: first, second: second, argumentCount: uint32(len(arguments)), nativeID: nativeID,
+		})
+		if err != nil {
+			return fmt.Errorf("run: call failed: host function failed: %w", err)
+		}
+		if !outcome.matched {
+			return fmt.Errorf("run: call failed: compact Machine native ID %d is unsupported", nativeID)
+		}
+		return machine.applyIntrinsicOutcome(destination, resultCount, machineIntrinsicOutcome{
+			value: outcome.value, resultCount: outcome.resultCount, matched: true,
+		})
+	}
+	request := machineIntrinsicRequest{
+		nativeID: nativeID,
+		callee:   callable,
+		args:     arguments,
+	}
+	if machine.window.controller != nil {
+		request.tableEntryLimit = machine.window.controller.limits.MaxTableEntriesPerTable
+	}
+	outcome, err := runMachineGuardedIntrinsicStopped(machine, request)
+	if err != nil {
+		return fmt.Errorf("run: call failed: host function failed: %w", err)
+	}
+	if !outcome.matched {
+		return fmt.Errorf("run: call failed: compact Machine native ID %d is unsupported", nativeID)
+	}
+	return machine.applyIntrinsicOutcome(destination, resultCount, outcome)
+}
+
+func (machine *scalarMachine) fastCall(operation machineOperation, returnPC int) error {
+	if machine == nil || machine.persistentOwner == nil {
+		return fmt.Errorf("compact Machine FAST_CALL requires a persistent owner")
+	}
+	dense, err := machine.persistentOwner.globalIndexStopped(machine.activeModule, operation.globalIndex)
+	if err != nil {
+		return err
+	}
+	callee, present, err := machine.persistentOwner.globals.getAt(dense)
+	if err != nil {
+		return err
+	}
+	if !present {
+		return fmt.Errorf("run: undefined intrinsic global")
+	}
+	if operation.guardField != invalidMachineStringID {
+		globalTable, tableErr := machine.tableID(callee)
+		if tableErr != nil {
+			return fmt.Errorf("run: intrinsic guard target is %s, want table", slotValueKind(callee))
+		}
+		field, translateErr := machine.persistentOwner.translateImageStringIDStopped(machine.activeModule, operation.guardField)
+		if translateErr != nil {
+			return translateErr
+		}
+		callee, err = machine.tables.rawGet(globalTable, machineTableStringKey(field))
+		if err != nil {
+			return err
+		}
+	}
+	start := machine.activeBase + int(operation.a)
+	argCount := int(operation.c)
+	if start < machine.activeBase || argCount < 0 || start+argCount > len(machine.registers) {
+		return fmt.Errorf("compact Machine FAST_CALL argument window is out of range")
+	}
+	nativeID := nativeFuncID(operation.nativeID)
+	if nativeID == nativeFuncCoroutineResume && slotTagOf(callee) == slotTagNativeID {
+		actual, nativeErr := slotNativeIDValue(callee)
+		if nativeErr != nil {
+			return nativeErr
+		}
+		if actual == nativeID {
+			return machine.callCoroutineNativeStopped(nativeID, machine.registers[start:start+argCount], start, int(operation.d), returnPC)
+		}
+	}
+	request := machineIntrinsicRequest{
+		nativeID:          nativeID,
+		callee:            callee,
+		args:              machine.registers[start : start+argCount],
+		selectVarargCount: machine.activeVarargCount,
+	}
+	if machine.window.controller != nil {
+		request.tableEntryLimit = machine.window.controller.limits.MaxTableEntriesPerTable
+	}
+	outcome, err := runMachineGuardedIntrinsicStopped(machine, request)
+	if err != nil {
+		return fmt.Errorf("run: call failed: host function failed: %w", err)
+	}
+	if outcome.matched {
+		if outcome.additionalGuestCharge != 0 && machine.window.controller != nil {
+			if err := machine.window.controller.chargeInstructions(uint64(outcome.additionalGuestCharge)); err != nil {
+				return err
+			}
+		}
+		return machine.applyIntrinsicOutcome(start, int(operation.d), outcome)
+	}
+	if slotTagOf(callee) != slotTagHostCallable {
+		return fmt.Errorf("run: call failed: intrinsic guard replacement is %s, want function", slotValueKind(callee))
+	}
+	args := machine.registers[start : start+argCount]
+	if nativeID == nativeFuncSelect {
+		machine.callScratch = machine.callScratch[:0]
+		hashID, internErr := machine.strings.internStringStopped("#")
+		if internErr != nil {
+			return internErr
+		}
+		hashSlot, internErr := slotPackHandle(slotTagString, uint32(hashID), 1)
+		if internErr != nil {
+			return internErr
+		}
+		machine.callScratch = append(machine.callScratch, hashSlot)
+		varargStart := machine.activeVarargStart
+		if varargStart < 0 || varargStart+machine.activeVarargCount > len(machine.registers) {
+			return fmt.Errorf("compact Machine select vararg window is unavailable")
+		}
+		machine.callScratch = append(machine.callScratch, machine.registers[varargStart:varargStart+machine.activeVarargCount]...)
+		args = machine.callScratch
+	}
+	return machine.callFastHostStopped(callee, args, start, int(operation.d))
+}
+
+func (machine *scalarMachine) applyIntrinsicOutcome(destination, requested int, outcome machineIntrinsicOutcome) error {
+	if outcome.resultCount > 1 {
+		return fmt.Errorf("compact Machine intrinsic returned unsupported result count %d", outcome.resultCount)
+	}
+	actual := int(outcome.resultCount)
+	if requested < 0 {
+		requested = actual
+		machine.activeOpenStart = destination
+		machine.activeOpenCount = actual
+	} else {
+		machine.activeOpenStart = 0
+		machine.activeOpenCount = 0
+	}
+	if requested < 0 || destination < 0 || destination+requested > len(machine.registers) {
+		return fmt.Errorf("compact Machine intrinsic result window is out of range")
+	}
+	if actual > 0 && requested > 0 {
+		if err := machine.copySlot(destination, outcome.value); err != nil {
+			return err
+		}
+	}
+	for index := actual; index < requested; index++ {
+		machine.registers[destination+index] = slotNil
+	}
+	return nil
+}
+
+func (machine *scalarMachine) fillFixedCallResults(destination, requested, actual int) error {
+	if requested < 0 {
+		machine.activeOpenStart = destination
+		machine.activeOpenCount = actual
+		return nil
+	}
+	for index := actual; index < requested; index++ {
+		if destination+index < 0 || destination+index >= len(machine.registers) {
+			return fmt.Errorf("compact Machine call result window is out of range")
+		}
+		machine.registers[destination+index] = slotNil
+	}
+	return nil
+}
+
+func (machine *scalarMachine) enterTailCall(targetModule programModuleID, targetID int32, closure machineClosureHandle, target *machineProto, arguments []slot, varargCount int) (int32, int, error) {
 	machine.transfer = machine.transfer[:0]
-	for index := 0; index < argCount; index++ {
-		value := machine.registers[argStart+index]
+	for _, value := range arguments {
 		transfer := machineTransferValue{value: value}
 		if slotValueKind(value) == NumberKind {
 			number, err := machine.number(value)
@@ -812,7 +1589,7 @@ func (machine *scalarMachine) enterTailCall(targetModule programModuleID, target
 	for index := calleeBase; index < calleeBase+target.registers; index++ {
 		machine.registers[index] = slotNil
 	}
-	for index := 0; index < target.params && index < argCount; index++ {
+	for index := 0; index < target.params && index < len(arguments); index++ {
 		if err := machine.copyTransfer(calleeBase+index, machine.transfer[index]); err != nil {
 			return 0, 0, err
 		}
@@ -922,6 +1699,10 @@ func (machine *scalarMachine) returnFromCall(start, count int) (done bool, proto
 		if err := machine.copyTransfer(int(continuation.returnReg)+index, value); err != nil {
 			return false, 0, 0, 0, err
 		}
+	}
+	if continuation.resume.kind != machineResumeNone {
+		machine.resume = continuation.resume
+		machine.skipCharge = 1
 	}
 	return false, continuation.protoID, int(continuation.returnBase), int(continuation.returnPC), nil
 }
@@ -1067,7 +1848,7 @@ func (machine *scalarMachine) stableMachineValueStopped(value slot) (slot, error
 	switch slotValueKind(value) {
 	case NilKind, BoolKind:
 		return value, nil
-	case NumberKind, StringKind, TableKind:
+	case NumberKind, StringKind, TableKind, HostFuncKind, UserDataKind:
 		return machine.stableTableValueStopped(value)
 	case FunctionKind:
 		if _, _, _, err := machine.closureTarget(value); err != nil {
@@ -1302,22 +2083,149 @@ func (machine *scalarMachine) stringID(value slot) (machineStringID, error) {
 }
 
 func (machine *scalarMachine) numericOperand(value slot, side, operator string) (float64, error) {
-	if slotValueKind(value) == NumberKind {
-		return machine.number(value)
+	operand, err := machine.scalarOperand(value)
+	if err != nil {
+		return 0, err
 	}
-	return 0, fmt.Errorf("%s %s operand is %s, want number", operator, side, slotValueKind(value))
+	action, err := machinePrepareNumericOperand(operand, &machine.strings)
+	if err != nil {
+		return 0, err
+	}
+	return machineNumericOperandResult(action, side, operator)
+}
+
+func (machine *scalarMachine) scalarOperand(value slot) (machineScalarOperand, error) {
+	operand := machineScalarOperand{value: value}
+	if slotValueKind(value) != NumberKind || !slotIsTagged(value) {
+		return operand, nil
+	}
+	number, err := machine.number(value)
+	if err != nil {
+		return machineScalarOperand{}, err
+	}
+	operand.numberBits = math.Float64bits(number)
+	return operand, nil
 }
 
 func (machine *scalarMachine) negate(destination, operand int) error {
 	value := machine.registers[operand]
-	if slotValueKind(value) != NumberKind {
-		return fmt.Errorf("run: negate operand is %s, want number", slotValueKind(value))
+	number, err := machine.numericOperand(value, "", "negate")
+	if err != nil {
+		return fmt.Errorf("run: %w", err)
 	}
-	number, err := machine.number(value)
+	machine.setNumber(destination, -number)
+	return nil
+}
+
+func (machine *scalarMachine) concat(destination int, values ...slot) error {
+	machine.stringScratch = machine.stringScratch[:0]
+	machine.operandScratch = machine.operandScratch[:0]
+	for _, value := range values {
+		operand, err := machine.scalarOperand(value)
+		if err != nil {
+			return err
+		}
+		machine.operandScratch = append(machine.operandScratch, operand)
+	}
+	var action machineStringAction
+	var err error
+	machine.stringScratch, action, err = machinePrepareConcatChain(machine.stringScratch, machine.operandScratch, &machine.strings)
+	if err != nil {
+		return fmt.Errorf("run: concat failed: %w", err)
+	}
+	if action.kind == machineStringActionEffect {
+		index := int(action.operand)
+		side := "right"
+		if index == 0 {
+			side = "left"
+		}
+		kind := slotInvalidValueKind
+		if index >= 0 && index < len(values) {
+			kind = slotValueKind(values[index])
+		}
+		return fmt.Errorf("run: concat failed: concat %s operand is %s, want string or number", side, kind)
+	}
+	return machine.completeStringAction(destination, action)
+}
+
+func (machine *scalarMachine) concatRegisters(destination, start, count int) error {
+	if count < 0 || start < 0 || start+count > len(machine.registers) {
+		return fmt.Errorf("compact Machine CONCAT_CHAIN operands are out of range")
+	}
+	return machine.concat(destination, machine.registers[start:start+count]...)
+}
+
+func (machine *scalarMachine) toString(destination int, value slot) error {
+	operand, err := machine.scalarOperand(value)
 	if err != nil {
 		return err
 	}
-	machine.setNumber(destination, -number)
+	machine.stringScratch = machine.stringScratch[:0]
+	var action machineStringAction
+	machine.stringScratch, action, err = machinePrepareToString(machine.stringScratch, operand, &machine.strings)
+	if err != nil {
+		return err
+	}
+	if action.kind == machineStringActionEffect {
+		text := slotValueKind(value).String()
+		if slotValueKind(value) == HostFuncKind {
+			text = FunctionKind.String()
+		}
+		start := len(machine.stringScratch)
+		machine.stringScratch = append(machine.stringScratch, text...)
+		machine.stringScratch, action, err = machineGeneratedStringAction(machine.stringScratch, start, false)
+		if err != nil {
+			return err
+		}
+	}
+	return machine.completeStringAction(destination, action)
+}
+
+func (machine *scalarMachine) completeStringAction(destination int, action machineStringAction) error {
+	if destination < 0 || destination >= len(machine.registers) {
+		return fmt.Errorf("compact Machine string destination is out of range")
+	}
+	if action.kind == machineStringActionReuse {
+		value, err := slotPackHandle(slotTagString, uint32(action.stringID), 1)
+		if err != nil {
+			return err
+		}
+		machine.registers[destination] = value
+		return nil
+	}
+	text, err := machineStringActionBytes(action, machine.stringScratch, &machine.strings)
+	if err != nil {
+		return err
+	}
+	hash := machineStringHash(text)
+	existing := machine.strings.find(text, hash)
+	alreadyGenerated := false
+	if action.generatedBytes != 0 && existing != invalidMachineStringID {
+		for _, generated := range machine.generatedStrings {
+			if generated == existing {
+				alreadyGenerated = true
+				break
+			}
+		}
+	}
+	if err := machineChargeGeneratedStringStopped(machine.window.controller, action, alreadyGenerated); err != nil {
+		return err
+	}
+	id := existing
+	if id == invalidMachineStringID {
+		id, err = machine.strings.internBytesStopped(text)
+		if err != nil {
+			return err
+		}
+	}
+	if action.generatedBytes != 0 && !alreadyGenerated {
+		machine.generatedStrings = append(machine.generatedStrings, id)
+	}
+	value, err := slotPackHandle(slotTagString, uint32(id), 1)
+	if err != nil {
+		return err
+	}
+	machine.registers[destination] = value
 	return nil
 }
 
@@ -1372,6 +2280,19 @@ func (machine *scalarMachine) equal(left, right slot) (bool, error) {
 			return false, err
 		}
 		rightHandle, _, _, err := machine.closureTarget(right)
+		if err != nil {
+			return false, err
+		}
+		return leftHandle.index == rightHandle.index && leftHandle.generation == rightHandle.generation, nil
+	case UserDataKind:
+		if machine.persistentOwner == nil || slotTagOf(left) != slotTagCoroutine || slotTagOf(right) != slotTagCoroutine {
+			return false, fmt.Errorf("compact Machine equality kind %s is unsupported", leftKind)
+		}
+		leftHandle, err := machine.persistentOwner.coroutines.handleFromSlot(left)
+		if err != nil {
+			return false, err
+		}
+		rightHandle, err := machine.persistentOwner.coroutines.handleFromSlot(right)
 		if err != nil {
 			return false, err
 		}
@@ -1528,12 +2449,9 @@ func (machine *scalarMachine) numericForCheck(loop, limit, step int) (bool, erro
 	numbers := [3]float64{}
 	for index, value := range values {
 		slotValue := machine.registers[value.register]
-		if slotValueKind(slotValue) != NumberKind {
-			return false, fmt.Errorf("run: numeric for %s is %s, want number", value.name, slotValueKind(slotValue))
-		}
-		number, err := machine.number(slotValue)
+		number, err := machine.numericOperand(slotValue, "", "numeric for")
 		if err != nil {
-			return false, err
+			return false, fmt.Errorf("run: numeric for %s is %s, want number", value.name, slotValueKind(slotValue))
 		}
 		numbers[index] = number
 	}
@@ -1548,20 +2466,14 @@ func (machine *scalarMachine) numericForCheck(loop, limit, step int) (bool, erro
 
 func (machine *scalarMachine) numericForLoop(loop, step int) error {
 	loopValue := machine.registers[loop]
-	if slotValueKind(loopValue) != NumberKind {
+	stepValue := machine.registers[step]
+	loopNumber, err := machine.numericOperand(loopValue, "", "numeric for")
+	if err != nil {
 		return fmt.Errorf("run: numeric for loop value is %s, want number", slotValueKind(loopValue))
 	}
-	stepValue := machine.registers[step]
-	if slotValueKind(stepValue) != NumberKind {
+	stepNumber, err := machine.numericOperand(stepValue, "", "numeric for")
+	if err != nil {
 		return fmt.Errorf("run: numeric for step is %s, want number", slotValueKind(stepValue))
-	}
-	loopNumber, err := machine.number(loopValue)
-	if err != nil {
-		return err
-	}
-	stepNumber, err := machine.number(stepValue)
-	if err != nil {
-		return err
 	}
 	machine.setNumber(loop, loopNumber+stepNumber)
 	return nil
@@ -1633,8 +2545,11 @@ type machineExportedTable struct {
 // tables to detached public Values. The map is deliberately confined to this
 // effect boundary; Machine execution and table storage remain map-free.
 type machineTableExporter struct {
-	machine *scalarMachine
-	tables  map[machineTableID]machineExportedTable
+	machine   *scalarMachine
+	tables    map[machineTableID]machineExportedTable
+	originals map[*Table]slot
+	values    map[slot]Value
+	reverse   map[Value]slot
 }
 
 func (exporter *machineTableExporter) value(value slot) (Value, error) {
@@ -1686,14 +2601,54 @@ func (exporter *machineTableExporter) value(value slot) (Value, error) {
 		if machine.persistentOwner == nil {
 			return NilValue(), errors.New("compact Machine cannot detach a host function")
 		}
+		if cached, ok := exporter.values[value]; ok {
+			return cached, nil
+		}
+		if slotTagOf(value) == slotTagNativeID {
+			id, err := slotNativeIDValue(value)
+			if err != nil {
+				return NilValue(), err
+			}
+			fn, ok := nativeFuncByID(id)
+			if !ok {
+				return NilValue(), fmt.Errorf("compact Machine native ID %d is unsupported", id)
+			}
+			return nativeFuncValueWithID(fn, id), nil
+		}
 		fn, err := machine.persistentOwner.hosts.lookup(value)
 		if err != nil {
 			return NilValue(), err
 		}
-		return ContextHostFuncValue(fn), nil
+		exported := ContextHostFuncValue(fn)
+		exporter.rememberValue(value, exported)
+		return exported, nil
+	case UserDataKind:
+		if machine.persistentOwner != nil && slotTagOf(value) == slotTagCoroutine {
+			if cached, ok := exporter.values[value]; ok {
+				return cached, nil
+			}
+			exported, err := machine.persistentOwner.coroutines.exportValueStopped(value)
+			if err != nil {
+				return NilValue(), err
+			}
+			exporter.rememberValue(value, exported)
+			return exported, nil
+		}
+		return NilValue(), fmt.Errorf("compact Machine result userdata is unsupported")
 	default:
 		return NilValue(), fmt.Errorf("compact Machine result kind %s is unsupported", slotValueKind(value))
 	}
+}
+
+func (exporter *machineTableExporter) rememberValue(original slot, exported Value) {
+	if exporter.values == nil {
+		exporter.values = make(map[slot]Value)
+	}
+	if exporter.reverse == nil {
+		exporter.reverse = make(map[Value]slot)
+	}
+	exporter.values[original] = exported
+	exporter.reverse[exported] = original
 }
 
 func (exporter *machineTableExporter) table(value slot) (Value, error) {
@@ -1702,10 +2657,7 @@ func (exporter *machineTableExporter) table(value slot) (Value, error) {
 		return NilValue(), err
 	}
 	if existing, ok := exporter.tables[id]; ok {
-		if existing.visiting {
-			return NilValue(), fmt.Errorf("compact Machine cannot export cyclic table %d", id)
-		}
-		if existing.complete {
+		if existing.visiting || existing.complete {
 			return TableValue(existing.table), nil
 		}
 	}
@@ -1714,6 +2666,10 @@ func (exporter *machineTableExporter) table(value slot) (Value, error) {
 		return NilValue(), fmt.Errorf("compact Machine table ID %d is invalid", id)
 	}
 	table := newTableWithCapacity(int(record.arrayLength), int(record.fieldCount))
+	if exporter.originals == nil {
+		exporter.originals = make(map[*Table]slot)
+	}
+	exporter.originals[table] = value
 	exporter.tables[id] = machineExportedTable{table: table, visiting: true}
 	var cursor machineTableCursor
 	for {
@@ -1737,8 +2693,227 @@ func (exporter *machineTableExporter) table(value slot) (Value, error) {
 		}
 		cursor = next
 	}
+	if record.metatable != invalidMachineTableID {
+		metatableSlot, err := slotPackHandle(slotTagTable, uint32(record.metatable), 1)
+		if err != nil {
+			return NilValue(), err
+		}
+		exported, err := exporter.table(metatableSlot)
+		if err != nil {
+			return NilValue(), err
+		}
+		metatable, _ := exported.Table()
+		table.setMetatable(metatable)
+	}
 	exporter.tables[id] = machineExportedTable{table: table, complete: true}
 	return TableValue(table), nil
+}
+
+type machineTableReconciler struct {
+	machine  *scalarMachine
+	imported map[*Table]slot
+	visiting map[*Table]bool
+	complete map[*Table]bool
+	limit    uint64
+}
+
+type machineTableReconcileCheckpoint struct {
+	tables       machineTableArena
+	strings      machineStringArena
+	tableNumbers []uint64
+	hosts        machineHostCallableArena
+	originals    map[*Table]slot
+	registers    []slot
+	numberBits   []uint64
+	openStart    int
+	openCount    int
+}
+
+func captureMachineTableReconcileCheckpoint(exporter *machineTableExporter) machineTableReconcileCheckpoint {
+	machine := exporter.machine
+	checkpoint := machineTableReconcileCheckpoint{
+		tables: machine.tables, strings: machine.strings, hosts: machine.persistentOwner.hosts,
+		tableNumbers: append([]uint64(nil), machine.tableNumbers...),
+		originals:    make(map[*Table]slot, len(exporter.originals)),
+		registers:    append([]slot(nil), machine.registers...),
+		numberBits:   append([]uint64(nil), machine.numberBits...),
+		openStart:    machine.activeOpenStart,
+		openCount:    machine.activeOpenCount,
+	}
+	checkpoint.tables.tables = append([]machineTableRecord(nil), machine.tables.tables...)
+	checkpoint.tables.arrays = append([]slot(nil), machine.tables.arrays...)
+	checkpoint.tables.fields = append([]machineTableField(nil), machine.tables.fields...)
+	checkpoint.tables.orders = append([]machineTableOrderEntry(nil), machine.tables.orders...)
+	checkpoint.strings.records = append([]machineStringRecord(nil), machine.strings.records...)
+	checkpoint.strings.data = append([]byte(nil), machine.strings.data...)
+	checkpoint.strings.index = append([]machineStringID(nil), machine.strings.index...)
+	checkpoint.hosts.values = append([]ContextHostFunc(nil), machine.persistentOwner.hosts.values...)
+	for table, value := range exporter.originals {
+		checkpoint.originals[table] = value
+	}
+	return checkpoint
+}
+
+func (checkpoint machineTableReconcileCheckpoint) restore(exporter *machineTableExporter) {
+	machine := exporter.machine
+	machine.tables = checkpoint.tables
+	machine.strings = checkpoint.strings
+	machine.tableNumbers = checkpoint.tableNumbers
+	machine.persistentOwner.hosts = checkpoint.hosts
+	exporter.originals = checkpoint.originals
+	machine.registers = checkpoint.registers
+	machine.numberBits = checkpoint.numberBits
+	machine.activeOpenStart = checkpoint.openStart
+	machine.activeOpenCount = checkpoint.openCount
+}
+
+func (exporter *machineTableExporter) reconcileStopped(limit uint64) error {
+	if exporter == nil || exporter.machine == nil || len(exporter.originals) == 0 {
+		return nil
+	}
+	checkpoint := captureMachineTableReconcileCheckpoint(exporter)
+	reconciler := machineTableReconciler{
+		machine: exporter.machine, imported: exporter.originals,
+		visiting: make(map[*Table]bool), complete: make(map[*Table]bool), limit: limit,
+	}
+	tables := make([]*Table, 0, len(exporter.originals))
+	for table := range exporter.originals {
+		tables = append(tables, table)
+	}
+	sort.Slice(tables, func(left, right int) bool {
+		leftSlot := exporter.originals[tables[left]]
+		rightSlot := exporter.originals[tables[right]]
+		leftIndex, _, _ := slotValidateHandle(leftSlot, slotTagTable)
+		rightIndex, _, _ := slotValidateHandle(rightSlot, slotTagTable)
+		return leftIndex < rightIndex
+	})
+	for _, table := range tables {
+		if _, err := reconciler.syncTableStopped(table); err != nil {
+			checkpoint.restore(exporter)
+			return err
+		}
+	}
+	return nil
+}
+
+func (exporter *machineTableExporter) importValueStopped(value Value) (slot, error) {
+	if original, ok := exporter.reverse[value]; ok {
+		return original, nil
+	}
+	if exporter.originals == nil {
+		exporter.originals = make(map[*Table]slot)
+	}
+	return exporter.machine.persistentOwner.importValueWithTablesStopped(value, exporter.originals)
+}
+
+func (reconciler *machineTableReconciler) valueStopped(value Value) (slot, error) {
+	if value.Kind() != TableKind {
+		return reconciler.machine.persistentOwner.importValueWithTablesStopped(value, reconciler.imported)
+	}
+	table, _ := value.Table()
+	return reconciler.syncTableStopped(table)
+}
+
+func (reconciler *machineTableReconciler) syncTableStopped(table *Table) (slot, error) {
+	if table == nil {
+		return slotNil, fmt.Errorf("compact Machine callback returned a nil table")
+	}
+	value, ok := reconciler.imported[table]
+	if !ok {
+		id, err := reconciler.machine.tables.newTableStopped(0, 0)
+		if err != nil {
+			return slotNil, err
+		}
+		value, err = slotPackHandle(slotTagTable, uint32(id), 1)
+		if err != nil {
+			return slotNil, err
+		}
+		reconciler.imported[table] = value
+	}
+	if reconciler.complete[table] || reconciler.visiting[table] {
+		return value, nil
+	}
+	reconciler.visiting[table] = true
+	defer delete(reconciler.visiting, table)
+
+	type publicEntry struct{ key, value Value }
+	entries := make([]publicEntry, 0)
+	key := NilValue()
+	for {
+		next, item, err := table.rawNext(key)
+		if err != nil {
+			return slotNil, err
+		}
+		if next.IsNil() {
+			break
+		}
+		entries = append(entries, publicEntry{key: next, value: item})
+		key = next
+	}
+	id, err := reconciler.machine.tableID(value)
+	if err != nil {
+		return slotNil, err
+	}
+	tableIndex, ok := reconciler.machine.tables.tableIndex(id)
+	if !ok {
+		return slotNil, errMachineTableInvalidID
+	}
+	record := &reconciler.machine.tables.tables[tableIndex]
+	if record.protection != slotNil {
+		record.protection = slotNil
+		record.metaVersion = machineTableNextVersion(record.metaVersion)
+	}
+	for {
+		storedKey, _, _, found, err := reconciler.machine.tables.next(id, machineTableCursor{})
+		if err != nil {
+			return slotNil, err
+		}
+		if !found {
+			break
+		}
+		if err := reconciler.machine.tables.rawSetMetatableAwareStopped(id, storedKey, slotNil, reconciler.machine.metatableName, 0); err != nil {
+			return slotNil, err
+		}
+	}
+	for _, entry := range entries {
+		importedKey, err := reconciler.valueStopped(entry.key)
+		if err != nil {
+			return slotNil, err
+		}
+		importedValue, err := reconciler.valueStopped(entry.value)
+		if err != nil {
+			return slotNil, err
+		}
+		machineKey, err := reconciler.machine.tableKey(importedKey)
+		if err != nil {
+			return slotNil, err
+		}
+		stable, err := reconciler.machine.stableTableValueStopped(importedValue)
+		if err != nil {
+			return slotNil, err
+		}
+		if err := reconciler.machine.tables.rawSetMetatableAwareStopped(id, machineKey, stable, reconciler.machine.metatableName, reconciler.limit); err != nil {
+			return slotNil, err
+		}
+	}
+	metatableID := invalidMachineTableID
+	if table.metatable != nil {
+		metatableValue, err := reconciler.syncTableStopped(table.metatable)
+		if err != nil {
+			return slotNil, err
+		}
+		metatableID, err = reconciler.machine.tableID(metatableValue)
+		if err != nil {
+			return slotNil, err
+		}
+	}
+	record = &reconciler.machine.tables.tables[tableIndex]
+	if record.metatable != metatableID {
+		record.metatable = metatableID
+		record.metaVersion = machineTableNextVersion(record.metaVersion)
+	}
+	reconciler.complete[table] = true
+	return value, nil
 }
 
 func (exporter *machineTableExporter) key(key machineTableKey) (Value, error) {

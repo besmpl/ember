@@ -29,6 +29,7 @@ const (
 	machineTableEventInvalid machineTableEvent = iota
 	machineTableEventIndex
 	machineTableEventNewIndex
+	machineTableEventIter
 )
 
 // machineTableAction is the pointer-free outcome of semantic table access.
@@ -87,8 +88,16 @@ func machineTableKeyFromScalar(value slot, boxedNumberBits uint64) (machineTable
 			return machineTableKey{}, errMachineTableInvalidKey
 		}
 		return machineTableSlotKey(value), nil
+	case UserDataKind:
+		if slotTagOf(value) != slotTagCoroutine {
+			return machineTableKey{}, fmt.Errorf("table: key is %s, want boolean, string, number, table, or coroutine", slotValueKind(value))
+		}
+		if _, _, err := slotValidateHandle(value, slotTagCoroutine); err != nil {
+			return machineTableKey{}, errMachineTableInvalidKey
+		}
+		return machineTableSlotKey(value), nil
 	default:
-		return machineTableKey{}, fmt.Errorf("table: key is %s, want boolean, string, number, or table", slotValueKind(value))
+		return machineTableKey{}, fmt.Errorf("table: key is %s, want boolean, string, number, table, or coroutine", slotValueKind(value))
 	}
 }
 

@@ -11,41 +11,45 @@ import (
 // scalar Machine. It contains no runtime owner, host capability, or mutable
 // inline cache.
 type codeImage struct {
-	operations    []machineOperation
-	constants     []machineConstant
-	blocks        []machineBlock
-	prototypes    []machineProto
-	registers     int
-	maxResults    int
-	eligible      bool
-	detachable    bool
-	requiresOwner bool
-	rejectReason  string
-	sourceName    string
-	functionName  string
-	stringRecords []machineStringRecord
-	stringData    []byte
-	globalNames   []machineStringID
+	operations               []machineOperation
+	constants                []machineConstant
+	blocks                   []machineBlock
+	prototypes               []machineProto
+	registers                int
+	maxResults               int
+	eligible                 bool
+	detachable               bool
+	requiresOwner            bool
+	requiresNumericCoercion  bool
+	requiresGeneratedStrings bool
+	rejectReason             string
+	sourceName               string
+	functionName             string
+	stringRecords            []machineStringRecord
+	stringData               []byte
+	globalNames              []machineStringID
 }
 
 // machineProto is one immutable executable function in a CodeImage. Proto
 // identity is represented by its position in codeImage.prototypes; no runtime
 // pointer is retained in the image or in a continuation.
 type machineProto struct {
-	operations    []machineOperation
-	constants     []machineConstant
-	upvalues      []machineUpvalue
-	blocks        []machineBlock
-	registers     int
-	params        int
-	variadic      bool
-	maxResults    int
-	eligible      bool
-	detachable    bool
-	requiresOwner bool
-	rejectReason  string
-	sourceName    string
-	functionName  string
+	operations               []machineOperation
+	constants                []machineConstant
+	upvalues                 []machineUpvalue
+	blocks                   []machineBlock
+	registers                int
+	params                   int
+	variadic                 bool
+	maxResults               int
+	eligible                 bool
+	detachable               bool
+	requiresOwner            bool
+	requiresNumericCoercion  bool
+	requiresGeneratedStrings bool
+	rejectReason             string
+	sourceName               string
+	functionName             string
 }
 
 type machineUpvalue struct {
@@ -73,6 +77,8 @@ type machineOperation struct {
 	returnCount  int32
 	tailCall     uint8
 	globalIndex  int32
+	nativeID     int32
+	guardField   machineStringID
 }
 
 type machineConstant struct {
@@ -115,22 +121,21 @@ func prepareCodeImage(proto *Proto) (*codeImage, error) {
 	}
 	root := builder.prototypes[0]
 	image := &codeImage{
-		operations:    root.operations,
-		constants:     root.constants,
-		blocks:        root.blocks,
-		prototypes:    builder.prototypes,
-		registers:     root.registers,
-		maxResults:    root.maxResults,
-		eligible:      root.eligible,
-		detachable:    root.detachable,
-		requiresOwner: root.requiresOwner,
-		rejectReason:  root.rejectReason,
-		stringRecords: builder.strings.records,
-		stringData:    builder.strings.data,
-		globalNames:   builder.globalNames,
-	}
-	if builder.hasStringConstant && builder.hasUnprovenNumeric {
-		image.reject("image combines strings with an unproven numeric operation that may require coercion")
+		operations:               root.operations,
+		constants:                root.constants,
+		blocks:                   root.blocks,
+		prototypes:               builder.prototypes,
+		registers:                root.registers,
+		maxResults:               root.maxResults,
+		eligible:                 root.eligible,
+		detachable:               root.detachable,
+		requiresOwner:            root.requiresOwner,
+		requiresNumericCoercion:  root.requiresNumericCoercion,
+		requiresGeneratedStrings: root.requiresGeneratedStrings,
+		rejectReason:             root.rejectReason,
+		stringRecords:            builder.strings.records,
+		stringData:               builder.strings.data,
+		globalNames:              builder.globalNames,
 	}
 	if proto.debugInfo != nil {
 		image.sourceName = proto.debugInfo.sourceName
@@ -149,6 +154,16 @@ func prepareCodeImage(proto *Proto) (*codeImage, error) {
 		if prepared.requiresOwner {
 			image.requiresOwner = true
 		}
+		if prepared.requiresNumericCoercion {
+			image.requiresNumericCoercion = true
+		}
+		if prepared.requiresGeneratedStrings {
+			image.requiresGeneratedStrings = true
+		}
+	}
+	if image.requiresGeneratedStrings {
+		image.requiresOwner = true
+		image.detachable = false
 	}
 	return image, nil
 }
@@ -256,14 +271,22 @@ func (builder *machineImageBuilder) prepare(proto *Proto, id int32) (machineProt
 	if len(code) == 0 {
 		return machineProto{}, fmt.Errorf("prepare code image: prototype has no executable instructions")
 	}
-	if reason := machineStaticRejectReason(proto, code); reason != "" {
-		prepared.reject(reason)
-	}
 	numericFacts := detectNumericOperandFactPCs(proto)
 	for pc, ins := range code {
 		if machineOperationMayCoerceNumericString(ins.op) && (pc >= len(numericFacts) || !numericFacts[pc]) {
 			builder.hasUnprovenNumeric = true
+			prepared.requiresNumericCoercion = true
 		}
+		if ins.op == opConcat || ins.op == opConcatChain ||
+			(ins.op == opFastCall && nativeFuncID(ins.b) == nativeFuncToString) {
+			prepared.requiresGeneratedStrings = true
+		}
+	}
+	if machineUsesGeneratedStringHelper(proto, code) {
+		prepared.requiresGeneratedStrings = true
+	}
+	if reason := machineCoroutineStaticRejectReason(proto, code); reason != "" {
+		prepared.reject(reason)
 	}
 	for _, child := range proto.prototypes {
 		if _, err := builder.add(child); err != nil {
@@ -313,6 +336,9 @@ func (builder *machineImageBuilder) prepare(proto *Proto, id int32) (machineProt
 			if ins.c < 0 || ins.c >= len(proto.globalNames) {
 				return machineProto{}, fmt.Errorf("prepare code image: instruction %d has invalid global slot %d", pc, ins.c)
 			}
+			if ins.op == opLoadGlobal && machineUnsupportedBaseGlobal(proto.globalNames[ins.c]) {
+				prepared.reject(fmt.Sprintf("instruction %d loads unsupported base global %q", pc, proto.globalNames[ins.c]))
+			}
 			globalIndex, err := builder.internGlobal(proto.globalNames[ins.c])
 			if err != nil {
 				return machineProto{}, fmt.Errorf("prepare code image: instruction %d global: %w", pc, err)
@@ -325,7 +351,7 @@ func (builder *machineImageBuilder) prepare(proto *Proto, id int32) (machineProt
 			if closureRegisters[ins.c] {
 				hasClosureTable = true
 			}
-		case opCall, opCallOne, opCallLocalOne, opCallUpvalueOne:
+		case opCall, opCallOne, opCallLocalOne, opCallUpvalueOne, opCallMethodOne:
 			shape, ok := machineCallShape(ins, proto.registers)
 			if !ok {
 				prepared.reject(fmt.Sprintf("instruction %d has an unsupported call shape", pc))
@@ -339,6 +365,31 @@ func (builder *machineImageBuilder) prepare(proto *Proto, id int32) (machineProt
 				operation.tailCall = 1
 				returnMeta, _ := opcodeMetadata(opReturn)
 				operation.tailCharge = returnMeta.machine.guestCharge
+			}
+		case opFastCall:
+			prepared.requiresOwner = true
+			nativeID := nativeFuncID(ins.b)
+			if !machineFastCallSupported(nativeID) {
+				prepared.reject(fmt.Sprintf("instruction %d uses unsupported FAST_CALL native %s", pc, nativeFuncName(nativeID)))
+				break
+			}
+			globalName, field := fastCallIntrinsicNames(nativeID)
+			if globalName == "" {
+				prepared.reject(fmt.Sprintf("instruction %d FAST_CALL has no scalar guard", pc))
+				break
+			}
+			globalIndex, err := builder.internGlobal(globalName)
+			if err != nil {
+				return machineProto{}, fmt.Errorf("prepare code image: instruction %d FAST_CALL global: %w", pc, err)
+			}
+			operation.globalIndex = globalIndex
+			operation.nativeID = int32(nativeID)
+			if field != "" {
+				fieldID, err := builder.internString(field)
+				if err != nil {
+					return machineProto{}, fmt.Errorf("prepare code image: instruction %d FAST_CALL field: %w", pc, err)
+				}
+				operation.guardField = fieldID
 			}
 		case opReturnOne:
 			hasReturn = true
@@ -397,6 +448,162 @@ func (builder *machineImageBuilder) prepare(proto *Proto, id int32) (machineProt
 	}
 	prepared.blocks = machineBlocks(code)
 	return prepared, nil
+}
+
+func machineFastCallSupported(nativeID nativeFuncID) bool {
+	switch nativeID {
+	case nativeFuncMathMin, nativeFuncRawLen, nativeFuncSelect, nativeFuncTableInsert, nativeFuncTableRemove, nativeFuncCoroutineResume:
+		return true
+	default:
+		return false
+	}
+}
+
+func machineUnsupportedBaseGlobal(name string) bool {
+	return false
+}
+
+const (
+	machineCoroutineFactTable uint8 = 1 << iota
+	machineCoroutineFactMember
+	machineCoroutineFactConsumedTable
+)
+
+// machineCoroutineStaticRejectReason proves that the core coroutine table is
+// used only as the receiver of one supported, statically named member access,
+// and that the resulting function is called directly. The facts merge with
+// OR at control-flow joins, so ambiguity fails closed instead of selecting the
+// Machine on an unproven alias or escape.
+func machineCoroutineStaticRejectReason(proto *Proto, code []instruction) string {
+	if proto == nil || proto.registers <= 0 || len(code) == 0 {
+		return ""
+	}
+	states := make([][]uint8, len(code))
+	states[0] = make([]uint8, proto.registers)
+	queued := make([]bool, len(code))
+	queued[0] = true
+	work := []int{0}
+	for len(work) != 0 {
+		pc := work[0]
+		work = work[1:]
+		queued[pc] = false
+		state := append([]uint8(nil), states[pc]...)
+		ins := code[pc]
+		if ins.op == opSetGlobal && ins.c >= 0 && ins.c < len(proto.globalNames) && proto.globalNames[ins.c] == "coroutine" {
+			return fmt.Sprintf("instruction %d rebinds the core coroutine global", pc)
+		}
+		field := ""
+		if ins.op == opGetStringField && ins.c >= 0 && ins.c < len(proto.constants) && valueKind(proto.constants[ins.c]) == StringKind {
+			field = proto.constants[ins.c].stringText()
+		}
+		reads := instructionRegistersBounded(ins, instructionRegisterRead, proto.registers)
+		for register, ok := reads.next(); ok; register, ok = reads.next() {
+			fact := state[register]
+			if fact&machineCoroutineFactTable != 0 {
+				if ins.op != opGetStringField || register != ins.b {
+					return fmt.Sprintf("instruction %d lets the core coroutine table escape a direct field access", pc)
+				}
+				if !machineCoroutineFieldSupported(field) {
+					return fmt.Sprintf("instruction %d accesses unsupported core coroutine field %q", pc, field)
+				}
+			}
+			if fact&machineCoroutineFactMember != 0 && !machineCoroutineDirectCallTarget(ins, register) {
+				return fmt.Sprintf("instruction %d lets a core coroutine function escape a direct call", pc)
+			}
+			if fact&machineCoroutineFactConsumedTable != 0 {
+				return fmt.Sprintf("instruction %d reuses an aliased core coroutine table", pc)
+			}
+		}
+		writes := instructionRegistersBounded(ins, instructionRegisterWrite, proto.registers)
+		for register, ok := writes.next(); ok; register, ok = writes.next() {
+			state[register] = 0
+		}
+		switch ins.op {
+		case opLoadGlobal:
+			if ins.c >= 0 && ins.c < len(proto.globalNames) && proto.globalNames[ins.c] == "coroutine" {
+				state[ins.a] = machineCoroutineFactTable
+			}
+		case opGetStringField:
+			if states[pc][ins.b]&machineCoroutineFactTable != 0 && machineCoroutineFieldSupported(field) {
+				if ins.a != ins.b {
+					state[ins.b] = machineCoroutineFactConsumedTable
+				}
+				state[ins.a] = machineCoroutineFactMember
+			}
+		}
+		for _, successor := range instructionSuccessors(code, pc) {
+			if successor < 0 || successor >= len(code) {
+				continue
+			}
+			if states[successor] == nil {
+				states[successor] = append([]uint8(nil), state...)
+				if !queued[successor] {
+					work = append(work, successor)
+					queued[successor] = true
+				}
+				continue
+			}
+			changed := false
+			for register := range state {
+				merged := states[successor][register] | state[register]
+				if merged != states[successor][register] {
+					states[successor][register] = merged
+					changed = true
+				}
+			}
+			if changed && !queued[successor] {
+				work = append(work, successor)
+				queued[successor] = true
+			}
+		}
+	}
+	return ""
+}
+
+func machineCoroutineFieldSupported(field string) bool {
+	switch field {
+	case "create", "status", "resume", "yield":
+		return true
+	default:
+		return false
+	}
+}
+
+func machineCoroutineDirectCallTarget(ins instruction, register int) bool {
+	switch ins.op {
+	case opCall, opCallOne, opCallLocalOne:
+		return ins.b == register
+	default:
+		return false
+	}
+}
+
+func machineUsesGeneratedStringHelper(proto *Proto, code []instruction) bool {
+	if proto == nil || proto.registers <= 0 {
+		return false
+	}
+	tostringRegisters := make([]bool, proto.registers)
+	for _, ins := range code {
+		if ins.op == opFastCall && nativeFuncID(ins.b) == nativeFuncToString {
+			return true
+		}
+		if (ins.op == opCall || ins.op == opCallOne) &&
+			ins.b >= 0 && ins.b < len(tostringRegisters) && tostringRegisters[ins.b] {
+			return true
+		}
+		switch ins.op {
+		case opLoadGlobal:
+			tostringRegisters[ins.a] = ins.c >= 0 && ins.c < len(proto.globalNames) && proto.globalNames[ins.c] == "tostring"
+		case opMove:
+			tostringRegisters[ins.a] = tostringRegisters[ins.b]
+		default:
+			writes := instructionRegistersBounded(ins, instructionRegisterWrite, proto.registers)
+			for register, ok := writes.next(); ok; register, ok = writes.next() {
+				tostringRegisters[register] = false
+			}
+		}
+	}
+	return false
 }
 
 func machineOperationMayCoerceNumericString(op opcode) bool {
@@ -522,6 +729,10 @@ func machineCallShape(ins instruction, registers int) (machineCallDescriptor, bo
 	case opCallUpvalueOne:
 		shape.argCount, _ = decodeFixedCallCount(ins.d)
 		shape.argStart = ins.c
+	case opCallMethodOne:
+		explicit, _ := decodeFixedCallCount(ins.d)
+		shape.argStart = ins.a + 1
+		shape.argCount = explicit + 1
 	default:
 		return machineCallDescriptor{}, false
 	}

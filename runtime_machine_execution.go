@@ -26,6 +26,7 @@ func (execution *machineRuntimeExecution) initialize(runtime *Runtime) error {
 		return fmt.Errorf("runtime: initialize Machine execution: %w", err)
 	}
 	execution.owner = owner
+	owner.coroutines.arena.limit = runtime.limits.MaxCoroutines
 	return nil
 }
 

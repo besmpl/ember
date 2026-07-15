@@ -113,6 +113,20 @@ func TestMachineTableScalarKeysMatchPublicRawIdentity(t *testing.T) {
 	}
 }
 
+func TestMachineTableKeyAcceptsStructurallyValidCoroutineHandle(t *testing.T) {
+	value, err := slotPackHandle(slotTagCoroutine, 7, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := machineTableKeyFromScalar(value, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key != machineTableSlotKey(value) {
+		t.Fatalf("coroutine key = %#v, want slot identity", key)
+	}
+}
+
 func TestMachineTableRawOperationsMatchPublicDeletionLengthAndQuota(t *testing.T) {
 	var arena machineTableArena
 	table, err := arena.newTableStopped(0, 0)

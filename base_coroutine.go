@@ -30,9 +30,9 @@ type vmCoroutine struct {
 
 func baseCoroutine() *Table {
 	table := newTableWithCapacity(0, 8)
-	_ = table.Set(StringValue("create"), nativeFuncValue(baseCoroutineCreate))
+	_ = table.Set(StringValue("create"), nativeFuncValueWithID(baseCoroutineCreate, nativeFuncCoroutineCreate))
 	_ = table.Set(StringValue("resume"), nativeFuncValueWithID(baseCoroutineResume, nativeFuncCoroutineResume))
-	_ = table.Set(StringValue("yield"), nativeFuncValue(baseCoroutineYield))
+	_ = table.Set(StringValue("yield"), nativeFuncValueWithID(baseCoroutineYield, nativeFuncCoroutineYield))
 	_ = table.Set(StringValue("status"), nativeFuncValueWithID(baseCoroutineStatusNative, nativeFuncCoroutineStatus))
 	_ = table.Set(StringValue("close"), HostFuncValue(baseCoroutineClose))
 	_ = table.Set(StringValue("running"), nativeFuncValue(baseCoroutineRunning))

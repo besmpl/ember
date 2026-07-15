@@ -59,17 +59,21 @@ func captureMachineCallback(execution *machineRuntimeExecution, call invocationS
 	if err != nil {
 		return nil, fmt.Errorf("callback: capture script function: %w", err)
 	}
+	callable := machineClosureHandle{
+		owner:      handle.owner,
+		index:      handle.index,
+		generation: uint16(handle.generation),
+	}
+	if err := owner.pinCallbackRoot(callable); err != nil {
+		return nil, fmt.Errorf("callback: retain script function: %w", err)
+	}
 	return &machineCallbackTarget{
 		execution: execution,
 		runtime:   call.runtime,
-		callable: machineClosureHandle{
-			owner:      handle.owner,
-			index:      handle.index,
-			generation: uint16(handle.generation),
-		},
-		from:    call.from,
-		globals: copyGlobals(call.globals),
-		state:   &machineCallbackState{},
+		callable:  callable,
+		from:      call.from,
+		globals:   copyGlobals(call.globals),
+		state:     &machineCallbackState{},
 	}, nil
 }
 
@@ -113,8 +117,15 @@ func (target *machineCallbackTarget) close() error {
 		return nil
 	}
 	target.state.mu.Lock()
+	if target.state.released {
+		target.state.mu.Unlock()
+		return nil
+	}
 	target.state.released = true
 	target.state.mu.Unlock()
+	if target.execution != nil && target.execution.owner != nil {
+		target.execution.owner.unpinCallbackRoot(target.callable)
+	}
 	return nil
 }
 

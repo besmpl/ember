@@ -2,6 +2,7 @@ package ember
 
 import (
 	"errors"
+	"math"
 	"reflect"
 	"runtime"
 	"testing"
@@ -219,6 +220,96 @@ end`,
 	}
 	if allocations != 0 {
 		t.Fatalf("warmed global/call/module allocations = %v, want 0", allocations)
+	}
+}
+
+func TestMachineOwnerRestoresPersistentBaseGlobalsWithoutAllocating(t *testing.T) {
+	owner, err := newMachineOwner(machineOwnerProgramImage(t, []string{
+		`return math.min(3, 2), rawlen("abc"), table`,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.close()
+
+	baseValues := append([]slot(nil), owner.baseGlobals...)
+	basePresent := append([]uint8(nil), owner.basePresent...)
+	override := NewTable()
+	if err := override.Set(StringValue("min"), HostFuncValue(func([]Value) ([]Value, error) {
+		return []Value{NumberValue(99)}, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.importGlobalsStopped(map[string]Value{"math": TableValue(override)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.importGlobalsStopped(nil); err != nil {
+		t.Fatal(err)
+	}
+	for dense := range baseValues {
+		if owner.globals.values[dense] != baseValues[dense] || owner.globals.present[dense] != basePresent[dense] {
+			t.Fatalf("restored global %d = (%#x, %d), want persistent base (%#x, %d)", dense, owner.globals.values[dense], owner.globals.present[dense], baseValues[dense], basePresent[dense])
+		}
+	}
+
+	if checkptrInstrumentedTest() {
+		return
+	}
+	allocations := testing.AllocsPerRun(100, func() {
+		if err := owner.importGlobalsStopped(nil); err != nil {
+			panic(err)
+		}
+	})
+	if allocations != 0 {
+		t.Fatalf("warmed base-global restore allocations = %v, want 0", allocations)
+	}
+}
+
+func TestMachineOwnerRestoresMutatedBaseTableContents(t *testing.T) {
+	owner, err := newMachineOwner(machineOwnerProgramImage(t, []string{`return math.min(3, 2)`}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.close()
+	var mathSlot slot
+	for dense, nameID := range owner.globals.names {
+		name, ok := owner.strings.bytesFor(nameID)
+		if ok && string(name) == "math" {
+			mathSlot = owner.globals.values[dense]
+			break
+		}
+	}
+	mathID, err := owner.tableID(mathSlot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	minName, err := owner.strings.internStringStopped("min")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.tables.rawSetStopped(mathID, machineTableStringKey(minName), slot(math.Float64bits(99)), 0); err != nil {
+		t.Fatal(err)
+	}
+	metatable, err := owner.tables.newTableStopped(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.tables.setMetatableStopped(mathID, metatable); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.importGlobalsStopped(nil); err != nil {
+		t.Fatal(err)
+	}
+	minimum, err := owner.tables.rawGet(mathID, machineTableStringKey(minName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if minimum != slotNativeID(nativeFuncMathMin) {
+		t.Fatalf("restored math.min = %#x, want native slot %#x", minimum, slotNativeID(nativeFuncMathMin))
+	}
+	record, ok := owner.tables.lookup(mathID)
+	if !ok || record.metatable != invalidMachineTableID {
+		t.Fatalf("restored math metatable = %d, want none", record.metatable)
 	}
 }
 

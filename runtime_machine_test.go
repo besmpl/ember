@@ -422,10 +422,26 @@ func TestPublicRunUsesScalarMachineForStringTableField(t *testing.T) {
 	}
 }
 
-func TestPublicRunFailsClosedWhenScalarMachineTableResultIsCyclic(t *testing.T) {
+func TestPublicRunDetachesCyclicScalarMachineTableResult(t *testing.T) {
 	proto := mustEligibleMachineProto(t, `local value = {} value.self = value return value`)
-	if _, err := Run(proto); err == nil || !strings.Contains(err.Error(), "cannot export cyclic table") {
-		t.Fatalf("Run error = %v, want fail-closed cyclic table export", err)
+	values, err := Run(proto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 {
+		t.Fatalf("Run returned %d values, want 1", len(values))
+	}
+	table, ok := values[0].Table()
+	if !ok {
+		t.Fatalf("Run result kind = %s, want table", values[0].Kind())
+	}
+	self, err := table.Get(StringValue("self"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfTable, ok := self.Table()
+	if !ok || selfTable != table {
+		t.Fatalf("Run result self = %v (%t), want detached table identity", selfTable, ok)
 	}
 }
 
