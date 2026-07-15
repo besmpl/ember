@@ -142,6 +142,8 @@ func (execution *machineRuntimeExecution) callCallbackStopped(
 	if err := owner.importGlobalsStopped(globals); err != nil {
 		return nil, fmt.Errorf("callback: import captured globals: %w", err)
 	}
+	tableCheckpoint := owner.tables.checkpointStopped()
+	defer owner.recycleTransientTablesStopped(tableCheckpoint)
 	machineArgs, err := importMachineValuesStopped(owner, args)
 	if err != nil {
 		return nil, fmt.Errorf("callback: import arguments: %w", err)

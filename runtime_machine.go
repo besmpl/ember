@@ -1971,6 +1971,10 @@ func (machine *scalarMachine) binary(op opcode, destination int, left, right slo
 	if err != nil {
 		return fmt.Errorf("run: %s failed: %w", prefix, err)
 	}
+	return machine.binaryNumbers(op, destination, leftNumber, rightNumber)
+}
+
+func (machine *scalarMachine) binaryNumbers(op opcode, destination int, leftNumber, rightNumber float64) error {
 	var result float64
 	switch op {
 	case opAdd, opAddK:
@@ -2016,10 +2020,24 @@ func machineArithmeticNames(op opcode) (operator, prefix string) {
 }
 
 func (machine *scalarMachine) binaryRegisters(op opcode, destination, left, right int) error {
-	return machine.binary(op, destination, machine.registers[left], machine.registers[right])
+	leftValue, rightValue := machine.registers[left], machine.registers[right]
+	if !slotIsTagged(leftValue) && !slotIsTagged(rightValue) {
+		return machine.binaryNumbers(op, destination,
+			math.Float64frombits(uint64(leftValue)), math.Float64frombits(uint64(rightValue)))
+	}
+	return machine.binary(op, destination, leftValue, rightValue)
 }
 
 func (machine *scalarMachine) binaryConstant(op opcode, destination, left, constant int) error {
+	proto := machine.currentProto()
+	leftValue := machine.registers[left]
+	if proto != nil && constant >= 0 && constant < len(proto.constants) && !slotIsTagged(leftValue) {
+		descriptor := proto.constants[constant]
+		if descriptor.kind == NumberKind {
+			return machine.binaryNumbers(op, destination,
+				math.Float64frombits(uint64(leftValue)), math.Float64frombits(descriptor.bits))
+		}
+	}
 	right, err := machine.constantSlot(constant, destination)
 	if err != nil {
 		return err
@@ -2109,6 +2127,10 @@ func (machine *scalarMachine) scalarOperand(value slot) (machineScalarOperand, e
 
 func (machine *scalarMachine) negate(destination, operand int) error {
 	value := machine.registers[operand]
+	if !slotIsTagged(value) {
+		machine.setNumber(destination, -math.Float64frombits(uint64(value)))
+		return nil
+	}
 	number, err := machine.numericOperand(value, "", "negate")
 	if err != nil {
 		return fmt.Errorf("run: %w", err)
@@ -2230,6 +2252,11 @@ func (machine *scalarMachine) completeStringAction(destination int, action machi
 }
 
 func (machine *scalarMachine) equal(left, right slot) (bool, error) {
+	if !slotIsTagged(left) && !slotIsTagged(right) {
+		leftNumber := math.Float64frombits(uint64(left))
+		rightNumber := math.Float64frombits(uint64(right))
+		return !math.IsNaN(leftNumber) && !math.IsNaN(rightNumber) && leftNumber == rightNumber, nil
+	}
 	leftKind, rightKind := slotValueKind(left), slotValueKind(right)
 	if leftKind != rightKind {
 		return false, nil
@@ -2303,6 +2330,9 @@ func (machine *scalarMachine) equal(left, right slot) (bool, error) {
 }
 
 func (machine *scalarMachine) compare(op opcode, left, right slot) (bool, error) {
+	if !slotIsTagged(left) && !slotIsTagged(right) {
+		return machine.compareNumbers(op, math.Float64frombits(uint64(left)), math.Float64frombits(uint64(right)))
+	}
 	prefix := machineComparisonName(op)
 	if slotValueKind(left) != slotValueKind(right) {
 		return false, fmt.Errorf("run: %s failed: compare operands are %s and %s", prefix, slotValueKind(left), slotValueKind(right))
@@ -2346,8 +2376,12 @@ func (machine *scalarMachine) compare(op opcode, left, right slot) (bool, error)
 	if err != nil {
 		return false, err
 	}
+	return machine.compareNumbers(op, leftNumber, rightNumber)
+}
+
+func (machine *scalarMachine) compareNumbers(op opcode, leftNumber, rightNumber float64) (bool, error) {
 	if math.IsNaN(leftNumber) || math.IsNaN(rightNumber) {
-		return false, fmt.Errorf("run: %s failed: compare operand is NaN", prefix)
+		return false, fmt.Errorf("run: %s failed: compare operand is NaN", machineComparisonName(op))
 	}
 	switch op {
 	case opLess, opJumpIfNotLess, opJumpIfLess, opJumpIfNotLessK, opJumpIfLessK:
@@ -2414,9 +2448,15 @@ func (machine *scalarMachine) compareConstant(op opcode, register, constant, scr
 		descriptor := proto.constants[constant]
 		left := machine.registers[register]
 		if descriptor.kind == NumberKind && slotValueKind(left) == NumberKind {
-			leftNumber, err := machine.number(left)
-			if err != nil {
-				return false, err
+			leftNumber := 0.0
+			if !slotIsTagged(left) {
+				leftNumber = math.Float64frombits(uint64(left))
+			} else {
+				var err error
+				leftNumber, err = machine.number(left)
+				if err != nil {
+					return false, err
+				}
 			}
 			rightNumber := math.Float64frombits(descriptor.bits)
 			if math.IsNaN(leftNumber) || math.IsNaN(rightNumber) {
@@ -2438,6 +2478,14 @@ func (machine *scalarMachine) compareConstant(op opcode, register, constant, scr
 }
 
 func (machine *scalarMachine) numericForCheck(loop, limit, step int) (bool, error) {
+	loopValue, limitValue, stepValue := machine.registers[loop], machine.registers[limit], machine.registers[step]
+	if !slotIsTagged(loopValue) && !slotIsTagged(limitValue) && !slotIsTagged(stepValue) {
+		return machine.numericForNumbers(
+			math.Float64frombits(uint64(loopValue)),
+			math.Float64frombits(uint64(limitValue)),
+			math.Float64frombits(uint64(stepValue)),
+		)
+	}
 	values := [...]struct {
 		name     string
 		register int
@@ -2455,18 +2503,26 @@ func (machine *scalarMachine) numericForCheck(loop, limit, step int) (bool, erro
 		}
 		numbers[index] = number
 	}
-	if math.IsNaN(numbers[0]) || math.IsNaN(numbers[1]) || math.IsNaN(numbers[2]) {
+	return machine.numericForNumbers(numbers[0], numbers[1], numbers[2])
+}
+
+func (machine *scalarMachine) numericForNumbers(loop, limit, step float64) (bool, error) {
+	if math.IsNaN(loop) || math.IsNaN(limit) || math.IsNaN(step) {
 		return false, fmt.Errorf("run: numeric for operand is NaN")
 	}
-	if numbers[2] > 0 {
-		return numbers[0] > numbers[1], nil
+	if step > 0 {
+		return loop > limit, nil
 	}
-	return numbers[0] < numbers[1], nil
+	return loop < limit, nil
 }
 
 func (machine *scalarMachine) numericForLoop(loop, step int) error {
 	loopValue := machine.registers[loop]
 	stepValue := machine.registers[step]
+	if !slotIsTagged(loopValue) && !slotIsTagged(stepValue) {
+		machine.setNumber(loop, math.Float64frombits(uint64(loopValue))+math.Float64frombits(uint64(stepValue)))
+		return nil
+	}
 	loopNumber, err := machine.numericOperand(loopValue, "", "numeric for")
 	if err != nil {
 		return fmt.Errorf("run: numeric for loop value is %s, want number", slotValueKind(loopValue))

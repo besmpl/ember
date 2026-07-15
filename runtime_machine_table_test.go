@@ -351,6 +351,50 @@ func TestMachineTableArenaBoundsResetAndClose(t *testing.T) {
 	arena.close()
 }
 
+func TestMachineTableArenaRollbackReusesHighWaterStorageWithoutStaleEntries(t *testing.T) {
+	var arena machineTableArena
+	checkpoint := arena.checkpointStopped()
+	first, err := arena.newTableStopped(4, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := uint32(1); index <= 4; index++ {
+		if err := arena.setArrayStopped(first, index, slot(index)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := arena.setSlotStopped(first, slotBool(true), slot(9)); err != nil {
+		t.Fatal(err)
+	}
+	arrayHighWater, fieldHighWater, orderHighWater := len(arena.arrays), len(arena.fields), len(arena.orders)
+	if !arena.rollbackStopped(checkpoint) {
+		t.Fatal("rollback rejected transient-only arena")
+	}
+
+	second, err := arena.newTableStopped(4, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatalf("reused table ID = %d, want %d", second, first)
+	}
+	if err := arena.setArrayStopped(second, 4, slot(44)); err != nil {
+		t.Fatal(err)
+	}
+	for index := uint32(1); index < 4; index++ {
+		if value, present := arena.getArray(second, index); present || value != slotNil {
+			t.Fatalf("reused sparse index %d = %#x (%t), want nil", index, value, present)
+		}
+	}
+	if value, present := arena.getSlot(second, slotBool(true)); present || value != slotNil {
+		t.Fatalf("reused record field = %#x (%t), want nil", value, present)
+	}
+	if len(arena.arrays) != arrayHighWater || len(arena.fields) != fieldHighWater || len(arena.orders) != orderHighWater {
+		t.Fatalf("reuse regrew storage: arrays=%d fields=%d orders=%d, want %d/%d/%d",
+			len(arena.arrays), len(arena.fields), len(arena.orders), arrayHighWater, fieldHighWater, orderHighWater)
+	}
+}
+
 func machineTableTypeHasPointers(valueType reflect.Type) bool {
 	switch valueType.Kind() {
 	case reflect.Array:

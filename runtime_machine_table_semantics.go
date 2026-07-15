@@ -116,7 +116,7 @@ func machineTableNextVersion(version uint32) uint32 {
 // rawGet performs a checked, metamethod-free lookup through one normalized
 // scalar key. Missing entries are represented by slotNil.
 func (arena *machineTableArena) rawGet(id machineTableID, key machineTableKey) (slot, error) {
-	if _, ok := arena.lookup(id); !ok {
+	if _, ok := arena.lookupStopped(id); !ok {
 		return slotNil, arena.tableError()
 	}
 	switch key.kind {
@@ -148,7 +148,7 @@ func (arena *machineTableArena) rawGet(id machineTableID, key machineTableKey) (
 // The existing storage methods keep all growth and compaction at this stopped
 // boundary.
 func (arena *machineTableArena) rawSetStopped(id machineTableID, key machineTableKey, value slot, entryLimit uint64) error {
-	record, ok := arena.lookup(id)
+	record, ok := arena.lookupStopped(id)
 	if !ok {
 		return arena.tableError()
 	}
@@ -178,7 +178,7 @@ func (arena *machineTableArena) rawSetStopped(id machineTableID, key machineTabl
 // rawLen returns the prefix before the first missing positive integer key.
 // Entries beyond a hole remain stored but do not contribute to the result.
 func (arena *machineTableArena) rawLen(id machineTableID) (uint32, error) {
-	record, ok := arena.lookup(id)
+	record, ok := arena.lookupStopped(id)
 	if !ok {
 		return 0, arena.tableError()
 	}

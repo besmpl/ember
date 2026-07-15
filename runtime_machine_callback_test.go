@@ -281,6 +281,89 @@ func TestMachineCallbackUsesCapturedHostGlobalsAndCallContext(t *testing.T) {
 	}
 }
 
+func TestMachineCallbackReusesTransientTableArena(t *testing.T) {
+	runtime, callback := captureMachineRuntimeCallback(t, `function()
+    local values = {}
+    for i = 1, 256 do
+        values[i] = i
+    end
+    return values[256]
+end`)
+	defer runtime.Close()
+	defer callback.Close()
+
+	owner := runtime.execution.(*machineRuntimeExecution).owner
+	wantTables := len(owner.tables.tables)
+	wantArrayNext := owner.tables.arrayCursor
+	wantFieldNext := owner.tables.fieldCursor
+	wantOrderNext := owner.tables.orderCursor
+	warm, err := callback.Call(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, ok := warm[0].Number(); !ok || result != 256 {
+		t.Fatalf("warm callback result = %#v, want 256", warm)
+	}
+	if len(owner.tables.tables) != wantTables || owner.tables.arrayCursor != wantArrayNext ||
+		owner.tables.fieldCursor != wantFieldNext || owner.tables.orderCursor != wantOrderNext {
+		t.Fatalf("warm callback retained logical table spans: tables=%d arrays=%d fields=%d orders=%d; want %d/%d/%d/%d",
+			len(owner.tables.tables), owner.tables.arrayCursor, owner.tables.fieldCursor, owner.tables.orderCursor,
+			wantTables, wantArrayNext, wantFieldNext, wantOrderNext)
+	}
+	wantArrays := len(owner.tables.arrays)
+	wantFields := len(owner.tables.fields)
+	wantOrders := len(owner.tables.orders)
+	for call := 1; call <= 3; call++ {
+		values, err := callback.Call(context.Background())
+		if err != nil {
+			t.Fatalf("callback call %d: %v", call, err)
+		}
+		if len(values) != 1 {
+			t.Fatalf("callback call %d returned %#v, want one result", call, values)
+		}
+		if result, ok := values[0].Number(); !ok || result != 256 {
+			t.Fatalf("callback call %d result = %#v, want 256", call, values[0])
+		}
+		if len(owner.tables.tables) != wantTables || owner.tables.arrayCursor != wantArrayNext ||
+			owner.tables.fieldCursor != wantFieldNext || owner.tables.orderCursor != wantOrderNext ||
+			len(owner.tables.arrays) != wantArrays || len(owner.tables.fields) != wantFields || len(owner.tables.orders) != wantOrders {
+			t.Fatalf("callback call %d retained transient table spans: tables=%d arrays=%d fields=%d orders=%d; want %d/%d/%d/%d",
+				call, len(owner.tables.tables), len(owner.tables.arrays), len(owner.tables.fields), len(owner.tables.orders),
+				wantTables, wantArrays, wantFields, wantOrders)
+		}
+	}
+}
+
+func TestMachineCallbackKeepsTableThatEscapesIntoCapture(t *testing.T) {
+	owner, err := newMachineOwner(machineOwnerProgramImage(t, []string{`local state = {}
+local index = 0
+return function()
+        index = index + 1
+        state[index] = index
+        return state[index]
+    end`}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.close()
+	if err := owner.executeRoot(0, nil); err != nil {
+		t.Fatal(err)
+	}
+	callable, err := owner.resultAt(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for want := 1; want <= 3; want++ {
+		checkpoint := owner.tables.checkpointStopped()
+		if err := owner.executeClosure(callable, nil, nil); err != nil {
+			t.Fatalf("callback call %d: %v", want, err)
+		}
+		owner.recycleTransientTablesStopped(checkpoint)
+		assertMachineOwnerNumberResult(t, owner, float64(want))
+	}
+}
+
 func newBlockingMachineCallback(t *testing.T) (*Runtime, Callback, <-chan struct{}, func()) {
 	t.Helper()
 	entered := make(chan struct{}, 1)

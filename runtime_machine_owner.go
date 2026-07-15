@@ -598,6 +598,81 @@ func (owner *machineOwner) reclaimDeadCoroutinesStopped() error {
 	return owner.coroutines.reclaimUnreachableDeadStopped(reachable)
 }
 
+// recycleTransientTablesStopped reclaims callback-local tables only when the
+// appended IDs cannot be reached from persistent owner state. The scan is
+// deliberately conservative: an active coroutine or any ambiguous handle
+// keeps the appended storage alive.
+func (owner *machineOwner) recycleTransientTablesStopped(checkpoint machineTableArenaCheckpoint) {
+	if owner == nil || checkpoint.tables >= len(owner.tables.tables) || owner.transientTableEscapedStopped(checkpoint) {
+		return
+	}
+	owner.tables.rollbackStopped(checkpoint)
+}
+
+func (owner *machineOwner) transientTableEscapedStopped(checkpoint machineTableArenaCheckpoint) bool {
+	owner.coroutines.mu.Lock()
+	hasCoroutines := owner.coroutines.arena.live != 0
+	owner.coroutines.mu.Unlock()
+	if hasCoroutines {
+		return true
+	}
+	containsTransient := func(values []slot) bool {
+		for _, value := range values {
+			if machineTableSlotAfterCheckpoint(value, checkpoint.tables) {
+				return true
+			}
+		}
+		return false
+	}
+	if containsTransient(owner.globals.values) || containsTransient(owner.modules.exports) || containsTransient(owner.baseGlobals) {
+		return true
+	}
+	for _, cell := range owner.closures.cells {
+		if cell.live == 0 {
+			continue
+		}
+		if cell.openRegister != 0 || machineTableSlotAfterCheckpoint(cell.value, checkpoint.tables) {
+			return true
+		}
+	}
+	for _, snapshot := range owner.baseTables {
+		if int(snapshot.metatable) > checkpoint.tables || machineTableSlotAfterCheckpoint(snapshot.protection, checkpoint.tables) {
+			return true
+		}
+		for _, entry := range snapshot.entries {
+			if machineTableKeyAfterCheckpoint(entry.key, checkpoint.tables) || machineTableSlotAfterCheckpoint(entry.value, checkpoint.tables) {
+				return true
+			}
+		}
+	}
+	for tableIndex := 0; tableIndex < checkpoint.tables; tableIndex++ {
+		record := owner.tables.tables[tableIndex]
+		if int(record.metatable) > checkpoint.tables || machineTableSlotAfterCheckpoint(record.protection, checkpoint.tables) {
+			return true
+		}
+		for orderIndex := uint32(0); orderIndex < record.orderLength; orderIndex++ {
+			entry := owner.tables.orders[int(record.orderOffset+orderIndex)]
+			if entry.present != 0 && (machineTableKeyAfterCheckpoint(entry.key, checkpoint.tables) ||
+				machineTableSlotAfterCheckpoint(entry.value, checkpoint.tables)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func machineTableKeyAfterCheckpoint(key machineTableKey, tableCount int) bool {
+	return key.kind == machineTableKeySlot && machineTableSlotAfterCheckpoint(key.value, tableCount)
+}
+
+func machineTableSlotAfterCheckpoint(value slot, tableCount int) bool {
+	if slotTagOf(value) != slotTagTable {
+		return false
+	}
+	index, generation, err := slotValidateHandle(value, slotTagTable)
+	return err != nil || generation != 1 || int(index) > tableCount
+}
+
 func (owner *machineOwner) pinCallbackRoot(handle machineClosureHandle) error {
 	if owner == nil {
 		return errMachineOwnerReleased

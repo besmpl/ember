@@ -85,7 +85,23 @@ type machineTableArena struct {
 	arrays []slot
 	fields []machineTableField
 	orders []machineTableOrderEntry
-	closed bool
+	// The allocation cursors may be shorter than the backing slices after a
+	// callback rollback. Reusing that high-water storage avoids append-driven
+	// clearing on the next warmed call.
+	arrayCursor int
+	fieldCursor int
+	orderCursor int
+	closed      bool
+}
+
+// machineTableArenaCheckpoint marks one stopped boundary. A callback may roll
+// back storage appended after the mark when none of the new tables escaped and
+// no older table relocated one of its spans into the appended region.
+type machineTableArenaCheckpoint struct {
+	tables int
+	arrays int
+	fields int
+	orders int
 }
 
 type machineTableCursor struct {
@@ -136,27 +152,27 @@ func (arena *machineTableArena) newTableStopped(arrayCapacity, recordCapacity ui
 	if orderCapacity > math.MaxUint32 {
 		return invalidMachineTableID, errors.New("machine table arena capacity overflows uint32")
 	}
-	if !machineTableSpanFits(len(arena.arrays), arrayCapacity) ||
-		!machineTableSpanFits(len(arena.fields), fieldCapacity) ||
-		!machineTableSpanFits(len(arena.orders), uint32(orderCapacity)) {
+	if !machineTableSpanFits(arena.arrayCursor, arrayCapacity) ||
+		!machineTableSpanFits(arena.fieldCursor, fieldCapacity) ||
+		!machineTableSpanFits(arena.orderCursor, uint32(orderCapacity)) {
 		return invalidMachineTableID, errors.New("machine table arena capacity overflows uint32")
 	}
+	arrayOffset := arena.reserveArraysStopped(arrayCapacity)
+	fieldOffset := arena.reserveFieldsStopped(fieldCapacity)
+	orderOffset := arena.reserveOrdersStopped(uint32(orderCapacity))
 
 	record := machineTableRecord{
-		arrayOffset:   uint32(len(arena.arrays)),
+		arrayOffset:   arrayOffset,
 		arrayCapacity: arrayCapacity,
-		fieldOffset:   uint32(len(arena.fields)),
+		fieldOffset:   fieldOffset,
 		fieldCapacity: fieldCapacity,
-		orderOffset:   uint32(len(arena.orders)),
+		orderOffset:   orderOffset,
 		orderCapacity: uint32(orderCapacity),
 		protection:    slotNil,
 	}
-	arena.arrays = append(arena.arrays, make([]slot, int(arrayCapacity))...)
-	for index := int(record.arrayOffset); index < len(arena.arrays); index++ {
-		arena.arrays[index] = slotNil
+	if fieldCapacity != 0 {
+		clear(arena.fields[int(fieldOffset):int(fieldOffset+fieldCapacity)])
 	}
-	arena.fields = append(arena.fields, make([]machineTableField, int(fieldCapacity))...)
-	arena.orders = append(arena.orders, make([]machineTableOrderEntry, int(orderCapacity))...)
 	arena.tables = append(arena.tables, record)
 	return machineTableID(len(arena.tables)), nil
 }
@@ -188,6 +204,7 @@ func (arena *machineTableArena) setArrayStopped(id machineTableID, index uint32,
 		return nil
 	}
 	record := &arena.tables[tableIndex]
+	previousLength := record.arrayLength
 	var previous slot = slotNil
 	if index <= record.arrayLength {
 		previous = arena.arrays[int(record.arrayOffset+index-1)]
@@ -202,6 +219,9 @@ func (arena *machineTableArena) setArrayStopped(id machineTableID, index uint32,
 		return err
 	}
 	record = &arena.tables[tableIndex]
+	for gap := previousLength + 1; gap < index; gap++ {
+		arena.arrays[int(record.arrayOffset+gap-1)] = slotNil
+	}
 	arena.arrays[int(record.arrayOffset+index-1)] = value
 	if previous == slotNil {
 		record.entryCount++
@@ -228,7 +248,7 @@ func (arena *machineTableArena) setStringStopped(id machineTableID, key machineS
 }
 
 func (arena *machineTableArena) getArray(id machineTableID, index uint32) (slot, bool) {
-	record, ok := arena.lookup(id)
+	record, ok := arena.lookupStopped(id)
 	if !ok || index == 0 || index > record.arrayLength {
 		return slotNil, false
 	}
@@ -251,7 +271,7 @@ func (arena *machineTableArena) getString(id machineTableID, key machineStringID
 }
 
 func (arena *machineTableArena) next(id machineTableID, cursor machineTableCursor) (machineTableKey, slot, machineTableCursor, bool, error) {
-	record, ok := arena.lookup(id)
+	record, ok := arena.lookupStopped(id)
 	if !ok {
 		return machineTableKey{}, slotNil, machineTableCursor{}, false, arena.tableError()
 	}
@@ -276,6 +296,48 @@ func (arena *machineTableArena) next(id machineTableID, cursor machineTableCurso
 	return machineTableKey{}, slotNil, machineTableCursor{}, false, nil
 }
 
+func (arena *machineTableArena) checkpointStopped() machineTableArenaCheckpoint {
+	if arena == nil {
+		return machineTableArenaCheckpoint{}
+	}
+	return machineTableArenaCheckpoint{
+		tables: len(arena.tables),
+		arrays: arena.arrayCursor,
+		fields: arena.fieldCursor,
+		orders: arena.orderCursor,
+	}
+}
+
+// rollbackStopped drops storage appended after checkpoint while retaining its
+// backing capacity for the next callback. It refuses rollback if an older
+// table grew into the appended region because that span is persistent state.
+func (arena *machineTableArena) rollbackStopped(checkpoint machineTableArenaCheckpoint) bool {
+	if arena == nil || arena.closed || checkpoint.tables < 0 || checkpoint.tables > len(arena.tables) ||
+		checkpoint.arrays < 0 || checkpoint.arrays > arena.arrayCursor ||
+		checkpoint.fields < 0 || checkpoint.fields > arena.fieldCursor ||
+		checkpoint.orders < 0 || checkpoint.orders > arena.orderCursor {
+		return false
+	}
+	for index := 0; index < checkpoint.tables; index++ {
+		record := arena.tables[index]
+		if !machineTableCheckpointSpanFits(record.arrayOffset, record.arrayCapacity, checkpoint.arrays) ||
+			!machineTableCheckpointSpanFits(record.fieldOffset, record.fieldCapacity, checkpoint.fields) ||
+			!machineTableCheckpointSpanFits(record.orderOffset, record.orderCapacity, checkpoint.orders) {
+			return false
+		}
+	}
+	clear(arena.tables[checkpoint.tables:])
+	arena.tables = arena.tables[:checkpoint.tables]
+	arena.arrayCursor = checkpoint.arrays
+	arena.fieldCursor = checkpoint.fields
+	arena.orderCursor = checkpoint.orders
+	return true
+}
+
+func machineTableCheckpointSpanFits(offset, capacity uint32, limit int) bool {
+	return uint64(offset)+uint64(capacity) <= uint64(limit)
+}
+
 // reset drops all logical tables while retaining cleared backing storage for
 // the next stopped bind. IDs are owner-local and restart densely at one.
 func (arena *machineTableArena) reset() {
@@ -290,6 +352,9 @@ func (arena *machineTableArena) reset() {
 	arena.arrays = arena.arrays[:0]
 	arena.fields = arena.fields[:0]
 	arena.orders = arena.orders[:0]
+	arena.arrayCursor = 0
+	arena.fieldCursor = 0
+	arena.orderCursor = 0
 	arena.closed = false
 }
 
@@ -303,6 +368,9 @@ func (arena *machineTableArena) close() {
 	arena.arrays = nil
 	arena.fields = nil
 	arena.orders = nil
+	arena.arrayCursor = 0
+	arena.fieldCursor = 0
+	arena.orderCursor = 0
 	arena.closed = true
 }
 
@@ -367,7 +435,7 @@ func (arena *machineTableArena) setRecordStopped(id machineTableID, key machineT
 }
 
 func (arena *machineTableArena) getRecord(id machineTableID, key machineTableKey) (slot, bool) {
-	record, ok := arena.lookup(id)
+	record, ok := arena.lookupStopped(id)
 	if !ok {
 		return slotNil, false
 	}
@@ -387,14 +455,10 @@ func (arena *machineTableArena) getRecord(id machineTableID, key machineTableKey
 }
 
 func (arena *machineTableArena) lookup(id machineTableID) (machineTableRecord, bool) {
-	if arena == nil || arena.closed || id == invalidMachineTableID {
+	record, ok := arena.lookupStopped(id)
+	if !ok {
 		return machineTableRecord{}, false
 	}
-	index := uint64(id - 1)
-	if index >= uint64(len(arena.tables)) {
-		return machineTableRecord{}, false
-	}
-	record := arena.tables[index]
 	if record.arrayLength > record.arrayCapacity ||
 		record.fieldCount > record.fieldCapacity ||
 		uint64(record.entryCount) > uint64(record.arrayLength)+uint64(record.fieldCount) ||
@@ -410,8 +474,22 @@ func (arena *machineTableArena) lookup(id machineTableID) (machineTableRecord, b
 	return record, true
 }
 
+// lookupStopped is the hot internal lookup after a scalar table handle has
+// crossed machine.tableID's fully validated boundary. Arena mutation preserves
+// record invariants, so repeated raw operations only need the dense ID check.
+func (arena *machineTableArena) lookupStopped(id machineTableID) (machineTableRecord, bool) {
+	if arena == nil || arena.closed || id == invalidMachineTableID {
+		return machineTableRecord{}, false
+	}
+	index := uint64(id - 1)
+	if index >= uint64(len(arena.tables)) {
+		return machineTableRecord{}, false
+	}
+	return arena.tables[index], true
+}
+
 func (arena *machineTableArena) tableIndex(id machineTableID) (int, bool) {
-	if _, ok := arena.lookup(id); !ok {
+	if _, ok := arena.lookupStopped(id); !ok {
 		return 0, false
 	}
 	return int(id - 1), true
@@ -430,14 +508,10 @@ func (arena *machineTableArena) ensureArrayStopped(tableIndex int, needed uint32
 		return nil
 	}
 	capacity, err := machineTableGrowCapacity(record.arrayCapacity, needed, 4)
-	if err != nil || !machineTableSpanFits(len(arena.arrays), capacity) {
+	if err != nil || !machineTableSpanFits(arena.arrayCursor, capacity) {
 		return errors.New("machine table array capacity overflows uint32")
 	}
-	offset := uint32(len(arena.arrays))
-	arena.arrays = append(arena.arrays, make([]slot, int(capacity))...)
-	for index := int(offset); index < len(arena.arrays); index++ {
-		arena.arrays[index] = slotNil
-	}
+	offset := arena.reserveArraysStopped(capacity)
 	copy(arena.arrays[int(offset):int(offset+record.arrayLength)],
 		arena.arrays[int(record.arrayOffset):int(record.arrayOffset+record.arrayLength)])
 	arena.tables[tableIndex].arrayOffset = offset
@@ -451,11 +525,10 @@ func (arena *machineTableArena) ensureOrderStopped(tableIndex int, needed uint32
 		return nil
 	}
 	capacity, err := machineTableGrowCapacity(record.orderCapacity, needed, 4)
-	if err != nil || !machineTableSpanFits(len(arena.orders), capacity) {
+	if err != nil || !machineTableSpanFits(arena.orderCursor, capacity) {
 		return errors.New("machine table order capacity overflows uint32")
 	}
-	offset := uint32(len(arena.orders))
-	arena.orders = append(arena.orders, make([]machineTableOrderEntry, int(capacity))...)
+	offset := arena.reserveOrdersStopped(capacity)
 	copy(arena.orders[int(offset):int(offset+record.orderLength)],
 		arena.orders[int(record.orderOffset):int(record.orderOffset+record.orderLength)])
 	arena.tables[tableIndex].orderOffset = offset
@@ -522,6 +595,15 @@ func (arena *machineTableArena) compactOrderStopped(tableIndex int) {
 }
 
 func (arena *machineTableArena) orderIndex(record machineTableRecord, key machineTableKey) (uint32, bool) {
+	// Dense arrays are normally inserted in index order, so their order entry
+	// sits at index-1. Validate the hint before falling back because mixed keys,
+	// deletion, and compaction can move it.
+	if key.kind == machineTableKeyArray && key.id != 0 {
+		hint := key.id - 1
+		if hint < record.orderLength && arena.orders[int(record.orderOffset+hint)].key == key {
+			return hint, true
+		}
+	}
 	for index := uint32(0); index < record.orderLength; index++ {
 		if arena.orders[int(record.orderOffset+index)].key == key {
 			return index, true
@@ -571,11 +653,10 @@ func (arena *machineTableArena) ensureFieldsStopped(tableIndex int) error {
 
 func (arena *machineTableArena) rehashFieldsStopped(tableIndex int, capacity uint32) error {
 	if capacity < machineTableInitialFieldCapacity || capacity&(capacity-1) != 0 ||
-		!machineTableSpanFits(len(arena.fields), capacity) {
+		!machineTableSpanFits(arena.fieldCursor, capacity) {
 		return errors.New("machine table field capacity overflows uint32")
 	}
-	offset := uint32(len(arena.fields))
-	arena.fields = append(arena.fields, make([]machineTableField, int(capacity))...)
+	offset := arena.reserveFieldsStopped(capacity)
 	arena.tables[tableIndex].fieldOffset = offset
 	arena.tables[tableIndex].fieldCapacity = capacity
 	arena.rebuildFieldsStopped(tableIndex)
@@ -701,6 +782,36 @@ func machineTableGrowCapacity(current, needed, minimum uint32) (uint32, error) {
 
 func machineTableSpanFits(length int, capacity uint32) bool {
 	return uint64(length)+uint64(capacity) <= math.MaxUint32
+}
+
+func (arena *machineTableArena) reserveArraysStopped(capacity uint32) uint32 {
+	offset := arena.arrayCursor
+	end := offset + int(capacity)
+	if end > len(arena.arrays) {
+		arena.arrays = append(arena.arrays, make([]slot, end-len(arena.arrays))...)
+	}
+	arena.arrayCursor = end
+	return uint32(offset)
+}
+
+func (arena *machineTableArena) reserveFieldsStopped(capacity uint32) uint32 {
+	offset := arena.fieldCursor
+	end := offset + int(capacity)
+	if end > len(arena.fields) {
+		arena.fields = append(arena.fields, make([]machineTableField, end-len(arena.fields))...)
+	}
+	arena.fieldCursor = end
+	return uint32(offset)
+}
+
+func (arena *machineTableArena) reserveOrdersStopped(capacity uint32) uint32 {
+	offset := arena.orderCursor
+	end := offset + int(capacity)
+	if end > len(arena.orders) {
+		arena.orders = append(arena.orders, make([]machineTableOrderEntry, end-len(arena.orders))...)
+	}
+	arena.orderCursor = end
+	return uint32(offset)
 }
 
 func machineTableSpanValid(offset, capacity uint32, length int) bool {
