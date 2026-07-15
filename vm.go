@@ -18,6 +18,13 @@ func Run(proto *Proto) ([]Value, error) {
 	if proto.verifyErr != nil {
 		return nil, fmt.Errorf("run: invalid prototype: %w", proto.verifyErr)
 	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		return nil, fmt.Errorf("run: invalid prototype: %w", err)
+	}
+	if image.eligible {
+		return executeCodeImage(image, nil)
+	}
 
 	return executeProto(context.Background(), proto, nil, executeOptions{
 		controller: nil,

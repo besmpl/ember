@@ -1,0 +1,128 @@
+package ember
+
+func runScalarMachineLoop(machine *scalarMachine) (int, error) {
+	operations := machine.image.operations
+	for pc := 0; pc >= 0 && pc < len(operations); {
+		operation := operations[pc]
+		if machine.window.controller != nil {
+			if err := machine.charge(operation); err != nil {
+				return pc, err
+			}
+		}
+		a := int(operation.a)
+		b := int(operation.b)
+		c := int(operation.c)
+		d := int(operation.d)
+		next := pc + 1
+		switch operation.op {
+		case opLoadConst:
+			if err := machine.loadConstant(a, b); err != nil {
+				return pc, err
+			}
+
+		case opMove:
+			if err := machine.move(a, b); err != nil {
+				return pc, err
+			}
+
+		case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow:
+			if err := machine.binaryRegisters(operation.op, a, b, c); err != nil {
+				return pc, err
+			}
+
+		case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
+			if err := machine.binaryConstant(operation.op, a, b, c); err != nil {
+				return pc, err
+			}
+
+		case opNeg:
+			if err := machine.negate(a, b); err != nil {
+				return pc, err
+			}
+
+		case opEqual, opNotEqual, opLess, opLessEqual, opGreater, opGreaterEqual:
+			if err := machine.storeComparison(operation.op, a, b, c); err != nil {
+				return pc, err
+			}
+
+		case opNumericForCheck:
+			exit, err := machine.numericForCheck(a, b, c)
+			if err != nil {
+				return pc, err
+			}
+			if exit {
+				pc = d
+				continue
+			}
+
+		case opNumericForLoop:
+			if err := machine.numericForLoop(a, b); err != nil {
+				return pc, err
+			}
+			pc = d
+			continue
+
+		case opJumpIfNotEqualK:
+			equal, err := machine.equalityConstant(a, b, a)
+			if err != nil {
+				return pc, err
+			}
+			if !equal {
+				pc = d
+				continue
+			}
+
+		case opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
+			comparison, err := machine.compareConstant(operation.op, a, b, a)
+			if err != nil {
+				return pc, err
+			}
+			jump := comparison
+			if operation.op == opJumpIfNotLessK || operation.op == opJumpIfNotGreaterK {
+				jump = !jump
+			}
+			if jump {
+				pc = d
+				continue
+			}
+
+		case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
+			comparison, err := machine.compare(operation.op, machine.registers[a], machine.registers[b])
+			if err != nil {
+				return pc, err
+			}
+			jump := comparison
+			if operation.op == opJumpIfNotLess || operation.op == opJumpIfNotGreater {
+				jump = !jump
+			}
+			if jump {
+				pc = d
+				continue
+			}
+
+		case opJumpIfFalse:
+			if !machineTruthy(machine.registers[a]) {
+				pc = b
+				continue
+			}
+
+		case opJump:
+			pc = b
+			continue
+
+		case opReturnOne:
+			if err := machine.returnValues(a, 1); err != nil {
+				return pc, err
+			}
+			return -1, nil
+
+		case opReturn:
+			if err := machine.returnValues(a, b); err != nil {
+				return pc, err
+			}
+			return -1, nil
+		}
+		pc = next
+	}
+	return len(operations), errCompactMachineFellOffEnd
+}

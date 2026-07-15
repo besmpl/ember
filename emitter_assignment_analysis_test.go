@@ -1,9 +1,6 @@
 package ember
 
-import (
-	"reflect"
-	"testing"
-)
+import "testing"
 
 // TestAssignmentDependencyPreservesPublicBehavior exercises the assignment
 // peephole through the public Compile/Run surface and compares it with the
@@ -177,7 +174,7 @@ return value`,
 			if optimizedErr != nil {
 				t.Fatalf("Run returned error: %v", optimizedErr)
 			}
-			if !reflect.DeepEqual(optimizedValues, disabledValues) {
+			if !valuesSliceEquivalent(optimizedValues, disabledValues) {
 				t.Fatalf("optimized Run values = %#v, peephole-disabled values = %#v", optimizedValues, disabledValues)
 			}
 			if len(optimizedValues) != len(test.want) {

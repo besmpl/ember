@@ -592,7 +592,7 @@ return (x + y) * 3 - 4 / 2
 	}
 }
 
-func BenchmarkRunArithmetic(b *testing.B) {
+func BenchmarkRunArithmeticProduction(b *testing.B) {
 	proto := benchmarkCompile(b, `
 local x = 1
 local y = 2
@@ -655,7 +655,7 @@ return sum(12)
 	}
 }
 
-func BenchmarkRunWhileLoop(b *testing.B) {
+func BenchmarkRunWhileLoopProduction(b *testing.B) {
 	proto := benchmarkCompile(b, `
 local i = 0
 local total = 0

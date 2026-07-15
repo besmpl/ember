@@ -16,7 +16,7 @@ func (fakeOS) StartProcess(string, []string, any) {}
 
 type fakeSyscall struct{}
 
-func (fakeSyscall) Mmap() {}
+func (fakeSyscall) Mmap()    {}
 func (fakeSyscall) Syscall() {}
 
 func harmlessShadowedIdentifiers() {

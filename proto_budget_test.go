@@ -29,6 +29,9 @@ func TestProtoFieldClassificationBudget(t *testing.T) {
 		"reuseZeroCaptureClosure": {},
 		"verifyErr":               {},
 		"debugInfo":               {},
+		"codeImageOnce":           {},
+		"codeImage":               {},
+		"codeImageErr":            {},
 	}
 	runtimeSideTables := map[string]struct{}{
 		"entryNilRegisters": {},

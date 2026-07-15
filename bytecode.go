@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 type opcode uint8
@@ -159,11 +160,55 @@ var allOpcodes = [...]opcode{
 	opReturn,
 }
 
+// machineEligibleOpcodes is consumed by both opcode metadata and vmgen. Keep
+// the compact Machine switch generated from this list so selection and
+// execution cannot drift apart.
+var machineEligibleOpcodes = [...]opcode{
+	opLoadConst,
+	opMove,
+	opAdd,
+	opSub,
+	opMul,
+	opDiv,
+	opMod,
+	opIDiv,
+	opPow,
+	opNeg,
+	opAddK,
+	opSubK,
+	opMulK,
+	opDivK,
+	opModK,
+	opIDivK,
+	opEqual,
+	opNotEqual,
+	opLess,
+	opLessEqual,
+	opGreater,
+	opGreaterEqual,
+	opNumericForCheck,
+	opNumericForLoop,
+	opJumpIfNotEqualK,
+	opJumpIfNotLessK,
+	opJumpIfNotGreaterK,
+	opJumpIfLessK,
+	opJumpIfGreaterK,
+	opJumpIfNotLess,
+	opJumpIfNotGreater,
+	opJumpIfLess,
+	opJumpIfGreater,
+	opJumpIfFalse,
+	opJump,
+	opReturnOne,
+	opReturn,
+}
+
 const opcodeCount = len(allOpcodes)
 
 type opcodeMetadataEntry struct {
 	name                         string
 	directFrame                  bool
+	machine                      opcodeMachinePolicy
 	controlFlow                  opcodeControlFlowKind
 	jumpTarget                   opcodeJumpTargetSlot
 	operands                     opcodeOperandShape
@@ -171,6 +216,32 @@ type opcodeMetadataEntry struct {
 	effects                      opcodeEffects
 	directFrameUnsupportedReason string
 	wordcode                     wordcodeEncodingMetadata
+}
+
+type opcodeMachineSafepoint uint8
+
+const (
+	opcodeMachineSafepointUnclassified opcodeMachineSafepoint = iota
+	opcodeMachineSafepointGuest
+)
+
+type opcodeMachineErrorClass uint8
+
+const (
+	opcodeMachineErrorNone opcodeMachineErrorClass = iota
+	opcodeMachineErrorOperands
+	opcodeMachineErrorNumericFor
+)
+
+// opcodeMachinePolicy is the single classification used when lowering and
+// executing the compact scalar Machine. Unsupported opcodes are classified
+// just as deliberately as supported ones so image selection fails closed.
+type opcodeMachinePolicy struct {
+	classified  bool
+	eligible    bool
+	guestCharge uint8
+	safepoint   opcodeMachineSafepoint
+	errorClass  opcodeMachineErrorClass
 }
 
 type opcodeEffects struct {
@@ -202,7 +273,31 @@ var opcodeMetadataTable = func() [opcodeLimit]opcodeMetadataEntry {
 		table[op].name = opcodeName(op)
 		table[op].registerEffects.classified = true
 		table[op].effects.classified = true
+		table[op].machine = opcodeMachinePolicy{
+			classified:  true,
+			guestCharge: 1,
+			safepoint:   opcodeMachineSafepointGuest,
+		}
 	}
+	for _, op := range machineEligibleOpcodes {
+		policy := table[op].machine
+		policy.eligible = true
+		table[op].machine = policy
+	}
+	for _, op := range []opcode{
+		opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow, opNeg,
+		opAddK, opSubK, opMulK, opDivK, opModK, opIDivK,
+		opLess, opLessEqual, opGreater, opGreaterEqual,
+		opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK,
+		opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater,
+	} {
+		policy := table[op].machine
+		policy.errorClass = opcodeMachineErrorOperands
+		table[op].machine = policy
+	}
+	policy := table[opNumericForCheck].machine
+	policy.errorClass = opcodeMachineErrorNumericFor
+	table[opNumericForCheck].machine = policy
 	for _, op := range allOpcodes {
 		table[op].directFrame = true
 	}
@@ -568,6 +663,15 @@ func validateOpcodeMetadataTable(table [opcodeLimit]opcodeMetadataEntry) error {
 		}
 		if !meta.effects.classified {
 			return fmt.Errorf("%s effects are unclassified", opcodeName(op))
+		}
+		if !meta.machine.classified {
+			return fmt.Errorf("%s Machine policy is unclassified", opcodeName(op))
+		}
+		if meta.machine.guestCharge == 0 {
+			return fmt.Errorf("%s Machine guest charge is zero", opcodeName(op))
+		}
+		if meta.machine.safepoint == opcodeMachineSafepointUnclassified {
+			return fmt.Errorf("%s Machine safepoint is unclassified", opcodeName(op))
 		}
 		if err := validateOpcodeRegisterEffects(meta.registerEffects); err != nil {
 			return fmt.Errorf("%s %w", opcodeName(op), err)
@@ -1685,6 +1789,9 @@ type Proto struct {
 	reuseZeroCaptureClosure bool
 	verifyErr               error
 	debugInfo               *protoDebugInfo
+	codeImageOnce           sync.Once
+	codeImage               *codeImage
+	codeImageErr            error
 }
 
 // protoDebugInfo is immutable compiler metadata used by runtime diagnostics.
@@ -1822,6 +1929,9 @@ func finalizeProtoExecutionArtifact(proto *Proto, sourceCode ...[]instruction) e
 		proto.verifyErr = err
 		return proto.verifyErr
 	}
+	proto.codeImageOnce = sync.Once{}
+	proto.codeImage = nil
+	proto.codeImageErr = nil
 	return proto.verifyErr
 }
 

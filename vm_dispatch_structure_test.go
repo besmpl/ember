@@ -24,7 +24,7 @@ func TestApprovedExecutionLoopsRemainExplicit(t *testing.T) {
 	}
 	root := filepath.Dir(testFile)
 	var loops []string
-	for _, name := range []string{"vm_dispatch_generated.go"} {
+	for _, name := range []string{"vm_dispatch_generated.go", "runtime_machine_generated.go"} {
 		file, err := goparser.ParseFile(token.NewFileSet(), filepath.Join(root, name), nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
@@ -45,8 +45,9 @@ func TestApprovedExecutionLoopsRemainExplicit(t *testing.T) {
 					if !ok {
 						return true
 					}
-					identifier, ok := switchStatement.Tag.(*ast.Ident)
-					if ok && identifier.Name == "op" {
+					identifier, identOK := switchStatement.Tag.(*ast.Ident)
+					selector, selectorOK := switchStatement.Tag.(*ast.SelectorExpr)
+					if identOK && identifier.Name == "op" || selectorOK && selector.Sel.Name == "op" {
 						isDispatchLoop = true
 					}
 					return !isDispatchLoop
@@ -59,7 +60,7 @@ func TestApprovedExecutionLoopsRemainExplicit(t *testing.T) {
 		}
 	}
 	sort.Strings(loops)
-	want := []string{"runGeneratedDirectFrameInstrumentedLoop", "runGeneratedDirectFrameProductionLoop"}
+	want := []string{"runGeneratedDirectFrameInstrumentedLoop", "runGeneratedDirectFrameProductionLoop", "runGeneratedScalarMachineLoop"}
 	sort.Strings(want)
 	if !reflect.DeepEqual(loops, want) {
 		t.Fatalf("instruction dispatch loops = %v, want approved set %v", loops, want)
@@ -94,6 +95,26 @@ func TestGeneratedDispatchMatchesSemanticSource(t *testing.T) {
 		if !strings.Contains(string(generated), name) {
 			t.Fatalf("generated dispatch is missing %s", name)
 		}
+	}
+	machineTemplate, err := os.ReadFile(filepath.Join(root, "runtime_machine_template.go.tmpl"))
+	if err != nil {
+		t.Fatalf("read Machine template: %v", err)
+	}
+	machineGenerated, err := os.ReadFile(filepath.Join(root, "runtime_machine_generated.go"))
+	if err != nil {
+		t.Fatalf("read generated Machine: %v", err)
+	}
+	metadata, err := os.ReadFile(filepath.Join(root, "bytecode.go"))
+	if err != nil {
+		t.Fatalf("read opcode metadata: %v", err)
+	}
+	machineHashInput := append(append([]byte{}, metadata...), machineTemplate...)
+	machineStamp := fmt.Sprintf("Machine metadata sha256: %x", sha256.Sum256(machineHashInput))
+	if !strings.Contains(string(machineGenerated), machineStamp) {
+		t.Fatalf("generated Machine is stale: missing %q", machineStamp)
+	}
+	if !strings.Contains(string(machineGenerated), "func runGeneratedScalarMachineLoop") {
+		t.Fatal("generated Machine dispatch is missing runGeneratedScalarMachineLoop")
 	}
 	check := exec.Command("go", "run", "./cmd/ember-vmgen", "-check")
 	check.Dir = root
