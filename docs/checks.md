@@ -95,6 +95,9 @@ probes apply the same limits to external processes while excluding the measuring
 Go process. This limits external activity to three cores, leaving at least half
 the host free while the single-threaded benchmark runs, without treating
 Ember's own timed work or ordinary single-core macOS daemons as contamination.
+A live point whose before or after probe is contaminated is discarded and
+retried after one second, up to 60 attempts; only clean paired rows are emitted,
+and exhaustion still fails the capture.
 
 ```sh
 scripts/runtime-ratio-gate --derive \

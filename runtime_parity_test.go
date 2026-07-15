@@ -36,6 +36,9 @@ const (
 	// The live CPU sample excludes this measuring process.
 	parityLoadMax = 8.0
 	parityCPUMax  = 300.0
+
+	parityPointAttemptLimit = 60
+	parityPointRetryDelay   = time.Second
 )
 
 var parityIterations = [...]int{1, 10, 100, 1000}
@@ -505,6 +508,56 @@ func paritySystemSampleClean(sample paritySystemSample) bool {
 		sample.Load <= parityLoadMax && sample.CPU <= parityCPUMax
 }
 
+type parityPointMeasurement struct {
+	engineIndex int
+	engine      string
+	elapsed     float64
+}
+
+func acquireCleanParityPoint(
+	maxAttempts int,
+	sample func() (paritySystemSample, error),
+	measure func() ([]parityPointMeasurement, error),
+	wait func(),
+) ([]parityPointMeasurement, error) {
+	if maxAttempts <= 0 {
+		return nil, errors.New("parity point: attempt limit must be positive")
+	}
+	var last paritySystemSample
+	var stage string
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		before, err := sample()
+		if err != nil {
+			return nil, fmt.Errorf("parity point before sample: %w", err)
+		}
+		if !paritySystemSampleClean(before) {
+			last = before
+			stage = "before"
+			if attempt < maxAttempts {
+				wait()
+			}
+			continue
+		}
+		point, err := measure()
+		if err != nil {
+			return nil, err
+		}
+		after, err := sample()
+		if err != nil {
+			return nil, fmt.Errorf("parity point after sample: %w", err)
+		}
+		if paritySystemSampleClean(after) {
+			return point, nil
+		}
+		last = after
+		stage = "after"
+		if attempt < maxAttempts {
+			wait()
+		}
+	}
+	return nil, fmt.Errorf("parity point %s sample contaminated after %d attempts: load=%.6f cpu=%.6f", stage, maxAttempts, last.Load, last.CPU)
+}
+
 type parityModuleLoader map[string]string
 
 func (loader parityModuleLoader) LoadModule(ctx context.Context, id ember.ModuleID) (ember.Source, error) {
@@ -755,6 +808,37 @@ func TestRuntimeParityHarness(t *testing.T) {
 	if _, err := parseParityProcessCPU("42 nope\n", 42); err == nil {
 		t.Fatal("accepted invalid process CPU sample")
 	}
+	pointSamples := []paritySystemSample{
+		{Load: parityLoadMax + 1, CPU: 0},
+		{Load: 1, CPU: 0},
+		{Load: 1, CPU: parityCPUMax + 1},
+		{Load: 1, CPU: 0},
+		{Load: 1, CPU: 0},
+	}
+	sampleIndex := 0
+	measureCount := 0
+	waitCount := 0
+	point, err := acquireCleanParityPoint(3, func() (paritySystemSample, error) {
+		sample := pointSamples[sampleIndex]
+		sampleIndex++
+		return sample, nil
+	}, func() ([]parityPointMeasurement, error) {
+		measureCount++
+		return []parityPointMeasurement{{elapsed: float64(measureCount)}}, nil
+	}, func() {
+		waitCount++
+	})
+	if err != nil || len(point) != 1 || point[0].elapsed != 2 || measureCount != 2 || waitCount != 2 {
+		t.Fatalf("retried point = %#v, measures=%d waits=%d error=%v", point, measureCount, waitCount, err)
+	}
+	if _, err := acquireCleanParityPoint(2, func() (paritySystemSample, error) {
+		return paritySystemSample{Load: parityLoadMax + 1}, nil
+	}, func() ([]parityPointMeasurement, error) {
+		t.Fatal("measured a contaminated point")
+		return nil, nil
+	}, func() {}); err == nil {
+		t.Fatal("accepted exhausted contaminated point")
+	}
 
 	for pair := 1; pair <= parityPairCount; pair++ {
 		order := parityEngineOrder(pair)
@@ -919,45 +1003,50 @@ func TestRuntimeParityLive(t *testing.T) {
 			timings["ember"][repeat] = make(map[int]float64, len(parityIterations))
 			timings["luau"][repeat] = make(map[int]float64, len(parityIterations))
 			for iterationIndex, n := range parityIterations {
-				before, err := sampleParitySystem()
-				if err != nil {
-					t.Fatalf("%s repeat=%d N=%d before sample: %v", tc.name, repeat, n, err)
-				}
-				if !paritySystemSampleClean(before) {
-					t.Fatalf("%s repeat=%d N=%d before sample contaminated: load=%.6f cpu=%.6f", tc.name, repeat, n, before.Load, before.CPU)
-				}
 				order := parityEngineOrderFor(1, repeat, iterationIndex)
-				pointRows := make([]string, 0, 2)
-				for engineIndex, engine := range order {
-					var elapsed float64
-					var result string
-					switch engine {
-					case "ember":
-						elapsed, result, err = measureParityEmber(owners[n], n)
-					case "luau":
-						elapsed, result, err = measureParityLuau(environment.LuauPath, scripts[n])
-					default:
-						t.Fatalf("unknown parity engine %q", engine)
+				point, err := acquireCleanParityPoint(parityPointAttemptLimit, sampleParitySystem, func() ([]parityPointMeasurement, error) {
+					measurements := make([]parityPointMeasurement, 0, len(order))
+					for engineIndex, engine := range order {
+						var elapsed float64
+						var result string
+						var measureErr error
+						switch engine {
+						case "ember":
+							elapsed, result, measureErr = measureParityEmber(owners[n], n)
+						case "luau":
+							elapsed, result, measureErr = measureParityLuau(environment.LuauPath, scripts[n])
+						default:
+							return nil, fmt.Errorf("unknown parity engine %q", engine)
+						}
+						if measureErr != nil {
+							return nil, fmt.Errorf("engine=%s: %w", engine, measureErr)
+						}
+						if elapsed <= 0 || !finiteParityFloat(elapsed) {
+							return nil, fmt.Errorf("engine=%s: invalid timing %v", engine, elapsed)
+						}
+						if result != tc.want {
+							return nil, fmt.Errorf("engine=%s: result %q, want %q", engine, result, tc.want)
+						}
+						measurements = append(measurements, parityPointMeasurement{
+							engineIndex: engineIndex,
+							engine:      engine,
+							elapsed:     elapsed,
+						})
 					}
-					if err != nil {
-						t.Fatalf("%s repeat=%d engine=%s N=%d: %v", tc.name, repeat, engine, n, err)
-					}
-					if elapsed <= 0 || !finiteParityFloat(elapsed) {
-						t.Fatalf("%s repeat=%d engine=%s N=%d: invalid timing %v", tc.name, repeat, engine, n, elapsed)
-					}
-					if result != tc.want {
-						t.Fatalf("%s repeat=%d engine=%s N=%d: result %q, want %q", tc.name, repeat, engine, n, result, tc.want)
-					}
-					timings[engine][repeat][n] = elapsed
-					acquisitionOrder := (repeat-1)*len(parityIterations)*2 + parityOrderForRepeat(repeat, engineIndex, iterationIndex)
-					pointRows = append(pointRows, fmt.Sprintf("1\t%s\t%s\t%s\t%s\t%s\t%s\twarm_call\t%s\t%d\t%d\t%d\t%.17g\t%s\twarmed_callable_v1\t%s\t", role, pair, captureID, sourceCommit, entry.Corpus, entry.Name, engine, repeat, acquisitionOrder, n, elapsed, resultHash, environmentHash))
-				}
-				after, err := sampleParitySystem()
+					return measurements, nil
+				}, func() {
+					time.Sleep(parityPointRetryDelay)
+				})
 				if err != nil {
-					t.Fatalf("%s repeat=%d N=%d after sample: %v", tc.name, repeat, n, err)
+					t.Fatalf("%s repeat=%d N=%d: %v", tc.name, repeat, n, err)
 				}
-				if !paritySystemSampleClean(after) {
-					t.Fatalf("%s repeat=%d N=%d after sample contaminated: load=%.6f cpu=%.6f", tc.name, repeat, n, after.Load, after.CPU)
+				pointRows := make([]string, 0, len(point))
+				for _, measurement := range point {
+					engine := measurement.engine
+					elapsed := measurement.elapsed
+					timings[engine][repeat][n] = elapsed
+					acquisitionOrder := (repeat-1)*len(parityIterations)*2 + parityOrderForRepeat(repeat, measurement.engineIndex, iterationIndex)
+					pointRows = append(pointRows, fmt.Sprintf("1\t%s\t%s\t%s\t%s\t%s\t%s\twarm_call\t%s\t%d\t%d\t%d\t%.17g\t%s\twarmed_callable_v1\t%s\t", role, pair, captureID, sourceCommit, entry.Corpus, entry.Name, engine, repeat, acquisitionOrder, n, elapsed, resultHash, environmentHash))
 				}
 				for _, row := range pointRows {
 					writeRaw("%s0\n", row)
