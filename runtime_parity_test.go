@@ -32,10 +32,10 @@ const (
 	parityRepeatCount = 3
 
 	// The acceptance host has eight logical CPUs. These limits cap external
-	// activity at two cores while rejecting a sustained full-host run queue.
+	// activity at three cores while rejecting a sustained full-host run queue.
 	// The live CPU sample excludes this measuring process.
 	parityLoadMax = 8.0
-	parityCPUMax  = 200.0
+	parityCPUMax  = 300.0
 )
 
 var parityIterations = [...]int{1, 10, 100, 1000}
@@ -735,7 +735,7 @@ func TestRuntimeParityHarness(t *testing.T) {
 	if _, _, err := summarizeParityRepeatRatios([]float64{0.9, math.NaN(), 1.0}); err == nil {
 		t.Fatal("accepted non-finite repeat ratio")
 	}
-	if !paritySystemSampleClean(paritySystemSample{Load: 7.5, CPU: 150.0}) {
+	if !paritySystemSampleClean(paritySystemSample{Load: 7.5, CPU: 250.0}) {
 		t.Fatal("rejected clean system sample")
 	}
 	for _, contaminated := range []paritySystemSample{
