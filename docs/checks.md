@@ -89,6 +89,11 @@ future 2x target is missed. It does not waive environment, result, row,
 contamination, or slope validation. Gate two independent captures and derive
 their immutable manifest separately:
 
+The capture role selects the whole runtime before binding: `frozen-current`
+uses `EMBER_RUNTIME_ENGINE=vm`, while `candidate` uses
+`EMBER_RUNTIME_ENGINE=machine`. The selected engine is recorded in
+`command.txt`; workload identity never participates in engine selection.
+
 On the pinned eight-logical-CPU M1, acquisition starts after three one-second
 samples with aggregate CPU at most 300%. One-minute load remains diagnostic but
 is not an admission gate: it is lagging, core-count-blind, and includes blocked
