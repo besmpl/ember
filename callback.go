@@ -11,7 +11,16 @@ import (
 // A Callback shares mutable state with its owning Runtime; hosts should
 // serialize calls with other work on that Runtime.
 type Callback struct {
-	call  invocationScope
+	target callbackTarget
+}
+
+type callbackTarget interface {
+	call(context.Context, []Value) ([]Value, error)
+	close() error
+}
+
+type vmCallbackTarget struct {
+	scope invocationScope
 	value Value
 	state *callbackState
 }
@@ -30,13 +39,25 @@ func CaptureCallback(ctx context.Context, value Value) (Callback, error) {
 	if !ok || call.runtime == nil {
 		return Callback{}, fmt.Errorf("callback: missing runtime context")
 	}
-	if err := call.runtime.owner.checkOpen(); err == errRuntimeOwnerClosed {
-		return Callback{}, fmt.Errorf("callback: runtime is closed")
-	} else if err != nil {
+	execution, err := call.runtime.executionAdapter()
+	if err != nil {
 		return Callback{}, fmt.Errorf("callback: capture runtime: %w", err)
 	}
+	target, err := execution.captureCallback(call, value)
+	if err != nil {
+		return Callback{}, err
+	}
+	return Callback{target: target}, nil
+}
+
+func captureVMCallback(call invocationScope, value Value) (callbackTarget, error) {
+	if err := call.runtime.owner.checkOpen(); err == errRuntimeOwnerClosed {
+		return nil, fmt.Errorf("callback: runtime is closed")
+	} else if err != nil {
+		return nil, fmt.Errorf("callback: capture runtime: %w", err)
+	}
 	if _, ok := value.scriptFunction(); !ok {
-		return Callback{}, fmt.Errorf("callback: value is %s, want script function", value.Kind())
+		return nil, fmt.Errorf("callback: value is %s, want script function", value.Kind())
 	}
 	rootValues := make([]Value, 0, 1+len(call.globals))
 	rootValues = append(rootValues, value)
@@ -45,11 +66,11 @@ func CaptureCallback(ctx context.Context, value Value) (Callback, error) {
 	}
 	roots, err := call.runtime.owner.rootValues(rootValues)
 	if err != nil {
-		return Callback{}, fmt.Errorf("callback: retain values: %w", err)
+		return nil, fmt.Errorf("callback: retain values: %w", err)
 	}
 	call.controller = nil
-	return Callback{
-		call:  call,
+	return &vmCallbackTarget{
+		scope: call,
 		value: value,
 		state: &callbackState{roots: roots},
 	}, nil
@@ -59,13 +80,17 @@ func CaptureCallback(ctx context.Context, value Value) (Callback, error) {
 // cancellation for this invocation and is visible to ContextHostFuncValue host
 // callbacks called by the script.
 func (cb Callback) Call(ctx context.Context, args ...Value) ([]Value, error) {
-	if cb.call.runtime == nil {
+	if cb.target == nil {
 		return nil, fmt.Errorf("callback: not captured")
 	}
-	if cb.state == nil {
+	return cb.target.call(ctx, args)
+}
+
+func (target *vmCallbackTarget) call(ctx context.Context, args []Value) ([]Value, error) {
+	if target == nil || target.state == nil {
 		return nil, fmt.Errorf("callback: not retained")
 	}
-	lease, err := cb.call.runtime.beginRun()
+	lease, err := target.scope.runtime.beginRun()
 	if err == errRuntimeOwnerClosed {
 		return nil, fmt.Errorf("callback: runtime is closed")
 	}
@@ -76,14 +101,14 @@ func (cb Callback) Call(ctx context.Context, args ...Value) ([]Value, error) {
 		return nil, fmt.Errorf("callback: begin call: %w", err)
 	}
 	defer lease.end()
-	cb.state.mu.Lock()
-	released := cb.state.released
-	cb.state.mu.Unlock()
+	target.state.mu.Lock()
+	released := target.state.released
+	target.state.mu.Unlock()
 	if released {
 		return nil, fmt.Errorf("callback: released")
 	}
-	if _, ok := cb.value.scriptFunction(); !ok {
-		return nil, fmt.Errorf("callback: value is %s, want script function", cb.value.Kind())
+	if _, ok := target.value.scriptFunction(); !ok {
+		return nil, fmt.Errorf("callback: value is %s, want script function", target.value.Kind())
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -92,16 +117,16 @@ func (cb Callback) Call(ctx context.Context, args ...Value) ([]Value, error) {
 		return nil, err
 	}
 
-	call := cb.call
+	call := target.scope
 	call.ctx = ctx
-	controller, err := newExecutionPolicy(ctx, cb.call.runtime.limits)
+	controller, err := newExecutionPolicy(ctx, target.scope.runtime.limits)
 	if err != nil {
 		return nil, fmt.Errorf("callback: create execution controller: %w", err)
 	}
 	call.controller = controller
-	closure, ok := cb.value.scriptFunction()
+	closure, ok := target.value.scriptFunction()
 	if !ok {
-		return nil, fmt.Errorf("callback: value is %s, want script function", cb.value.Kind())
+		return nil, fmt.Errorf("callback: value is %s, want script function", target.value.Kind())
 	}
 	return executeProtoWithInvocationScope(ctx, closure.proto, call, executeOptions{
 		args:           args,
@@ -117,19 +142,26 @@ func (cb Callback) Call(ctx context.Context, args ...Value) ([]Value, error) {
 // serialize Close with Call, as they already must serialize callback calls
 // with other work on the owning Runtime.
 func (cb Callback) Close() error {
-	if cb.state == nil {
+	if cb.target == nil {
 		return nil
 	}
-	cb.state.mu.Lock()
-	defer cb.state.mu.Unlock()
-	if cb.state.released {
+	return cb.target.close()
+}
+
+func (target *vmCallbackTarget) close() error {
+	if target == nil || target.state == nil {
 		return nil
 	}
-	for _, root := range cb.state.roots {
+	target.state.mu.Lock()
+	defer target.state.mu.Unlock()
+	if target.state.released {
+		return nil
+	}
+	for _, root := range target.state.roots {
 		root.release()
 	}
-	cb.state.roots = nil
-	cb.state.released = true
+	target.state.roots = nil
+	target.state.released = true
 	return nil
 }
 

@@ -2,6 +2,7 @@ package ember
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -102,9 +103,10 @@ var (
 )
 
 const (
-	valueKindBits      = uint64(0xff)
-	valueNativeIDShift = 8
-	valueNativeIDBits  = uint64(0xff) << valueNativeIDShift
+	valueKindBits                   = uint64(0xff)
+	valueNativeIDShift              = 8
+	valueNativeIDBits               = uint64(0xff) << valueNativeIDShift
+	valueTransientScriptCallableTag = uint64(1) << 8
 )
 
 func valueKind(v Value) ValueKind {
@@ -158,8 +160,30 @@ type stringBox struct {
 	hash uint64
 }
 
+// scriptCallableHandle is an engine-neutral scalar reference to a transient
+// script call target. The owning execution engine remains responsible for
+// validating that the indexed generation is live.
+type scriptCallableHandle struct {
+	owner      uint64
+	index      uint32
+	generation uint32
+}
+
+type transientScriptCallablePayload struct {
+	handle scriptCallableHandle
+}
+
+type scriptCallableHandleValidator func(scriptCallableHandle) bool
+
+var (
+	errScriptCallableValueInvalid    = errors.New("script callable: invalid value")
+	errScriptCallableValueCrossOwner = errors.New("script callable: cross-owner value")
+	errScriptCallableValueStale      = errors.New("script callable: stale value")
+)
+
 type hostCallable struct {
 	hostFunc      HostFunc
+	contextHost   ContextHostFunc
 	native        nativeFunc
 	yieldableHost yieldableHostFunc
 }
@@ -848,13 +872,15 @@ func HostFuncValue(fn HostFunc) Value {
 // ContextHostFuncValue returns a Go host callback value that receives the
 // active runtime context when called.
 func ContextHostFuncValue(fn ContextHostFunc) Value {
-	return nativeFuncValue(func(globals *globalEnv, args []Value) ([]Value, error) {
+	callable := &hostCallable{contextHost: fn}
+	callable.native = func(globals *globalEnv, args []Value) ([]Value, error) {
 		ctx := contextFromGlobalEnv(globals)
 		if scope, ok := invocationScopeFromGlobalEnv(globals); ok {
 			ctx = contextWithInvocationScope(ctx, scope)
 		}
 		return fn(ctx, ownedHostArgs(args))
-	})
+	}
+	return valueWithRef(HostFuncKind, unsafe.Pointer(callable))
 }
 
 // ownedHostArgs creates the escape-barrier copy passed to public host
@@ -1031,6 +1057,35 @@ func functionValueWithUpvalues(proto *Proto, upvalues []*cell, values []Value, v
 
 func closureFunctionValue(closure *closure) Value {
 	return valueWithRef(FunctionKind, unsafe.Pointer(closure))
+}
+
+func transientScriptCallableValue(handle scriptCallableHandle) (Value, error) {
+	if handle.owner == 0 || handle.index == 0 || handle.generation == 0 {
+		return Value{}, errScriptCallableValueInvalid
+	}
+	payload := &transientScriptCallablePayload{handle: handle}
+	return Value{
+		ref:  unsafe.Pointer(payload),
+		bits: uint64(FunctionKind) | valueTransientScriptCallableTag,
+	}, nil
+}
+
+func decodeTransientScriptCallableValue(value Value, owner uint64, validate scriptCallableHandleValidator) (scriptCallableHandle, error) {
+	if owner == 0 || valueKind(value) != FunctionKind ||
+		value.bits != uint64(FunctionKind)|valueTransientScriptCallableTag || valueRef(value) == nil {
+		return scriptCallableHandle{}, errScriptCallableValueInvalid
+	}
+	handle := (*transientScriptCallablePayload)(valueRef(value)).handle
+	if handle.owner == 0 || handle.index == 0 || handle.generation == 0 {
+		return scriptCallableHandle{}, errScriptCallableValueInvalid
+	}
+	if handle.owner != owner {
+		return scriptCallableHandle{}, errScriptCallableValueCrossOwner
+	}
+	if validate == nil || !validate(handle) {
+		return scriptCallableHandle{}, errScriptCallableValueStale
+	}
+	return handle, nil
 }
 
 // Kind returns the value kind.
@@ -2538,6 +2593,14 @@ func (v Value) hostFunction() (HostFunc, bool) {
 	return callable.hostFunc, true
 }
 
+func (v Value) contextHostFunction() (ContextHostFunc, bool) {
+	callable := v.hostCallableRef()
+	if callable == nil || callable.contextHost == nil {
+		return nil, false
+	}
+	return callable.contextHost, true
+}
+
 func (v Value) nativeFunction() (nativeFunc, bool) {
 	if valueKind(v) != HostFuncKind {
 		return nil, false
@@ -2568,7 +2631,7 @@ func (v Value) hostCallableRef() *hostCallable {
 }
 
 func (v Value) scriptFunction() (*closure, bool) {
-	if valueKind(v) != FunctionKind || valueRef(v) == nil {
+	if valueKind(v) != FunctionKind || v.bits != uint64(FunctionKind) || valueRef(v) == nil {
 		return nil, false
 	}
 	return (*closure)(valueRef(v)), true

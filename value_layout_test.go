@@ -68,6 +68,9 @@ func TestValueSemanticMatrixRoundTripsScalarsAndReferences(t *testing.T) {
 	if got, ok := contextHost.nativeFunction(); !ok || got == nil {
 		t.Fatalf("context host round trip = %v, %t; want native callback", got, ok)
 	}
+	if got, ok := contextHost.contextHostFunction(); !ok || got == nil {
+		t.Fatalf("context host direct round trip = %v, %t; want context callback", got, ok)
+	}
 	if got, ok := native.nativeFunction(); !ok || got == nil {
 		t.Fatalf("native ID round trip = %v, %t; want native callback", got, ok)
 	}

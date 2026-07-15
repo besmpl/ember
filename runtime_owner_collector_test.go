@@ -149,6 +149,7 @@ func TestRuntimeCollectScansPersistentValuesAndProgramConstants(t *testing.T) {
 	constant := newStringBox("constant root")
 	proto := &Proto{constants: []Value{stringValueFromBox(constant)}}
 	runtime := &Runtime{
+		execution:   vmRuntimeExecution{},
 		owner:       owner,
 		program:     &Program{protos: map[moduleKey]*Proto{{}: proto}},
 		entrypoints: map[moduleKey]Value{{}: TableValue(entrypoint)},
@@ -195,7 +196,7 @@ func TestRuntimeCollectScansPersistentValuesAndProgramConstants(t *testing.T) {
 
 func TestRuntimeCollectSerializesWithClose(t *testing.T) {
 	for iteration := 0; iteration < 20; iteration++ {
-		runtime := &Runtime{owner: newRuntimeOwner(), program: &Program{}}
+		runtime := &Runtime{execution: vmRuntimeExecution{}, owner: newRuntimeOwner(), program: &Program{}}
 		var ready sync.WaitGroup
 		ready.Add(2)
 		start := make(chan struct{})

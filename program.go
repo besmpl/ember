@@ -78,6 +78,10 @@ type Program struct {
 	entrypoints []programEntrypoint
 	graph       moduleGraph
 	protos      map[moduleKey]*Proto
+
+	programImageOnce sync.Once
+	programImage     *programImage
+	programImageErr  error
 }
 
 type programEntrypoint struct {
@@ -142,6 +146,7 @@ type HostCall struct {
 // reports an active runtime without tearing down the in-flight call.
 type Runtime struct {
 	closeMu         sync.Mutex
+	execution       runtimeExecution
 	owner           *runtimeOwner
 	program         *Program
 	host            RuntimeHost
@@ -223,11 +228,15 @@ func loadProgramWithArtifactStore(ctx context.Context, loader ModuleLoader, opti
 	}
 	report.Modules = moduleReports(combined, summaries)
 
-	return &Program{
+	program := &Program{
 		entrypoints: entrypoints,
 		graph:       combined,
 		protos:      protos,
-	}, report, nil
+	}
+	if _, err := program.preparedProgramImage(); err != nil {
+		return nil, report, fmt.Errorf("load program: %w", err)
+	}
+	return program, report, nil
 }
 
 // NewRuntime creates mutable execution state for p. It does not execute script
@@ -243,18 +252,20 @@ func (p *Program) NewRuntime(options RuntimeOptions) (*Runtime, error) {
 	if err := validateExecutionLimits(limits); err != nil {
 		return nil, err
 	}
-	owner := newRuntimeOwner()
-	owner.coroutineLimit = limits.MaxCoroutines
-	return &Runtime{
-		owner:           owner,
-		program:         p,
-		host:            options.Host,
-		entrypoints:     make(map[moduleKey]Value),
-		loaded:          make(map[moduleKey]Value),
-		requireAdapters: make(map[moduleKey]Value),
-		active:          make(map[moduleKey]bool),
-		limits:          limits,
-	}, nil
+	execution, err := selectRuntimeExecution(p)
+	if err != nil {
+		return nil, err
+	}
+	runtime := &Runtime{
+		execution: execution,
+		program:   p,
+		host:      options.Host,
+		limits:    limits,
+	}
+	if err := execution.initialize(runtime); err != nil {
+		return nil, err
+	}
+	return runtime, nil
 }
 
 // RunHook loads entrypoints lazily and calls hook in entrypoint order.
@@ -268,6 +279,14 @@ func (r *Runtime) RunHook(ctx context.Context, hook string, args ...Value) (Hook
 // and error semantics while allowing private callers that only need success
 // or failure to discard per-entrypoint outcomes.
 func (r *Runtime) runHook(ctx context.Context, hook string, args []Value, report *HookReport) error {
+	execution, err := r.executionAdapter()
+	if err != nil {
+		return err
+	}
+	return execution.runHook(r, ctx, hook, args, report)
+}
+
+func (r *Runtime) runVMHook(ctx context.Context, hook string, args []Value, report *HookReport) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -399,6 +418,23 @@ func (r *Runtime) Close() error {
 	if r == nil {
 		return nil
 	}
+	// Preserve the public zero-value contract without silently assigning the
+	// old VM to a Runtime that has lost or never received execution ownership.
+	r.closeMu.Lock()
+	if r.execution == nil {
+		r.closed = true
+		r.closeMu.Unlock()
+		return nil
+	}
+	r.closeMu.Unlock()
+	execution, err := r.executionAdapter()
+	if err != nil {
+		return err
+	}
+	return execution.close(r)
+}
+
+func (r *Runtime) closeVM() error {
 	r.closeMu.Lock()
 	defer r.closeMu.Unlock()
 	if r.closed {

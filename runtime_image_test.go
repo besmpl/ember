@@ -58,15 +58,15 @@ func TestPrepareCodeImageIsDeterministicAndMapped(t *testing.T) {
 	}
 }
 
-func TestPrepareCodeImageFailsClosed(t *testing.T) {
+func TestPrepareCodeImageMarksOwnerAndDetachRequirements(t *testing.T) {
 	tests := []struct {
-		name   string
-		source string
+		name          string
+		source        string
+		detachable    bool
+		requiresOwner bool
 	}{
-		{name: "string constant", source: `return "ember"`},
-		{name: "child prototype", source: `local function value() return 1 end return value()`},
-		{name: "table", source: `return {1}`},
-		{name: "global", source: `return math.pi`},
+		{name: "escaping closure alias", source: `local function value() return 1 end local copy = value return copy`},
+		{name: "global", source: `return math.pi`, detachable: true, requiresOwner: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -78,8 +78,8 @@ func TestPrepareCodeImageFailsClosed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if image.eligible || image.rejectReason == "" {
-				t.Fatalf("image = eligible:%t reason:%q, want fail-closed rejection", image.eligible, image.rejectReason)
+			if !image.eligible || image.detachable != test.detachable || image.requiresOwner != test.requiresOwner {
+				t.Fatalf("image = eligible:%t detachable:%t requiresOwner:%t reason:%q", image.eligible, image.detachable, image.requiresOwner, image.rejectReason)
 			}
 			if _, err := Run(proto); err != nil {
 				t.Fatalf("old-VM fallback failed: %v", err)
@@ -90,6 +90,30 @@ func TestPrepareCodeImageFailsClosed(t *testing.T) {
 	malformed := &Proto{registers: 1, words: []wordcodeWord{wordcodeOpcodeMask}}
 	if _, err := prepareCodeImage(malformed); err == nil {
 		t.Fatal("prepareCodeImage accepted malformed wordcode")
+	}
+}
+
+func TestPrepareCodeImageRejectsUnprovenNumericStringFromTable(t *testing.T) {
+	proto, err := Compile(`local values = {amount = "40"} return values.amount + 2`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := prepareCodeImage(proto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if image.eligible || image.rejectReason == "" {
+		t.Fatalf("image = eligible:%t reason:%q, want conservative numeric-string rejection", image.eligible, image.rejectReason)
+	}
+	values, err := Run(proto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 {
+		t.Fatalf("Run returned %d values, want 1", len(values))
+	}
+	if number, ok := values[0].Number(); !ok || number != 42 {
+		t.Fatalf("Run result = %v (%t), want old-VM coercion result 42", number, ok)
 	}
 }
 

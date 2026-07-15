@@ -22,7 +22,7 @@ func Run(proto *Proto) ([]Value, error) {
 	if err != nil {
 		return nil, fmt.Errorf("run: invalid prototype: %w", err)
 	}
-	if image.eligible {
+	if image.eligible && image.detachable && !image.requiresOwner {
 		return executeCodeImage(image, nil)
 	}
 

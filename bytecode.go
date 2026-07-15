@@ -165,7 +165,19 @@ var allOpcodes = [...]opcode{
 // execution cannot drift apart.
 var machineEligibleOpcodes = [...]opcode{
 	opLoadConst,
+	opLoadGlobal,
+	opSetGlobal,
 	opMove,
+	opNewTable,
+	opSetField,
+	opSetStringField,
+	opGetStringField,
+	opSetIndex,
+	opGetIndex,
+	opClosure,
+	opGetUpvalue,
+	opSetUpvalue,
+	opVararg,
 	opAdd,
 	opSub,
 	opMul,
@@ -199,6 +211,10 @@ var machineEligibleOpcodes = [...]opcode{
 	opJumpIfGreater,
 	opJumpIfFalse,
 	opJump,
+	opCall,
+	opCallOne,
+	opCallLocalOne,
+	opCallUpvalueOne,
 	opReturnOne,
 	opReturn,
 }
@@ -231,6 +247,7 @@ const (
 	opcodeMachineErrorNone opcodeMachineErrorClass = iota
 	opcodeMachineErrorOperands
 	opcodeMachineErrorNumericFor
+	opcodeMachineErrorTable
 )
 
 // opcodeMachinePolicy is the single classification used when lowering and
@@ -298,6 +315,11 @@ var opcodeMetadataTable = func() [opcodeLimit]opcodeMetadataEntry {
 	policy := table[opNumericForCheck].machine
 	policy.errorClass = opcodeMachineErrorNumericFor
 	table[opNumericForCheck].machine = policy
+	for _, op := range []opcode{opNewTable, opSetField, opSetStringField, opGetStringField, opSetIndex, opGetIndex} {
+		policy := table[op].machine
+		policy.errorClass = opcodeMachineErrorTable
+		table[op].machine = policy
+	}
 	for _, op := range allOpcodes {
 		table[op].directFrame = true
 	}

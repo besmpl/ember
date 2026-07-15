@@ -62,7 +62,7 @@ func TestCoroutineDoesNotRetainInvocationScopeAcrossLifecycle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	owner := newRuntimeOwner()
-	runtime := &Runtime{owner: owner}
+	runtime := &Runtime{execution: vmRuntimeExecution{}, owner: owner}
 	controller, err := newExecutionController(ctx, ExecutionLimits{MaxInstructions: 100})
 	if err != nil {
 		t.Fatalf("new controller: %v", err)
@@ -152,7 +152,7 @@ func TestCoroutineContextHostUsesActiveThreadScopeForCapture(t *testing.T) {
 	key := contextKey{}
 	ctx := context.WithValue(context.Background(), key, "coroutine")
 	owner := newRuntimeOwner()
-	runtime := &Runtime{owner: owner}
+	runtime := &Runtime{execution: vmRuntimeExecution{}, owner: owner}
 	var callback Callback
 	globals := map[string]Value{
 		"capture": ContextHostFuncValue(func(got context.Context, args []Value) ([]Value, error) {
@@ -184,7 +184,7 @@ func TestCoroutineContextHostUsesActiveThreadScopeForCapture(t *testing.T) {
 	if _, err := baseCoroutineResume(env, []Value{UserDataValue(coroutine.userdata)}); err != nil {
 		t.Fatalf("resume coroutine: %v", err)
 	}
-	if callback.state == nil {
+	if callback.target == nil {
 		t.Fatal("context host callback did not capture callback from coroutine")
 	}
 	values, err := callback.Call(context.Background())

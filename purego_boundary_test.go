@@ -217,7 +217,7 @@ func loadPureGoExecAllowlist(path string) (map[string]pureGoExecAllowEntry, erro
 
 func pureGoExecClass(class string) bool {
 	switch class {
-	case "pinned-luau", "runner-fingerprint", "generator-check":
+	case "pinned-luau", "runner-fingerprint", "generator-check", "test-helper":
 		return true
 	default:
 		return false

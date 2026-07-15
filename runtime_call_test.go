@@ -12,7 +12,7 @@ var benchmarkRuntimeRequireValue Value
 // BenchmarkRuntimeRequireEnvironment includes the per-invocation environment
 // and global-map setup around the cached require adapter.
 func BenchmarkRuntimeRequireEnvironment(b *testing.B) {
-	runtime := &Runtime{owner: newRuntimeOwner(), requireAdapters: make(map[moduleKey]Value)}
+	runtime := &Runtime{execution: vmRuntimeExecution{}, owner: newRuntimeOwner(), requireAdapters: make(map[moduleKey]Value)}
 	call := runtime.newInvocationScope(context.Background(), moduleKey{kind: moduleKeyLogical, path: "game/init"}, nil, nil)
 	_ = call.envWithRequire()
 	b.ReportAllocs()
@@ -23,7 +23,7 @@ func BenchmarkRuntimeRequireEnvironment(b *testing.B) {
 }
 
 func BenchmarkRuntimeRequireAdapterCacheLookup(b *testing.B) {
-	runtime := &Runtime{owner: newRuntimeOwner(), requireAdapters: make(map[moduleKey]Value)}
+	runtime := &Runtime{execution: vmRuntimeExecution{}, owner: newRuntimeOwner(), requireAdapters: make(map[moduleKey]Value)}
 	from := moduleKey{kind: moduleKeyLogical, path: "game/init"}
 	runtime.requireAdapter(from)
 	b.ReportAllocs()
@@ -51,7 +51,8 @@ func TestRetainedRequirePreservesModuleOriginAndUsesActiveScope(t *testing.T) {
 		return proto
 	}
 	runtime := &Runtime{
-		owner: newRuntimeOwner(),
+		execution: vmRuntimeExecution{},
+		owner:     newRuntimeOwner(),
 		program: &Program{protos: map[moduleKey]*Proto{
 			moduleA:      compile("return require"),
 			moduleAChild: compile(`return probe()`),
@@ -134,9 +135,9 @@ func TestRetainedRequirePreservesModuleOriginAndUsesActiveScope(t *testing.T) {
 }
 
 func TestRuntimeRequireAdapterRejectsRuntimeMismatch(t *testing.T) {
-	runtimeA := &Runtime{owner: newRuntimeOwner()}
+	runtimeA := &Runtime{execution: vmRuntimeExecution{}, owner: newRuntimeOwner()}
 	defer runtimeA.Close()
-	runtimeB := &Runtime{owner: newRuntimeOwner()}
+	runtimeB := &Runtime{execution: vmRuntimeExecution{}, owner: newRuntimeOwner()}
 	defer runtimeB.Close()
 	from := moduleKey{kind: moduleKeyLogical, path: "game/a"}
 	adapter := runtimeA.requireAdapter(from)
@@ -151,7 +152,7 @@ func TestRuntimeRequireAdapterRejectsRuntimeMismatch(t *testing.T) {
 }
 
 func TestRuntimeCollectImportsRequireAdapters(t *testing.T) {
-	runtime := &Runtime{owner: newRuntimeOwner(), requireAdapters: make(map[moduleKey]Value)}
+	runtime := &Runtime{execution: vmRuntimeExecution{}, owner: newRuntimeOwner(), requireAdapters: make(map[moduleKey]Value)}
 	from := moduleKey{kind: moduleKeyLogical, path: "game/a"}
 	value := runtime.requireAdapter(from)
 	if _, err := runtime.collect(); err != nil {

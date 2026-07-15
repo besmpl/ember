@@ -9,7 +9,7 @@ import (
 
 func TestCapturedCallbackRootsEscapedValuesUntilClose(t *testing.T) {
 	owner := newRuntimeOwner()
-	runtime := &Runtime{owner: owner, program: &Program{}}
+	runtime := &Runtime{execution: vmRuntimeExecution{}, owner: owner, program: &Program{}}
 	closure := &closure{proto: &Proto{}}
 	globalTable := NewTable()
 	call := invocationScope{
@@ -70,7 +70,7 @@ func TestCallbackCallContextHostReceivesCallerContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile callback: %v", err)
 	}
-	runtime := &Runtime{owner: newRuntimeOwner()}
+	runtime := &Runtime{execution: vmRuntimeExecution{}, owner: newRuntimeOwner()}
 	globals := map[string]Value{
 		"check": ContextHostFuncValue(func(ctx context.Context, _ []Value) ([]Value, error) {
 			observed = ctx.Value(key)

@@ -105,7 +105,7 @@ return { startup = function() capture(function() return 7 end) end }
 		t.Fatalf("RunHook returned error: %v", err)
 	}
 	defer callback.Close()
-	if callback.state == nil {
+	if callback.target == nil {
 		t.Fatal("host call did not capture callback")
 	}
 	values, err := callback.Call(context.Background())
@@ -165,7 +165,7 @@ return { startup = function() connect(function() block() end) end }
 		runtime.Close()
 		t.Fatalf("RunHook returned error: %v", err)
 	}
-	if callback.state == nil {
+	if callback.target == nil {
 		runtime.Close()
 		t.Fatal("host call did not capture callback")
 	}
