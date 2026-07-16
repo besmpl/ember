@@ -511,6 +511,29 @@ The retained path has moved beyond the original starting state:
   supported `math.archMin` helper and has only cold bounds/stack-growth
   helpers otherwise, with no opcode, descriptor, Machine table, runtime
   string, interning, or VM dispatch.
+- A second representative `ai_utility_scoring` capture composes one mutable
+  standalone record with two independent four-record arrays, typed numeric
+  fields, finite string IDs, nested iteration, comparisons, and integer
+  division. Nine nonescaping records scalarize into ordinary locals and fixed
+  arrays; generated code, prepared owner, generic Machine, and the independent
+  interpreter agree across negative, ordinary, and large seeds. Private
+  function mutation retains the same structural lowering; record escape,
+  mixed standalone field kinds, and array shape drift fail closed. Direct and
+  prepared paths allocate zero when warmed and materialize no owner tables or
+  strings. The direct kernel has a five-sample median of about
+  4.460 microseconds (4.189-5.432 microseconds observed), while the prepared
+  owner path has a median of about 4.621 microseconds
+  (4.466-5.165 microseconds observed), versus about 946.5 microseconds through
+  generic Machine (842.9-3,010.0 microseconds observed). Pinned Luau `-O2 -g0`
+  produced the same warmed checksum with a five-sample median of about
+  69.805 microseconds per call (65.199-132.799 microseconds observed), making
+  prepared about `0.066x` Luau. Deterministic generated source is 23,318
+  bytes. Linked ARM64 is 1,168 bytes for the direct kernel and 1,280 bytes for
+  the prepared body; each has only cold bounds/stack-growth helpers and no
+  opcode, descriptor, Machine table, runtime string, interning, or VM
+  dispatch. This supplies the second representative private compiler shape;
+  the formal guest-batch capture contract still remains to be wired and run
+  before any public prepared API.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
