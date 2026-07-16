@@ -59,3 +59,5 @@ fi
 
 EMBER_PUREGO_LINKED_BINARY="$test_binary" CGO_ENABLED=0 \
 	go test -run '^TestPureGoLinkedBinary$' .
+
+scripts/check-machine-backend --cross --binary "$test_binary"

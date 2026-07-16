@@ -6,18 +6,25 @@ func runScalarMachineLoop(machine *scalarMachine) (int, error) {
 	protoID := machine.activeProto
 	base := machine.activeBase
 	pc := machine.restartPC
+	burstSuppressedProto := int32(-1)
+	burstSuppressedHeader := -1
 	machine.restartPC = 0
 	for {
 		if protoID < 0 || int(protoID) >= len(machine.image.prototypes) {
 			return pc, fmt.Errorf("compact Machine prototype %d is out of range", protoID)
 		}
 		currentProto := &machine.image.prototypes[protoID]
+		if burstSuppressedProto >= 0 && (protoID != burstSuppressedProto || !machineBurstPCInRegion(currentProto, burstSuppressedHeader, pc)) {
+			burstSuppressedProto = -1
+			burstSuppressedHeader = -1
+		}
 		if pc < 0 || pc >= len(currentProto.operations) {
 			return pc, errCompactMachineFellOffEnd
 		}
 		machine.activeProto = protoID
 		machine.activeBase = base
 		operation := currentProto.operations[pc]
+		skippedCharge := machine.skipCharge != 0
 		if machine.skipCharge != 0 {
 			machine.skipCharge = 0
 		} else if machine.window.controller != nil {
@@ -205,6 +212,25 @@ func runScalarMachineLoop(machine *scalarMachine) (int, error) {
 			}
 
 		case opNumericForCheck:
+			if machine.window.controller == nil && !skippedCharge && (protoID != burstSuppressedProto || pc != burstSuppressedHeader) {
+				if region, ok := machineBurstRegionAt(currentProto, pc); ok {
+					control, supported := runMachineBurst(region, currentProto.burstOperations, currentProto.burstGuards, machine.registers, machine.numberBits, base, machineBurstMaxOperations)
+					if supported {
+						switch control.status {
+						case machineBurstComplete, machineBurstQuantum:
+							pc = int(control.nextPC)
+							continue
+						case machineBurstFallback:
+							burstSuppressedProto = protoID
+							burstSuppressedHeader = int(region.checkPC)
+							if int(control.nextPC) != pc {
+								pc = int(control.nextPC)
+								continue
+							}
+						}
+					}
+				}
+			}
 			exit, err := machine.numericForCheck(a, b, c)
 			if err != nil {
 				return pc, err
