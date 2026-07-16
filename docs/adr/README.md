@@ -25,4 +25,8 @@ Current runtime decisions:
   runtime call-boundary setup instead.
 - `0007-compact-production-machine.md`: accepted `CodeImage`/owner-bound
   `Machine` architecture, pure-Go production kernel, migration invariants, and
-  supersession map.
+  supersession map. ADR 0008 retains the Machine as the complete fallback but
+  supersedes its final-backend and performance-target clauses.
+- `0008-ssa-aot-for-luau-parity.md`: select build-time SSA/value/shape-
+  specialized AOT to ordinary Go for prepared parity, retain exact Machine side
+  exits, and defer static assembly to a profile-proven second lowerer.

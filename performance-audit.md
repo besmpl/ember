@@ -48,10 +48,73 @@ compile/load, image preparation, Machine bind/detach/close, stateless and
 persistent calls, globals, modules, host calls, callbacks, coroutines, and
 result lifetime.
 
-The all-37 Ember/Luau speed pair is intentionally not frozen from an unquiet
-workstation. Acquisition fails closed unless load and aggregate CPU satisfy
-the acceptance threshold for three consecutive probes. A failed quietness
-wait produces no reusable capture directory and contributes no ratios.
+The complete Machine all-37 pair was later acquired cleanly from commit
+`24797945c04b1cd104e802b375f8233fe459909b` under the same controlled
+environment. The capture directory hashes are
+`c0b2f7e4da30a532a265944642cf949d1d64747e8f8757d8bb00bea2231e70b0`
+and
+`8529c07faea2ccbe82dd7ee9477e201e8954c965f07dcf23942019ecc66739dc`.
+Every row misses 1:1: the best row is about 3.02x Luau, arithmetic about 5.85x,
+recursive Fibonacci about 6.2x, and the slowest table/array rows about
+21x-22.2x. Representative sparse-grid, callback, and vararg scenarios remain
+about 9.7x, 15.8x-16.9x, and 18.0x. This evidence supersedes interpreter-only
+parity as the final architecture target; see ADR 0008.
+
+## No-CGO architecture selection evidence
+
+The reusable proof harness was retained at exact commit
+`b9717cc835637d3902a3df5058bb8985a58fe85a`. It uses one parameterized program
+per case, runtime N/seed, the `guest_batch_v1` timer contract, checksum
+equivalence, N=`{1,10,100,1000}`, three fitted repeats, alternating acquisition
+order, and clean-runner admission. All captures record `vcs_modified=false`,
+source SHA-256
+`98d49d8afd03ab7ffd3881e7e9e965819cdd07c8ec40f26cceb80791d181ba53`,
+binary SHA-256
+`cdf291e1d196c01552091984608fa0e0d137d70e99cc5d414edb5acbc0978a8b`,
+and the pinned Luau hash above.
+
+| Capture | Directory hash | Median range versus Luau |
+| --- | --- | --- |
+| direct typed Go ceiling A | `2cfa240c51957e65574fca9c98364794cadd8e695775c293b72956d75eb2cf9c` | `0.011x-0.094x` |
+| direct typed Go ceiling B | `72813a1be85dfb5ff985b711bcdfa249643774609f82fc1dcc4af4007b948906` | `0.012x-0.095x` |
+| generic-representation sensitivity A | `a24f21ff5a9abda1bbc72fd0d5546b5d48bd46b644c66a4b049a7587f8ab04f9` | `0.011x-0.310x` |
+| generic-representation sensitivity B | `caacfd7d7f4f995a66d354c975b4bf5402fa97167a6f2a98ad469cb066b50fb8` | `0.011x-0.313x` |
+
+The direct ceiling covers arithmetic/branches, stable fields, arrays and
+iteration, dynamic closures/upvalues, recursion, varargs/multiple returns,
+metatable fallback, coroutine state machines, generated strings, and mutating
+arrays. The sensitivity variants preserve ordinary Go maps, strings, closures,
+and variadic slices. Their worst row remains about 3.2x faster than Luau, so
+the ranking does not reverse under the sensitivity test.
+
+Most specialized lowerings allocate zero. The packed sparse-grid lowering uses
+about 2,840 B/52 allocations per guest call; its ordinary string/map variant
+uses about 18.7 KiB/4,564 allocations. Signal-bus Go closures use about
+224 B/14 allocations. These are rejection pressure for generic Go heap
+representations, not acceptable production budgets. The selected compiler must
+use Machine arenas, interned strings, scalar replacement, and exact exits while
+staying within the frozen warmed ceilings.
+
+The eleven specialized functions plus recursive helper occupy about 5,232
+linked text bytes. Five 2-second direct-function samples put compiled Go and
+supported Plan 9 ARM64 assembly in the same approximate 226-238 ns range, so
+assembly has no demonstrated architectural advantage for identical lowered
+work.
+
+A discarded pure-Go MAP_JIT leaf also matched Go rather than beating it. With
+asynchronous preemption disabled, the Go and JIT medians were about 275.5 ns
+and 275.9 ns. The test-binary SHA-256 was
+`02c4a3298fb6ee91cf6e8086e15147edc7b50c4c5bee837c96fd18612802174c`
+and the external benchmark-log SHA-256 was
+`7e2f64586258c5639556111bb49e34da340c98db913676f2474b2601d96dbe88`.
+The executable-memory source was deliberately not retained under the pure-Go
+product boundary.
+
+This evidence selects build-time SSA/value/shape-specialized AOT to ordinary
+Go, retains the complete Machine as exact fallback, defers static assembly to
+a profile-proven second lowerer, and rejects JIT as the production foundation.
+See ADR 0008 and
+`luau-parity-no-cgo-ssa-aot-implementation-plan.md`.
 
 ## Compact-migration mechanism profile
 
@@ -213,7 +276,10 @@ At the baseline commit:
 The Proto check is a field-classification test, not a complete `sizeof(Proto)`
 measurement.
 
-## Evidence-gated execution order
+## Historical compact-Machine execution order
+
+This sequence records the earlier Machine migration pressure. ADR 0008 and the
+prepared parity plan supersede it as the active final-performance path.
 
 1. **Phase 2 - persistent hook boundary.** Establish the private hook core and
    allocation contract, then elide only the unlimited-background controller,
@@ -247,7 +313,11 @@ The tracked files `docs/exec-plans/interpreter-core-speed.md`,
 `docs/exec-plans/massive-optimization.md` are retired temporary roadmaps.
 Their durable rationale remains in this audit and ADRs 0004, 0005, and 0006.
 The active runtime coordination document is
-[`runtime-speed-2x-no-cgo-production-migration-implementation-plan.md`](runtime-speed-2x-no-cgo-production-migration-implementation-plan.md).
+[`luau-parity-no-cgo-ssa-aot-implementation-plan.md`](luau-parity-no-cgo-ssa-aot-implementation-plan.md).
+The earlier compact Machine coordination document remains at
+[`runtime-speed-2x-no-cgo-production-migration-implementation-plan.md`](runtime-speed-2x-no-cgo-production-migration-implementation-plan.md)
+for migration archaeology; ADR 0008 supersedes its final-backend and final
+performance-target direction.
 The earlier `performance-optimization-implementation-plan.md` is historical;
 its durable measurements and retained decisions remain in this audit and the
 ADRs.

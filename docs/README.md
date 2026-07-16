@@ -39,7 +39,11 @@ and retire or delete it when the slice lands or is abandoned.
 - `adr/0006-persistent-table-allocation-gate.md`: evidence for stopping the
   conditional table allocator campaign after persistent workload profiling.
 - `adr/0007-compact-production-machine.md`: accepted owner-neutral `CodeImage`,
-  owner-bound scalar `Machine`, pure-Go kernel, and production migration.
+  owner-bound scalar `Machine`, pure-Go kernel, and production migration; ADR
+  0008 supersedes its final-backend and performance-target clauses.
+- `adr/0008-ssa-aot-for-luau-parity.md`: accepted prepared SSA AOT-to-Go
+  architecture, exact Machine side exits, lifecycle claim split, and candidate
+  rejection evidence.
 
 ## Workflow Documents
 
@@ -47,9 +51,11 @@ and retire or delete it when the slice lands or is abandoned.
   interface decisions.
 - `../performance-audit.md`: current reproducible performance evidence and
   noise envelope.
+- `../luau-parity-no-cgo-ssa-aot-implementation-plan.md`: active Simple Loop
+  delivery contract for the prepared parity architecture.
 - `../runtime-speed-2x-no-cgo-production-migration-implementation-plan.md`:
-  active production-first runtime migration plan. It replaces the abandoned
-  proof and earlier incremental runtime-speed plans.
+  retained background for the compact Machine migration. ADR 0008 and the
+  prepared parity plan supersede its final-backend and final-target direction.
 
 Historical performance execution plans are intentionally not part of the
 navigation. Their durable decisions remain in the performance audit and ADRs;

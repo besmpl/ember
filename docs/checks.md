@@ -135,6 +135,39 @@ counts cannot rise; cold byte and retained-state snapshots remain report-only.
 A finite snapshot cannot establish unbounded growth, so a later repeated-growth
 test must supply that evidence before retained bytes can become a blocking gate.
 
+## No-CGO architecture proof
+
+`internal/architectureproof` is a reusable architecture ceiling, not a
+production backend. It contains parameterized manual semantic lowerings,
+generic-representation sensitivity variants, and a direct static ARM64
+comparison.
+
+Run deterministic and live semantic checks:
+
+```sh
+CGO_ENABLED=0 go test ./internal/architectureproof
+CGO_ENABLED=0 GOMAXPROCS=1 \
+  EMBER_ARCHITECTURE_PROOF_LIVE=1 \
+  LUAU_BIN=/opt/homebrew/bin/luau \
+  go test -run '^TestProofCasesMatchLuau$' ./internal/architectureproof
+```
+
+Acquire an exact-revision clean capture from a clean worktree:
+
+```sh
+CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau \
+  scripts/check-architecture-proof \
+  --backend go-aot-ceiling --capture-pair a \
+  --output /tmp/ember-architecture-ceiling-a
+```
+
+Use `go-aot-sensitivity` for the ordinary Go
+string/map/closure/variadic variants and acquire independent A/B roles for
+decision evidence. The runner records `guest_batch_v1`, runtime N/seed,
+checksums, allocations, binary/source hashes, exact Git revision, and whether
+busy-runner admission was waived. `--allow-busy` is exploratory only and is
+never acceptance evidence.
+
 ## Scheduled evidence
 
 `.github/workflows/scheduled.yml` runs the long-lived checks weekly (and by

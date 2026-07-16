@@ -1,6 +1,8 @@
 # ADR 0007: Compact Production Machine
 
-Status: Accepted
+Status: Accepted; final-backend and performance-target clauses are superseded
+by ADR 0008. The CodeImage, Machine, ownership, effect, and no-CGO decisions
+remain active.
 
 ## Context
 
