@@ -29,8 +29,9 @@ return kernel
 func TestBackendGoNumericProofEmitsDeterministicDirectSource(t *testing.T) {
 	ir := backendNumericProofIR(t)
 	options := backendGoNumericOptions{
-		packageName:  "ember",
-		functionName: "backendGeneratedNumericFixture",
+		packageName:          "ember",
+		functionName:         "backendGeneratedNumericFixture",
+		preparedFunctionName: "backendGeneratedNumericPreparedFixture",
 	}
 	first, err := emitBackendGoNumericProof(ir, options)
 	if err != nil {
@@ -54,7 +55,8 @@ func TestBackendGoNumericProofEmitsDeterministicDirectSource(t *testing.T) {
 	}
 	if !strings.Contains(text, "math.Floor") ||
 		!strings.Contains(text, "goto b") ||
-		!strings.Contains(text, "return") {
+		!strings.Contains(text, "context.numberParameter(0)") ||
+		!strings.Contains(text, "machinePreparedReturnOneNumber(result)") {
 		t.Fatalf("generated source does not contain direct arithmetic CFG:\n%s", text)
 	}
 }
@@ -107,8 +109,9 @@ func TestBackendGoNumericProofIgnoresSourceIdentity(t *testing.T) {
 
 func TestBackendGoNumericProofGeneratedFixtureIsFreshAndCorrect(t *testing.T) {
 	generated, err := emitBackendGoNumericProof(backendNumericProofIR(t), backendGoNumericOptions{
-		packageName:  "ember",
-		functionName: "backendGeneratedNumericFixture",
+		packageName:          "ember",
+		functionName:         "backendGeneratedNumericFixture",
+		preparedFunctionName: "backendGeneratedNumericPreparedFixture",
 	})
 	if err != nil {
 		t.Fatal(err)

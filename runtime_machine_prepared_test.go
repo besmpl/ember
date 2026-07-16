@@ -11,15 +11,7 @@ func TestMachinePreparedBindingRunsGeneratedNumericFunctionAndReplaysFailedGuard
 	calls := 0
 	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
 		calls++
-		seed, ok := context.numberParameter(0)
-		if !ok {
-			return machinePreparedReplayEntry()
-		}
-		result, ok := backendGeneratedNumericFixture(seed)
-		if !ok {
-			return machinePreparedReplayEntry()
-		}
-		return machinePreparedReturnOneNumber(result)
+		return backendGeneratedNumericPreparedFixture(context)
 	})
 	owner, err := newMachineOwnerWithPrepared(image, program)
 	if err != nil {
@@ -79,15 +71,7 @@ func TestMachinePreparedControlledExecutionStaysGenericAndChargesExactly(t *test
 	calls := 0
 	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
 		calls++
-		seed, ok := context.numberParameter(0)
-		if !ok {
-			return machinePreparedReplayEntry()
-		}
-		result, ok := backendGeneratedNumericFixture(seed)
-		if !ok {
-			return machinePreparedReplayEntry()
-		}
-		return machinePreparedReturnOneNumber(result)
+		return backendGeneratedNumericPreparedFixture(context)
 	})
 	prepared, err := newMachineOwnerWithPrepared(image, program)
 	if err != nil {
@@ -138,15 +122,7 @@ func TestMachinePreparedBindingRejectsMismatchBeforeExecutionAndCopiesInventory(
 	calls := 0
 	function := func(context machinePreparedContext) machinePreparedExit {
 		calls++
-		seed, ok := context.numberParameter(0)
-		if !ok {
-			return machinePreparedReplayEntry()
-		}
-		result, ok := backendGeneratedNumericFixture(seed)
-		if !ok {
-			return machinePreparedReplayEntry()
-		}
-		return machinePreparedReturnOneNumber(result)
+		return backendGeneratedNumericPreparedFixture(context)
 	}
 	program := machinePreparedTestProgram(t, image, 0, 1, function)
 

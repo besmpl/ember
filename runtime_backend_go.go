@@ -8,8 +8,9 @@ import (
 )
 
 type backendGoNumericOptions struct {
-	packageName  string
-	functionName string
+	packageName          string
+	functionName         string
+	preparedFunctionName string
 }
 
 type backendGoNumericPlan struct {
@@ -33,6 +34,10 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	}
 	if !token.IsIdentifier(options.functionName) || token.Lookup(options.functionName).IsKeyword() {
 		return nil, fmt.Errorf("emit backend Go numeric proof: invalid function name %q", options.functionName)
+	}
+	if options.preparedFunctionName != "" &&
+		(!token.IsIdentifier(options.preparedFunctionName) || token.Lookup(options.preparedFunctionName).IsKeyword()) {
+		return nil, fmt.Errorf("emit backend Go numeric proof: invalid prepared function name %q", options.preparedFunctionName)
 	}
 	plan, err := buildBackendGoNumericPlan(ir)
 	if err != nil {
@@ -75,6 +80,25 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	}
 	source.WriteString(emitter.body.String())
 	source.WriteString("}\n")
+	if options.preparedFunctionName != "" {
+		fmt.Fprintf(&source, "\nfunc %s(context machinePreparedContext) machinePreparedExit {\n", options.preparedFunctionName)
+		for parameter := 0; parameter < ir.params; parameter++ {
+			fmt.Fprintf(&source, "\tp%d, ok := context.numberParameter(%d)\n", parameter, parameter)
+			source.WriteString("\tif !ok {\n\t\treturn machinePreparedReplayEntry()\n\t}\n")
+		}
+		source.WriteString("\tresult, ok := ")
+		source.WriteString(options.functionName)
+		source.WriteByte('(')
+		for parameter := 0; parameter < ir.params; parameter++ {
+			if parameter != 0 {
+				source.WriteString(", ")
+			}
+			fmt.Fprintf(&source, "p%d", parameter)
+		}
+		source.WriteString(")\n")
+		source.WriteString("\tif !ok {\n\t\treturn machinePreparedReplayEntry()\n\t}\n")
+		source.WriteString("\treturn machinePreparedReturnOneNumber(result)\n}\n")
+	}
 	formatted, err := format.Source([]byte(source.String()))
 	if err != nil {
 		return nil, fmt.Errorf("emit backend Go numeric proof: format generated source: %w", err)

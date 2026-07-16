@@ -88,3 +88,15 @@ b5:
 b6:
 	return v9, true
 }
+
+func backendGeneratedNumericPreparedFixture(context machinePreparedContext) machinePreparedExit {
+	p0, ok := context.numberParameter(0)
+	if !ok {
+		return machinePreparedReplayEntry()
+	}
+	result, ok := backendGeneratedNumericFixture(p0)
+	if !ok {
+		return machinePreparedReplayEntry()
+	}
+	return machinePreparedReturnOneNumber(result)
+}
