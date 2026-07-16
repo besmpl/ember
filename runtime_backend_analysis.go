@@ -16,13 +16,21 @@ func buildBackendProtoIR(proto *machineProto) (*backendProtoIR, error) {
 		return nil, fmt.Errorf("build backend IR: empty Machine prototype")
 	}
 	ir := &backendProtoIR{
-		registers: proto.registers,
-		params:    proto.params,
-		variadic:  proto.variadic,
-		blocks:    make([]backendBlockIR, len(proto.blocks)),
-		ops:       make([]backendOperationIR, len(proto.operations)),
-		pcToBlock: make([]int32, len(proto.operations)),
-		constants: append([]machineConstant(nil), proto.constants...),
+		registers:                proto.registers,
+		params:                   proto.params,
+		variadic:                 proto.variadic,
+		maxResults:               proto.maxResults,
+		detachable:               proto.detachable,
+		requiresOwner:            proto.requiresOwner,
+		requiresNumericCoercion:  proto.requiresNumericCoercion,
+		requiresGeneratedStrings: proto.requiresGeneratedStrings,
+		sourceName:               proto.sourceName,
+		functionName:             proto.functionName,
+		blocks:                   make([]backendBlockIR, len(proto.blocks)),
+		ops:                      make([]backendOperationIR, len(proto.operations)),
+		pcToBlock:                make([]int32, len(proto.operations)),
+		constants:                append([]machineConstant(nil), proto.constants...),
+		upvalues:                 append([]machineUpvalue(nil), proto.upvalues...),
 	}
 	for blockIndex, source := range proto.blocks {
 		block := &ir.blocks[blockIndex]
@@ -79,6 +87,8 @@ func buildBackendProtoIR(proto *machineProto) (*backendProtoIR, error) {
 			nativeID:     source.nativeID,
 			guardField:   source.guardField,
 			guestCharge:  source.guestCharge,
+			tailCharge:   source.tailCharge,
+			errorClass:   source.errorClass,
 			effects:      effects,
 			exit:         exit,
 			reads:        reads,

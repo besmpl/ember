@@ -240,6 +240,8 @@ type backendOperationIR struct {
 	nativeID     int32
 	guardField   machineStringID
 	guestCharge  uint8
+	tailCharge   uint8
+	errorClass   opcodeMachineErrorClass
 	effects      backendEffect
 	exit         backendExitPolicy
 	reads        backendRegisterSet
@@ -274,14 +276,22 @@ type backendBlockIR struct {
 }
 
 type backendProtoIR struct {
-	registers int
-	params    int
-	variadic  bool
-	blocks    []backendBlockIR
-	ops       []backendOperationIR
-	pcToBlock []int32
-	values    []backendValueIR
-	initial   []backendValueID
-	constants []machineConstant
-	edges     []backendEdgeIR
+	registers                int
+	params                   int
+	variadic                 bool
+	maxResults               int
+	detachable               bool
+	requiresOwner            bool
+	requiresNumericCoercion  bool
+	requiresGeneratedStrings bool
+	sourceName               string
+	functionName             string
+	blocks                   []backendBlockIR
+	ops                      []backendOperationIR
+	pcToBlock                []int32
+	values                   []backendValueIR
+	initial                  []backendValueID
+	constants                []machineConstant
+	upvalues                 []machineUpvalue
+	edges                    []backendEdgeIR
 }
