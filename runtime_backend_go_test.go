@@ -191,6 +191,53 @@ end
 return kernel
 `
 
+const backendSparseGridProofSource = `
+local function kernel(seed)
+    local cells = {
+        ["0:0"] = {terrain = 1, heat = 5 + seed % 5},
+        ["1:0"] = {terrain = 2, heat = 3},
+        ["2:1"] = {terrain = 1, heat = 7},
+        ["3:2"] = {terrain = 3, heat = 2},
+        ["4:4"] = {terrain = 2, heat = 9},
+    }
+    local offsets = {
+        {dx = 1, dy = 0},
+        {dx = -1, dy = 0},
+        {dx = 0, dy = 1},
+        {dx = 0, dy = -1},
+    }
+    local function cellKey(x, y)
+        return tostring(x) .. ":" .. tostring(y)
+    end
+    local total = 0
+    for tick = 1, 36 do
+        for x = 0, 4 do
+            for y = 0, 4 do
+                local key = cellKey(x, y)
+                local center = cells[key]
+                if center ~= nil then
+                    for _, offset in offsets do
+                        local neighborKey = cellKey(x + offset.dx, y + offset.dy)
+                        local neighbor = cells[neighborKey]
+                        if neighbor ~= nil then
+                            local flow = center.heat - neighbor.heat
+                            if flow < 0 then flow = -flow end
+                            center.heat = center.heat + tick % 3 - neighbor.terrain
+                            total = total + flow + center.heat
+                        elseif tick % 5 == 0 then
+                            cells[neighborKey] = {terrain = tick % 3 + 1, heat = x + y + tick % 4}
+                            total = total + cells[neighborKey].heat
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return total + (cells["2:2"] and cells["2:2"].heat or 0) + (cells["4:4"] and cells["4:4"].heat or 0)
+end
+return kernel
+`
+
 const backendArrayOpsProofSource = `
 local function kernel(seed)
     local values = {}
@@ -1656,6 +1703,203 @@ return kernel
 	}
 	if got := strings.Count(string(generated), "context.intrinsicUnchanged("); got != 2 {
 		t.Fatalf("inline structural tostring guard count = %d, want 2:\n%s", got, generated)
+	}
+}
+
+func TestBackendGoSparseGridRecordShapeIsRecognized(t *testing.T) {
+	irs := backendStructuralStringKeyProofIRs(t, backendSparseGridProofSource)
+	options := backendGoNumericOptions{
+		directTargets: backendStructuralStringKeyProofTargets(irs),
+	}
+	keys := analyzeBackendGoStructuralKeys(irs[1], options)
+	records := analyzeBackendGoRecordTables(irs[1], keys)
+	if !records.enabled {
+		t.Fatalf("sparse-grid record shape was not recognized: %s", records.rejectReason)
+	}
+	if len(records.maps) != 1 || len(records.arrays) != 1 || len(records.records) != 10 {
+		t.Fatalf(
+			"sparse-grid record inventory = maps %d arrays %d records %d, want 1/1/10",
+			len(records.maps),
+			len(records.arrays),
+			len(records.records),
+		)
+	}
+	if records.maps[0].recordCount != 6 ||
+		len(records.maps[0].fieldNames) != 2 ||
+		records.arrays[0].length != 4 ||
+		len(records.arrays[0].fieldNames) != 2 {
+		t.Fatalf("sparse-grid record shapes = map %#v array %#v", records.maps[0], records.arrays[0])
+	}
+	generated, err := emitBackendGoNumericProof(irs[1], backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedSparseGrid",
+		preparedFunctionName: "backendGeneratedSparseGridPrepared",
+		directTargets:        options.directTargets,
+	})
+	if err != nil {
+		t.Fatalf("emit sparse-grid record shape: %v", err)
+	}
+	if _, err := goparser.ParseFile(token.NewFileSet(), "generated_sparse_grid.go", generated, goparser.AllErrors); err != nil {
+		t.Fatalf("parse generated sparse-grid source: %v", err)
+	}
+}
+
+func TestBackendGoSparseGridFixtureIsFreshAndCorrect(t *testing.T) {
+	irs := backendStructuralStringKeyProofIRs(t, backendSparseGridProofSource)
+	generated, err := emitBackendGoNumericProof(irs[1], backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedSparseGrid",
+		preparedFunctionName: "backendGeneratedSparseGridPreparedFixture",
+		directTargets:        backendStructuralStringKeyProofTargets(irs),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fixture = "runtime_backend_sparse_grid_generated_test.go"
+	onDisk, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(generated, onDisk) {
+		t.Fatal("generated sparse-grid fixture is stale")
+	}
+	if _, err := goparser.ParseFile(token.NewFileSet(), fixture, generated, goparser.AllErrors); err != nil {
+		t.Fatalf("parse generated sparse-grid source: %v", err)
+	}
+	text := string(generated)
+	for _, required := range []string{
+		"var mk0 [128]backendPreparedStringKey",
+		"var mu0 [128]bool",
+		"var mf0_0 [128]float64",
+		"var mf0_1 [128]float64",
+		"var ra0_0 [4]float64",
+		"var ra0_1 [4]float64",
+		"for rp",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("generated sparse-grid source lacks %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"map[", "make(", "machineTable", "opcode", "descriptor",
+		"NEW_TABLE", "SET_FIELD", "GET_FIELD", "SET_INDEX", "GET_INDEX",
+		"PREPARE_ITER", "ARRAY_NEXT_JUMP2",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("generated sparse-grid source contains runtime table/dispatch marker %q", forbidden)
+		}
+	}
+
+	root, err := Compile(backendSparseGridProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seed := range []float64{-29, -1, 0, 1, 7, 29, 1_000_005} {
+		got, ok := backendGeneratedSparseGrid(seed)
+		if !ok {
+			t.Fatalf("generated sparse-grid fixture exited for seed %v", seed)
+		}
+		oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+			args: []Value{NumberValue(seed)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(oracle) != 1 {
+			t.Fatalf("sparse-grid oracle result count = %d, want 1", len(oracle))
+		}
+		oracleNumber, ok := oracle[0].Number()
+		if !ok || oracleNumber != got {
+			t.Fatalf("generated/oracle sparse-grid seed %v = %v/%v (%t)", seed, got, oracleNumber, ok)
+		}
+	}
+	if !checkptrInstrumentedTest() {
+		if allocations := testing.AllocsPerRun(1000, func() {
+			_, _ = backendGeneratedSparseGrid(29)
+		}); allocations != 0 {
+			t.Fatalf("generated sparse-grid allocations = %v, want 0", allocations)
+		}
+	}
+}
+
+func TestBackendGoSparseGridIsIdentityBlindAndRejectsUnprovedShapes(t *testing.T) {
+	base := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "source/main", Text: backendSparseGridProofSource},
+	}, []Entrypoint{{Name: "main", Module: LogicalModule("main")}})
+	holdoutSource := strings.ReplaceAll(backendSparseGridProofSource, `:`, `|`)
+	holdout := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "opaque/renamed/source", Text: holdoutSource},
+	}, []Entrypoint{{Name: "renamed", Module: LogicalModule("main")}})
+	emit := func(program *backendProgramIR) []byte {
+		irs := program.modules[0].protos
+		generated, err := emitBackendGoNumericProof(irs[1], backendGoNumericOptions{
+			packageName:          "ember",
+			functionName:         "identityBlindSparseGrid",
+			preparedFunctionName: "identityBlindSparseGridPrepared",
+			directTargets:        backendStructuralStringKeyProofTargets(irs),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return generated
+	}
+	if !bytes.Equal(emit(base), emit(holdout)) {
+		t.Fatal("sparse-grid source depends on source/module/entrypoint or safe separator text identity")
+	}
+
+	tests := map[string]string{
+		"noncanonical literal key": strings.Replace(
+			backendSparseGridProofSource,
+			`["1:0"]`,
+			`["01:0"]`,
+			1,
+		),
+		"literal and generated key domains differ": strings.Replace(
+			backendSparseGridProofSource,
+			`return tostring(x) .. ":" .. tostring(y)`,
+			`return tostring(x) .. "|" .. tostring(y)`,
+			1,
+		),
+		"record shape mismatch": strings.Replace(
+			backendSparseGridProofSource,
+			`{terrain = 2, heat = 3}`,
+			`{terrain = 2, moisture = 3}`,
+			1,
+		),
+		"record initialized after insertion": strings.Replace(
+			backendSparseGridProofSource,
+			`cells[neighborKey] = {terrain = tick % 3 + 1, heat = x + y + tick % 4}
+                            total = total + cells[neighborKey].heat`,
+			`local created = {terrain = tick % 3 + 1}
+                            cells[neighborKey] = created
+                            created.heat = x + y + tick % 4
+                            total = total + cells[neighborKey].heat`,
+			1,
+		),
+		"escaping map": strings.Replace(
+			backendSparseGridProofSource,
+			`return total + (cells["2:2"] and cells["2:2"].heat or 0) + (cells["4:4"] and cells["4:4"].heat or 0)`,
+			`return cells`,
+			1,
+		),
+	}
+	for name, source := range tests {
+		t.Run(name, func(t *testing.T) {
+			irs := backendStructuralStringKeyProofIRs(t, source)
+			options := backendGoNumericOptions{
+				packageName:   "ember",
+				functionName:  "rejectUnprovedSparseGrid",
+				directTargets: backendStructuralStringKeyProofTargets(irs),
+			}
+			keys := analyzeBackendGoStructuralKeys(irs[1], options)
+			records := analyzeBackendGoRecordTables(irs[1], keys)
+			if records.enabled {
+				t.Fatalf("sparse-grid record analyzer accepted %s", name)
+			}
+			if _, err := emitBackendGoNumericProof(irs[1], options); err == nil {
+				t.Fatalf("sparse-grid compiler accepted %s", name)
+			}
+		})
 	}
 }
 
@@ -3470,6 +3714,20 @@ func BenchmarkBackendGeneratedStructuralStringKeyKernel(b *testing.B) {
 		value, ok := backendGeneratedStructuralStringKeyKernel(float64(iteration & 31))
 		if !ok {
 			b.Fatal("generated structural string-key fixture exited")
+		}
+		result = value
+	}
+	backendGeneratedNumericSink = result
+}
+
+func BenchmarkBackendGeneratedSparseGrid(b *testing.B) {
+	var result float64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		value, ok := backendGeneratedSparseGrid(float64(iteration & 31))
+		if !ok {
+			b.Fatal("generated sparse-grid fixture exited")
 		}
 		result = value
 	}

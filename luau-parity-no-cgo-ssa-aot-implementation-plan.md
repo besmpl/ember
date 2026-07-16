@@ -411,11 +411,36 @@ The retained path has moved beyond the original starting state:
   240 bytes for the direct kernel, and 304 bytes for the prepared body; the
   caller has two direct helper calls but no opcode, descriptor, string,
   interning, or Machine dispatch.
+- The bounded sparse-grid record slice composes structural generated keys with
+  nonescaping fixed-shape numeric records, one fixed four-record offset array,
+  and one capacity-128 open-addressed map. Record references are scalar slot
+  numbers; record fields become typed locals or fixed Go arrays. Literal map
+  keys must parse canonically in the same safe separator domain as every
+  generated lookup key. Noncanonical literals, mismatched separator domains,
+  inconsistent record shapes, escaping maps, unsupported uses, and unbounded
+  topology fail closed to Machine. Prepared failure paths replay entry before
+  canonical mutation; rebound `tostring` identities produce the same generic
+  error. A separator-text/source/module/entrypoint holdout produces
+  byte-identical generated source. The direct kernel has a five-sample median
+  of about 28.3 microseconds on the checkpoint machine
+  (28.3-29.7 microseconds observed), while the prepared owner path has a median
+  of about 30.3 microseconds (29.7-33.3 microseconds observed), versus about
+  5.04 milliseconds through generic Machine (4.85-5.09 milliseconds
+  observed). Direct and prepared report zero allocations and materialize no
+  owner tables or strings. Live pinned Luau `-O2 -g0` produced the same warmed
+  result and checksum with a five-sample median of about 492.3 microseconds per
+  call (485.9-510.9 microseconds observed), making prepared about `0.062x`
+  Luau. Deterministic generated source is 33,800 bytes. Linked ARM64 is 2,784
+  bytes for the direct kernel and 2,976 bytes for the prepared body; each has
+  two direct structural-key helper calls, cold bounds/stack-growth helpers,
+  and no opcode, descriptor, Machine table, runtime string, interning, or VM
+  dispatch.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
-all-37 parity. Non-dense iteration, general table mutation, general generated
-strings, dynamic string-key maps, nil/string unions, escaping strings,
+all-37 parity. General non-dense iteration, general table mutation, general
+generated strings, unbounded or polymorphic dynamic string-key maps,
+nil/string unions, escaping strings,
 general closures/upvalues and dynamic call sets, open varargs/results,
 heterogeneous or dynamically shaped multiple results,
 general recursion and logical-frame/error cases, dynamic/callable metatables,

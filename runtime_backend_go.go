@@ -36,6 +36,7 @@ type backendGoNumericPlan struct {
 	replayEntry []bool
 	tables      backendGoScalarTablePlan
 	keys        backendGoStructuralKeyPlan
+	records     backendGoRecordTablePlan
 	closures    backendGoScalarClosurePlan
 	methods     backendGoScalarMethodPlan
 	coroutines  backendGoScalarCoroutinePlan
@@ -251,6 +252,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		fmt.Fprintf(&source, "\tvar i%d int\n", arrayIndex)
 		fmt.Fprintf(&source, "\t_ = i%d\n", arrayIndex)
 	}
+	writeBackendGoRecordDeclarations(&source, plan.records)
 	for cell := 0; cell < plan.closures.cellCount; cell++ {
 		fmt.Fprintf(&source, "\tvar c%d float64\n", cell)
 		fmt.Fprintf(&source, "\t_ = c%d\n", cell)
@@ -336,6 +338,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			fmt.Fprintf(&source, "\tvar i%d int\n", arrayIndex)
 			fmt.Fprintf(&source, "\t_ = i%d\n", arrayIndex)
 		}
+		writeBackendGoRecordDeclarations(&source, plan.records)
 		for cell := 0; cell < plan.closures.cellCount; cell++ {
 			fmt.Fprintf(&source, "\tvar c%d float64\n", cell)
 			fmt.Fprintf(&source, "\t_ = c%d\n", cell)
@@ -538,9 +541,15 @@ func verifyBackendGoNumericTargets(targets []backendGoNumericTarget) error {
 
 func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptions) (backendGoNumericPlan, error) {
 	keys := analyzeBackendGoStructuralKeys(ir, options)
-	tables, err := analyzeBackendGoScalarTables(ir, options.receiverTable)
-	if err != nil {
-		return backendGoNumericPlan{}, err
+	records := analyzeBackendGoRecordTables(ir, keys)
+	var tables backendGoScalarTablePlan
+	var err error
+	if !records.enabled {
+		records = backendGoRecordTablePlan{}
+		tables, err = analyzeBackendGoScalarTables(ir, options.receiverTable)
+		if err != nil {
+			return backendGoNumericPlan{}, err
+		}
 	}
 	closures, err := analyzeBackendGoScalarClosures(ir, options)
 	if err != nil {
@@ -561,6 +570,7 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		replayEntry:          make([]bool, len(ir.ops)),
 		tables:               tables,
 		keys:                 keys,
+		records:              records,
 		closures:             closures,
 		methods:              methods,
 		coroutines:           coroutines,
@@ -621,8 +631,9 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						tags = backendTagTable
 					}
 				case opGetStringField:
-					_, field, ok := plan.tables.operationField(ir, operation)
-					if ok {
+					if _, ok := plan.records.fieldsByPC[operation.pc]; ok {
+						tags = backendTagNumber
+					} else if _, field, ok := plan.tables.operationField(ir, operation); ok {
 						if field.child != invalidBackendValueID {
 							tags = backendTagTable
 						} else if field.methodProto >= 0 {
@@ -631,15 +642,24 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 							tags = field.tags
 						}
 					}
+				case opGetIndex:
+					if _, ok := plan.records.mapGetByPC[operation.pc]; ok {
+						tags = backendTagNumber
+					}
 				case opPrepareIter:
-					if value.register == operation.a {
+					if _, ok := plan.records.arrayPreparePC[operation.pc]; ok {
+						tags = 0
+					} else if value.register == operation.a {
 						if _, _, _, ok := plan.tables.arrayOperation(ir, operation); ok {
 							tags = backendTagTable
 						}
 					}
 				case opArrayNextJump2:
-					_, array, _, ok := plan.tables.arrayOperation(ir, operation)
-					if ok {
+					if _, ok := plan.records.arrayNextPC[operation.pc]; ok {
+						if value.register == operation.a+1 {
+							tags = backendTagNumber
+						}
+					} else if _, array, _, ok := plan.tables.arrayOperation(ir, operation); ok {
 						switch value.register {
 						case operation.a:
 							tags = backendTagNumber
@@ -789,6 +809,11 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		}
 	}
 	for valueIndex, scalar := range plan.keys.scalarReplaced {
+		if scalar {
+			markScalarReplaced(backendValueID(valueIndex + 1))
+		}
+	}
+	for valueIndex, scalar := range plan.records.scalarValues {
 		if scalar {
 			markScalarReplaced(backendValueID(valueIndex + 1))
 		}
@@ -1105,7 +1130,7 @@ func verifyBackendGoNumericOperation(
 			}
 		}
 		switch ir.constants[operation.b].kind {
-		case NumberKind, BoolKind, StringKind:
+		case NilKind, NumberKind, BoolKind, StringKind:
 			return nil
 		default:
 			return fmt.Errorf("emit backend Go numeric proof: PC %d loads unsupported %s constant", operation.pc, ir.constants[operation.b].kind)
@@ -1121,12 +1146,16 @@ func verifyBackendGoNumericOperation(
 		return nil
 	case opNewTable:
 		for _, definition := range operation.defs {
-			if plan.tables.root(definition.value) == invalidBackendValueID {
+			if plan.tables.root(definition.value) == invalidBackendValueID &&
+				plan.records.root(definition.value) == invalidBackendValueID {
 				return fmt.Errorf("emit backend Go numeric proof: PC %d table is not scalar replaceable", operation.pc)
 			}
 		}
 		return nil
 	case opSetStringField:
+		if _, ok := plan.records.fieldsByPC[operation.pc]; ok {
+			return require(operation.c, backendTagNumber)
+		}
 		_, field, ok := plan.tables.operationField(ir, operation)
 		if !ok {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar field", operation.pc)
@@ -1149,12 +1178,38 @@ func verifyBackendGoNumericOperation(
 		}
 		return require(operation.c, field.tags)
 	case opSetField:
+		if _, ok := plan.records.arraySetByPC[operation.pc]; ok {
+			return nil
+		}
 		_, array, _, ok := plan.tables.arrayOperation(ir, operation)
 		if !ok {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar array element", operation.pc)
 		}
 		return require(operation.c, array.tags)
+	case opSetIndex:
+		if _, ok := plan.records.mapSetByPC[operation.pc]; !ok {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record-map store", operation.pc)
+		}
+		return nil
+	case opGetIndex:
+		if _, ok := plan.records.mapGetByPC[operation.pc]; !ok {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record-map lookup", operation.pc)
+		}
+		for _, definition := range operation.defs {
+			if plan.tags[definition.value-1] != backendTagNumber {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d record-map result is not scalar", operation.pc)
+			}
+		}
+		return nil
 	case opGetStringField:
+		if _, ok := plan.records.fieldsByPC[operation.pc]; ok {
+			for _, definition := range operation.defs {
+				if plan.tags[definition.value-1] != backendTagNumber {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d record field result is not numeric", operation.pc)
+				}
+			}
+			return nil
+		}
 		_, field, ok := plan.tables.operationField(ir, operation)
 		if !ok {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar field", operation.pc)
@@ -1171,6 +1226,14 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opPrepareIter:
+		if _, ok := plan.records.arrayPreparePC[operation.pc]; ok {
+			for _, definition := range operation.defs {
+				if !plan.records.iteratorValue(definition.value) {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d materializes record iterator state", operation.pc)
+				}
+			}
+			return nil
+		}
 		_, _, _, ok := plan.tables.arrayOperation(ir, operation)
 		if !ok {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar array iterator", operation.pc)
@@ -1188,6 +1251,22 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opArrayNextJump2:
+		if _, ok := plan.records.arrayNextPC[operation.pc]; ok {
+			for _, definition := range operation.defs {
+				switch definition.register {
+				case operation.a:
+					if !plan.records.iteratorValue(definition.value) {
+						return fmt.Errorf("emit backend Go numeric proof: PC %d materializes record iterator key", operation.pc)
+					}
+				case operation.a + 1:
+					if _, ok := plan.records.ref(definition.value); !ok ||
+						plan.tags[definition.value-1] != backendTagNumber {
+						return fmt.Errorf("emit backend Go numeric proof: PC %d loses record iterator value", operation.pc)
+					}
+				}
+			}
+			return nil
+		}
 		_, array, _, ok := plan.tables.arrayOperation(ir, operation)
 		if !ok {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar array iterator", operation.pc)
@@ -1385,8 +1464,20 @@ func verifyBackendGoNumericOperation(
 	case opEqual, opNotEqual:
 		left := backendOperationUse(operation, operation.b)
 		right := backendOperationUse(operation, operation.c)
-		if left == invalidBackendValueID || right == invalidBackendValueID ||
-			plan.tags[left-1] != plan.tags[right-1] ||
+		if left == invalidBackendValueID || right == invalidBackendValueID {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported equality operands", operation.pc)
+		}
+		leftRef, leftIsRef := plan.records.ref(left)
+		rightRef, rightIsRef := plan.records.ref(right)
+		if leftIsRef || rightIsRef {
+			if leftIsRef && plan.tags[right-1] == backendTagNil ||
+				rightIsRef && plan.tags[left-1] == backendTagNil ||
+				leftIsRef && rightIsRef && leftRef == rightRef {
+				return nil
+			}
+			return fmt.Errorf("emit backend Go numeric proof: PC %d compares incompatible record references", operation.pc)
+		}
+		if plan.tags[left-1] != plan.tags[right-1] ||
 			(plan.tags[left-1] != backendTagNumber &&
 				plan.tags[left-1] != backendTagBool &&
 				plan.tags[left-1] != backendTagString) {
@@ -1848,6 +1939,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 	case opNewTable:
 		return false, nil
 	case opSetStringField:
+		if handled, err := emitter.emitRecordSetStringField(operation, use); handled {
+			return false, err
+		}
 		fieldIndex, field, ok := emitter.plan.tables.operationField(emitter.ir, operation)
 		if !ok {
 			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar field", operation.pc)
@@ -1864,6 +1958,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		}
 		fmt.Fprintf(&emitter.body, "\t%s = v%d\n", emitter.scalarField(fieldIndex), source)
 	case opSetField:
+		if handled, err := emitter.emitRecordArraySet(operation); handled {
+			return false, err
+		}
 		arrayIndex, _, element, ok := emitter.plan.tables.arrayOperation(emitter.ir, operation)
 		if !ok {
 			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar array element", operation.pc)
@@ -1873,7 +1970,20 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			return false, err
 		}
 		fmt.Fprintf(&emitter.body, "\ta%d[%d] = v%d\n", arrayIndex, element-1, source)
+	case opSetIndex:
+		if handled, err := emitter.emitRecordMapSet(operation); handled {
+			return false, err
+		}
+		return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record-map store", operation.pc)
+	case opGetIndex:
+		if handled, err := emitter.emitRecordMapGet(operation, definition); handled {
+			return false, err
+		}
+		return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record-map lookup", operation.pc)
 	case opGetStringField:
+		if handled, err := emitter.emitRecordGetStringField(operation, definition); handled {
+			return false, err
+		}
 		fieldIndex, field, ok := emitter.plan.tables.operationField(emitter.ir, operation)
 		if !ok {
 			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar field", operation.pc)
@@ -1887,12 +1997,18 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		}
 		fmt.Fprintf(&emitter.body, "\tv%d = %s\n", destination, emitter.scalarField(fieldIndex))
 	case opPrepareIter:
+		if handled, err := emitter.emitRecordArrayPrepare(operation); handled {
+			return false, err
+		}
 		arrayIndex, _, _, ok := emitter.plan.tables.arrayOperation(emitter.ir, operation)
 		if !ok {
 			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar array iterator", operation.pc)
 		}
 		fmt.Fprintf(&emitter.body, "\ti%d = 0\n", arrayIndex)
 	case opArrayNextJump2:
+		if handled, terminated, err := emitter.emitRecordArrayNext(operation, block, definition); handled {
+			return terminated, err
+		}
 		arrayIndex, _, _, ok := emitter.plan.tables.arrayOperation(emitter.ir, operation)
 		if !ok {
 			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar array iterator", operation.pc)
@@ -2119,6 +2235,18 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		destination, _ := definition(operation.a)
 		left, _ := use(operation.b)
 		right, _ := use(operation.c)
+		if operation.op == opEqual || operation.op == opNotEqual {
+			_, leftRef := emitter.plan.records.ref(left)
+			_, rightRef := emitter.plan.records.ref(right)
+			if leftRef && emitter.plan.tags[right-1] == backendTagNil {
+				fmt.Fprintf(&emitter.body, "\tv%d = v%d %s 0\n", destination, left, backendGoComparisonOperator(operation.op))
+				return false, nil
+			}
+			if rightRef && emitter.plan.tags[left-1] == backendTagNil {
+				fmt.Fprintf(&emitter.body, "\tv%d = v%d %s 0\n", destination, right, backendGoComparisonOperator(operation.op))
+				return false, nil
+			}
+		}
 		if operation.op != opEqual && operation.op != opNotEqual {
 			emitter.emitNaNGuard(operation, 1, left, right)
 		}
@@ -2170,7 +2298,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 	case opJumpIfFalse:
 		condition, _ := use(operation.a)
 		expression := "false"
-		if emitter.plan.tags[condition-1] == backendTagBool {
+		if _, ok := emitter.plan.records.ref(condition); ok {
+			expression = fmt.Sprintf("v%d == 0", condition)
+		} else if emitter.plan.tags[condition-1] == backendTagBool {
 			expression = fmt.Sprintf("!v%d", condition)
 		}
 		emitter.emitBranch(int32(block.id), operation.targetPC, expression, 1)
@@ -2500,6 +2630,9 @@ func (emitter *backendGoNumericEmitter) emitGoto(from, to int32, indent int) {
 }
 
 func (emitter *backendGoNumericEmitter) failureReturn() string {
+	if emitter.prepared {
+		return "return machinePreparedReplayEntry()"
+	}
 	if emitter.options.coroutineTarget {
 		return "return 0, false, false"
 	}

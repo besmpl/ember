@@ -6,9 +6,10 @@ type backendPreparedStringKey struct {
 }
 
 type backendGoStructuralKey struct {
-	first  backendValueID
-	second backendValueID
-	domain int32
+	first     backendValueID
+	second    backendValueID
+	domain    int32
+	separator machineStringID
 }
 
 type backendGoStructuralKeyPlan struct {
@@ -82,13 +83,15 @@ func analyzeBackendGoStructuralKeys(
 		secondString := backendOperationUse(operation, operation.b+2)
 		first, firstOK := plan.components[firstString]
 		second, secondOK := plan.components[secondString]
-		if !firstOK || !secondOK || !backendGoStructuralKeySeparator(ir, separator) {
+		separatorID, ok := backendGoStructuralKeySeparator(ir, separator)
+		if !firstOK || !secondOK || !ok {
 			continue
 		}
 		key := backendGoStructuralKey{
-			first:  first,
-			second: second,
-			domain: -(operation.pc + 1),
+			first:     first,
+			second:    second,
+			domain:    -(operation.pc + 1),
+			separator: separatorID,
 		}
 		result := operation.defs[0].value
 		plan.keys[result] = key
@@ -103,6 +106,7 @@ func analyzeBackendGoStructuralKeys(
 			continue
 		}
 		target, ok := backendGoNumericDirectTarget(options, operation)
+		targetKey, ok := backendGoStructuralKeyTargetKey(target.ir)
 		if !ok || !backendGoStructuralKeyTarget(target.ir) {
 			continue
 		}
@@ -111,7 +115,8 @@ func analyzeBackendGoStructuralKeys(
 				continue
 			}
 			plan.keys[definition.value] = backendGoStructuralKey{
-				domain: operation.call.targetProto + 1,
+				domain:    operation.call.targetProto + 1,
+				separator: targetKey.separator,
 			}
 		}
 	}
@@ -193,39 +198,50 @@ func backendGoStructuralKeyTarget(ir *backendProtoIR) bool {
 	return len(plan.concatByPC) == 1
 }
 
-func backendGoStructuralKeySeparator(ir *backendProtoIR, id backendValueID) bool {
+func backendGoStructuralKeySeparator(ir *backendProtoIR, id backendValueID) (machineStringID, bool) {
 	if !ir.validBackendValue(id) {
-		return false
+		return invalidMachineStringID, false
 	}
 	value := &ir.values[id-1]
 	if value.kind != backendValueOperation ||
 		value.pc < 0 ||
 		int(value.pc) >= len(ir.ops) {
-		return false
+		return invalidMachineStringID, false
 	}
 	operation := &ir.ops[value.pc]
 	if operation.op != opLoadConst ||
 		operation.b < 0 ||
 		int(operation.b) >= len(ir.constants) ||
 		ir.constants[operation.b].kind != StringKind {
-		return false
+		return invalidMachineStringID, false
 	}
 	constant := ir.constants[operation.b]
 	stringID := machineStringID(constant.bits)
 	if stringID == invalidMachineStringID || uint64(stringID-1) >= uint64(len(ir.stringRecords)) {
-		return false
+		return invalidMachineStringID, false
 	}
 	record := ir.stringRecords[stringID-1]
 	end := uint64(record.offset) + uint64(record.length)
 	if record.length == 0 || end > uint64(len(ir.stringData)) {
-		return false
+		return invalidMachineStringID, false
 	}
 	for _, character := range ir.stringData[record.offset:end] {
 		if character != '-' && (character < '0' || character > '9') {
-			return true
+			return stringID, true
 		}
 	}
-	return false
+	return invalidMachineStringID, false
+}
+
+func backendGoStructuralKeyTargetKey(ir *backendProtoIR) (backendGoStructuralKey, bool) {
+	if ir == nil {
+		return backendGoStructuralKey{}, false
+	}
+	plan := analyzeBackendGoStructuralKeys(ir, backendGoNumericOptions{})
+	for _, key := range plan.concatByPC {
+		return key, true
+	}
+	return backendGoStructuralKey{}, false
 }
 
 func (plan backendGoStructuralKeyPlan) key(id backendValueID) (backendGoStructuralKey, bool) {
