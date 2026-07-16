@@ -16,6 +16,7 @@ const (
 	backendGoRecordRefMap
 	backendGoRecordRefArray
 	backendGoRecordRefArrayFamily
+	backendGoRecordRefChildRecord
 )
 
 type backendGoRecordRef struct {
@@ -130,6 +131,7 @@ const (
 	backendGoRecordFieldMap
 	backendGoRecordFieldArray
 	backendGoRecordFieldArrayFamily
+	backendGoRecordFieldChildRecord
 )
 
 type backendGoRecordFieldOperation struct {
@@ -378,6 +380,10 @@ func analyzeBackendGoRecordTables(
 		plan.rejectReason = "reference propagation"
 		return plan
 	}
+	if !plan.discoverChildRecordValues(ir) || !plan.propagateRefsAndIterators(ir) {
+		plan.rejectReason = "child-record value propagation"
+		return plan
+	}
 	if !plan.discoverFamilyValues(ir) || !plan.propagateFamilyValues(ir) {
 		plan.rejectReason = "child-array value propagation"
 		return plan
@@ -552,6 +558,44 @@ func (plan *backendGoRecordTablePlan) discoverFamilyValues(ir *backendProtoIR) b
 				return false
 			}
 			plan.familyValues[definition.value] = family
+		}
+	}
+	return true
+}
+
+func (plan *backendGoRecordTablePlan) discoverChildRecordValues(ir *backendProtoIR) bool {
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op != opGetStringField || len(operation.defs) == 0 {
+			continue
+		}
+		base := backendOperationUse(operation, operation.b)
+		ref, ok := plan.refs[base]
+		if !ok || ref.kind != backendGoRecordRefArray ||
+			ref.index < 0 || ref.index >= len(plan.arrays) {
+			continue
+		}
+		name, ok := backendGoStringFieldName(ir, operation.access.constant)
+		if !ok {
+			return false
+		}
+		field, ok := plan.arrays[ref.index].fieldIndex[name]
+		if !ok {
+			continue
+		}
+		family, ok := plan.childByParent[backendGoRecordParentField{
+			array: ref.index,
+			field: field,
+		}]
+		if !ok {
+			continue
+		}
+		for _, definition := range operation.defs {
+			child := backendGoRecordRef{kind: backendGoRecordRefChildRecord, index: family}
+			if current, exists := plan.refs[definition.value]; exists && current != child {
+				return false
+			}
+			plan.refs[definition.value] = child
 		}
 	}
 	return true
@@ -1180,6 +1224,8 @@ func (plan *backendGoRecordTablePlan) classifyFields(ir *backendProtoIR) bool {
 			field = plan.arrays[ref.index].fieldIndex[name]
 		case backendGoRecordRefArrayFamily:
 			field = plan.families[ref.index].fieldIndex[name]
+		case backendGoRecordRefChildRecord:
+			field = plan.childRecords[ref.index].fieldIndex[name]
 		}
 		if field < 0 {
 			plan.rejectReason = "record reference field is missing at PC " + strconv.Itoa(int(operation.pc))
@@ -1197,12 +1243,17 @@ func (plan *backendGoRecordTablePlan) classifyFields(ir *backendProtoIR) bool {
 			source:  source,
 		}
 		if operation.op == opGetStringField && ref.kind == backendGoRecordRefArray {
-			if _, child := plan.childByParent[backendGoRecordParentField{
+			if child, ok := plan.childByParent[backendGoRecordParentField{
 				array: ref.index,
 				field: field,
-			}]; child {
-				plan.rejectReason = "child-record selector escapes fused lookup at PC " + strconv.Itoa(int(operation.pc))
-				return false
+			}]; ok {
+				for _, definition := range operation.defs {
+					if current, exists := plan.refs[definition.value]; !exists ||
+						current.kind != backendGoRecordRefChildRecord || current.index != child {
+						plan.rejectReason = "child-record identity is not preserved at PC " + strconv.Itoa(int(operation.pc))
+						return false
+					}
+				}
 			}
 			if family, ok := plan.familyByParent[backendGoRecordParentField{
 				array: ref.index,
@@ -1365,6 +1416,11 @@ func (plan *backendGoRecordTablePlan) fieldTagsFor(
 			return 0
 		}
 		return plan.familyFieldTags(tags, field.index, field.field)
+	case backendGoRecordFieldChildRecord:
+		if field.index < 0 || field.index >= len(plan.childRecords) {
+			return 0
+		}
+		return plan.childRecordStaticFieldTags(tags, field.index, field.field)
 	default:
 		return 0
 	}
@@ -1417,6 +1473,10 @@ func (plan backendGoRecordTablePlan) fieldTags(
 		if field.index >= 0 && field.index < len(plan.families) &&
 			field.field >= 0 && field.field < len(plan.families[field.index].fieldTags) {
 			return plan.families[field.index].fieldTags[field.field]
+		}
+	case backendGoRecordFieldChildRecord:
+		if field.index >= 0 && field.index < len(plan.childRecords) {
+			return plan.childRecords[field.index].fieldTags
 		}
 	}
 	return 0
@@ -1529,6 +1589,34 @@ func (plan *backendGoRecordTablePlan) childRecordFieldTags(
 		for field := range record.fieldNames {
 			result |= plan.scratchFieldTags(tags, recordIndex, field)
 		}
+	}
+	return result
+}
+
+func (plan *backendGoRecordTablePlan) childRecordStaticFieldTags(
+	tags []backendTagMask,
+	familyIndex int,
+	field int,
+) backendTagMask {
+	if familyIndex < 0 || familyIndex >= len(plan.childRecords) {
+		return 0
+	}
+	family := &plan.childRecords[familyIndex]
+	if field < 0 || field >= len(family.fieldNames) {
+		return 0
+	}
+	name := family.fieldNames[field]
+	var result backendTagMask
+	for _, recordIndex := range family.records {
+		if recordIndex < 0 || recordIndex >= len(plan.records) {
+			return 0
+		}
+		record := &plan.records[recordIndex]
+		recordField, ok := record.fieldIndex[name]
+		if !ok {
+			return 0
+		}
+		result |= plan.scratchFieldTags(tags, recordIndex, recordField)
 	}
 	return result
 }
@@ -2293,6 +2381,10 @@ func (emitter *backendGoNumericEmitter) emitRecordSetStringField(
 		if err := emitter.emitRecordFamilyField(field, source, true); err != nil {
 			return true, err
 		}
+	case backendGoRecordFieldChildRecord:
+		if err := emitter.emitRecordChildField(field, source, true); err != nil {
+			return true, err
+		}
 	default:
 		return true, fmt.Errorf("emit backend Go numeric proof: PC %d has invalid record field storage", operation.pc)
 	}
@@ -2327,6 +2419,10 @@ func (emitter *backendGoNumericEmitter) emitRecordGetStringField(
 		fmt.Fprintf(&emitter.body, "\tv%d = ra%d_%d[int(v%d)-1]\n", destination, field.index, field.field, field.ref)
 	case backendGoRecordFieldArrayFamily:
 		if err := emitter.emitRecordFamilyField(field, destination, false); err != nil {
+			return true, err
+		}
+	case backendGoRecordFieldChildRecord:
+		if err := emitter.emitRecordChildField(field, destination, false); err != nil {
 			return true, err
 		}
 	default:
@@ -2496,6 +2592,46 @@ func (emitter *backendGoNumericEmitter) emitRecordFamilyField(
 	emitter.body.WriteString("\t\tdefault:\n")
 	fmt.Fprintf(&emitter.body, "\t\t\t%s\n", emitter.failureReturn())
 	emitter.body.WriteString("\t\t}\n\t}\n")
+	return nil
+}
+
+func (emitter *backendGoNumericEmitter) emitRecordChildField(
+	field backendGoRecordFieldOperation,
+	value backendValueID,
+	set bool,
+) error {
+	if field.index < 0 || field.index >= len(emitter.plan.records.childRecords) ||
+		field.ref == invalidBackendValueID {
+		return fmt.Errorf("emit backend Go numeric proof: invalid child-record reference")
+	}
+	family := emitter.plan.records.childRecords[field.index]
+	if field.field < 0 || field.field >= len(family.fieldNames) {
+		return fmt.Errorf("emit backend Go numeric proof: invalid child-record field")
+	}
+	if err := emitter.emitRecordRefGuard(field.ref, len(family.records)); err != nil {
+		return err
+	}
+	name := family.fieldNames[field.field]
+	fmt.Fprintf(&emitter.body, "\tswitch int(v%d) - 1 {\n", field.ref)
+	for member, recordIndex := range family.records {
+		if recordIndex < 0 || recordIndex >= len(emitter.plan.records.records) {
+			return fmt.Errorf("emit backend Go numeric proof: invalid child record")
+		}
+		record := emitter.plan.records.records[recordIndex]
+		recordField, ok := record.fieldIndex[name]
+		if !ok {
+			return fmt.Errorf("emit backend Go numeric proof: child-record shape mismatch")
+		}
+		fmt.Fprintf(&emitter.body, "\tcase %d:\n", member)
+		if set {
+			fmt.Fprintf(&emitter.body, "\t\tr%d_%d = v%d\n", recordIndex, recordField, value)
+		} else {
+			fmt.Fprintf(&emitter.body, "\t\tv%d = r%d_%d\n", value, recordIndex, recordField)
+		}
+	}
+	emitter.body.WriteString("\tdefault:\n")
+	fmt.Fprintf(&emitter.body, "\t\t%s\n", emitter.failureReturn())
+	emitter.body.WriteString("\t}\n")
 	return nil
 }
 

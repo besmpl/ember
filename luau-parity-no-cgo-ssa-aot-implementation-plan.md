@@ -635,6 +635,34 @@ The retained path has moved beyond the original starting state:
   or VM dispatch. Twelve of the 25 Scenario kernels now emit through the
   single-Proto proof route; the six nested-Proto cases require the direct-call
   route before they can be classified by the same observer.
+- The explicit child-record selector slice lets one verified
+  `GET_STRING_FIELD` carry the parent member as a compiler-private numeric
+  reference into subsequent ordinary field reads or same-kind writes. The
+  selector propagates only through proved SSA moves/phis and remains tied to
+  one uniform child family; it never materializes a table or crosses the owner
+  seam. Invalid selectors replay entry, while child escape, identity changes,
+  shape drift, mixed field kinds, kind-changing writes, and unresolved uses
+  fail closed. A parameterized `economy_market_tick` holdout proves one
+  three-market array, nine nested stock/demand/price records, one four-order
+  array, six fused dynamic reads, three fused dynamic writes, three explicit
+  child-selector field reads, and guarded `math.min`. Generated Go, prepared
+  owner, generic Machine, and the independent interpreter agree across
+  negative, ordinary, and large seeds. Controlled execution remains generic;
+  invalid prepared arguments replay entry; owner table/string counts remain
+  unchanged; direct and prepared paths allocate zero when warmed. The direct
+  kernel has a five-sample median of about 9.263 microseconds
+  (9.256-9.343 microseconds observed), while the prepared owner path has a
+  median of about 9.439 microseconds (9.422-9.486 microseconds observed),
+  versus about 970.4 microseconds through generic Machine
+  (969.0-972.4 microseconds observed). The pinned Luau CLI has a five-sample
+  median of about 71.91 microseconds per call, including the cold first sample,
+  making prepared about `0.131x` Luau. Deterministic generated source is
+  34,122 bytes. Linked ARM64 is 4,288 bytes for the direct kernel and 4,688
+  bytes for the prepared body; each calls Go's supported `math.archMin` helper
+  and has only cold bounds/stack-growth helpers otherwise, with no opcode,
+  descriptor, Machine table, runtime string, interning, or VM dispatch.
+  Thirteen of the 25 Scenario kernels now emit through the single-Proto proof
+  route.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
