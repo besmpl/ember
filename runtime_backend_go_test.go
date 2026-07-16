@@ -95,6 +95,25 @@ end
 return kernel
 `
 
+const backendClosureProofSource = `
+local function kernel(seed)
+    local function makeCounter(initial)
+        local value = initial
+        return function(step)
+            value = value + step
+            return value
+        end
+    end
+    local counter = makeCounter(10 + seed % 3)
+    local total = 0
+    for i = 1, 60 do
+        total = total + counter(i % 4)
+    end
+    return total
+end
+return kernel
+`
+
 func TestBackendGoNumericProofEmitsDeterministicDirectSource(t *testing.T) {
 	ir := backendNumericProofIR(t)
 	options := backendGoNumericOptions{
@@ -315,6 +334,34 @@ func TestBackendGoScalarArrayOpsIgnoreSourceIdentity(t *testing.T) {
 	}
 	if !bytes.Equal(baseSource, renamedSource) {
 		t.Fatal("source or entrypoint identity selected scalar array-ops code")
+	}
+}
+
+func TestBackendGoScalarClosureIgnoresSourceIdentity(t *testing.T) {
+	base := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "source/main", Text: backendClosureProofSource},
+	}, []Entrypoint{{Name: "main", Module: LogicalModule("main")}})
+	renamed := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "opaque/renamed/source", Text: backendClosureProofSource},
+	}, []Entrypoint{{Name: "renamed-entrypoint", Module: LogicalModule("main")}})
+	if base.programHash == renamed.programHash {
+		t.Fatal("identity-mutated closure Programs unexpectedly share a binding hash")
+	}
+	emit := func(program *backendProgramIR) []byte {
+		t.Helper()
+		targets := backendClosureProofTargets(program.modules[0].protos)
+		source, err := emitBackendGoNumericProof(program.modules[0].protos[1], backendGoNumericOptions{
+			packageName:   "ember",
+			functionName:  "identityBlindClosureKernel",
+			directTargets: targets,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return source
+	}
+	if !bytes.Equal(emit(base), emit(renamed)) {
+		t.Fatal("source or entrypoint identity selected scalar closure code")
 	}
 }
 
@@ -836,6 +883,235 @@ return kernel
 	}
 }
 
+func TestBackendGoScalarClosureFixturesAreFreshAndCorrect(t *testing.T) {
+	irs := backendClosureProofIRs(t)
+	targetOptions := backendGoNumericOptions{
+		packageName:  "ember",
+		functionName: "backendGeneratedCounterBody",
+	}
+	generatedTarget, err := emitBackendGoNumericProof(irs[3], targetOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := backendClosureProofTargets(irs)
+	callerOptions := backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedClosureKernel",
+		preparedFunctionName: "backendGeneratedClosurePreparedFixture",
+		directTargets:        targets,
+	}
+	generatedCaller, err := emitBackendGoNumericProof(irs[1], callerOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range []struct {
+		path      string
+		generated []byte
+	}{
+		{path: "runtime_backend_closure_body_generated_test.go", generated: generatedTarget},
+		{path: "runtime_backend_closure_kernel_generated_test.go", generated: generatedCaller},
+	} {
+		onDisk, err := os.ReadFile(fixture.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(fixture.generated, onDisk) {
+			t.Fatalf("generated scalar closure fixture %s is stale", fixture.path)
+		}
+		if _, err := goparser.ParseFile(token.NewFileSet(), fixture.path, fixture.generated, goparser.AllErrors); err != nil {
+			t.Fatalf("parse %s: %v", fixture.path, err)
+		}
+	}
+	targetText := string(generatedTarget)
+	for _, required := range []string{"u0 *float64", "v5 = *u0", "*u0 = v7"} {
+		if !strings.Contains(targetText, required) {
+			t.Fatalf("generated closure body lacks %q:\n%s", required, targetText)
+		}
+	}
+	callerText := string(generatedCaller)
+	for _, required := range []string{
+		"var c0 float64",
+		"c0 = v23",
+		"s0 = c0",
+		"backendGeneratedCounterBody(&s0",
+		"c0 = s0",
+	} {
+		if !strings.Contains(callerText, required) {
+			t.Fatalf("generated closure caller lacks %q:\n%s", required, callerText)
+		}
+	}
+	scratch := strings.Index(callerText, "s0 = c0")
+	call := strings.Index(callerText, "backendGeneratedCounterBody(&s0")
+	guard := strings.Index(callerText, "if !ok16")
+	commit := strings.Index(callerText, "c0 = s0")
+	if scratch < 0 || call <= scratch || guard <= call || commit <= guard {
+		t.Fatalf("generated closure caller does not copy, guard, then commit captured state:\n%s", callerText)
+	}
+	for _, forbidden := range []string{
+		"switch", "opcode", "descriptor", "machineClosure", "machineUpvalue",
+		"CALL_LOCAL_ONE", "GET_UPVALUE", "SET_UPVALUE",
+	} {
+		if strings.Contains(targetText, forbidden) || strings.Contains(callerText, forbidden) {
+			t.Fatalf("generated scalar closure source contains runtime dispatch/materialization marker %q", forbidden)
+		}
+	}
+
+	root, err := Compile(backendClosureProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seed := range []float64{-29, -1, 0, 1, 7, 29, 1_000_000_000_005} {
+		got, ok := backendGeneratedClosureKernel(seed)
+		want := backendClosureExpected(seed)
+		if !ok || got != want {
+			t.Fatalf("generated scalar closure fixture(%v) = (%v, %t), want (%v, true)", seed, got, ok, want)
+		}
+		oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+			args: []Value{NumberValue(seed)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(oracle) != 1 {
+			t.Fatalf("closure oracle result count = %d, want 1", len(oracle))
+		}
+		oracleNumber, ok := oracle[0].Number()
+		if !ok || oracleNumber != got {
+			t.Fatalf("generated/oracle closure seed %v = %v/%v (%t)", seed, got, oracleNumber, ok)
+		}
+	}
+	if got, ok := backendGeneratedClosureKernel(math.NaN()); !ok || !math.IsNaN(got) {
+		t.Fatalf("generated scalar closure NaN result = (%v, %t), want (NaN, true)", got, ok)
+	}
+	oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+		args: []Value{NumberValue(math.NaN())},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oracleNaN, ok := oracle[0].Number()
+	if !ok || !math.IsNaN(oracleNaN) {
+		t.Fatalf("closure oracle NaN result = %v (%t), want NaN", oracleNaN, ok)
+	}
+	if !checkptrInstrumentedTest() {
+		if allocations := testing.AllocsPerRun(1000, func() {
+			_, _ = backendGeneratedClosureKernel(29)
+		}); allocations != 0 {
+			t.Fatalf("generated scalar closure allocations = %v, want 0", allocations)
+		}
+	}
+}
+
+func TestBackendGoScalarClosureRejectsUnprovedShapes(t *testing.T) {
+	tests := map[string]string{
+		"two captures": `
+local function kernel(seed)
+    local function makeCounter(initial)
+        local value = initial
+        local calls = 0
+        return function(step)
+            calls = calls + 1
+            value = value + step
+            return value + calls
+        end
+    end
+    local counter = makeCounter(seed)
+    return counter(1)
+end
+return kernel
+`,
+		"derived capture": `
+local function kernel(seed)
+    local function makeCounter(initial)
+        local value = initial + 1
+        return function(step)
+            value = value + step
+            return value
+        end
+    end
+    local counter = makeCounter(seed)
+    return counter(1)
+end
+return kernel
+`,
+		"read only copied capture": `
+local function kernel(seed)
+    local function makeCounter(initial)
+        local value = initial
+        return function()
+            return value
+        end
+    end
+    local counter = makeCounter(seed)
+    return counter()
+end
+return kernel
+`,
+		"merged independent closures": `
+local function kernel(seed)
+    local function makeCounter(initial)
+        local value = initial
+        return function(step)
+            value = value + step
+            return value
+        end
+    end
+    local counter = nil
+    if seed > 0 then
+        counter = makeCounter(seed)
+    else
+        counter = makeCounter(-seed)
+    end
+    return counter(1)
+end
+return kernel
+`,
+	}
+	for name, source := range tests {
+		t.Run(name, func(t *testing.T) {
+			proto, err := Compile(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			image, err := proto.preparedCodeImage()
+			if err != nil {
+				t.Fatal(err)
+			}
+			irs := make([]*backendProtoIR, len(image.prototypes))
+			for protoID := range image.prototypes {
+				irs[protoID], err = buildBackendProtoIR(&image.prototypes[protoID])
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			targets := make([]backendGoNumericTarget, len(irs))
+			for protoID := 2; protoID < len(irs); protoID++ {
+				targets[protoID] = backendGoNumericTarget{
+					ir:           irs[protoID],
+					functionName: fmt.Sprintf("rejectedClosureTarget%d", protoID),
+				}
+			}
+			if _, err := emitBackendGoNumericProof(irs[1], backendGoNumericOptions{
+				packageName:   "ember",
+				functionName:  "rejectUnprovedClosure",
+				directTargets: targets,
+			}); err == nil {
+				t.Fatal("emitted scalar closure for an unproved capture shape")
+			}
+		})
+	}
+}
+
+func backendClosureExpected(seed float64) float64 {
+	value := 10 + seed - math.Floor(seed/3)*3
+	total := 0.0
+	for index := 1.0; index <= 60; index++ {
+		value += index - math.Floor(index/4)*4
+		total += value
+	}
+	return total
+}
+
 func backendArrayOpsExpected(seed float64) float64 {
 	seedMod := seed - math.Floor(seed/3)*3
 	removed := 0.0
@@ -969,6 +1245,42 @@ func backendArrayOpsProofIR(t *testing.T) *backendProtoIR {
 	return ir
 }
 
+func backendClosureProofIRs(t *testing.T) []*backendProtoIR {
+	t.Helper()
+	proto, err := Compile(backendClosureProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(image.prototypes) != 4 {
+		t.Fatalf("closure proof Proto count = %d, want 4", len(image.prototypes))
+	}
+	irs := make([]*backendProtoIR, len(image.prototypes))
+	for protoID := range image.prototypes {
+		irs[protoID], err = buildBackendProtoIR(&image.prototypes[protoID])
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return irs
+}
+
+func backendClosureProofTargets(irs []*backendProtoIR) []backendGoNumericTarget {
+	targets := make([]backendGoNumericTarget, len(irs))
+	targets[2] = backendGoNumericTarget{
+		ir:           irs[2],
+		functionName: "backendGeneratedCounterFactory",
+	}
+	targets[3] = backendGoNumericTarget{
+		ir:           irs[3],
+		functionName: "backendGeneratedCounterBody",
+	}
+	return targets
+}
+
 func BenchmarkBackendGeneratedNumericFixture(b *testing.B) {
 	var result float64
 	b.ReportAllocs()
@@ -1011,6 +1323,20 @@ func BenchmarkBackendGeneratedArrayOpsFixture(b *testing.B) {
 	backendGeneratedNumericSink = result
 }
 
+func BenchmarkBackendGeneratedClosureKernel(b *testing.B) {
+	var result float64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		value, ok := backendGeneratedClosureKernel(float64(iteration & 31))
+		if !ok {
+			b.Fatal("generated scalar closure fixture exited")
+		}
+		result = value
+	}
+	backendGeneratedNumericSink = result
+}
+
 var backendGeneratedNumericSink float64
 
 func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
@@ -1020,6 +1346,7 @@ func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
 		backendTableFieldProofSource,
 		backendArrayIterationProofSource,
 		backendArrayOpsProofSource,
+		backendClosureProofSource,
 		"local function add(value) return value + 1 end return add",
 		"return { field = 1 }",
 	} {

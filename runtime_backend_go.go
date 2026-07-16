@@ -27,6 +27,7 @@ type backendGoNumericPlan struct {
 	// replayEntry marks exits whose exact spill would require one of those values.
 	replayEntry []bool
 	tables      backendGoScalarTablePlan
+	closures    backendGoScalarClosurePlan
 }
 
 type backendGoNumericEmitter struct {
@@ -51,6 +52,9 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	if options.preparedFunctionName != "" &&
 		(!token.IsIdentifier(options.preparedFunctionName) || token.Lookup(options.preparedFunctionName).IsKeyword()) {
 		return nil, fmt.Errorf("emit backend Go numeric proof: invalid prepared function name %q", options.preparedFunctionName)
+	}
+	if options.preparedFunctionName != "" && len(ir.upvalues) != 0 {
+		return nil, fmt.Errorf("emit backend Go numeric proof: prepared entry has %d upvalues", len(ir.upvalues))
 	}
 	if err := verifyBackendGoNumericTargets(options.directTargets); err != nil {
 		return nil, err
@@ -77,13 +81,22 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		source.WriteString("import \"math\"\n\n")
 	}
 	fmt.Fprintf(&source, "func %s(", options.functionName)
+	for upvalue := range ir.upvalues {
+		if upvalue != 0 {
+			source.WriteString(", ")
+		}
+		fmt.Fprintf(&source, "u%d *float64", upvalue)
+	}
 	for parameter := 0; parameter < ir.params; parameter++ {
-		if parameter != 0 {
+		if len(ir.upvalues) != 0 || parameter != 0 {
 			source.WriteString(", ")
 		}
 		fmt.Fprintf(&source, "p%d float64", parameter)
 	}
 	source.WriteString(") (float64, bool) {\n")
+	for upvalue := range ir.upvalues {
+		fmt.Fprintf(&source, "\tif u%d == nil {\n\t\treturn 0, false\n\t}\n", upvalue)
+	}
 	for valueIndex := range ir.values {
 		if !plan.used[valueIndex] {
 			continue
@@ -123,8 +136,17 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		fmt.Fprintf(&source, "\tvar i%d int\n", arrayIndex)
 		fmt.Fprintf(&source, "\t_ = i%d\n", arrayIndex)
 	}
+	for cell := 0; cell < plan.closures.cellCount; cell++ {
+		fmt.Fprintf(&source, "\tvar c%d float64\n", cell)
+		fmt.Fprintf(&source, "\t_ = c%d\n", cell)
+		fmt.Fprintf(&source, "\tvar s%d float64\n", cell)
+		fmt.Fprintf(&source, "\t_ = s%d\n", cell)
+	}
 	for pc := range ir.ops {
 		operation := &ir.ops[pc]
+		if _, _, factory := plan.closures.factory(operation); factory {
+			continue
+		}
 		if !backendGoNumericOperationDead(plan, operation) && operation.op == opCallLocalOne {
 			fmt.Fprintf(&source, "\tvar ok%d bool\n", operation.pc)
 		}
@@ -180,8 +202,17 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			fmt.Fprintf(&source, "\tvar i%d int\n", arrayIndex)
 			fmt.Fprintf(&source, "\t_ = i%d\n", arrayIndex)
 		}
+		for cell := 0; cell < plan.closures.cellCount; cell++ {
+			fmt.Fprintf(&source, "\tvar c%d float64\n", cell)
+			fmt.Fprintf(&source, "\t_ = c%d\n", cell)
+			fmt.Fprintf(&source, "\tvar s%d float64\n", cell)
+			fmt.Fprintf(&source, "\t_ = s%d\n", cell)
+		}
 		for pc := range ir.ops {
 			operation := &ir.ops[pc]
+			if _, _, factory := plan.closures.factory(operation); factory {
+				continue
+			}
 			if !backendGoNumericOperationDead(plan, operation) && operation.op == opCallLocalOne {
 				fmt.Fprintf(&source, "\tvar ok%d bool\n", operation.pc)
 			}
@@ -240,7 +271,9 @@ func verifyBackendGoNumericTargets(targets []backendGoNumericTarget) error {
 			return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d: %w", protoID, err)
 		}
 		if _, err := buildBackendGoNumericPlan(target.ir, backendGoNumericOptions{}); err != nil {
-			return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d is not a numeric leaf: %w", protoID, err)
+			if _, ok := backendGoNumericClosureFactory(target.ir, targets); !ok {
+				return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d is not a numeric leaf or closure factory: %w", protoID, err)
+			}
 		}
 	}
 	return nil
@@ -251,12 +284,17 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 	if err != nil {
 		return backendGoNumericPlan{}, err
 	}
+	closures, err := analyzeBackendGoScalarClosures(ir, options)
+	if err != nil {
+		return backendGoNumericPlan{}, err
+	}
 	plan := backendGoNumericPlan{
 		tags:                 make([]backendTagMask, len(ir.values)),
 		used:                 make([]bool, len(ir.values)),
 		scalarReplacedValues: make([]bool, len(ir.values)),
 		replayEntry:          make([]bool, len(ir.ops)),
 		tables:               tables,
+		closures:             closures,
 	}
 	for register, id := range ir.initial {
 		if register < ir.params {
@@ -347,9 +385,15 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						}
 					}
 				case opCallLocalOne:
-					if _, ok := backendGoNumericDirectTarget(options, operation); ok {
+					if _, _, ok := plan.closures.factory(operation); ok {
+						tags = backendTagFunction
+					} else if _, ok := plan.closures.call(operation); ok {
+						tags = backendTagNumber
+					} else if _, ok := backendGoNumericDirectTarget(options, operation); ok {
 						tags = backendTagNumber
 					}
+				case opGetUpvalue:
+					tags = backendTagNumber
 				default:
 					return backendGoNumericPlan{}, fmt.Errorf("emit backend Go numeric proof: PC %d writes through unsupported opcode %s", value.pc, opcodeName(operation.op))
 				}
@@ -379,6 +423,18 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		if backendGoNumericScalarReplacedCall(ir, options, operation) {
 			markScalarReplaced(backendOperationUse(operation, operation.b))
 			plan.replayEntry[pc] = true
+		}
+		if _, _, ok := plan.closures.factory(operation); ok {
+			markScalarReplaced(backendOperationUse(operation, operation.b))
+		}
+		if _, ok := plan.closures.call(operation); ok {
+			markScalarReplaced(backendOperationUse(operation, operation.b))
+			plan.replayEntry[pc] = true
+		}
+	}
+	for valueIndex, scalar := range plan.closures.scalarClosures {
+		if scalar {
+			markScalarReplaced(backendValueID(valueIndex + 1))
 		}
 	}
 	for valueIndex, root := range plan.tables.roots {
@@ -426,8 +482,10 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 				continue
 			}
 			for _, use := range operation.uses {
-				if operation.op == opCallLocalOne && use.register == operation.b &&
-					backendGoNumericScalarReplacedCall(ir, options, operation) {
+				if operation.op == opCallLocalOne &&
+					use.register == operation.b &&
+					(backendGoNumericScalarReplacedCall(ir, options, operation) ||
+						plan.closures.scalarValue(use.value)) {
 					continue
 				}
 				markUsed(use.value)
@@ -455,7 +513,8 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 			for _, use := range operation.uses {
 				if operation.op == opCallLocalOne &&
 					use.register == operation.b &&
-					backendGoNumericScalarReplacedCall(ir, options, operation) {
+					(backendGoNumericScalarReplacedCall(ir, options, operation) ||
+						plan.closures.scalarValue(use.value)) {
 					continue
 				}
 				markUsed(use.value)
@@ -531,7 +590,7 @@ func backendGoNumericPureProducer(op opcode) bool {
 	case opLoadConst, opMove,
 		opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow, opNeg,
 		opAddK, opSubK, opMulK, opDivK, opModK, opIDivK,
-		opClosure, opNewTable, opGetStringField:
+		opClosure, opNewTable, opGetStringField, opGetUpvalue:
 		return true
 	default:
 		return false
@@ -751,6 +810,21 @@ func verifyBackendGoNumericOperation(
 			return err
 		}
 		return require(operation.b, backendTagNumber)
+	case opGetUpvalue:
+		if operation.b < 0 || int(operation.b) >= len(ir.upvalues) {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d reads invalid upvalue %d", operation.pc, operation.b)
+		}
+		for _, definition := range operation.defs {
+			if plan.tags[definition.value-1] != backendTagNumber {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d reads a nonnumeric upvalue", operation.pc)
+			}
+		}
+		return nil
+	case opSetUpvalue:
+		if operation.a < 0 || int(operation.a) >= len(ir.upvalues) {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d writes invalid upvalue %d", operation.pc, operation.a)
+		}
+		return require(operation.b, backendTagNumber)
 	case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
 		if err := require(operation.a, backendTagNumber); err != nil {
 			return err
@@ -766,6 +840,27 @@ func verifyBackendGoNumericOperation(
 	case opJump:
 		return nil
 	case opCallLocalOne:
+		if factory, _, ok := plan.closures.factory(operation); ok {
+			if factory.captureArgument < 0 ||
+				factory.captureArgument >= operation.callArgCount {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d has invalid closure capture argument", operation.pc)
+			}
+			return require(operation.callArgStart+factory.captureArgument, backendTagNumber)
+		}
+		if call, ok := plan.closures.call(operation); ok {
+			if len(call.target.ir.upvalues) != 1 ||
+				call.target.ir.variadic ||
+				operation.callArgCount != int32(call.target.ir.params) ||
+				operation.callArgCount < 0 {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported scalar closure call shape", operation.pc)
+			}
+			for register := operation.callArgStart; register < operation.callArgStart+operation.callArgCount; register++ {
+				if err := require(register, backendTagNumber); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
 		target, ok := backendGoNumericDirectTarget(options, operation)
 		if !ok || !backendGoNumericScalarReplacedCall(ir, options, operation) {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no direct numeric target", operation.pc)
@@ -1020,6 +1115,18 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		destination, _ := definition(operation.a)
 		source, _ := use(operation.b)
 		fmt.Fprintf(&emitter.body, "\tv%d = -v%d\n", destination, source)
+	case opGetUpvalue:
+		destination, err := definition(operation.a)
+		if err != nil {
+			return false, err
+		}
+		fmt.Fprintf(&emitter.body, "\tv%d = *u%d\n", destination, operation.b)
+	case opSetUpvalue:
+		source, err := use(operation.b)
+		if err != nil {
+			return false, err
+		}
+		fmt.Fprintf(&emitter.body, "\t*u%d = v%d\n", operation.a, source)
 	case opEqual, opNotEqual, opLess, opLessEqual, opGreater, opGreaterEqual:
 		destination, _ := definition(operation.a)
 		left, _ := use(operation.b)
@@ -1079,6 +1186,35 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		emitter.emitGoto(int32(block.id), emitter.ir.pcToBlock[operation.targetPC], 1)
 		return true, nil
 	case opCallLocalOne:
+		if factory, cell, ok := emitter.plan.closures.factory(operation); ok {
+			source, err := use(operation.callArgStart + factory.captureArgument)
+			if err != nil {
+				return false, err
+			}
+			fmt.Fprintf(&emitter.body, "\tc%d = v%d\n", cell, source)
+			return false, nil
+		}
+		if call, ok := emitter.plan.closures.call(operation); ok {
+			destination, err := definition(operation.a)
+			if err != nil {
+				return false, err
+			}
+			fmt.Fprintf(&emitter.body, "\ts%d = c%d\n", call.cell, call.cell)
+			fmt.Fprintf(&emitter.body, "\tv%d, ok%d = %s(&s%d", destination, operation.pc, call.target.functionName, call.cell)
+			for argument := int32(0); argument < operation.callArgCount; argument++ {
+				value, err := use(operation.callArgStart + argument)
+				if err != nil {
+					return false, err
+				}
+				fmt.Fprintf(&emitter.body, ", v%d", value)
+			}
+			emitter.body.WriteString(")\n")
+			fmt.Fprintf(&emitter.body, "\tif !ok%d {\n", operation.pc)
+			emitter.emitReplayEntry(2)
+			emitter.body.WriteString("\t}\n")
+			fmt.Fprintf(&emitter.body, "\tc%d = s%d\n", call.cell, call.cell)
+			return false, nil
+		}
 		target, ok := backendGoNumericDirectTarget(emitter.options, operation)
 		if !ok || !backendGoNumericScalarReplacedCall(emitter.ir, emitter.options, operation) {
 			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar-replaced direct target", operation.pc)

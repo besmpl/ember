@@ -230,12 +230,28 @@ The retained path has moved beyond the original starting state:
   Its linked ARM64 body is 528 bytes; explicit head/tail bounds remove every
   linked bounds-panic/helper call, leaving only Go's entry stack-growth slow
   path and no opcode, descriptor, intrinsic, or table dispatch in hot code.
+- The current mutable-closure slice scalar-replaces a parameterized
+  `top10/closures_upvalues` factory shape into one typed Go cell. It accepts
+  only one nonescaping returned local closure, one mutable numeric capture
+  initialized directly from one factory parameter, one fixed numeric target,
+  and no closure merge, copied capture, derived capture, second upvalue,
+  variadic target, or escaping use. The generated target receives the cell
+  explicitly, while each caller invocation mutates a scratch copy and commits
+  only after a successful return so any target guard remains replay-safe.
+  Unsupported shapes fail closed to Machine. The prepared owner path takes
+  roughly 115-139 ns on the checkpoint machine, versus roughly
+  11.7 microseconds through generic Machine, with zero prepared allocations
+  and no materialized Machine closure or cell. The direct generated kernel
+  takes roughly 73-87 ns. Go inlines the 53-cost captured-cell helper into a
+  160-byte prepared body containing no calls, stack frame, opcode/descriptor
+  dispatch, closure lookup, or upvalue lookup.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
 all-37 parity. Non-dense iteration, general table mutation, strings,
-closures/upvalues, varargs/results, recursion, metatables, host/effect exits,
-modules, and coroutines remain on the active path.
+general closures/upvalues and dynamic call sets, varargs/results, recursion,
+metatables, host/effect exits, modules, and coroutines remain on the active
+path.
 
 ## Active execution path
 
