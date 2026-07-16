@@ -3711,6 +3711,7 @@ func (c *compiler) compilePlannedCallToResultsGeneric(lowered callPlan, args []e
 		}
 	}
 	if resultCount > 0 {
+		c.reserveRegistersThrough(target + resultCount)
 		c.claimRegisterRange(target, target+resultCount)
 	} else {
 		c.claimRegister(target)

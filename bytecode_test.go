@@ -7237,6 +7237,29 @@ return value
 	}
 }
 
+func TestCompilerReservesScratchFixedMultiResultWindow(t *testing.T) {
+	proto, err := Compile(`
+local function kernel(seed)
+	local function split(value)
+		return value, value + 1, value + 2
+	end
+	local total = 0
+	for i = 1, 50 + seed % 2 do
+		local a, b, c = split(i)
+		total = total + a + b * 2 + c * 3
+	end
+	return total
+end
+return kernel
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if proto == nil {
+		t.Fatal("Compile returned nil prototype")
+	}
+}
+
 func TestCompilerUsesMethodOneResultCallOpcode(t *testing.T) {
 	proto, err := Compile(`
 local counter = {value = 0}
