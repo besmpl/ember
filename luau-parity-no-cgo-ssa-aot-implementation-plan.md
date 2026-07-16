@@ -583,6 +583,32 @@ The retained path has moved beyond the original starting state:
   4,496 bytes for the prepared body, and 128 bytes for the wrapper; generated
   bodies contain only cold bounds/stack-growth calls and no opcode,
   descriptor, Machine table, runtime string, interning, or VM dispatch.
+- The mixed scalarizer and fused child-record slice lets record lowering and
+  the existing fixed scalar-array lowering own disjoint table roots in one
+  Proto. Uniform nonescaping child records stored in parent record arrays use
+  small numeric selectors, and `GET_STRING_FIELD_INDEX` becomes guarded
+  switches over the parent slot and finite string ID. A parameterized
+  `save_state_diff` holdout proves two three-record arrays, six nested inventory
+  records, one independent three-string key array, observed outer iterator
+  indices, finite-string comparisons, and two fused child lookups. Generated
+  Go, the prepared owner, generic Machine, and the independent interpreter
+  agree across negative, ordinary, and large seeds. Child escape, child shape
+  drift, mixed child-field kinds, and mixed dynamic-key kinds fail closed;
+  unknown finite keys replay canonical entry rather than fabricating nil.
+  Controlled execution stays on generic Machine; invalid prepared arguments
+  replay entry; owner table/string counts remain unchanged; direct and
+  prepared paths allocate zero when warmed. The direct kernel has a
+  five-sample median of about 4.149 microseconds (4.142-4.204 microseconds
+  observed), while the prepared owner path has a median of about 4.259
+  microseconds (4.250-4.269 microseconds observed), versus about 515.2
+  microseconds through generic Machine (514.5-529.3 microseconds observed).
+  The pinned Luau CLI has a five-sample median of about 52.09 microseconds per
+  call, including the cold first process sample, making prepared about
+  `0.082x` Luau. Deterministic generated source is 21,842 bytes. Linked ARM64
+  is 1,216 bytes for the direct kernel, 1,344 bytes for the prepared body, and
+  128 bytes for the wrapper; generated bodies contain only cold
+  bounds/stack-growth calls and no opcode, descriptor, Machine table, runtime
+  string, interning, or VM dispatch.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final

@@ -564,14 +564,23 @@ func verifyBackendGoNumericTargets(targets []backendGoNumericTarget) error {
 func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptions) (backendGoNumericPlan, error) {
 	keys := analyzeBackendGoStructuralKeys(ir, options)
 	records := analyzeBackendGoRecordTables(ir, keys)
-	var tables backendGoScalarTablePlan
-	var err error
-	if !records.enabled {
-		records = backendGoRecordTablePlan{}
-		tables, err = analyzeBackendGoScalarTables(ir, options.receiverTable)
-		if err != nil {
-			return backendGoNumericPlan{}, err
+	excludedTables := make(map[backendValueID]bool)
+	if records.enabled {
+		for root := range records.recordByRoot {
+			excludedTables[root] = true
 		}
+		for root := range records.mapByRoot {
+			excludedTables[root] = true
+		}
+		for root := range records.arrayByRoot {
+			excludedTables[root] = true
+		}
+	} else {
+		records = backendGoRecordTablePlan{}
+	}
+	tables, err := analyzeBackendGoScalarTablesExcluding(ir, options.receiverTable, excludedTables)
+	if err != nil {
+		return backendGoNumericPlan{}, err
 	}
 	closures, err := analyzeBackendGoScalarClosures(ir, options)
 	if err != nil {
@@ -663,6 +672,10 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						} else {
 							tags = field.tags
 						}
+					}
+				case opGetStringFieldIndex:
+					if fused, ok := plan.records.fusedGetByPC[operation.pc]; ok {
+						tags = plan.records.childRecordFieldTags(plan.tags, fused.family)
 					}
 				case opGetIndex:
 					if _, ok := plan.records.mapGetByPC[operation.pc]; ok {
@@ -1198,6 +1211,9 @@ func verifyBackendGoNumericOperation(
 			if _, child := plan.records.childSetByPC[operation.pc]; child {
 				return nil
 			}
+			if _, child := plan.records.childRecordSet[operation.pc]; child {
+				return nil
+			}
 			return require(operation.c, plan.records.fieldTags(field))
 		}
 		_, field, ok := plan.tables.operationField(ir, operation)
@@ -1249,6 +1265,26 @@ func verifyBackendGoNumericOperation(
 		for _, definition := range operation.defs {
 			if plan.tags[definition.value-1] != backendTagNumber {
 				return fmt.Errorf("emit backend Go numeric proof: PC %d record lookup result is not scalar", operation.pc)
+			}
+		}
+		return nil
+	case opGetStringFieldIndex:
+		fused, ok := plan.records.fusedGetByPC[operation.pc]
+		if !ok {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no fused child-record lookup", operation.pc)
+		}
+		if err := require(operation.d, backendTagString); err != nil {
+			return err
+		}
+		fieldTags := plan.records.childRecords[fused.family].fieldTags
+		for _, definition := range operation.defs {
+			if plan.tags[definition.value-1] != fieldTags {
+				return fmt.Errorf(
+					"emit backend Go numeric proof: PC %d fused lookup result has tags %x, want %x",
+					operation.pc,
+					plan.tags[definition.value-1],
+					fieldTags,
+				)
 			}
 		}
 		return nil
@@ -2110,6 +2146,11 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			return false, err
 		}
 		return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record lookup", operation.pc)
+	case opGetStringFieldIndex:
+		if handled, err := emitter.emitRecordFusedGet(operation, definition); handled {
+			return false, err
+		}
+		return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no fused child-record lookup", operation.pc)
 	case opGetStringField:
 		if handled, err := emitter.emitRecordGetStringField(operation, definition); handled {
 			return false, err

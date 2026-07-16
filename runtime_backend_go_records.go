@@ -86,6 +86,26 @@ type backendGoRecordChildArray struct {
 	member int
 }
 
+type backendGoRecordChildRecords struct {
+	records     []int
+	fieldNames  []machineStringID
+	fieldIndex  map[machineStringID]int
+	fieldTags   backendTagMask
+	parentArray int
+	parentField int
+}
+
+type backendGoRecordChildRecord struct {
+	family int
+	member int
+}
+
+type backendGoRecordFusedGet struct {
+	family int
+	ref    backendValueID
+	key    backendValueID
+}
+
 type backendGoRecordParentField struct {
 	array int
 	field int
@@ -137,6 +157,11 @@ type backendGoRecordTablePlan struct {
 	familyValues   map[backendValueID]int
 	familyPrepare  map[int32]int
 	familyNext     map[int32]int
+	childRecords   []backendGoRecordChildRecords
+	childByParent  map[backendGoRecordParentField]int
+	childRecord    map[backendGoRecordScratchField]backendGoRecordChildRecord
+	childRecordSet map[int32]backendGoRecordChildRecord
+	fusedGetByPC   map[int32]backendGoRecordFusedGet
 	fieldsByPC     map[int32]backendGoRecordFieldOperation
 	refs           map[backendValueID]backendGoRecordRef
 	iteratorValues []bool
@@ -169,6 +194,10 @@ func analyzeBackendGoRecordTables(
 		familyValues:   make(map[backendValueID]int),
 		familyPrepare:  make(map[int32]int),
 		familyNext:     make(map[int32]int),
+		childByParent:  make(map[backendGoRecordParentField]int),
+		childRecord:    make(map[backendGoRecordScratchField]backendGoRecordChildRecord),
+		childRecordSet: make(map[int32]backendGoRecordChildRecord),
+		fusedGetByPC:   make(map[int32]backendGoRecordFusedGet),
 		fieldsByPC:     make(map[int32]backendGoRecordFieldOperation),
 		refs:           make(map[backendValueID]backendGoRecordRef),
 		iteratorValues: make([]bool, len(ir.values)),
@@ -328,6 +357,10 @@ func analyzeBackendGoRecordTables(
 		plan.rejectReason = "child-array families"
 		return plan
 	}
+	if !plan.discoverChildRecordFamilies() {
+		plan.rejectReason = "child-record families"
+		return plan
+	}
 	if !plan.analyzeIterators(ir) {
 		plan.rejectReason = "iterator analysis"
 		return plan
@@ -348,6 +381,10 @@ func analyzeBackendGoRecordTables(
 		plan.rejectReason = "child-array reference propagation"
 		return plan
 	}
+	if !plan.classifyFusedGets(ir) {
+		plan.rejectReason = "fused child-record lookup"
+		return plan
+	}
 	if !plan.propagateArrayKeys(ir) {
 		plan.rejectReason = "array-key propagation"
 		return plan
@@ -366,7 +403,7 @@ func analyzeBackendGoRecordTables(
 		return plan
 	}
 	for valueIndex, root := range plan.roots {
-		if root != invalidBackendValueID {
+		if plan.ownsRoot(root) {
 			plan.scalarValues[valueIndex] = true
 		}
 	}
@@ -1091,13 +1128,18 @@ func (plan *backendGoRecordTablePlan) classifyFields(ir *backendProtoIR) bool {
 					return false
 				}
 			}
-			if _, child := plan.childByScratch[backendGoRecordScratchField{
+			key := backendGoRecordScratchField{
 				record: record,
 				field:  field,
-			}]; child {
+			}
+			_, childArray := plan.childByScratch[key]
+			_, childRecord := plan.childRecord[key]
+			if childArray || childRecord {
 				if _, initial := plan.childSetByPC[operation.pc]; !initial {
-					plan.rejectReason = "child-array identity changes at PC " + strconv.Itoa(int(operation.pc))
-					return false
+					if _, initial = plan.childRecordSet[operation.pc]; !initial {
+						plan.rejectReason = "child-table identity changes at PC " + strconv.Itoa(int(operation.pc))
+						return false
+					}
 				}
 			}
 			source := invalidBackendValueID
@@ -1142,6 +1184,13 @@ func (plan *backendGoRecordTablePlan) classifyFields(ir *backendProtoIR) bool {
 			source:  source,
 		}
 		if operation.op == opGetStringField && ref.kind == backendGoRecordRefArray {
+			if _, child := plan.childByParent[backendGoRecordParentField{
+				array: ref.index,
+				field: field,
+			}]; child {
+				plan.rejectReason = "child-record selector escapes fused lookup at PC " + strconv.Itoa(int(operation.pc))
+				return false
+			}
 			if family, ok := plan.familyByParent[backendGoRecordParentField{
 				array: ref.index,
 				field: field,
@@ -1158,6 +1207,46 @@ func (plan *backendGoRecordTablePlan) classifyFields(ir *backendProtoIR) bool {
 	return true
 }
 
+func (plan *backendGoRecordTablePlan) classifyFusedGets(ir *backendProtoIR) bool {
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op != opGetStringFieldIndex || len(operation.defs) != 1 {
+			continue
+		}
+		base := backendOperationUse(operation, operation.b)
+		ref, ok := plan.refs[base]
+		if !ok || ref.kind != backendGoRecordRefArray ||
+			ref.index < 0 || ref.index >= len(plan.arrays) {
+			continue
+		}
+		name, ok := backendGoStringFieldName(ir, operation.access.constant)
+		if !ok {
+			return false
+		}
+		field, ok := plan.arrays[ref.index].fieldIndex[name]
+		if !ok {
+			return false
+		}
+		family, ok := plan.childByParent[backendGoRecordParentField{
+			array: ref.index,
+			field: field,
+		}]
+		if !ok {
+			continue
+		}
+		key := backendOperationUse(operation, operation.d)
+		if key == invalidBackendValueID {
+			return false
+		}
+		plan.fusedGetByPC[operation.pc] = backendGoRecordFusedGet{
+			family: family,
+			ref:    base,
+			key:    key,
+		}
+	}
+	return true
+}
+
 func (plan *backendGoRecordTablePlan) fieldTagsFor(
 	tags []backendTagMask,
 	field backendGoRecordFieldOperation,
@@ -1168,6 +1257,12 @@ func (plan *backendGoRecordTablePlan) fieldTagsFor(
 			return 0
 		}
 		if _, ok := plan.childByScratch[backendGoRecordScratchField{
+			record: field.index,
+			field:  field.field,
+		}]; ok {
+			return backendTagNumber
+		}
+		if _, ok := plan.childRecord[backendGoRecordScratchField{
 			record: field.index,
 			field:  field.field,
 		}]; ok {
@@ -1191,6 +1286,12 @@ func (plan *backendGoRecordTablePlan) fieldTagsFor(
 			return 0
 		}
 		if _, ok := plan.familyByParent[backendGoRecordParentField{
+			array: field.index,
+			field: field.field,
+		}]; ok {
+			return backendTagNumber
+		}
+		if _, ok := plan.childByParent[backendGoRecordParentField{
 			array: field.index,
 			field: field.field,
 		}]; ok {
@@ -1360,6 +1461,23 @@ func backendGoRecordValueTags(tags []backendTagMask, value backendValueID) backe
 	return tags[value-1]
 }
 
+func (plan *backendGoRecordTablePlan) childRecordFieldTags(
+	tags []backendTagMask,
+	familyIndex int,
+) backendTagMask {
+	if familyIndex < 0 || familyIndex >= len(plan.childRecords) {
+		return 0
+	}
+	var result backendTagMask
+	for _, recordIndex := range plan.childRecords[familyIndex].records {
+		record := &plan.records[recordIndex]
+		for field := range record.fieldNames {
+			result |= plan.scratchFieldTags(tags, recordIndex, field)
+		}
+	}
+	return result
+}
+
 func (plan *backendGoRecordTablePlan) finalizeFieldTags(
 	ir *backendProtoIR,
 	tags []backendTagMask,
@@ -1370,6 +1488,12 @@ func (plan *backendGoRecordTablePlan) finalizeFieldTags(
 		for field := range record.fieldValues {
 			fieldTags := plan.scratchFieldTags(tags, recordIndex, field)
 			if _, ok := plan.childByScratch[backendGoRecordScratchField{
+				record: recordIndex,
+				field:  field,
+			}]; ok {
+				fieldTags = backendTagNumber
+			}
+			if _, ok := plan.childRecord[backendGoRecordScratchField{
 				record: recordIndex,
 				field:  field,
 			}]; ok {
@@ -1419,6 +1543,12 @@ func (plan *backendGoRecordTablePlan) finalizeFieldTags(
 			}]; ok {
 				fieldTags = backendTagNumber
 			}
+			if _, ok := plan.childByParent[backendGoRecordParentField{
+				array: arrayIndex,
+				field: field,
+			}]; ok {
+				fieldTags = backendTagNumber
+			}
 			if array.length == 0 {
 				array.fieldTags[field] = 0
 				continue
@@ -1452,12 +1582,24 @@ func (plan *backendGoRecordTablePlan) finalizeFieldTags(
 			}
 		}
 	}
+	for familyIndex := range plan.childRecords {
+		family := &plan.childRecords[familyIndex]
+		fieldTags := plan.childRecordFieldTags(tags, familyIndex)
+		if _, ok := backendGoNumericType(fieldTags); !ok {
+			plan.rejectReason = "unsupported child-record field tags"
+			return false
+		}
+		family.fieldTags = fieldTags
+	}
 	for pc, field := range plan.fieldsByPC {
 		operation := &ir.ops[pc]
 		if operation.op != opSetStringField {
 			continue
 		}
 		if _, ok := plan.childSetByPC[operation.pc]; ok {
+			continue
+		}
+		if _, ok := plan.childRecordSet[operation.pc]; ok {
 			continue
 		}
 		source := backendOperationUse(operation, operation.c)
@@ -1482,16 +1624,18 @@ func (plan *backendGoRecordTablePlan) validateUses(ir *backendProtoIR) bool {
 	}
 	for pc := range ir.ops {
 		operation := &ir.ops[pc]
-		if operation.op == opNewTable {
-			for _, definition := range operation.defs {
-				if !accountedRoots[definition.value] {
+		if operation.op == opGetStringFieldIndex {
+			base := backendOperationUse(operation, operation.b)
+			if _, ref := plan.refs[base]; ref {
+				if _, ok := plan.fusedGetByPC[operation.pc]; !ok {
+					plan.rejectReason = "unclassified fused child-record lookup at PC " + strconv.Itoa(int(operation.pc))
 					return false
 				}
 			}
 		}
 		for _, use := range operation.uses {
 			root := plan.root(use.value)
-			if root != invalidBackendValueID {
+			if root != invalidBackendValueID && accountedRoots[root] {
 				switch operation.op {
 				case opMove:
 					if use.register != operation.b {
@@ -1548,7 +1692,7 @@ func (plan *backendGoRecordTablePlan) validateUses(ir *backendProtoIR) bool {
 			}
 			if _, ref := plan.refs[use.value]; ref {
 				switch operation.op {
-				case opMove, opGetStringField, opSetStringField, opEqual, opNotEqual,
+				case opMove, opGetStringField, opGetStringFieldIndex, opSetStringField, opEqual, opNotEqual,
 					opJumpIfFalse, opJumpIfTableHasMetatable:
 				default:
 					plan.rejectReason = "unsupported record reference use by " + opcodeName(operation.op) + " at PC " + strconv.Itoa(int(operation.pc))
@@ -1575,6 +1719,20 @@ func (plan *backendGoRecordTablePlan) validateUses(ir *backendProtoIR) bool {
 		}
 	}
 	return true
+}
+
+func (plan backendGoRecordTablePlan) ownsRoot(root backendValueID) bool {
+	if root == invalidBackendValueID {
+		return false
+	}
+	if _, ok := plan.recordByRoot[root]; ok {
+		return true
+	}
+	if _, ok := plan.mapByRoot[root]; ok {
+		return true
+	}
+	_, ok := plan.arrayByRoot[root]
+	return ok
 }
 
 func (plan *backendGoRecordTablePlan) ensureMap(root backendValueID) int {
@@ -1712,6 +1870,88 @@ func (plan *backendGoRecordTablePlan) discoverChildArrayFamilies(ir *backendProt
 						continue
 					}
 					plan.childSetByPC[pc] = child
+					foundSet = true
+					break
+				}
+				if !foundSet {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func (plan *backendGoRecordTablePlan) discoverChildRecordFamilies() bool {
+	usedChildren := make(map[int]bool)
+	for parentIndex := range plan.arrays {
+		parent := &plan.arrays[parentIndex]
+		if len(parent.records) == 0 {
+			continue
+		}
+		for parentField, name := range parent.fieldNames {
+			children := make([]int, len(parent.records))
+			allChildren := true
+			for member, recordIndex := range parent.records {
+				record := &plan.records[recordIndex]
+				recordField, ok := record.fieldIndex[name]
+				if !ok {
+					return false
+				}
+				root := plan.root(record.fieldValues[recordField])
+				child, ok := plan.recordByRoot[root]
+				if !ok || child == recordIndex || plan.records[child].storedAtPC >= 0 {
+					allChildren = false
+					break
+				}
+				children[member] = child
+			}
+			if !allChildren {
+				continue
+			}
+			for _, child := range children {
+				if usedChildren[child] {
+					return false
+				}
+				usedChildren[child] = true
+			}
+			first := plan.records[children[0]]
+			for _, child := range children[1:] {
+				if !backendGoRecordSameShape(first.fieldIndex, plan.records[child].fieldIndex) {
+					return false
+				}
+			}
+			familyIndex := len(plan.childRecords)
+			fieldIndex := make(map[machineStringID]int, len(first.fieldIndex))
+			for childName, field := range first.fieldIndex {
+				fieldIndex[childName] = field
+			}
+			plan.childRecords = append(plan.childRecords, backendGoRecordChildRecords{
+				records:     append([]int(nil), children...),
+				fieldNames:  append([]machineStringID(nil), first.fieldNames...),
+				fieldIndex:  fieldIndex,
+				parentArray: parentIndex,
+				parentField: parentField,
+			})
+			plan.childByParent[backendGoRecordParentField{
+				array: parentIndex,
+				field: parentField,
+			}] = familyIndex
+			for member, recordIndex := range parent.records {
+				record := &plan.records[recordIndex]
+				recordField := record.fieldIndex[name]
+				child := backendGoRecordChildRecord{family: familyIndex, member: member}
+				key := backendGoRecordScratchField{record: recordIndex, field: recordField}
+				if current, exists := plan.childRecord[key]; exists && current != child {
+					return false
+				}
+				plan.childRecord[key] = child
+				foundSet := false
+				for pc, field := range record.setByPC {
+					if field != recordField {
+						continue
+					}
+					plan.childRecordSet[pc] = child
 					foundSet = true
 					break
 				}
@@ -1945,6 +2185,16 @@ func (emitter *backendGoNumericEmitter) emitRecordSetStringField(
 		)
 		return true, nil
 	}
+	if child, ok := emitter.plan.records.childRecordSet[operation.pc]; ok {
+		fmt.Fprintf(
+			&emitter.body,
+			"\tr%d_%d = %d\n",
+			field.index,
+			field.field,
+			child.member+1,
+		)
+		return true, nil
+	}
 	source, err := use(operation.c)
 	if err != nil {
 		return true, err
@@ -2006,6 +2256,52 @@ func (emitter *backendGoNumericEmitter) emitRecordGetStringField(
 	default:
 		return true, fmt.Errorf("emit backend Go numeric proof: PC %d reads invalid record field storage", operation.pc)
 	}
+	return true, nil
+}
+
+func (emitter *backendGoNumericEmitter) emitRecordFusedGet(
+	operation *backendOperationIR,
+	definition func(int32) (backendValueID, error),
+) (bool, error) {
+	fused, ok := emitter.plan.records.fusedGetByPC[operation.pc]
+	if !ok {
+		return false, nil
+	}
+	if fused.family < 0 || fused.family >= len(emitter.plan.records.childRecords) {
+		return true, fmt.Errorf("emit backend Go numeric proof: PC %d has invalid child-record family", operation.pc)
+	}
+	destination, err := definition(operation.a)
+	if err != nil {
+		return true, err
+	}
+	family := emitter.plan.records.childRecords[fused.family]
+	parent := emitter.plan.records.arrays[family.parentArray]
+	if err := emitter.emitRecordRefGuard(fused.ref, len(parent.records)); err != nil {
+		return true, err
+	}
+	fmt.Fprintf(&emitter.body, "\tswitch int(v%d) - 1 {\n", fused.ref)
+	for member, recordIndex := range family.records {
+		if recordIndex < 0 || recordIndex >= len(emitter.plan.records.records) {
+			return true, fmt.Errorf("emit backend Go numeric proof: PC %d has invalid child record", operation.pc)
+		}
+		record := emitter.plan.records.records[recordIndex]
+		fmt.Fprintf(&emitter.body, "\tcase %d:\n", member)
+		fmt.Fprintf(&emitter.body, "\t\tswitch v%d {\n", fused.key)
+		for _, name := range family.fieldNames {
+			field, ok := record.fieldIndex[name]
+			if !ok {
+				return true, fmt.Errorf("emit backend Go numeric proof: PC %d has child-record shape mismatch", operation.pc)
+			}
+			fmt.Fprintf(&emitter.body, "\t\tcase uint32(%d):\n", name)
+			fmt.Fprintf(&emitter.body, "\t\t\tv%d = r%d_%d\n", destination, recordIndex, field)
+		}
+		emitter.body.WriteString("\t\tdefault:\n")
+		fmt.Fprintf(&emitter.body, "\t\t\t%s\n", emitter.failureReturn())
+		emitter.body.WriteString("\t\t}\n")
+	}
+	emitter.body.WriteString("\tdefault:\n")
+	fmt.Fprintf(&emitter.body, "\t\t%s\n", emitter.failureReturn())
+	emitter.body.WriteString("\t}\n")
 	return true, nil
 }
 

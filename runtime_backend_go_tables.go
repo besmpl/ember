@@ -45,9 +45,18 @@ type backendGoScalarTablePlan struct {
 	iteratorValues []bool
 	iteratorByPC   map[int32]int
 	externalRoot   backendValueID
+	partial        bool
 }
 
 func analyzeBackendGoScalarTables(ir *backendProtoIR, receiverTable bool) (backendGoScalarTablePlan, error) {
+	return analyzeBackendGoScalarTablesExcluding(ir, receiverTable, nil)
+}
+
+func analyzeBackendGoScalarTablesExcluding(
+	ir *backendProtoIR,
+	receiverTable bool,
+	excluded map[backendValueID]bool,
+) (backendGoScalarTablePlan, error) {
 	if ir == nil {
 		return backendGoScalarTablePlan{}, nil
 	}
@@ -59,6 +68,7 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR, receiverTable bool) (backe
 		metatableByPC: make(map[int32]backendGoScalarMetatable),
 		iteratorByPC:  make(map[int32]int),
 		externalRoot:  invalidBackendValueID,
+		partial:       len(excluded) != 0,
 	}
 	for valueIndex := range ir.values {
 		value := &ir.values[valueIndex]
@@ -66,7 +76,7 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR, receiverTable bool) (backe
 			continue
 		}
 		root := value.origins[0]
-		if !backendGoNewTableRoot(ir, root) {
+		if !backendGoNewTableRoot(ir, root) || excluded[root] {
 			continue
 		}
 		plan.roots[valueIndex] = root
@@ -924,7 +934,7 @@ func (plan *backendGoScalarTablePlan) analyzeIterators(ir *backendProtoIR) bool 
 		if operation.op != opArrayNextJump2 {
 			continue
 		}
-		if _, ok := plan.iteratorByPC[operation.pc]; !ok {
+		if _, ok := plan.iteratorByPC[operation.pc]; !ok && !plan.partial {
 			return false
 		}
 	}
