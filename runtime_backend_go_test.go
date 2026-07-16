@@ -364,6 +364,58 @@ end
 return kernel
 `
 
+const backendAIUtilityScoringProofSource = `
+local function kernel(seed)
+    local self = {hp = 72, energy = 40 + seed % 3, threat = 9}
+    local targets = {
+        {hp = 30, distance = 4, threat = 7, armor = 2},
+        {hp = 80, distance = 9, threat = 12, armor = 6},
+        {hp = 55, distance = 2, threat = 4, armor = 1},
+        {hp = 110, distance = 12, threat = 15, armor = 9},
+    }
+    local actions = {
+        {kind = "attack", cost = 8, base = 20, range = 5},
+        {kind = "kite", cost = 4, base = 12, range = 10},
+        {kind = "guard", cost = 6, base = 16, range = 3},
+        {kind = "burst", cost = 18, base = 45, range = 4},
+    }
+    local total = 0
+    for tick = 1, 45 do
+        local best = -9999
+        for _, action in actions do
+            for _, target in targets do
+                local score = action.base + self.threat - target.armor
+                if target.distance <= action.range then
+                    score = score + 25
+                else
+                    score = score - (target.distance - action.range) * 3
+                end
+                if action.kind == "attack" then
+                    score = score + (100 - target.hp) // 4
+                elseif action.kind == "kite" then
+                    score = score + target.threat - self.hp // 10
+                elseif action.kind == "guard" then
+                    score = score + (100 - self.hp) // 3
+                else
+                    score = score + self.energy - action.cost
+                end
+                if self.energy < action.cost then
+                    score = score - 50
+                end
+                if score > best then
+                    best = score
+                end
+            end
+        end
+        total = total + best
+        self.energy = self.energy + tick % 5 - 2
+        self.hp = self.hp + tick % 3 - 1
+    end
+    return total + self.hp + self.energy
+end
+return kernel
+`
+
 const backendArrayOpsProofSource = `
 local function kernel(seed)
     local values = {}
@@ -2504,6 +2556,174 @@ return kernel
 	}
 }
 
+func TestBackendGoAIUtilityScoringRecordsAreRecognized(t *testing.T) {
+	ir := backendRecordArrayProofIR(t, backendAIUtilityScoringProofSource)
+	records := analyzeBackendGoRecordTables(ir, analyzeBackendGoStructuralKeys(ir, backendGoNumericOptions{}))
+	if !records.enabled {
+		t.Fatalf("AI utility-scoring records were not recognized: %s", records.rejectReason)
+	}
+	if len(records.maps) != 0 || len(records.arrays) != 2 || len(records.records) != 9 {
+		t.Fatalf(
+			"AI utility-scoring record inventory = maps %d arrays %d records %d, want 0/2/9",
+			len(records.maps),
+			len(records.arrays),
+			len(records.records),
+		)
+	}
+	if _, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedAIUtilityScoring",
+		preparedFunctionName: "backendGeneratedAIUtilityScoringPrepared",
+	}); err != nil {
+		t.Fatalf("emit AI utility-scoring records: %v", err)
+	}
+}
+
+func TestBackendGoAIUtilityScoringFixtureIsFreshAndCorrect(t *testing.T) {
+	ir := backendRecordArrayProofIR(t, backendAIUtilityScoringProofSource)
+	generated, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedAIUtilityScoring",
+		preparedFunctionName: "backendGeneratedAIUtilityScoringPreparedFixture",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fixture = "runtime_backend_ai_utility_generated_test.go"
+	onDisk, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(generated, onDisk) {
+		t.Fatal("generated AI utility-scoring fixture is stale")
+	}
+	if _, err := goparser.ParseFile(token.NewFileSet(), fixture, generated, goparser.AllErrors); err != nil {
+		t.Fatalf("parse generated AI utility-scoring source: %v", err)
+	}
+	text := string(generated)
+	for _, required := range []string{
+		"var r0_0 float64",
+		"var ra0_0 [4]float64",
+		"var ra1_0 [4]uint32",
+		"var ra1_3 [4]float64",
+		"math.Floor(",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("generated AI utility-scoring source lacks %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"map[", "make(", "machineTable", "machineString", "opcode", "descriptor",
+		"NEW_TABLE", "SET_FIELD", "GET_FIELD", "PREPARE_ITER", "ARRAY_NEXT_JUMP2",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("generated AI utility-scoring source contains runtime table/dispatch marker %q", forbidden)
+		}
+	}
+
+	root, err := Compile(backendAIUtilityScoringProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seed := range []float64{-29, -1, 0, 1, 7, 29, 1_000_005} {
+		got, ok := backendGeneratedAIUtilityScoring(seed)
+		if !ok {
+			t.Fatalf("generated AI utility-scoring fixture exited for seed %v", seed)
+		}
+		oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+			args: []Value{NumberValue(seed)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(oracle) != 1 {
+			t.Fatalf("AI utility-scoring oracle result count = %d, want 1", len(oracle))
+		}
+		oracleNumber, ok := oracle[0].Number()
+		if !ok || oracleNumber != got {
+			t.Fatalf("generated/oracle AI utility-scoring seed %v = %v/%v (%t)", seed, got, oracleNumber, ok)
+		}
+	}
+	if !checkptrInstrumentedTest() {
+		if allocations := testing.AllocsPerRun(1000, func() {
+			_, _ = backendGeneratedAIUtilityScoring(29)
+		}); allocations != 0 {
+			t.Fatalf("generated AI utility-scoring allocations = %v, want 0", allocations)
+		}
+	}
+}
+
+func TestBackendGoAIUtilityScoringIsIdentityBlindAndRejectsUnprovedRecords(t *testing.T) {
+	emit := func(source string) []byte {
+		generated, err := emitBackendGoNumericProof(
+			backendRecordArrayProofIR(t, source),
+			backendGoNumericOptions{
+				packageName:          "ember",
+				functionName:         "identityBlindAIUtilityScoring",
+				preparedFunctionName: "identityBlindAIUtilityScoringPrepared",
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return generated
+	}
+	renamed := strings.Replace(
+		backendAIUtilityScoringProofSource,
+		"local function kernel(seed)",
+		"local function opaque(seed)",
+		1,
+	)
+	baseGenerated := emit(backendAIUtilityScoringProofSource)
+	renamedGenerated := emit(renamed)
+	for _, marker := range []string{
+		"var r0_0 float64",
+		"var ra0_0 [4]float64",
+		"var ra1_0 [4]uint32",
+		"math.Floor(",
+	} {
+		if strings.Count(string(baseGenerated), marker) != strings.Count(string(renamedGenerated), marker) {
+			t.Fatalf("AI utility-scoring private rename changed structural lowering marker %q", marker)
+		}
+	}
+	if strings.Contains(string(renamedGenerated), "machineTable") ||
+		strings.Contains(string(renamedGenerated), "opcode") {
+		t.Fatal("renamed AI utility-scoring source lost structural lowering")
+	}
+
+	tests := map[string]string{
+		"escaping standalone record": strings.Replace(
+			backendAIUtilityScoringProofSource,
+			"return total + self.hp + self.energy",
+			"return self",
+			1,
+		),
+		"mixed standalone field tags": strings.Replace(
+			backendAIUtilityScoringProofSource,
+			"self.energy = self.energy + tick % 5 - 2",
+			"self.energy = true",
+			1,
+		),
+		"record shape mismatch": strings.Replace(
+			backendAIUtilityScoringProofSource,
+			"{hp = 110, distance = 12, threat = 15, armor = 9}",
+			"{hp = 110, distance = 12, threat = 15, defense = 9}",
+			1,
+		),
+	}
+	for name, source := range tests {
+		t.Run(name, func(t *testing.T) {
+			ir := backendRecordArrayProofIR(t, source)
+			if _, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+				packageName:  "ember",
+				functionName: "rejectUnprovedAIUtilityScoring",
+			}); err == nil {
+				t.Fatalf("record compiler accepted %s", name)
+			}
+		})
+	}
+}
+
 func TestBackendGoFiniteStringStateFixtureIsFreshAndCorrect(t *testing.T) {
 	generated, err := emitBackendGoNumericProof(backendFiniteStringStateProofIR(t), backendGoNumericOptions{
 		packageName:          "ember",
@@ -4395,6 +4615,20 @@ func BenchmarkBackendGeneratedAbilityResolution(b *testing.B) {
 		value, ok := backendGeneratedAbilityResolution(float64(iteration & 31))
 		if !ok {
 			b.Fatal("generated ability-resolution fixture exited")
+		}
+		result = value
+	}
+	backendGeneratedNumericSink = result
+}
+
+func BenchmarkBackendGeneratedAIUtilityScoring(b *testing.B) {
+	var result float64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		value, ok := backendGeneratedAIUtilityScoring(float64(iteration & 31))
+		if !ok {
+			b.Fatal("generated AI utility-scoring fixture exited")
 		}
 		result = value
 	}
