@@ -316,6 +316,54 @@ end
 return kernel
 `
 
+const backendAbilityResolutionProofSource = `
+local function kernel(seed)
+    local caster = {mana = 120 + seed % 3, heat = 0, power = 11, combo = 0}
+    local target = {hp = 340, armor = 8, ward = 12}
+    local abilities = {
+        {cost = 7, cooldown = 0, base = 18, tag = "strike"},
+        {cost = 13, cooldown = 1, base = 31, tag = "burn"},
+        {cost = 5, cooldown = 0, base = 12, tag = "pierce"},
+        {cost = 17, cooldown = 2, base = 45, tag = "burst"},
+    }
+    local total = 0
+    for turn = 1, 36 do
+        for _, ability in abilities do
+            if ability.cooldown <= 0 and caster.mana >= ability.cost then
+                caster.mana = caster.mana - ability.cost
+                local damage = ability.base + caster.power + caster.combo
+                if ability.tag == "burn" then
+                    damage = damage + caster.heat
+                    caster.heat = caster.heat + 3
+                elseif ability.tag == "pierce" then
+                    damage = damage - target.armor // 2
+                elseif ability.tag == "burst" then
+                    damage = damage + caster.combo * 2
+                    caster.combo = 0
+                else
+                    damage = damage - target.armor
+                    caster.combo = caster.combo + 1
+                end
+                if target.ward > 0 then
+                    local absorbed = math.min(target.ward, damage)
+                    target.ward = target.ward - absorbed
+                    damage = damage - absorbed
+                end
+                target.hp = target.hp - damage
+                ability.cooldown = turn % 3 + 1
+                total = total + target.hp + damage + caster.mana
+            else
+                ability.cooldown = ability.cooldown - 1
+                caster.mana = caster.mana + 2
+                total = total + caster.mana + ability.cooldown
+            end
+        end
+    end
+    return total + target.hp + caster.heat + caster.combo
+end
+return kernel
+`
+
 const backendArrayOpsProofSource = `
 local function kernel(seed)
     local values = {}
@@ -2279,6 +2327,183 @@ func TestBackendGoCombatTickMathMinIsIdentityBlindAndRejectsUnprovedCalls(t *tes
 	}
 }
 
+func TestBackendGoAbilityResolutionStandaloneRecordsAreRecognized(t *testing.T) {
+	ir := backendRecordArrayProofIR(t, backendAbilityResolutionProofSource)
+	records := analyzeBackendGoRecordTables(ir, analyzeBackendGoStructuralKeys(ir, backendGoNumericOptions{}))
+	if !records.enabled {
+		t.Fatalf("ability-resolution records were not recognized: %s", records.rejectReason)
+	}
+	if len(records.maps) != 0 || len(records.arrays) != 1 || len(records.records) != 6 {
+		t.Fatalf(
+			"ability-resolution record inventory = maps %d arrays %d records %d, want 0/1/6",
+			len(records.maps),
+			len(records.arrays),
+			len(records.records),
+		)
+	}
+	if _, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedAbilityResolution",
+		preparedFunctionName: "backendGeneratedAbilityResolutionPrepared",
+	}); err != nil {
+		t.Fatalf("emit ability-resolution records: %v", err)
+	}
+}
+
+func TestBackendGoAbilityResolutionFixtureIsFreshAndCorrect(t *testing.T) {
+	ir := backendRecordArrayProofIR(t, backendAbilityResolutionProofSource)
+	generated, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedAbilityResolution",
+		preparedFunctionName: "backendGeneratedAbilityResolutionPreparedFixture",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fixture = "runtime_backend_ability_resolution_generated_test.go"
+	onDisk, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(generated, onDisk) {
+		t.Fatal("generated ability-resolution fixture is stale")
+	}
+	if _, err := goparser.ParseFile(token.NewFileSet(), fixture, generated, goparser.AllErrors); err != nil {
+		t.Fatalf("parse generated ability-resolution source: %v", err)
+	}
+	text := string(generated)
+	for _, required := range []string{
+		"var r0_0 float64",
+		"var r1_0 float64",
+		"var ra0_0 [4]float64",
+		"var ra0_3 [4]uint32",
+		"math.Min(",
+		"context.intrinsicUnchanged(",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("generated ability-resolution source lacks %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"map[", "make(", "machineTable", "machineString", "opcode", "descriptor",
+		"FAST_CALL", "MATH_MIN", "NEW_TABLE", "SET_FIELD", "GET_FIELD",
+		"PREPARE_ITER", "ARRAY_NEXT_JUMP2",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("generated ability-resolution source contains runtime table/dispatch marker %q", forbidden)
+		}
+	}
+
+	root, err := Compile(backendAbilityResolutionProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seed := range []float64{-29, -1, 0, 1, 7, 29, 1_000_005} {
+		got, ok := backendGeneratedAbilityResolution(seed)
+		if !ok {
+			t.Fatalf("generated ability-resolution fixture exited for seed %v", seed)
+		}
+		oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+			args: []Value{NumberValue(seed)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(oracle) != 1 {
+			t.Fatalf("ability-resolution oracle result count = %d, want 1", len(oracle))
+		}
+		oracleNumber, ok := oracle[0].Number()
+		if !ok || oracleNumber != got {
+			t.Fatalf("generated/oracle ability-resolution seed %v = %v/%v (%t)", seed, got, oracleNumber, ok)
+		}
+	}
+	if !checkptrInstrumentedTest() {
+		if allocations := testing.AllocsPerRun(1000, func() {
+			_, _ = backendGeneratedAbilityResolution(29)
+		}); allocations != 0 {
+			t.Fatalf("generated ability-resolution allocations = %v, want 0", allocations)
+		}
+	}
+}
+
+func TestBackendGoAbilityResolutionIsIdentityBlindAndRejectsUnprovedRecords(t *testing.T) {
+	emit := func(source string) []byte {
+		generated, err := emitBackendGoNumericProof(
+			backendRecordArrayProofIR(t, source),
+			backendGoNumericOptions{
+				packageName:          "ember",
+				functionName:         "identityBlindAbilityResolution",
+				preparedFunctionName: "identityBlindAbilityResolutionPrepared",
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return generated
+	}
+	renamed := strings.Replace(
+		backendAbilityResolutionProofSource,
+		"local function kernel(seed)",
+		"local function opaque(seed)",
+		1,
+	)
+	baseGenerated := emit(backendAbilityResolutionProofSource)
+	renamedGenerated := emit(renamed)
+	for _, marker := range []string{
+		"var r0_0 float64",
+		"var r1_0 float64",
+		"var ra0_3 [4]uint32",
+		"math.Min(",
+		"context.intrinsicUnchanged(",
+	} {
+		if strings.Count(string(baseGenerated), marker) != strings.Count(string(renamedGenerated), marker) {
+			t.Fatalf("ability-resolution private rename changed structural lowering marker %q", marker)
+		}
+	}
+	if strings.Contains(string(renamedGenerated), "machineTable") ||
+		strings.Contains(string(renamedGenerated), "opcode") {
+		t.Fatal("renamed ability-resolution source lost structural lowering")
+	}
+
+	const storedAliasSource = `
+local function kernel(seed)
+    local record = {value = seed}
+    local records = {record}
+    record.value = record.value + 1
+    for _, item in records do
+        return item.value
+    end
+end
+return kernel
+`
+	tests := map[string]string{
+		"escaping standalone record": strings.Replace(
+			backendAbilityResolutionProofSource,
+			"return total + target.hp + caster.heat + caster.combo",
+			"return caster",
+			1,
+		),
+		"stored record alias remains live": storedAliasSource,
+		"mixed standalone field tags": strings.Replace(
+			backendAbilityResolutionProofSource,
+			"caster.combo = 0\n                else",
+			"caster.combo = true\n                else",
+			1,
+		),
+	}
+	for name, source := range tests {
+		t.Run(name, func(t *testing.T) {
+			ir := backendRecordArrayProofIR(t, source)
+			if _, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+				packageName:  "ember",
+				functionName: "rejectUnprovedAbilityResolution",
+			}); err == nil {
+				t.Fatalf("standalone-record compiler accepted %s", name)
+			}
+		})
+	}
+}
+
 func TestBackendGoFiniteStringStateFixtureIsFreshAndCorrect(t *testing.T) {
 	generated, err := emitBackendGoNumericProof(backendFiniteStringStateProofIR(t), backendGoNumericOptions{
 		packageName:          "ember",
@@ -4156,6 +4381,20 @@ func BenchmarkBackendGeneratedCombatTick(b *testing.B) {
 		value, ok := backendGeneratedCombatTick(float64(iteration & 31))
 		if !ok {
 			b.Fatal("generated combat-tick fixture exited")
+		}
+		result = value
+	}
+	backendGeneratedNumericSink = result
+}
+
+func BenchmarkBackendGeneratedAbilityResolution(b *testing.B) {
+	var result float64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		value, ok := backendGeneratedAbilityResolution(float64(iteration & 31))
+		if !ok {
+			b.Fatal("generated ability-resolution fixture exited")
 		}
 		result = value
 	}

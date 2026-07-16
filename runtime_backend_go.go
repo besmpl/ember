@@ -220,8 +220,14 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			}
 		}
 	}
+	generatedReachable := directEmitter.generatedReachableBlocks()
 	for valueIndex := range ir.values {
 		if !plan.used[valueIndex] {
+			continue
+		}
+		value := &ir.values[valueIndex]
+		if value.block >= 0 &&
+			(int(value.block) >= len(generatedReachable) || !generatedReachable[value.block]) {
 			continue
 		}
 		if plan.tags[valueIndex] == backendTagNil {
@@ -311,6 +317,11 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		source.WriteString(") machinePreparedExit {\n")
 		for valueIndex := range ir.values {
 			if !plan.used[valueIndex] || plan.tags[valueIndex] == backendTagNil {
+				continue
+			}
+			value := &ir.values[valueIndex]
+			if value.block >= 0 &&
+				(int(value.block) >= len(generatedReachable) || !generatedReachable[value.block]) {
 				continue
 			}
 			goType, ok := backendGoNumericTypeForValue(plan, backendValueID(valueIndex+1))
@@ -1586,6 +1597,14 @@ func verifyBackendGoNumericOperation(
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported truthy operand", operation.pc)
 		}
 		return nil
+	case opJumpIfTableHasMetatable:
+		id := backendOperationUse(operation, operation.a)
+		if plan.records.root(id) == invalidBackendValueID {
+			if _, ok := plan.records.ref(id); !ok {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record metatable guard", operation.pc)
+			}
+		}
+		return nil
 	case opJump:
 		return nil
 	case opCall:
@@ -1895,9 +1914,10 @@ func backendGoDirectTargetResultTag(
 }
 
 func (emitter *backendGoNumericEmitter) emitBody() error {
+	reachable := emitter.generatedReachableBlocks()
 	for blockIndex := range emitter.ir.blocks {
 		block := &emitter.ir.blocks[blockIndex]
-		if !block.reachable {
+		if !reachable[blockIndex] {
 			continue
 		}
 		if blockIndex != 0 {
@@ -1924,6 +1944,45 @@ func (emitter *backendGoNumericEmitter) emitBody() error {
 		emitter.emitGoto(int32(blockIndex), block.successors[0], 1)
 	}
 	return nil
+}
+
+func (emitter *backendGoNumericEmitter) generatedReachableBlocks() []bool {
+	reachable := make([]bool, len(emitter.ir.blocks))
+	if len(reachable) == 0 || !emitter.ir.blocks[0].reachable {
+		return reachable
+	}
+	reachable[0] = true
+	pending := []int32{0}
+	for len(pending) > 0 {
+		blockID := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		block := &emitter.ir.blocks[blockID]
+		successors := block.successors
+		for pc := block.first; pc < block.last; pc++ {
+			operation := &emitter.ir.ops[pc]
+			if backendGoNumericOperationDead(emitter.plan, operation) {
+				continue
+			}
+			if operation.op == opJumpIfTableHasMetatable {
+				nextBlock := int32(-1)
+				if int(block.last) < len(emitter.ir.ops) {
+					nextBlock = emitter.ir.pcToBlock[block.last]
+				}
+				successors = []int32{nextBlock}
+				break
+			}
+		}
+		for _, successor := range successors {
+			if successor < 0 || int(successor) >= len(reachable) ||
+				!emitter.ir.blocks[successor].reachable ||
+				reachable[successor] {
+				continue
+			}
+			reachable[successor] = true
+			pending = append(pending, successor)
+		}
+	}
+	return reachable
 }
 
 func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperationIR, block *backendBlockIR) (bool, error) {
@@ -2363,6 +2422,13 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			expression = fmt.Sprintf("!v%d", condition)
 		}
 		emitter.emitBranch(int32(block.id), operation.targetPC, expression, 1)
+		return true, nil
+	case opJumpIfTableHasMetatable:
+		nextBlock := int32(-1)
+		if int(block.last) < len(emitter.ir.ops) {
+			nextBlock = emitter.ir.pcToBlock[block.last]
+		}
+		emitter.emitGoto(int32(block.id), nextBlock, 1)
 		return true, nil
 	case opJump:
 		emitter.emitGoto(int32(block.id), emitter.ir.pcToBlock[operation.targetPC], 1)

@@ -483,6 +483,34 @@ The retained path has moved beyond the original starting state:
   supported `math.archMin` helper and has only cold bounds/stack-growth
   helpers otherwise, with no opcode, descriptor, Machine table, runtime
   string, interning, or VM dispatch.
+- The standalone-record slice extends the record scalarizer beyond container
+  elements to nonescaping fixed-shape local records with dominated
+  initialization, direct field reads, and same-kind mutations. A record may be
+  stored into one proved container only when every write dominates the store
+  and the original alias is dead afterward; escaping records, live aliases
+  after storage, mixed field kinds, multiple stores, and unsupported uses fail
+  closed. Proven-fresh scalar records also eliminate compiler-emitted
+  metatable slow paths, and generated reachability removes the now-dead blocks
+  and their SSA declarations deterministically. A parameterized
+  `ability_resolution` holdout proves two mutable standalone records, one
+  four-record typed array with finite string IDs, nested iteration, direct
+  reads/writes, and guarded `math.min`. Generated code, prepared owner,
+  generic Machine, and the independent interpreter agree across negative,
+  ordinary, and large seeds. Rebound `math.min` replays entry before mutation;
+  structural private-function mutation retains the same lowering shape.
+  Direct and prepared paths allocate zero when warmed and materialize no owner
+  tables or strings. The direct kernel has a five-sample median of about
+  366.3 ns (358.4-373.0 ns observed), while the prepared owner path has a
+  median of about 484.7 ns (477.5-544.0 ns observed), versus about
+  165.84 microseconds through generic Machine
+  (165.24-167.06 microseconds observed). Live Luau produced the same warmed
+  checksum with a five-sample median of about 9.360 microseconds per call
+  (9.349-9.546 microseconds observed), making prepared about `0.052x` Luau.
+  Deterministic generated source is 18,756 bytes. Linked ARM64 is 960 bytes
+  for the direct kernel and 1,040 bytes for the prepared body; each calls Go's
+  supported `math.archMin` helper and has only cold bounds/stack-growth
+  helpers otherwise, with no opcode, descriptor, Machine table, runtime
+  string, interning, or VM dispatch.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final

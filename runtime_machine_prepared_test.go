@@ -1280,6 +1280,125 @@ func TestMachinePreparedCombatTickGuardsMathMinBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestMachinePreparedAbilityResolutionAvoidsRuntimeTablesAndGuardsMathMin(t *testing.T) {
+	image := machinePreparedTestImageForSource(t, backendAbilityResolutionProofSource)
+	calls := 0
+	var observed machinePreparedExit
+	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
+		calls++
+		observed = backendGeneratedAbilityResolutionPreparedFixture(context)
+		return observed
+	})
+	prepared, err := newMachineOwnerWithPrepared(image, program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generic, err := newMachineOwner(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := prepared.close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := generic.close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	preparedArg, err := prepared.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericArg, err := generic.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tableCount := len(prepared.tables.tables)
+	stringCount := len(prepared.strings.records)
+	want, ok := backendGeneratedAbilityResolution(29)
+	if !ok {
+		t.Fatal("generated ability-resolution oracle exited")
+	}
+	runMachinePreparedTestProto(t, prepared, 1, []slot{preparedArg}, nil)
+	runMachinePreparedTestProto(t, generic, 1, []slot{genericArg}, nil)
+	assertMachineOwnerNumberResult(t, prepared, want)
+	assertMachineOwnerNumberResult(t, generic, want)
+	if calls != 1 || observed.kind != machinePreparedExitReturnOneNumber {
+		t.Fatalf("prepared ability-resolution success = calls %d exit %#v", calls, observed)
+	}
+	if len(prepared.tables.tables) != tableCount {
+		t.Fatalf(
+			"prepared ability-resolution path changed owner table count from %d to %d",
+			tableCount,
+			len(prepared.tables.tables),
+		)
+	}
+	if len(prepared.strings.records) != stringCount {
+		t.Fatalf(
+			"prepared ability-resolution path changed owner string count from %d to %d",
+			stringCount,
+			len(prepared.strings.records),
+		)
+	}
+
+	mathOverride := NewTable()
+	if err := mathOverride.Set(StringValue("min"), HostFuncValue(func([]Value) ([]Value, error) {
+		return []Value{NumberValue(99)}, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	override := map[string]Value{"math": TableValue(mathOverride)}
+	if err := prepared.importGlobalsStopped(override); err != nil {
+		t.Fatal(err)
+	}
+	if err := generic.importGlobalsStopped(override); err != nil {
+		t.Fatal(err)
+	}
+	runMachinePreparedTestProto(t, prepared, 1, []slot{preparedArg}, nil)
+	runMachinePreparedTestProto(t, generic, 1, []slot{genericArg}, nil)
+	preparedResult, err := prepared.number(prepared.results[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericResult, err := generic.number(generic.results[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || observed.kind != machinePreparedExitReplayEntry {
+		t.Fatalf("prepared ability-resolution guard fallback = calls %d exit %#v", calls, observed)
+	}
+	if preparedResult != genericResult || preparedResult == want {
+		t.Fatalf(
+			"prepared/generic rebound math.min results = %v/%v, canonical %v",
+			preparedResult,
+			genericResult,
+			want,
+		)
+	}
+	if err := prepared.importGlobalsStopped(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if !checkptrInstrumentedTest() {
+		lease, err := prepared.beginRun()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var runErr error
+		allocations := testing.AllocsPerRun(1000, func() {
+			runErr = prepared.executeStopped(0, 1, machineClosureHandle{}, []slot{preparedArg}, nil, machineRunEffects{})
+		})
+		lease.end()
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if allocations != 0 {
+			t.Fatalf("prepared ability-resolution owner allocations = %v, want 0", allocations)
+		}
+	}
+}
+
 func TestMachinePreparedScalarArrayOpsAvoidLocalTablesAndGuardIntrinsics(t *testing.T) {
 	image := machinePreparedTestImageForSource(t, backendArrayOpsProofSource)
 	calls := 0
@@ -2328,6 +2447,17 @@ func BenchmarkMachinePreparedCombatTickOwner(b *testing.B) {
 
 func BenchmarkMachineGenericCombatTickOwner(b *testing.B) {
 	image := machinePreparedBenchmarkImage(b, backendCombatTickProofSource)
+	benchmarkMachineNumericOwner(b, image, nil)
+}
+
+func BenchmarkMachinePreparedAbilityResolutionOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendAbilityResolutionProofSource)
+	program := machinePreparedBenchmarkProgram(b, image, backendGeneratedAbilityResolutionPreparedFixture)
+	benchmarkMachineNumericOwner(b, image, program)
+}
+
+func BenchmarkMachineGenericAbilityResolutionOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendAbilityResolutionProofSource)
 	benchmarkMachineNumericOwner(b, image, nil)
 }
 

@@ -29,6 +29,8 @@ type backendGoRecord struct {
 	fieldValues []backendValueID
 	fieldTags   []backendTagMask
 	setByPC     map[int32]int
+	writesByPC  map[int32]int
+	storedAtPC  int32
 }
 
 type backendGoRecordKey struct {
@@ -165,12 +167,14 @@ func analyzeBackendGoRecordTables(
 				root:       root,
 				fieldIndex: make(map[machineStringID]int),
 				setByPC:    make(map[int32]int),
+				writesByPC: make(map[int32]int),
+				storedAtPC: -1,
 			})
 		}
 		record := &plan.records[recordIndex]
-		if _, duplicate := record.fieldIndex[name]; duplicate {
-			plan.rejectReason = "duplicate record field"
-			return plan
+		if field, duplicate := record.fieldIndex[name]; duplicate {
+			record.writesByPC[operation.pc] = field
+			continue
 		}
 		field := len(record.fieldNames)
 		record.fieldNames = append(record.fieldNames, name)
@@ -180,6 +184,7 @@ func analyzeBackendGoRecordTables(
 		)
 		record.fieldIndex[name] = field
 		record.setByPC[operation.pc] = field
+		record.writesByPC[operation.pc] = field
 	}
 	if len(plan.records) == 0 {
 		plan.rejectReason = "no records"
@@ -199,6 +204,12 @@ func analyzeBackendGoRecordTables(
 			plan.mapSetByPC[operation.pc] = backendGoRecordMapOperation{
 				index: mapIndex, record: record,
 			}
+			if plan.records[record].storedAtPC >= 0 &&
+				plan.records[record].storedAtPC != operation.pc {
+				plan.rejectReason = "record has multiple container stores"
+				return plan
+			}
+			plan.records[record].storedAtPC = operation.pc
 			plan.maps[mapIndex].recordCount++
 		case opSetField:
 			table := plan.root(backendOperationUse(operation, operation.a))
@@ -215,6 +226,12 @@ func analyzeBackendGoRecordTables(
 			plan.arraySetByPC[operation.pc] = backendGoRecordArrayOperation{
 				index: arrayIndex, record: record, element: element,
 			}
+			if plan.records[record].storedAtPC >= 0 &&
+				plan.records[record].storedAtPC != operation.pc {
+				plan.rejectReason = "record has multiple container stores"
+				return plan
+			}
+			plan.records[record].storedAtPC = operation.pc
 		}
 	}
 	if len(plan.maps) == 0 && len(plan.arrays) == 0 {
@@ -633,8 +650,10 @@ func (plan *backendGoRecordTablePlan) finishShapesAndKeys(
 		}
 		current.records = append([]int(nil), recordIndexes...)
 	}
-	for _, uses := range recordUses {
-		if uses != 1 {
+	for recordIndex, uses := range recordUses {
+		if uses > 1 ||
+			uses == 0 && plan.records[recordIndex].storedAtPC >= 0 ||
+			uses == 1 && plan.records[recordIndex].storedAtPC < 0 {
 			return false
 		}
 	}
@@ -653,7 +672,7 @@ func (plan *backendGoRecordTablePlan) recordInitializedBefore(
 	if len(record.fieldNames) == 0 || len(record.setByPC) != len(record.fieldNames) {
 		return false
 	}
-	for pc := range record.setByPC {
+	for pc := range record.writesByPC {
 		if pc < 0 || int(pc) >= len(ir.ops) ||
 			!backendGoScalarTableOperationDominates(ir, &ir.ops[pc], consumer) {
 			return false
@@ -680,9 +699,30 @@ func (plan *backendGoRecordTablePlan) classifyFields(ir *backendProtoIR) bool {
 		}
 		if record, exists := plan.recordByRoot[plan.root(base)]; exists {
 			field, exists := plan.records[record].fieldIndex[name]
-			if !exists || operation.op == opGetStringField {
+			if !exists {
 				plan.rejectReason = "record field mismatch at PC " + strconv.Itoa(int(operation.pc))
 				return false
+			}
+			initialField, initial := plan.records[record].setByPC[operation.pc]
+			if !initial || initialField != field {
+				initialPC := int32(-1)
+				for pc, candidate := range plan.records[record].setByPC {
+					if candidate == field {
+						initialPC = pc
+						break
+					}
+				}
+				if initialPC < 0 ||
+					!backendGoScalarTableOperationDominates(ir, &ir.ops[initialPC], operation) {
+					plan.rejectReason = "record field used before initialization at PC " + strconv.Itoa(int(operation.pc))
+					return false
+				}
+				storedAtPC := plan.records[record].storedAtPC
+				if storedAtPC >= 0 &&
+					!backendGoScalarTableOperationDominates(ir, operation, &ir.ops[storedAtPC]) {
+					plan.rejectReason = "stored record root remains live at PC " + strconv.Itoa(int(operation.pc))
+					return false
+				}
 			}
 			source := invalidBackendValueID
 			if operation.op == opSetStringField {
@@ -736,11 +776,7 @@ func (plan *backendGoRecordTablePlan) fieldTagsFor(
 		if field.index < 0 || field.index >= len(plan.records) {
 			return 0
 		}
-		record := &plan.records[field.index]
-		if field.field < 0 || field.field >= len(record.fieldValues) {
-			return 0
-		}
-		return backendGoRecordValueTags(tags, record.fieldValues[field.field])
+		return plan.scratchFieldTags(tags, field.index, field.field)
 	case backendGoRecordFieldMap:
 		if field.index < 0 || field.index >= len(plan.maps) {
 			return 0
@@ -768,6 +804,30 @@ func (plan *backendGoRecordTablePlan) fieldTagsFor(
 	default:
 		return 0
 	}
+}
+
+func (plan *backendGoRecordTablePlan) scratchFieldTags(
+	tags []backendTagMask,
+	recordIndex int,
+	field int,
+) backendTagMask {
+	if recordIndex < 0 || recordIndex >= len(plan.records) {
+		return 0
+	}
+	record := &plan.records[recordIndex]
+	if field < 0 || field >= len(record.fieldValues) {
+		return 0
+	}
+	result := backendGoRecordValueTags(tags, record.fieldValues[field])
+	for _, operationField := range plan.fieldsByPC {
+		if operationField.storage == backendGoRecordFieldScratch &&
+			operationField.index == recordIndex &&
+			operationField.field == field &&
+			operationField.source != invalidBackendValueID {
+			result |= backendGoRecordValueTags(tags, operationField.source)
+		}
+	}
+	return result
 }
 
 func (plan backendGoRecordTablePlan) fieldTags(
@@ -843,8 +903,8 @@ func (plan *backendGoRecordTablePlan) finalizeFieldTags(
 	for recordIndex := range plan.records {
 		record := &plan.records[recordIndex]
 		record.fieldTags = make([]backendTagMask, len(record.fieldNames))
-		for field, value := range record.fieldValues {
-			fieldTags := backendGoRecordValueTags(tags, value)
+		for field := range record.fieldValues {
+			fieldTags := plan.scratchFieldTags(tags, recordIndex, field)
 			if _, ok := backendGoNumericType(fieldTags); !ok {
 				plan.rejectReason = "unsupported record field tags"
 				return false
@@ -968,6 +1028,11 @@ func (plan *backendGoRecordTablePlan) validateUses(ir *backendProtoIR) bool {
 						plan.rejectReason = "unclassified record iterator next at PC " + strconv.Itoa(int(operation.pc))
 						return false
 					}
+				case opJumpIfTableHasMetatable:
+					if use.register != operation.a {
+						plan.rejectReason = "record metatable guard use at PC " + strconv.Itoa(int(operation.pc))
+						return false
+					}
 				default:
 					plan.rejectReason = "unsupported table use by " + opcodeName(operation.op) + " at PC " + strconv.Itoa(int(operation.pc))
 					return false
@@ -975,7 +1040,8 @@ func (plan *backendGoRecordTablePlan) validateUses(ir *backendProtoIR) bool {
 			}
 			if _, ref := plan.refs[use.value]; ref {
 				switch operation.op {
-				case opMove, opGetStringField, opSetStringField, opEqual, opNotEqual, opJumpIfFalse:
+				case opMove, opGetStringField, opSetStringField, opEqual, opNotEqual,
+					opJumpIfFalse, opJumpIfTableHasMetatable:
 				default:
 					plan.rejectReason = "unsupported record reference use by " + opcodeName(operation.op) + " at PC " + strconv.Itoa(int(operation.pc))
 					return false
@@ -1233,6 +1299,8 @@ func (emitter *backendGoNumericEmitter) emitRecordGetStringField(
 		return true, err
 	}
 	switch field.storage {
+	case backendGoRecordFieldScratch:
+		fmt.Fprintf(&emitter.body, "\tv%d = r%d_%d\n", destination, field.index, field.field)
 	case backendGoRecordFieldMap:
 		if err := emitter.emitRecordRefGuard(field.ref, backendGoRecordMapCapacity); err != nil {
 			return true, err
