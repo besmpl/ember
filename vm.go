@@ -4870,6 +4870,18 @@ func (thread *vmThread) runDirectFastCall(frame *vmFrame, nativeID nativeFuncID,
 			return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
 		}
 		directFrameApplySingleCallIslandResult(frame, registers, start, resultCount, value)
+	case nativeFuncSetMetatable:
+		results, err := baseSetMetatable(thread.globals, registers[start:start+argCount])
+		if err != nil {
+			return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
+		}
+		directFrameApplyCallIslandResults(frame, registers, start, resultCount, results)
+	case nativeFuncGetMetatable:
+		results, err := baseGetMetatable(thread.globals, registers[start:start+argCount])
+		if err != nil {
+			return directFrameFail(fmt.Errorf("run: call failed: host function failed: %w", err))
+		}
+		directFrameApplyCallIslandResults(frame, registers, start, resultCount, results)
 	case nativeFuncSelect:
 		directFrameApplySingleCallIslandResult(frame, registers, start, resultCount, NumberValue(float64(frame.varargLen())))
 	default:
@@ -4929,6 +4941,20 @@ func (thread *vmThread) runColdFastCall(frame *vmFrame, nativeID nativeFuncID, s
 			}
 			frame.applyInlineResultDestination(destination, [2]Value{value}, 1)
 			return vmFrameResult{}, false, nil
+		case nativeFuncSetMetatable:
+			results, err := baseSetMetatable(thread.globals, args)
+			if err != nil {
+				return vmFrameResult{}, true, fmt.Errorf("run: call failed: host function failed: %w", err)
+			}
+			frame.applyResultDestination(destination, results)
+			return vmFrameResult{}, false, nil
+		case nativeFuncGetMetatable:
+			results, err := baseGetMetatable(thread.globals, args)
+			if err != nil {
+				return vmFrameResult{}, true, fmt.Errorf("run: call failed: host function failed: %w", err)
+			}
+			frame.applyResultDestination(destination, results)
+			return vmFrameResult{}, false, nil
 		case nativeFuncCoroutineResume:
 			results, err := baseCoroutineResume(thread.globals, args)
 			if err != nil {
@@ -4955,6 +4981,10 @@ func fastCallNativeUnchanged(globals *globalEnv, nativeID nativeFuncID) bool {
 		return globals == nil || globals.nativeGlobalUnchanged("rawlen", nativeID)
 	case nativeFuncSelect:
 		return globals == nil || globals.nativeGlobalUnchanged("select", nativeID)
+	case nativeFuncSetMetatable:
+		return globals == nil || globals.nativeGlobalUnchanged("setmetatable", nativeID)
+	case nativeFuncGetMetatable:
+		return globals == nil || globals.nativeGlobalUnchanged("getmetatable", nativeID)
 	default:
 		return false
 	}
@@ -4974,9 +5004,36 @@ func fastCallCallee(globals *globalEnv, nativeID nativeFuncID) (Value, bool, err
 		return rawLenIntrinsicCallee(globals)
 	case nativeFuncSelect:
 		return selectIntrinsicCallee(globals)
+	case nativeFuncSetMetatable:
+		return baseGlobalIntrinsicCallee(globals, "setmetatable", nativeID)
+	case nativeFuncGetMetatable:
+		return baseGlobalIntrinsicCallee(globals, "getmetatable", nativeID)
 	default:
 		return NilValue(), false, fmt.Errorf("run: unknown fast call native id %d", nativeID)
 	}
+}
+
+func baseGlobalIntrinsicCallee(globals *globalEnv, name string, nativeID nativeFuncID) (Value, bool, error) {
+	key := baseFieldIntrinsicGuardKey{globalName: name}
+	thread := activeThread(globals)
+	if guard, ok := thread.baseFieldIntrinsicGuard(key, globals); ok {
+		return guard.callee, true, nil
+	}
+	callee := valueWithRefAndNativeID(HostFuncKind, nil, nativeID)
+	if globals == nil {
+		return callee, true, nil
+	}
+	if value, ok := globals.overrideValue(name); ok {
+		fast := valueNativeID(value) == nativeID
+		if fast {
+			thread.storeBaseFieldIntrinsicGuard(key, globals, nil, value)
+		} else {
+			thread.clearBaseFieldIntrinsicGuard(key)
+		}
+		return value, fast, nil
+	}
+	thread.storeBaseFieldIntrinsicGuard(key, globals, nil, callee)
+	return callee, true, nil
 }
 
 func vmRowStringField(globals *globalEnv, table *Table, keyValue Value, key string, slotIndex int) (Value, error) {

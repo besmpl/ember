@@ -403,6 +403,141 @@ func TestMachinePreparedScalarTableFieldsAvoidAllocationAndReplayEntry(t *testin
 	}
 }
 
+func TestMachinePreparedScalarMetatableIndexAvoidsTablesAndReplaysEntry(t *testing.T) {
+	image := machinePreparedTestImageForSource(t, backendMetatableIndexProofSource)
+	calls := 0
+	var observed machinePreparedExit
+	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
+		calls++
+		observed = backendGeneratedMetatableIndexPreparedFixture(context)
+		return observed
+	})
+	prepared, err := newMachineOwnerWithPrepared(image, program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generic, err := newMachineOwner(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := prepared.close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := generic.close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	preparedArg, err := prepared.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericArg, err := generic.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runMachinePreparedTestProto(t, prepared, 1, []slot{preparedArg}, nil)
+	runMachinePreparedTestProto(t, generic, 1, []slot{genericArg}, nil)
+	assertMachineOwnerNumberResult(t, prepared, 1170)
+	assertMachineOwnerNumberResult(t, generic, 1170)
+	if calls != 1 || observed.kind != machinePreparedExitReturnOneNumber {
+		t.Fatalf("prepared scalar metatable success = calls %d exit %#v", calls, observed)
+	}
+	if len(prepared.tables.tables) != 0 {
+		t.Fatalf("prepared scalar metatable path materialized %d Machine tables", len(prepared.tables.tables))
+	}
+
+	preparedController, err := newExecutionController(context.Background(), ExecutionLimits{
+		MaxInstructions:   10_000,
+		MaxRuntimeObjects: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericController, err := newExecutionController(context.Background(), ExecutionLimits{
+		MaxInstructions:   10_000,
+		MaxRuntimeObjects: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedLimitErr := runMachinePreparedTestProtoError(t, prepared, 1, []slot{preparedArg}, preparedController)
+	genericLimitErr := runMachinePreparedTestProtoError(t, generic, 1, []slot{genericArg}, genericController)
+	if calls != 1 {
+		t.Fatalf("prepared scalar metatable function ran under execution policy %d times", calls)
+	}
+	if preparedLimitErr == nil || genericLimitErr == nil || preparedLimitErr.Error() != genericLimitErr.Error() {
+		t.Fatalf("prepared/generic scalar metatable limit errors = %v / %v", preparedLimitErr, genericLimitErr)
+	}
+
+	preparedStringID, err := prepared.strings.internStringStopped("29")
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedString, err := slotPackHandle(slotTagString, uint32(preparedStringID), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericStringID, err := generic.strings.internStringStopped("29")
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericString, err := slotPackHandle(slotTagString, uint32(genericStringID), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runMachinePreparedTestProto(t, prepared, 1, []slot{preparedString}, nil)
+	runMachinePreparedTestProto(t, generic, 1, []slot{genericString}, nil)
+	assertMachineOwnerNumberResult(t, prepared, 1170)
+	assertMachineOwnerNumberResult(t, generic, 1170)
+	if calls != 2 || observed.kind != machinePreparedExitReplayEntry {
+		t.Fatalf("prepared scalar metatable parameter fallback = calls %d exit %#v", calls, observed)
+	}
+
+	if !checkptrInstrumentedTest() {
+		lease, err := prepared.beginRun()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var runErr error
+		allocations := testing.AllocsPerRun(1000, func() {
+			runErr = prepared.executeStopped(0, 1, machineClosureHandle{}, []slot{preparedArg}, nil, machineRunEffects{})
+		})
+		lease.end()
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if allocations != 0 {
+			t.Fatalf("prepared scalar metatable owner allocations = %v, want 0", allocations)
+		}
+	}
+
+	operation := &image.modules[0].code.prototypes[1].operations[14]
+	if operation.op != opFastCall || nativeFuncID(operation.nativeID) != nativeFuncSetMetatable {
+		t.Fatalf("metatable proof PC 14 = %s native %d, want setmetatable FAST_CALL", opcodeName(operation.op), operation.nativeID)
+	}
+	for _, owner := range []*machineOwner{prepared, generic} {
+		dense, err := owner.globalIndexStopped(0, operation.globalIndex)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := owner.globals.setAt(dense, slotBool(false)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	callsBeforeRebind := calls
+	preparedIntrinsicErr := runMachinePreparedTestProtoError(t, prepared, 1, []slot{preparedArg}, nil)
+	genericIntrinsicErr := runMachinePreparedTestProtoError(t, generic, 1, []slot{genericArg}, nil)
+	if calls != callsBeforeRebind+1 || observed.kind != machinePreparedExitReplayEntry {
+		t.Fatalf("prepared rebound setmetatable fallback = calls %d exit %#v", calls, observed)
+	}
+	if preparedIntrinsicErr == nil || genericIntrinsicErr == nil ||
+		preparedIntrinsicErr.Error() != genericIntrinsicErr.Error() {
+		t.Fatalf("prepared/generic rebound setmetatable errors = %v / %v", preparedIntrinsicErr, genericIntrinsicErr)
+	}
+}
+
 func TestMachinePreparedScalarArrayIterationAvoidsTablesAndReplaysEntry(t *testing.T) {
 	image := machinePreparedTestImageForSource(t, backendArrayIterationProofSource)
 	calls := 0
@@ -1283,6 +1418,17 @@ func BenchmarkMachinePreparedScalarTableFieldOwner(b *testing.B) {
 
 func BenchmarkMachineGenericScalarTableFieldOwner(b *testing.B) {
 	image := machinePreparedBenchmarkImage(b, backendTableFieldProofSource)
+	benchmarkMachineNumericOwner(b, image, nil)
+}
+
+func BenchmarkMachinePreparedScalarMetatableIndexOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendMetatableIndexProofSource)
+	program := machinePreparedBenchmarkProgram(b, image, backendGeneratedMetatableIndexPreparedFixture)
+	benchmarkMachineNumericOwner(b, image, program)
+}
+
+func BenchmarkMachineGenericScalarMetatableIndexOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendMetatableIndexProofSource)
 	benchmarkMachineNumericOwner(b, image, nil)
 }
 

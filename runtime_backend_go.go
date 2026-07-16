@@ -283,6 +283,11 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 				continue
 			}
 			if _, _, _, ok := plan.tables.arrayOperation(ir, operation); !ok {
+				if _, ok := plan.tables.metatableOperation(operation); !ok {
+					continue
+				}
+			}
+			if operation.nativeID <= int32(nativeFuncUnknown) {
 				continue
 			}
 			fmt.Fprintf(&source, "\tif !context.intrinsicUnchanged(%d) {\n", operation.pc)
@@ -487,6 +492,10 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 				case opFastCall:
 					if backendGoNumericFixedVarargSelect(ir, options.fixedVarargCount, operation) {
 						tags = backendTagNumber
+					} else if metatable, ok := plan.tables.metatableOperation(operation); ok {
+						if plan.tables.root(value.id) == metatable.table {
+							tags = backendTagTable
+						}
 					} else if _, array, _, ok := plan.tables.arrayOperation(ir, operation); ok {
 						switch nativeFuncID(operation.nativeID) {
 						case nativeFuncTableInsert:
@@ -937,9 +946,26 @@ func verifyBackendGoNumericOperation(
 			}
 			return nil
 		}
+		if metatable, ok := plan.tables.metatableOperation(operation); ok {
+			if operation.c != 2 || operation.d != 1 {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported setmetatable shape", operation.pc)
+			}
+			if plan.tables.root(backendOperationUse(operation, operation.a)) != metatable.table ||
+				plan.tables.root(backendOperationUse(operation, operation.a+1)) != metatable.metatable {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d changes scalar metatable inputs", operation.pc)
+			}
+			for _, definition := range operation.defs {
+				if definition.register != operation.a ||
+					plan.tables.root(definition.value) != metatable.table ||
+					plan.tags[definition.value-1] != backendTagTable {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d changes setmetatable result identity", operation.pc)
+				}
+			}
+			return nil
+		}
 		_, array, _, ok := plan.tables.arrayOperation(ir, operation)
 		if !ok {
-			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar array intrinsic", operation.pc)
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar table intrinsic", operation.pc)
 		}
 		switch nativeFuncID(operation.nativeID) {
 		case nativeFuncTableInsert:
@@ -1342,9 +1368,12 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			fmt.Fprintf(&emitter.body, "\tv%d = %d\n", destination, emitter.options.fixedVarargCount)
 			return false, nil
 		}
+		if _, ok := emitter.plan.tables.metatableOperation(operation); ok {
+			return false, nil
+		}
 		arrayIndex, _, _, ok := emitter.plan.tables.arrayOperation(emitter.ir, operation)
 		if !ok {
-			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar array intrinsic", operation.pc)
+			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar table intrinsic", operation.pc)
 		}
 		switch nativeFuncID(operation.nativeID) {
 		case nativeFuncTableInsert:

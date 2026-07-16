@@ -68,6 +68,19 @@ end
 return kernel
 `
 
+const backendMetatableIndexProofSource = `
+local function kernel(seed)
+    local fallback = {hp = 7 + seed % 2, shield = 3}
+    local player = setmetatable({shield = 5}, {__index = fallback})
+    local total = 0
+    for i = 1, 90 do
+        total = total + player.hp + player.shield
+    end
+    return total
+end
+return kernel
+`
+
 const backendArrayIterationProofSource = `
 local function kernel(seed)
     local values = {1 + seed % 5, 2, 3, 4, 5, 6, 7, 8}
@@ -359,6 +372,30 @@ func TestBackendGoScalarTableFieldsIgnoreSourceIdentity(t *testing.T) {
 	}
 	if !bytes.Equal(baseSource, renamedSource) {
 		t.Fatal("source or entrypoint identity selected scalar table-field code")
+	}
+}
+
+func TestBackendGoScalarMetatableIndexIgnoresSourceIdentity(t *testing.T) {
+	base := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "source/main", Text: backendMetatableIndexProofSource},
+	}, []Entrypoint{{Name: "main", Module: LogicalModule("main")}})
+	renamed := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "opaque/renamed/source", Text: backendMetatableIndexProofSource},
+	}, []Entrypoint{{Name: "renamed-entrypoint", Module: LogicalModule("main")}})
+	if base.programHash == renamed.programHash {
+		t.Fatal("identity-mutated metatable Programs unexpectedly share a binding hash")
+	}
+	options := backendGoNumericOptions{packageName: "ember", functionName: "identityBlindMetatable"}
+	baseSource, err := emitBackendGoNumericProof(base.modules[0].protos[1], options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamedSource, err := emitBackendGoNumericProof(renamed.modules[0].protos[1], options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(baseSource, renamedSource) {
+		t.Fatal("source or entrypoint identity selected scalar metatable code")
 	}
 }
 
@@ -744,6 +781,151 @@ func TestBackendGoScalarTableFieldFixtureIsFreshAndCorrect(t *testing.T) {
 		}); allocations != 0 {
 			t.Fatalf("generated scalar table-field allocations = %v, want 0", allocations)
 		}
+	}
+}
+
+func TestBackendGoScalarMetatableIndexFixtureIsFreshAndCorrect(t *testing.T) {
+	generated, err := emitBackendGoNumericProof(backendMetatableIndexProofIR(t), backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedMetatableIndexFixture",
+		preparedFunctionName: "backendGeneratedMetatableIndexPreparedFixture",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk, err := os.ReadFile("runtime_backend_metatable_index_generated_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(generated, onDisk) {
+		t.Fatal("generated scalar metatable-index fixture is stale")
+	}
+	if _, err := goparser.ParseFile(token.NewFileSet(), "runtime_backend_metatable_index_generated_test.go", generated, goparser.AllErrors); err != nil {
+		t.Fatalf("parse generated scalar metatable-index source: %v", err)
+	}
+	text := string(generated)
+	for _, required := range []string{
+		"var f0 float64",
+		"var f2 float64",
+		"v39 = f0",
+		"v41 = f2",
+		"context.intrinsicUnchanged(14)",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("generated scalar metatable-index source lacks %q:\n%s", required, text)
+		}
+	}
+	for _, forbidden := range []string{
+		"switch", "opcode", "descriptor", "machineTable",
+		"FAST_CALL", "setmetatable", "GET_STRING_FIELD", "NEW_TABLE",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("generated scalar metatable-index source contains runtime table/dispatch marker %q", forbidden)
+		}
+	}
+
+	root, err := Compile(backendMetatableIndexProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seed := range []float64{-29, -1, 0, 1, 7, 29, 1_000_000_000_005} {
+		got, ok := backendGeneratedMetatableIndexFixture(seed)
+		mod := seed - math.Floor(seed/2)*2
+		want := 1080 + 90*mod
+		if !ok || got != want {
+			t.Fatalf("generated scalar metatable-index fixture(%v) = (%v, %t), want (%v, true)", seed, got, ok, want)
+		}
+		oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+			args: []Value{NumberValue(seed)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		oracleNumber, ok := oracle[0].Number()
+		if !ok || oracleNumber != got {
+			t.Fatalf("generated/oracle metatable-index seed %v = %v/%v (%t)", seed, got, oracleNumber, ok)
+		}
+	}
+	if !checkptrInstrumentedTest() {
+		if allocations := testing.AllocsPerRun(1000, func() {
+			_, _ = backendGeneratedMetatableIndexFixture(29)
+		}); allocations != 0 {
+			t.Fatalf("generated scalar metatable-index allocations = %v, want 0", allocations)
+		}
+	}
+}
+
+func TestBackendGoScalarMetatableIndexRejectsUnprovedShapes(t *testing.T) {
+	tests := map[string]string{
+		"function index": `
+local function kernel(seed)
+    local object = setmetatable({}, {__index = function() return seed end})
+    return object.value
+end
+return kernel
+`,
+		"dynamic metatable": `
+local function kernel(seed, metatable)
+    local object = setmetatable({}, metatable)
+    return object.value + seed
+end
+return kernel
+`,
+		"newindex field": `
+local function kernel(seed)
+    local fallback = {value = seed}
+    local object = setmetatable({}, {__index = fallback, __newindex = fallback})
+    return object.value
+end
+return kernel
+`,
+		"protected metatable": `
+local function kernel(seed)
+    local fallback = {value = seed}
+    local object = setmetatable({}, {__index = fallback, __metatable = false})
+    return object.value
+end
+return kernel
+`,
+		"changed index": `
+local function kernel(seed)
+    local fallback = {value = seed}
+    local metatable = {__index = fallback}
+    local object = setmetatable({}, metatable)
+    metatable.__index = {value = 2}
+    return object.value
+end
+return kernel
+`,
+		"get metatable": `
+local function kernel(seed)
+    local object = setmetatable({}, {__index = {value = seed}})
+    return getmetatable(object).value
+end
+return kernel
+`,
+	}
+	for name, source := range tests {
+		t.Run(name, func(t *testing.T) {
+			proto, err := Compile(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			image, err := proto.preparedCodeImage()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ir, err := buildBackendProtoIR(&image.prototypes[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+				packageName:  "ember",
+				functionName: "rejectUnprovedMetatable",
+			}); err == nil {
+				t.Fatal("emitted scalar metatable lookup for an unproved shape")
+			}
+		})
 	}
 }
 
@@ -1886,6 +2068,26 @@ func backendTableFieldProofIR(t *testing.T) *backendProtoIR {
 	return ir
 }
 
+func backendMetatableIndexProofIR(t *testing.T) *backendProtoIR {
+	t.Helper()
+	proto, err := Compile(backendMetatableIndexProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(image.prototypes) != 2 {
+		t.Fatalf("metatable-index proof Proto count = %d, want 2", len(image.prototypes))
+	}
+	ir, err := buildBackendProtoIR(&image.prototypes[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ir
+}
+
 func backendArrayIterationProofIR(t *testing.T) *backendProtoIR {
 	t.Helper()
 	proto, err := Compile(backendArrayIterationProofSource)
@@ -2158,6 +2360,20 @@ func BenchmarkBackendGeneratedTupleKernel(b *testing.B) {
 	backendGeneratedNumericSink = result
 }
 
+func BenchmarkBackendGeneratedMetatableIndexKernel(b *testing.B) {
+	var result float64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		value, ok := backendGeneratedMetatableIndexFixture(float64(iteration & 31))
+		if !ok {
+			b.Fatal("generated scalar metatable-index fixture exited")
+		}
+		result = value
+	}
+	backendGeneratedNumericSink = result
+}
+
 var backendGeneratedNumericSink float64
 
 func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
@@ -2165,6 +2381,7 @@ func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
 		backendNumericProofSource,
 		backendNumericExitProofSource,
 		backendTableFieldProofSource,
+		backendMetatableIndexProofSource,
 		backendArrayIterationProofSource,
 		backendArrayOpsProofSource,
 		backendClosureProofSource,

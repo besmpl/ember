@@ -118,7 +118,7 @@ return total + misses
 		t.Fatalf("prototype fallback cache sites = %d, want %d", got, want)
 	}
 	metrics := compilerBenchmarkMetrics([]*Proto{proto})
-	if got, want := metrics.WordcodeBytes, int64(456); got != want {
+	if got, want := metrics.WordcodeBytes, int64(432); got != want {
 		t.Fatalf("prototype fallback wordcode bytes = %d, want %d", got, want)
 	}
 }

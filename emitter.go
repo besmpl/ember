@@ -3308,6 +3308,9 @@ func (c *compiler) compilePlannedCallToResultsDirect(lowered callPlan, args []ex
 	if c.rawLenIntrinsicCall(lowered) {
 		return c.compileBaseIntrinsicCallToResults(nativeFuncRawLen, lowered, args, target, resultCount)
 	}
+	if intrinsic, ok := c.baseGlobalIntrinsicCall(lowered); ok {
+		return c.compileBaseIntrinsicCallToResults(intrinsic, lowered, args, target, resultCount)
+	}
 	if intrinsic, ok := c.tableIntrinsicCall(lowered); ok {
 		return c.compileBaseIntrinsicCallToResults(intrinsic, lowered, args, target, resultCount)
 	}
@@ -3415,6 +3418,26 @@ func (c *compiler) rawLenIntrinsicCall(lowered callPlan) bool {
 	return c.options.optimizations.enabled(optimizationBytecodePeephole) &&
 		lowered.receiver == 0 &&
 		c.isUnboundGlobalName(lowered.target, "rawlen")
+}
+
+func (c *compiler) baseGlobalIntrinsicCall(lowered callPlan) (nativeFuncID, bool) {
+	if !c.options.optimizations.enabled(optimizationBytecodePeephole) ||
+		lowered.receiver != 0 ||
+		!isNamedTerm(c.tree, lowered.target) {
+		return nativeFuncUnknown, false
+	}
+	name := c.tree.termName(lowered.target)
+	if !c.isUnboundGlobalName(lowered.target, name) {
+		return nativeFuncUnknown, false
+	}
+	switch name {
+	case "setmetatable":
+		return nativeFuncSetMetatable, true
+	case "getmetatable":
+		return nativeFuncGetMetatable, true
+	default:
+		return nativeFuncUnknown, false
+	}
 }
 
 func (c *compiler) isUnboundGlobalName(term termID, name string) bool {

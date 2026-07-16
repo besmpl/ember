@@ -297,14 +297,33 @@ The retained path has moved beyond the original starting state:
   median of about 657 ns on the same source. Go inlines the tuple helper into a
   176-byte kernel with no call instruction, stack frame, opcode/descriptor
   dispatch, closure lookup, or tuple allocation.
+- The current static-metatable slice promotes guarded base
+  `setmetatable`/`getmetatable` calls to Machine `FAST_CALL` operations and
+  scalar-replaces the exact `top10/metatable_index` shape when one
+  nonescaping local table receives one local metatable whose sole field is a
+  table-valued `__index`. Own fields take precedence; fallback lookup follows
+  the verified table chain with cycle rejection. Function-valued or dynamic
+  handlers, `__newindex`, protected or changed metatables, `getmetatable`
+  observation, unsupported call shapes, and unresolved fields fail closed.
+  Prepared entry verifies the live `setmetatable` intrinsic identity before
+  generated work and replays canonical Machine on mismatch. The prepared
+  owner path has a five-sample median of about 224 ns on the checkpoint
+  machine (219-256 ns observed), versus about 21.5 microseconds through
+  generic Machine (20.4-22.4 microseconds observed), with zero allocations
+  and no materialized Machine table. The direct generated kernel has a
+  five-sample median of about 110 ns (108-111 ns observed), while live pinned
+  Luau `-O2 -g0` has a warmed median of about 1.97 microseconds on the same
+  source. Linked ARM64 is 128 bytes for the direct kernel and 160 bytes for
+  the prepared body, with no call instruction, stack frame, opcode/descriptor
+  dispatch, metatable lookup, or table lookup.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
 all-37 parity. Non-dense iteration, general table mutation, strings,
 general closures/upvalues and dynamic call sets, open varargs/results,
 heterogeneous or dynamically shaped multiple results,
-general recursion and logical-frame/error cases, metatables, host/effect exits,
-modules, and coroutines remain on the active path.
+general recursion and logical-frame/error cases, dynamic/callable metatables,
+host/effect exits, modules, and coroutines remain on the active path.
 
 ## Active execution path
 

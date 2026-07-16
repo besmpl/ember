@@ -6649,6 +6649,58 @@ return count(1, 2, 3)
 	}
 }
 
+func TestCompilerUsesGuardedMetatableFastCalls(t *testing.T) {
+	proto, err := Compile(`
+local object = setmetatable({}, {__index = {answer = 42}})
+return getmetatable(object).__index.answer
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	joined := strings.Join(disassembleProto(proto), "\n")
+	if got := strings.Count(joined, "FAST_CALL"); got != 2 {
+		t.Fatalf("compiled metatable calls have %d FAST_CALL operations, want 2:\n%s", got, joined)
+	}
+	facts := strings.Join(disassembleProtoFacts(proto), "\n")
+	for _, want := range []string{
+		"global setmetatable",
+		"native SET_METATABLE",
+		"global getmetatable",
+		"native GET_METATABLE",
+	} {
+		if !strings.Contains(facts, want) {
+			t.Fatalf("compiled metatable facts lack %q:\n%s", want, facts)
+		}
+	}
+}
+
+func TestRunGuardedMetatableFastCallsRespectReboundGlobals(t *testing.T) {
+	proto, err := Compile(`
+setmetatable = function()
+    return {answer = 41}
+end
+getmetatable = function()
+    return {answer = 1}
+end
+local object = setmetatable({}, {})
+return object.answer + getmetatable(object).answer
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	joined := strings.Join(disassembleProto(proto), "\n")
+	if got := strings.Count(joined, "FAST_CALL"); got != 2 {
+		t.Fatalf("compiled rebound metatable calls have %d FAST_CALL operations, want guarded calls:\n%s", got, joined)
+	}
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if got, ok := results[0].Number(); !ok || got != 42 {
+		t.Fatalf("rebound metatable result = %v (%t), want 42", results[0], ok)
+	}
+}
+
 func TestCompilerUsesCoroutineResumeIntrinsicOpcode(t *testing.T) {
 	proto, err := Compile(`
 local co = coroutine.create(function(value)

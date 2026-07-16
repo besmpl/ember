@@ -82,9 +82,12 @@ type machineOperation struct {
 }
 
 type machineConstant struct {
-	kind ValueKind
-	bits uint64
+	kind  ValueKind
+	flags uint8
+	bits  uint64
 }
+
+const machineConstantFlagIndexName uint8 = 1 << 0
 
 type machineBlock struct {
 	first int32
@@ -247,7 +250,11 @@ func (builder *machineImageBuilder) prepare(proto *Proto, id int32) (machineProt
 			descriptor.bits = value.bits
 		case StringKind:
 			builder.hasStringConstant = true
-			id, err := builder.internString(value.stringText())
+			text := value.stringText()
+			if text == "__index" {
+				descriptor.flags |= machineConstantFlagIndexName
+			}
+			id, err := builder.internString(text)
 			if err != nil {
 				return machineProto{}, fmt.Errorf("prepare code image: constant %d string: %w", index, err)
 			}
@@ -452,7 +459,10 @@ func (builder *machineImageBuilder) prepare(proto *Proto, id int32) (machineProt
 
 func machineFastCallSupported(nativeID nativeFuncID) bool {
 	switch nativeID {
-	case nativeFuncMathMin, nativeFuncRawLen, nativeFuncSelect, nativeFuncTableInsert, nativeFuncTableRemove, nativeFuncCoroutineResume:
+	case nativeFuncMathMin, nativeFuncRawLen, nativeFuncSelect,
+		nativeFuncTableInsert, nativeFuncTableRemove,
+		nativeFuncSetMetatable, nativeFuncGetMetatable,
+		nativeFuncCoroutineResume:
 		return true
 	default:
 		return false

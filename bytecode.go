@@ -2231,6 +2231,10 @@ func fastCallIntrinsicNames(nativeID nativeFuncID) (string, string) {
 		return "rawlen", ""
 	case nativeFuncSelect:
 		return "select", ""
+	case nativeFuncSetMetatable:
+		return "setmetatable", ""
+	case nativeFuncGetMetatable:
+		return "getmetatable", ""
 	default:
 		return "", ""
 	}

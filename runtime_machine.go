@@ -1479,6 +1479,30 @@ func (machine *scalarMachine) fastCall(operation machineOperation, returnPC int)
 			return machine.callCoroutineNativeStopped(nativeID, machine.registers[start:start+argCount], start, int(operation.d), returnPC)
 		}
 	}
+	if nativeID == nativeFuncSetMetatable || nativeID == nativeFuncGetMetatable {
+		first, second := slotNil, slotNil
+		if argCount > 0 {
+			first = machine.registers[start]
+		}
+		if argCount > 1 {
+			second = machine.registers[start+1]
+		}
+		outcome, err := runMachineGuardedMetatableIntrinsicStopped(&machine.tables, machineMetatableIntrinsicRequest{
+			callee: callee, first: first, second: second, argumentCount: uint32(argCount), nativeID: nativeID,
+		})
+		if err != nil {
+			return fmt.Errorf("run: call failed: host function failed: %w", err)
+		}
+		if outcome.matched {
+			return machine.applyIntrinsicOutcome(start, int(operation.d), machineIntrinsicOutcome{
+				value: outcome.value, resultCount: outcome.resultCount, matched: true,
+			})
+		}
+		if slotTagOf(callee) != slotTagHostCallable {
+			return fmt.Errorf("run: call failed: intrinsic guard replacement is %s, want function", slotValueKind(callee))
+		}
+		return machine.callFastHostStopped(callee, machine.registers[start:start+argCount], start, int(operation.d))
+	}
 	request := machineIntrinsicRequest{
 		nativeID:          nativeID,
 		callee:            callee,

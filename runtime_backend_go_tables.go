@@ -11,9 +11,16 @@ type backendGoScalarFieldKey struct {
 }
 
 type backendGoScalarField struct {
-	key   backendGoScalarFieldKey
-	tags  backendTagMask
-	child backendValueID
+	key     backendGoScalarFieldKey
+	isIndex bool
+	tags    backendTagMask
+	child   backendValueID
+}
+
+type backendGoScalarMetatable struct {
+	table     backendValueID
+	metatable backendValueID
+	fallback  backendValueID
 }
 
 type backendGoScalarArray struct {
@@ -32,6 +39,8 @@ type backendGoScalarTablePlan struct {
 	index          map[backendGoScalarFieldKey]int
 	arrays         []backendGoScalarArray
 	arrayIndex     map[backendValueID]int
+	indexFallback  map[backendValueID]backendValueID
+	metatableByPC  map[int32]backendGoScalarMetatable
 	iteratorValues []bool
 	iteratorByPC   map[int32]int
 }
@@ -41,10 +50,12 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 		return backendGoScalarTablePlan{}, nil
 	}
 	plan := backendGoScalarTablePlan{
-		roots:        make([]backendValueID, len(ir.values)),
-		index:        make(map[backendGoScalarFieldKey]int),
-		arrayIndex:   make(map[backendValueID]int),
-		iteratorByPC: make(map[int32]int),
+		roots:         make([]backendValueID, len(ir.values)),
+		index:         make(map[backendGoScalarFieldKey]int),
+		arrayIndex:    make(map[backendValueID]int),
+		indexFallback: make(map[backendValueID]backendValueID),
+		metatableByPC: make(map[int32]backendGoScalarMetatable),
+		iteratorByPC:  make(map[int32]int),
 	}
 	for valueIndex := range ir.values {
 		value := &ir.values[valueIndex]
@@ -56,17 +67,6 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 			continue
 		}
 		plan.roots[valueIndex] = root
-	}
-	arrayGenerators := make([]bool, len(ir.values))
-	for pc := range ir.ops {
-		operation := &ir.ops[pc]
-		if operation.op != opArrayNextJump2 {
-			continue
-		}
-		generator := backendOperationUse(operation, operation.b)
-		if ir.validBackendValue(generator) {
-			arrayGenerators[generator-1] = true
-		}
 	}
 	setRoot := func(id, root backendValueID) (bool, bool) {
 		if !ir.validBackendValue(id) {
@@ -99,7 +99,7 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 		changed := false
 		for valueIndex := range ir.values {
 			value := &ir.values[valueIndex]
-			if value.kind != backendValuePhi || !arrayGenerators[valueIndex] {
+			if value.kind != backendValuePhi {
 				continue
 			}
 			block := &ir.blocks[value.block]
@@ -119,7 +119,8 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 					break
 				}
 				if root != invalidBackendValueID && root != candidate {
-					return backendGoScalarTablePlan{}, nil
+					ready = false
+					break
 				}
 				root = candidate
 			}
@@ -179,6 +180,7 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 				if !ok {
 					return backendGoScalarTablePlan{}, nil
 				}
+				isIndex := backendGoStringFieldIsIndex(ir, operation.access.constant)
 				source := backendOperationUse(operation, operation.c)
 				if !ir.validBackendValue(source) {
 					return backendGoScalarTablePlan{}, nil
@@ -188,7 +190,7 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 				if !exists {
 					fieldIndex = len(plan.fields)
 					plan.index[key] = fieldIndex
-					plan.fields = append(plan.fields, backendGoScalarField{key: key})
+					plan.fields = append(plan.fields, backendGoScalarField{key: key, isIndex: isIndex})
 				}
 				field := &plan.fields[fieldIndex]
 				child := plan.root(source)
@@ -236,6 +238,54 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 						return backendGoScalarTablePlan{}, nil
 					}
 				}
+			case opFastCall:
+				if nativeFuncID(operation.nativeID) != nativeFuncSetMetatable ||
+					operation.c != 2 || operation.d != 1 {
+					continue
+				}
+				table := plan.root(backendOperationUse(operation, operation.a))
+				metatable := plan.root(backendOperationUse(operation, operation.a+1))
+				if table == invalidBackendValueID || metatable == invalidBackendValueID {
+					continue
+				}
+				fallback := invalidBackendValueID
+				fieldCount := 0
+				for _, field := range plan.fields {
+					if field.key.table != metatable {
+						continue
+					}
+					fieldCount++
+					if field.isIndex && field.tags == 0 {
+						fallback = field.child
+					}
+				}
+				_, metatableHasArray := plan.arrayIndex[metatable]
+				if fieldCount != 1 || fallback == invalidBackendValueID ||
+					fallback == table || fallback == metatable ||
+					metatableHasArray {
+					continue
+				}
+				if current, exists := plan.indexFallback[table]; exists && current != fallback {
+					return backendGoScalarTablePlan{}, nil
+				}
+				if plan.indexFallback[table] != fallback {
+					plan.indexFallback[table] = fallback
+					changed = true
+				}
+				metatableOperation := backendGoScalarMetatable{
+					table: table, metatable: metatable, fallback: fallback,
+				}
+				if current, exists := plan.metatableByPC[operation.pc]; exists && current != metatableOperation {
+					return backendGoScalarTablePlan{}, nil
+				}
+				plan.metatableByPC[operation.pc] = metatableOperation
+				for _, definition := range operation.defs {
+					if updated, ok := setRoot(definition.value, table); !ok {
+						return backendGoScalarTablePlan{}, nil
+					} else if updated {
+						changed = true
+					}
+				}
 			}
 		}
 		if !changed {
@@ -250,13 +300,18 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 		if operation.op != opFastCall {
 			continue
 		}
-		table := plan.root(backendOperationUse(operation, operation.a))
-		if table == invalidBackendValueID {
-			continue
-		}
-		_, array := ensureArray(table)
 		switch nativeFuncID(operation.nativeID) {
+		case nativeFuncSetMetatable:
+			if _, ok := plan.metatableByPC[operation.pc]; !ok {
+				return backendGoScalarTablePlan{}, nil
+			}
+			continue
 		case nativeFuncTableInsert:
+			table := plan.root(backendOperationUse(operation, operation.a))
+			if table == invalidBackendValueID {
+				continue
+			}
+			_, array := ensureArray(table)
 			if operation.c != 2 || operation.d != 1 {
 				return backendGoScalarTablePlan{}, nil
 			}
@@ -278,12 +333,22 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 			array.appendBound += executions
 			array.mutable = true
 		case nativeFuncTableRemove:
+			table := plan.root(backendOperationUse(operation, operation.a))
+			if table == invalidBackendValueID {
+				continue
+			}
+			_, array := ensureArray(table)
 			if operation.c != 2 || operation.d != 1 ||
 				!backendGoStaticNumberEquals(ir, backendOperationUse(operation, operation.a+1), 1) {
 				return backendGoScalarTablePlan{}, nil
 			}
 			array.mutable = true
 		case nativeFuncRawLen:
+			table := plan.root(backendOperationUse(operation, operation.a))
+			if table == invalidBackendValueID {
+				continue
+			}
+			ensureArray(table)
 			if operation.c != 1 || operation.d != 1 {
 				return backendGoScalarTablePlan{}, nil
 			}
@@ -293,6 +358,15 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 	}
 	if len(plan.fields) == 0 && len(plan.arrays) == 0 {
 		return backendGoScalarTablePlan{}, nil
+	}
+	for table := range plan.indexFallback {
+		seen := make(map[backendValueID]bool)
+		for current := table; current != invalidBackendValueID; current = plan.indexFallback[current] {
+			if seen[current] {
+				return backendGoScalarTablePlan{}, nil
+			}
+			seen[current] = true
+		}
 	}
 	for arrayIndex := range plan.arrays {
 		array := &plan.arrays[arrayIndex]
@@ -361,6 +435,13 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 					return backendGoScalarTablePlan{}, nil
 				}
 			case opFastCall:
+				if metatable, ok := plan.metatableOperation(operation); ok {
+					if use.register != operation.a && use.register != operation.a+1 ||
+						root != metatable.table && root != metatable.metatable {
+						return backendGoScalarTablePlan{}, nil
+					}
+					continue
+				}
 				if use.register != operation.a {
 					return backendGoScalarTablePlan{}, nil
 				}
@@ -385,7 +466,7 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 		if !ok {
 			return backendGoScalarTablePlan{}, nil
 		}
-		field, ok := plan.field(backendGoScalarFieldKey{table: table, name: name})
+		_, field, ok := plan.resolveField(table, name)
 		if !ok || field.child == invalidBackendValueID && field.tags == 0 {
 			return backendGoScalarTablePlan{}, nil
 		}
@@ -413,6 +494,14 @@ func backendGoStringFieldName(ir *backendProtoIR, constant int32) (machineString
 		return invalidMachineStringID, false
 	}
 	return machineStringID(value.bits), true
+}
+
+func backendGoStringFieldIsIndex(ir *backendProtoIR, constant int32) bool {
+	return ir != nil &&
+		constant >= 0 &&
+		int(constant) < len(ir.constants) &&
+		ir.constants[constant].kind == StringKind &&
+		ir.constants[constant].flags&machineConstantFlagIndexName != 0
 }
 
 func backendGoArrayIndexConstant(ir *backendProtoIR, constant int32) (uint32, bool) {
@@ -790,6 +879,33 @@ func (plan backendGoScalarTablePlan) field(key backendGoScalarFieldKey) (backend
 	return plan.fields[index], true
 }
 
+func (plan backendGoScalarTablePlan) resolveField(
+	table backendValueID,
+	name machineStringID,
+) (int, backendGoScalarField, bool) {
+	seen := make(map[backendValueID]bool)
+	for table != invalidBackendValueID && !seen[table] {
+		seen[table] = true
+		key := backendGoScalarFieldKey{table: table, name: name}
+		if index, ok := plan.index[key]; ok && index >= 0 && index < len(plan.fields) {
+			return index, plan.fields[index], true
+		}
+		table = plan.indexFallback[table]
+	}
+	return 0, backendGoScalarField{}, false
+}
+
+func (plan backendGoScalarTablePlan) metatableOperation(
+	operation *backendOperationIR,
+) (backendGoScalarMetatable, bool) {
+	if operation == nil || operation.op != opFastCall ||
+		nativeFuncID(operation.nativeID) != nativeFuncSetMetatable {
+		return backendGoScalarMetatable{}, false
+	}
+	metatable, ok := plan.metatableByPC[operation.pc]
+	return metatable, ok
+}
+
 func (plan backendGoScalarTablePlan) operationField(
 	ir *backendProtoIR,
 	operation *backendOperationIR,
@@ -811,10 +927,5 @@ func (plan backendGoScalarTablePlan) operationField(
 	if table == invalidBackendValueID || !ok {
 		return 0, backendGoScalarField{}, false
 	}
-	key := backendGoScalarFieldKey{table: table, name: name}
-	index, ok := plan.index[key]
-	if !ok || index < 0 || index >= len(plan.fields) {
-		return 0, backendGoScalarField{}, false
-	}
-	return index, plan.fields[index], true
+	return plan.resolveField(table, name)
 }
