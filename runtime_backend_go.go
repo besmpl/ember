@@ -673,6 +673,8 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 				case opPrepareIter:
 					if _, ok := plan.records.arrayPreparePC[operation.pc]; ok {
 						tags = 0
+					} else if _, ok := plan.records.familyPrepare[operation.pc]; ok {
+						tags = 0
 					} else if value.register == operation.a {
 						if _, _, _, ok := plan.tables.arrayOperation(ir, operation); ok {
 							tags = backendTagTable
@@ -680,6 +682,10 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 					}
 				case opArrayNextJump2:
 					if _, ok := plan.records.arrayNextPC[operation.pc]; ok {
+						if value.register == operation.a+1 {
+							tags = backendTagNumber
+						}
+					} else if _, ok := plan.records.familyNext[operation.pc]; ok {
 						if value.register == operation.a+1 {
 							tags = backendTagNumber
 						}
@@ -1189,6 +1195,9 @@ func verifyBackendGoNumericOperation(
 		return nil
 	case opSetStringField:
 		if field, ok := plan.records.fieldsByPC[operation.pc]; ok {
+			if _, child := plan.records.childSetByPC[operation.pc]; child {
+				return nil
+			}
 			return require(operation.c, plan.records.fieldTags(field))
 		}
 		_, field, ok := plan.tables.operationField(ir, operation)
@@ -1274,7 +1283,9 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opPrepareIter:
-		if _, ok := plan.records.arrayPreparePC[operation.pc]; ok {
+		_, recordArray := plan.records.arrayPreparePC[operation.pc]
+		_, recordFamily := plan.records.familyPrepare[operation.pc]
+		if recordArray || recordFamily {
 			for _, definition := range operation.defs {
 				if !plan.records.iteratorValue(definition.value) {
 					return fmt.Errorf("emit backend Go numeric proof: PC %d materializes record iterator state", operation.pc)
@@ -1299,7 +1310,9 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opArrayNextJump2:
-		if _, ok := plan.records.arrayNextPC[operation.pc]; ok {
+		_, recordArray := plan.records.arrayNextPC[operation.pc]
+		_, recordFamily := plan.records.familyNext[operation.pc]
+		if recordArray || recordFamily {
 			for _, definition := range operation.defs {
 				switch definition.register {
 				case operation.a:
@@ -2114,7 +2127,7 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		}
 		fmt.Fprintf(&emitter.body, "\tv%d = %s\n", destination, emitter.scalarField(fieldIndex))
 	case opPrepareIter:
-		if handled, err := emitter.emitRecordArrayPrepare(operation); handled {
+		if handled, err := emitter.emitRecordArrayPrepare(operation, use); handled {
 			return false, err
 		}
 		arrayIndex, _, _, ok := emitter.plan.tables.arrayOperation(emitter.ir, operation)

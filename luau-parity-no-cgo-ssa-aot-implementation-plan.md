@@ -559,6 +559,30 @@ The retained path has moved beyond the original starting state:
   the prepared body; each has only cold bounds/stack-growth helpers and no
   opcode, descriptor, Machine table, runtime string, interning, or VM
   dispatch.
+- The nested record-array slice represents each proved child array stored in a
+  parent record as a small family selector. Child iterators carry explicit
+  selector/position state, and yielded records use guarded packed numeric
+  references into the already scalar-replaced fixed arrays. A parameterized
+  `cooldown_scheduler` holdout proves one three-record actor array, three
+  differently sized ability arrays, nested iteration, outer-to-inner field
+  dependencies, and mutation of both parent and child records. Generated Go,
+  the prepared owner, generic Machine, and the independent interpreter agree
+  across negative, ordinary, and large seeds. Child-array or child-record
+  escape, child identity replacement, shape mismatch, shared child aliases,
+  and unsupported selector uses fail closed. Controlled execution stays on
+  generic Machine; invalid prepared arguments replay entry; owner table/string
+  counts remain unchanged; direct and prepared paths allocate zero when
+  warmed. The direct kernel has a five-sample median of about 7.404
+  microseconds (7.396-7.501 microseconds observed), while the prepared owner
+  path has a median of about 6.932 microseconds (6.879-7.100 microseconds
+  observed), versus about 620.9 microseconds through generic Machine
+  (620.1-628.9 microseconds observed). The pinned Luau CLI warmed to a
+  five-sample median of about 41.43 microseconds per call after the cold first
+  process sample, making prepared about `0.167x` Luau. Deterministic generated
+  source is 35,764 bytes. Linked ARM64 is 3,888 bytes for the direct kernel,
+  4,496 bytes for the prepared body, and 128 bytes for the wrapper; generated
+  bodies contain only cold bounds/stack-growth calls and no opcode,
+  descriptor, Machine table, runtime string, interning, or VM dispatch.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
