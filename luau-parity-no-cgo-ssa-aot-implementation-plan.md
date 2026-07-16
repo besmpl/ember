@@ -316,6 +316,25 @@ The retained path has moved beyond the original starting state:
   source. Linked ARM64 is 128 bytes for the direct kernel and 160 bytes for
   the prepared body, with no call instruction, stack frame, opcode/descriptor
   dispatch, metatable lookup, or table lookup.
+- The current static-method slice scalar-replaces the parameterized
+  `top10/method_calls` shape when one nonescaping local table receives exactly
+  one dominating, capture-free method closure and that fixed method reads or
+  writes numeric fields on the identical receiver. The generated method target
+  receives pointers only to those proven fields; the caller copies them to
+  scratch, calls directly, checks the target result, and commits only on
+  success, so replay-entry fallback cannot expose partial receiver mutation.
+  Captured, reassigned, conditional, escaping, materialized, variadic,
+  polymorphic, nonnumeric, or otherwise unsupported method shapes fail closed.
+  Source/module/entrypoint identity mutation produces identical executable
+  source. The prepared owner path has a five-sample median of about 126 ns on
+  the checkpoint machine (124-130 ns observed), versus about 34.8 microseconds
+  through generic Machine (34.4-46.0 microseconds observed),
+  with zero allocations and no materialized Machine table or closure. The
+  direct generated kernel has a five-sample median of about 87.6 ns
+  (73.2-99.4 ns observed), while the repository's live pinned Luau CLI batch
+  warmed to about 5.2 microseconds per run. Go inlines the method helper into a
+  128-byte linked ARM64 kernel containing no call instruction, stack frame,
+  opcode/descriptor dispatch, closure lookup, method lookup, or table lookup.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
@@ -323,7 +342,8 @@ all-37 parity. Non-dense iteration, general table mutation, strings,
 general closures/upvalues and dynamic call sets, open varargs/results,
 heterogeneous or dynamically shaped multiple results,
 general recursion and logical-frame/error cases, dynamic/callable metatables,
-host/effect exits, modules, and coroutines remain on the active path.
+general captured or polymorphic methods, host/effect exits, modules, and
+coroutines remain on the active path.
 
 ## Active execution path
 

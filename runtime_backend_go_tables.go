@@ -11,10 +11,11 @@ type backendGoScalarFieldKey struct {
 }
 
 type backendGoScalarField struct {
-	key     backendGoScalarFieldKey
-	isIndex bool
-	tags    backendTagMask
-	child   backendValueID
+	key         backendGoScalarFieldKey
+	isIndex     bool
+	tags        backendTagMask
+	child       backendValueID
+	methodProto int32
 }
 
 type backendGoScalarMetatable struct {
@@ -43,9 +44,10 @@ type backendGoScalarTablePlan struct {
 	metatableByPC  map[int32]backendGoScalarMetatable
 	iteratorValues []bool
 	iteratorByPC   map[int32]int
+	externalRoot   backendValueID
 }
 
-func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan, error) {
+func analyzeBackendGoScalarTables(ir *backendProtoIR, receiverTable bool) (backendGoScalarTablePlan, error) {
 	if ir == nil {
 		return backendGoScalarTablePlan{}, nil
 	}
@@ -56,6 +58,7 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 		indexFallback: make(map[backendValueID]backendValueID),
 		metatableByPC: make(map[int32]backendGoScalarMetatable),
 		iteratorByPC:  make(map[int32]int),
+		externalRoot:  invalidBackendValueID,
 	}
 	for valueIndex := range ir.values {
 		value := &ir.values[valueIndex]
@@ -67,6 +70,13 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 			continue
 		}
 		plan.roots[valueIndex] = root
+	}
+	if receiverTable {
+		if ir.params == 0 || len(ir.initial) == 0 {
+			return backendGoScalarTablePlan{}, nil
+		}
+		plan.externalRoot = ir.initial[0]
+		plan.roots[plan.externalRoot-1] = plan.externalRoot
 	}
 	setRoot := func(id, root backendValueID) (bool, bool) {
 		if !ir.validBackendValue(id) {
@@ -190,7 +200,9 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 				if !exists {
 					fieldIndex = len(plan.fields)
 					plan.index[key] = fieldIndex
-					plan.fields = append(plan.fields, backendGoScalarField{key: key, isIndex: isIndex})
+					plan.fields = append(plan.fields, backendGoScalarField{
+						key: key, isIndex: isIndex, methodProto: -1,
+					})
 				}
 				field := &plan.fields[fieldIndex]
 				child := plan.root(source)
@@ -204,8 +216,20 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 					}
 					continue
 				}
+				if proto, ok := backendGoScalarMethodClosure(ir, source); ok {
+					if field.tags != 0 ||
+						field.child != invalidBackendValueID ||
+						field.methodProto >= 0 && field.methodProto != proto {
+						return backendGoScalarTablePlan{}, nil
+					}
+					field.methodProto = proto
+					continue
+				}
 				tags := ir.values[source-1].tags
-				if tags == 0 || tags&^(backendTagNumber|backendTagBool) != 0 || field.child != invalidBackendValueID {
+				if tags == 0 ||
+					tags&^(backendTagNumber|backendTagBool) != 0 ||
+					field.child != invalidBackendValueID ||
+					field.methodProto >= 0 {
 					return backendGoScalarTablePlan{}, nil
 				}
 				next := field.tags | tags
@@ -236,6 +260,21 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 						changed = true
 					} else if plan.roots[definition.value-1] != child {
 						return backendGoScalarTablePlan{}, nil
+					}
+				}
+			case opCallMethodOne:
+				root := plan.root(backendOperationUse(operation, operation.b))
+				if root == invalidBackendValueID {
+					continue
+				}
+				for _, definition := range operation.defs {
+					if definition.register != operation.callArgStart {
+						continue
+					}
+					if updated, ok := setRoot(definition.value, root); !ok {
+						return backendGoScalarTablePlan{}, nil
+					} else if updated {
+						changed = true
 					}
 				}
 			case opFastCall:
@@ -448,6 +487,10 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 				if _, _, _, ok := plan.arrayOperation(ir, operation); !ok {
 					return backendGoScalarTablePlan{}, nil
 				}
+			case opCallMethodOne:
+				if use.register != operation.b {
+					return backendGoScalarTablePlan{}, nil
+				}
 			default:
 				return backendGoScalarTablePlan{}, nil
 			}
@@ -467,11 +510,28 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 			return backendGoScalarTablePlan{}, nil
 		}
 		_, field, ok := plan.resolveField(table, name)
-		if !ok || field.child == invalidBackendValueID && field.tags == 0 {
+		if !ok || field.child == invalidBackendValueID && field.tags == 0 && field.methodProto < 0 {
 			return backendGoScalarTablePlan{}, nil
 		}
 	}
 	return plan, nil
+}
+
+func backendGoScalarMethodClosure(ir *backendProtoIR, id backendValueID) (int32, bool) {
+	if ir == nil || !ir.validBackendValue(id) {
+		return -1, false
+	}
+	value := &ir.values[id-1]
+	if value.object != backendObjectClosure ||
+		value.targetUnknown ||
+		len(value.targetProtos) != 1 ||
+		value.kind != backendValueOperation ||
+		value.pc < 0 ||
+		int(value.pc) >= len(ir.ops) ||
+		ir.ops[value.pc].op != opClosure {
+		return -1, false
+	}
+	return value.targetProtos[0], true
 }
 
 func backendGoNewTableRoot(ir *backendProtoIR, id backendValueID) bool {

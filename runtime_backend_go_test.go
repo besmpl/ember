@@ -81,6 +81,22 @@ end
 return kernel
 `
 
+const backendMethodProofSource = `
+local function kernel(seed)
+    local counter = {value = seed % 2}
+    function counter:add(amount)
+        self.value = self.value + amount
+        return self.value
+    end
+    local total = 0
+    for i = 1, 70 do
+        total = total + counter:add(i % 5)
+    end
+    return total
+end
+return kernel
+`
+
 const backendArrayIterationProofSource = `
 local function kernel(seed)
     local values = {1 + seed % 5, 2, 3, 4, 5, 6, 7, 8}
@@ -924,6 +940,233 @@ return kernel
 				functionName: "rejectUnprovedMetatable",
 			}); err == nil {
 				t.Fatal("emitted scalar metatable lookup for an unproved shape")
+			}
+		})
+	}
+}
+
+func TestBackendGoScalarMethodFixturesAreFreshAndCorrect(t *testing.T) {
+	irs := backendMethodProofIRs(t)
+	targets := backendMethodProofTargets(irs)
+	methodCall := &irs[1].ops[16]
+	if methodCall.op != opCallMethodOne ||
+		methodCall.access.kind != backendAccessStaticProperty ||
+		methodCall.access.constant != methodCall.c {
+		t.Fatalf("method call access = opcode %s access %+v", opcodeName(methodCall.op), methodCall.access)
+	}
+	generatedTarget, err := emitBackendGoNumericProof(irs[2], backendGoNumericOptions{
+		packageName:   "ember",
+		functionName:  "backendGeneratedCounterAdd",
+		receiverTable: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generatedCaller, err := emitBackendGoNumericProof(irs[1], backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedMethodKernel",
+		preparedFunctionName: "backendGeneratedMethodPreparedFixture",
+		directTargets:        targets,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range []struct {
+		path      string
+		generated []byte
+	}{
+		{path: "runtime_backend_method_add_generated_test.go", generated: generatedTarget},
+		{path: "runtime_backend_method_kernel_generated_test.go", generated: generatedCaller},
+	} {
+		onDisk, err := os.ReadFile(fixture.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(fixture.generated, onDisk) {
+			t.Fatalf("generated scalar method fixture %s is stale", fixture.path)
+		}
+		if _, err := goparser.ParseFile(token.NewFileSet(), fixture.path, fixture.generated, goparser.AllErrors); err != nil {
+			t.Fatalf("parse %s: %v", fixture.path, err)
+		}
+	}
+	targetText := string(generatedTarget)
+	callerText := string(generatedCaller)
+	for _, required := range []string{
+		"backendGeneratedCounterAdd(r0 *float64, p1 float64)",
+		"v7 = *r0",
+		"*r0 = v8",
+		"m16_0 = f0",
+		"backendGeneratedCounterAdd(&m16_0, v35)",
+		"if !ok16",
+		"f0 = m16_0",
+	} {
+		if !strings.Contains(targetText, required) && !strings.Contains(callerText, required) {
+			t.Fatalf("generated scalar method source lacks %q:\ntarget:\n%s\ncaller:\n%s", required, targetText, callerText)
+		}
+	}
+	copyIndex := strings.Index(callerText, "m16_0 = f0")
+	callIndex := strings.Index(callerText, "backendGeneratedCounterAdd(&m16_0, v35)")
+	guardIndex := strings.Index(callerText, "if !ok16")
+	commitIndex := strings.Index(callerText, "f0 = m16_0")
+	if copyIndex < 0 || callIndex <= copyIndex || guardIndex <= callIndex || commitIndex <= guardIndex {
+		t.Fatalf("generated scalar method caller does not copy, call, guard, then commit:\n%s", callerText)
+	}
+	for _, forbidden := range []string{
+		"switch", "opcode", "descriptor", "machineTable", "machineClosure",
+		"CALL_METHOD_ONE", "GET_STRING_FIELD", "SET_STRING_FIELD", "NEW_TABLE",
+	} {
+		if strings.Contains(targetText, forbidden) || strings.Contains(callerText, forbidden) {
+			t.Fatalf("generated scalar method source contains materialization/dispatch marker %q", forbidden)
+		}
+	}
+
+	root, err := Compile(backendMethodProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seed := range []float64{-29, -1, 0, 1, 7, 29, 1_000_000_000_005} {
+		got, ok := backendGeneratedMethodKernel(seed)
+		mod := seed - math.Floor(seed/2)*2
+		want := 4970 + 70*mod
+		if !ok || got != want {
+			t.Fatalf("generated scalar method kernel(%v) = (%v, %t), want (%v, true)", seed, got, ok, want)
+		}
+		oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+			args: []Value{NumberValue(seed)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(oracle) != 1 {
+			t.Fatalf("scalar method oracle result count = %d, want 1", len(oracle))
+		}
+		oracleNumber, ok := oracle[0].Number()
+		if !ok || oracleNumber != got {
+			t.Fatalf("generated/oracle scalar method seed %v = %v/%v (%t)", seed, got, oracleNumber, ok)
+		}
+	}
+	if _, ok := backendGeneratedCounterAdd(nil, 1); ok {
+		t.Fatal("generated scalar method target accepted a nil receiver field")
+	}
+	if !checkptrInstrumentedTest() {
+		if allocations := testing.AllocsPerRun(1000, func() {
+			_, _ = backendGeneratedMethodKernel(29)
+		}); allocations != 0 {
+			t.Fatalf("generated scalar method allocations = %v, want 0", allocations)
+		}
+	}
+}
+
+func TestBackendGoScalarMethodIgnoresSourceIdentity(t *testing.T) {
+	base := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "source/main", Text: backendMethodProofSource},
+	}, []Entrypoint{{Name: "main", Module: LogicalModule("main")}})
+	renamed := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "opaque/renamed/source", Text: backendMethodProofSource},
+	}, []Entrypoint{{Name: "renamed-entrypoint", Module: LogicalModule("main")}})
+	if base.programHash == renamed.programHash {
+		t.Fatal("identity-mutated method Programs unexpectedly share a binding hash")
+	}
+	options := func(module backendModuleIR) backendGoNumericOptions {
+		targets := make([]backendGoNumericTarget, len(module.protos))
+		targets[2] = backendGoNumericTarget{
+			ir:            module.protos[2],
+			functionName:  "identityBlindMethod",
+			receiverTable: true,
+		}
+		return backendGoNumericOptions{
+			packageName:   "ember",
+			functionName:  "identityBlindKernel",
+			directTargets: targets,
+		}
+	}
+	baseSource, err := emitBackendGoNumericProof(base.modules[0].protos[1], options(base.modules[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamedSource, err := emitBackendGoNumericProof(renamed.modules[0].protos[1], options(renamed.modules[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(baseSource, renamedSource) {
+		t.Fatal("source or entrypoint identity selected scalar method code")
+	}
+}
+
+func TestBackendGoScalarMethodRejectsUnprovedShapes(t *testing.T) {
+	tests := map[string]string{
+		"captured method": `
+local function kernel(seed)
+    local counter = {value = 0}
+    local bonus = seed
+    function counter:add(amount)
+        self.value = self.value + amount + bonus
+        return self.value
+    end
+    return counter:add(1)
+end
+return kernel
+`,
+		"reassigned method": `
+local function kernel(seed)
+    local counter = {value = seed}
+    function counter:add(amount)
+        self.value = self.value + amount
+        return self.value
+    end
+    function counter:add(amount)
+        self.value = self.value - amount
+        return self.value
+    end
+    return counter:add(1)
+end
+return kernel
+`,
+		"conditional method": `
+local function kernel(seed)
+    local counter = {value = seed}
+    if seed > 0 then
+        function counter:add(amount)
+            self.value = self.value + amount
+            return self.value
+        end
+    end
+    return counter:add(1)
+end
+return kernel
+`,
+	}
+	for name, source := range tests {
+		t.Run(name, func(t *testing.T) {
+			proto, err := Compile(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			image, err := proto.preparedCodeImage()
+			if err != nil {
+				t.Fatal(err)
+			}
+			irs := make([]*backendProtoIR, len(image.prototypes))
+			for protoID := range image.prototypes {
+				irs[protoID], err = buildBackendProtoIR(&image.prototypes[protoID])
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			targets := make([]backendGoNumericTarget, len(irs))
+			for protoID := 2; protoID < len(irs); protoID++ {
+				targets[protoID] = backendGoNumericTarget{
+					ir:            irs[protoID],
+					functionName:  fmt.Sprintf("rejectedMethod%d", protoID),
+					receiverTable: true,
+				}
+			}
+			if _, err := emitBackendGoNumericProof(irs[1], backendGoNumericOptions{
+				packageName:   "ember",
+				functionName:  "rejectedMethodKernel",
+				directTargets: targets,
+			}); err == nil {
+				t.Fatal("emitted an unproved scalar method shape")
 			}
 		})
 	}
@@ -2088,6 +2331,39 @@ func backendMetatableIndexProofIR(t *testing.T) *backendProtoIR {
 	return ir
 }
 
+func backendMethodProofIRs(t *testing.T) []*backendProtoIR {
+	t.Helper()
+	proto, err := Compile(backendMethodProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(image.prototypes) != 3 {
+		t.Fatalf("method proof Proto count = %d, want 3", len(image.prototypes))
+	}
+	irs := make([]*backendProtoIR, len(image.prototypes))
+	for protoID := range image.prototypes {
+		irs[protoID], err = buildBackendProtoIR(&image.prototypes[protoID])
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return irs
+}
+
+func backendMethodProofTargets(irs []*backendProtoIR) []backendGoNumericTarget {
+	targets := make([]backendGoNumericTarget, len(irs))
+	targets[2] = backendGoNumericTarget{
+		ir:            irs[2],
+		functionName:  "backendGeneratedCounterAdd",
+		receiverTable: true,
+	}
+	return targets
+}
+
 func backendArrayIterationProofIR(t *testing.T) *backendProtoIR {
 	t.Helper()
 	proto, err := Compile(backendArrayIterationProofSource)
@@ -2298,6 +2574,20 @@ func BenchmarkBackendGeneratedArrayOpsFixture(b *testing.B) {
 		value, ok := backendGeneratedArrayOpsFixture(float64(iteration & 31))
 		if !ok {
 			b.Fatal("generated scalar array-ops fixture exited")
+		}
+		result = value
+	}
+	backendGeneratedNumericSink = result
+}
+
+func BenchmarkBackendGeneratedMethodKernel(b *testing.B) {
+	var result float64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		value, ok := backendGeneratedMethodKernel(float64(iteration & 31))
+		if !ok {
+			b.Fatal("generated scalar method fixture exited")
 		}
 		result = value
 	}

@@ -14,6 +14,7 @@ type backendGoNumericOptions struct {
 	directTargets        []backendGoNumericTarget
 	selfRecursive        bool
 	fixedVarargCount     int
+	receiverTable        bool
 }
 
 type backendGoNumericTarget struct {
@@ -21,6 +22,7 @@ type backendGoNumericTarget struct {
 	functionName     string
 	selfRecursive    bool
 	fixedVarargCount int
+	receiverTable    bool
 }
 
 type backendGoNumericPlan struct {
@@ -32,6 +34,7 @@ type backendGoNumericPlan struct {
 	replayEntry []bool
 	tables      backendGoScalarTablePlan
 	closures    backendGoScalarClosurePlan
+	methods     backendGoScalarMethodPlan
 }
 
 type backendGoNumericEmitter struct {
@@ -63,6 +66,10 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	}
 	if options.preparedFunctionName != "" && ir.variadic {
 		return nil, fmt.Errorf("emit backend Go numeric proof: prepared entry is variadic")
+	}
+	if options.receiverTable &&
+		(ir.params == 0 || len(ir.upvalues) != 0 || options.preparedFunctionName != "") {
+		return nil, fmt.Errorf("emit backend Go numeric proof: invalid scalar receiver-table target")
 	}
 	resultCount, ok := backendGoNumericFixedResultCount(ir)
 	if !ok {
@@ -120,23 +127,49 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		fmt.Fprintf(&source, "func %sBody(p0 float64) float64 {\n", options.functionName)
 	} else {
 		fmt.Fprintf(&source, "func %s(", options.functionName)
+		wroteParameter := false
 		for upvalue := 0; upvalue < pointerUpvalues; upvalue++ {
-			if upvalue != 0 {
+			if wroteParameter {
 				source.WriteString(", ")
 			}
 			fmt.Fprintf(&source, "u%d *float64", upvalue)
+			wroteParameter = true
+		}
+		if options.receiverTable {
+			for fieldIndex, field := range plan.tables.fields {
+				if field.key.table != plan.tables.externalRoot || field.tags == 0 {
+					continue
+				}
+				if wroteParameter {
+					source.WriteString(", ")
+				}
+				fmt.Fprintf(&source, "r%d *float64", fieldIndex)
+				wroteParameter = true
+			}
 		}
 		for parameter := 0; parameter < parameterCount; parameter++ {
-			if pointerUpvalues != 0 || parameter != 0 {
+			if options.receiverTable && parameter == 0 {
+				continue
+			}
+			if wroteParameter {
 				source.WriteString(", ")
 			}
 			fmt.Fprintf(&source, "p%d float64", parameter)
+			wroteParameter = true
 		}
 		source.WriteString(") (")
 		writeBackendGoNumericResultTypes(&source, resultCount)
 		source.WriteString(") {\n")
 		for upvalue := 0; upvalue < pointerUpvalues; upvalue++ {
 			fmt.Fprintf(&source, "\tif u%d == nil {\n\t\t%s\n\t}\n", upvalue, backendGoNumericFailureReturn(resultCount))
+		}
+		if options.receiverTable {
+			for fieldIndex, field := range plan.tables.fields {
+				if field.key.table != plan.tables.externalRoot || field.tags == 0 {
+					continue
+				}
+				fmt.Fprintf(&source, "\tif r%d == nil {\n\t\t%s\n\t}\n", fieldIndex, backendGoNumericFailureReturn(resultCount))
+			}
 		}
 	}
 	for valueIndex := range ir.values {
@@ -153,6 +186,9 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		fmt.Fprintf(&source, "\tvar v%d %s\n", valueIndex+1, goType)
 	}
 	for fieldIndex, field := range plan.tables.fields {
+		if field.key.table == plan.tables.externalRoot {
+			continue
+		}
 		goType, ok := backendGoNumericType(field.tags)
 		if !ok {
 			continue
@@ -191,8 +227,14 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		}
 		if !backendGoNumericOperationDead(plan, operation) &&
 			(operation.op == opCallLocalOne ||
-				operation.op == opCall && backendGoNumericScalarReplacedCall(ir, options, operation)) {
+				operation.op == opCall && backendGoNumericScalarReplacedCall(ir, options, operation) ||
+				operation.op == opCallMethodOne) {
 			fmt.Fprintf(&source, "\tvar ok%d bool\n", operation.pc)
+		}
+		if call, ok := plan.methods.call(operation); ok {
+			for field := range call.callerFields {
+				fmt.Fprintf(&source, "\tvar m%d_%d float64\n", operation.pc, field)
+			}
 		}
 	}
 	for parameter := 0; parameter < ir.params; parameter++ {
@@ -221,6 +263,9 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			fmt.Fprintf(&source, "\tvar v%d %s\n", valueIndex+1, goType)
 		}
 		for fieldIndex, field := range plan.tables.fields {
+			if field.key.table == plan.tables.externalRoot {
+				continue
+			}
 			goType, ok := backendGoNumericType(field.tags)
 			if !ok {
 				continue
@@ -259,8 +304,14 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			}
 			if !backendGoNumericOperationDead(plan, operation) &&
 				(operation.op == opCallLocalOne ||
-					operation.op == opCall && backendGoNumericScalarReplacedCall(ir, options, operation)) {
+					operation.op == opCall && backendGoNumericScalarReplacedCall(ir, options, operation) ||
+					operation.op == opCallMethodOne) {
 				fmt.Fprintf(&source, "\tvar ok%d bool\n", operation.pc)
+			}
+			if call, ok := plan.methods.call(operation); ok {
+				for field := range call.callerFields {
+					fmt.Fprintf(&source, "\tvar m%d_%d float64\n", operation.pc, field)
+				}
 			}
 		}
 		for parameter := 0; parameter < ir.params; parameter++ {
@@ -381,8 +432,10 @@ func verifyBackendGoNumericTargets(targets []backendGoNumericTarget) error {
 		}
 		targetOptions := backendGoNumericOptions{
 			functionName:     target.functionName,
+			directTargets:    targets,
 			selfRecursive:    target.selfRecursive,
 			fixedVarargCount: target.fixedVarargCount,
+			receiverTable:    target.receiverTable,
 		}
 		if target.selfRecursive && (resultCount != 1 || !backendGoNumericSelfRecursiveTarget(target.ir)) {
 			return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d is not bounded self recursion", protoID)
@@ -397,11 +450,15 @@ func verifyBackendGoNumericTargets(targets []backendGoNumericTarget) error {
 }
 
 func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptions) (backendGoNumericPlan, error) {
-	tables, err := analyzeBackendGoScalarTables(ir)
+	tables, err := analyzeBackendGoScalarTables(ir, options.receiverTable)
 	if err != nil {
 		return backendGoNumericPlan{}, err
 	}
 	closures, err := analyzeBackendGoScalarClosures(ir, options)
+	if err != nil {
+		return backendGoNumericPlan{}, err
+	}
+	methods, err := analyzeBackendGoScalarMethods(ir, tables, options)
 	if err != nil {
 		return backendGoNumericPlan{}, err
 	}
@@ -412,9 +469,12 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		replayEntry:          make([]bool, len(ir.ops)),
 		tables:               tables,
 		closures:             closures,
+		methods:              methods,
 	}
 	for register, id := range ir.initial {
-		if register < ir.params {
+		if options.receiverTable && register == 0 {
+			plan.tags[id-1] = backendTagTable
+		} else if register < ir.params {
 			plan.tags[id-1] = backendTagNumber
 		} else {
 			plan.tags[id-1] = backendTagNil
@@ -469,6 +529,8 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 					if ok {
 						if field.child != invalidBackendValueID {
 							tags = backendTagTable
+						} else if field.methodProto >= 0 {
+							tags = backendTagFunction
 						} else {
 							tags = field.tags
 						}
@@ -533,6 +595,14 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 					if options.selfRecursive && operation.b == 0 {
 						tags = backendTagNumber
 					}
+				case opCallMethodOne:
+					if _, ok := plan.methods.call(operation); ok {
+						if value.register == operation.a {
+							tags = backendTagNumber
+						} else if plan.tables.root(value.id) != invalidBackendValueID {
+							tags = backendTagTable
+						}
+					}
 				case opGetUpvalue:
 					tags = backendTagNumber
 				default:
@@ -572,8 +642,16 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 			markScalarReplaced(backendOperationUse(operation, operation.b))
 			plan.replayEntry[pc] = true
 		}
+		if _, ok := plan.methods.call(operation); ok {
+			plan.replayEntry[pc] = true
+		}
 	}
 	for valueIndex, scalar := range plan.closures.scalarClosures {
+		if scalar {
+			markScalarReplaced(backendValueID(valueIndex + 1))
+		}
+	}
+	for valueIndex, scalar := range plan.methods.methodClosures {
 		if scalar {
 			markScalarReplaced(backendValueID(valueIndex + 1))
 		}
@@ -676,6 +754,11 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						plan.closures.scalarValue(use.value)) {
 					continue
 				}
+				if operation.op == opCallMethodOne &&
+					use.register == operation.b &&
+					plan.tables.root(use.value) != invalidBackendValueID {
+					continue
+				}
 				markUsed(use.value)
 			}
 			for _, definition := range operation.defs {
@@ -703,6 +786,11 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 					use.register == operation.b &&
 					(backendGoNumericScalarReplacedCall(ir, options, operation) ||
 						plan.closures.scalarValue(use.value)) {
+					continue
+				}
+				if operation.op == opCallMethodOne &&
+					use.register == operation.b &&
+					plan.tables.root(use.value) != invalidBackendValueID {
 					continue
 				}
 				markUsed(use.value)
@@ -872,6 +960,15 @@ func verifyBackendGoNumericOperation(
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar field", operation.pc)
 		}
 		source := backendOperationUse(operation, operation.c)
+		if field.methodProto >= 0 {
+			proto, ok := backendGoScalarMethodClosure(ir, source)
+			if !ok ||
+				proto != field.methodProto ||
+				!plan.methods.scalarClosure(source) {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d changes scalar method identity", operation.pc)
+			}
+			return nil
+		}
 		if field.child != invalidBackendValueID {
 			if plan.tables.root(source) != field.child {
 				return fmt.Errorf("emit backend Go numeric proof: PC %d changes scalar table identity", operation.pc)
@@ -896,6 +993,9 @@ func verifyBackendGoNumericOperation(
 					return fmt.Errorf("emit backend Go numeric proof: PC %d loses scalar table identity", operation.pc)
 				}
 			}
+		}
+		if field.methodProto >= 0 {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d materializes scalar method", operation.pc)
 		}
 		return nil
 	case opPrepareIter:
@@ -1183,6 +1283,41 @@ func verifyBackendGoNumericOperation(
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported recursive call shape", operation.pc)
 		}
 		return require(operation.callArgStart, backendTagNumber)
+	case opCallMethodOne:
+		call, ok := plan.methods.call(operation)
+		if !ok ||
+			call.target.ir == nil ||
+			!call.target.receiverTable ||
+			operation.callArgCount != int32(call.target.ir.params) ||
+			operation.callArgCount < 1 ||
+			operation.callResults != 1 {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no static scalar method target", operation.pc)
+		}
+		if plan.tables.root(backendOperationUse(operation, operation.b)) != call.receiverRoot {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d changes scalar method receiver", operation.pc)
+		}
+		for argument := int32(1); argument < operation.callArgCount; argument++ {
+			if err := require(operation.callArgStart+argument, backendTagNumber); err != nil {
+				return err
+			}
+		}
+		for _, definition := range operation.defs {
+			switch definition.register {
+			case operation.a:
+				if plan.tags[definition.value-1] != backendTagNumber {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d method result is not numeric", operation.pc)
+				}
+			case operation.callArgStart:
+				if plan.tables.root(definition.value) != call.receiverRoot {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d loses scalar method receiver", operation.pc)
+				}
+			default:
+				if plan.used[definition.value-1] {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d uses borrowed method register %d", operation.pc, definition.register)
+				}
+			}
+		}
+		return nil
 	case opReturnOne:
 		return require(operation.a, backendTagNumber)
 	case opReturn:
@@ -1301,6 +1436,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		if !ok {
 			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar field", operation.pc)
 		}
+		if field.methodProto >= 0 {
+			return false, nil
+		}
 		if field.child != invalidBackendValueID {
 			return false, nil
 		}
@@ -1308,7 +1446,7 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		if err != nil {
 			return false, err
 		}
-		fmt.Fprintf(&emitter.body, "\tf%d = v%d\n", fieldIndex, source)
+		fmt.Fprintf(&emitter.body, "\t%s = v%d\n", emitter.scalarField(fieldIndex), source)
 	case opSetField:
 		arrayIndex, _, element, ok := emitter.plan.tables.arrayOperation(emitter.ir, operation)
 		if !ok {
@@ -1331,7 +1469,7 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		if err != nil {
 			return false, err
 		}
-		fmt.Fprintf(&emitter.body, "\tv%d = f%d\n", destination, fieldIndex)
+		fmt.Fprintf(&emitter.body, "\tv%d = %s\n", destination, emitter.scalarField(fieldIndex))
 	case opPrepareIter:
 		arrayIndex, _, _, ok := emitter.plan.tables.arrayOperation(emitter.ir, operation)
 		if !ok {
@@ -1624,6 +1762,54 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		fmt.Fprintf(&emitter.body, "\tif !ok%d {\n", operation.pc)
 		emitter.emitReplayEntry(2)
 		emitter.body.WriteString("\t}\n")
+	case opCallMethodOne:
+		call, ok := emitter.plan.methods.call(operation)
+		if !ok {
+			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no static scalar method target", operation.pc)
+		}
+		destination, err := definition(operation.a)
+		if err != nil {
+			return false, err
+		}
+		for field, callerField := range call.callerFields {
+			fmt.Fprintf(
+				&emitter.body,
+				"\tm%d_%d = %s\n",
+				operation.pc,
+				field,
+				emitter.scalarField(callerField),
+			)
+		}
+		fmt.Fprintf(&emitter.body, "\tv%d, ok%d = %s(", destination, operation.pc, call.target.functionName)
+		for field := range call.callerFields {
+			if field != 0 {
+				emitter.body.WriteString(", ")
+			}
+			fmt.Fprintf(&emitter.body, "&m%d_%d", operation.pc, field)
+		}
+		for argument := int32(1); argument < operation.callArgCount; argument++ {
+			if len(call.callerFields) != 0 || argument != 1 {
+				emitter.body.WriteString(", ")
+			}
+			value, err := use(operation.callArgStart + argument)
+			if err != nil {
+				return false, err
+			}
+			fmt.Fprintf(&emitter.body, "v%d", value)
+		}
+		emitter.body.WriteString(")\n")
+		fmt.Fprintf(&emitter.body, "\tif !ok%d {\n", operation.pc)
+		emitter.emitReplayEntry(2)
+		emitter.body.WriteString("\t}\n")
+		for field, callerField := range call.callerFields {
+			fmt.Fprintf(
+				&emitter.body,
+				"\t%s = m%d_%d\n",
+				emitter.scalarField(callerField),
+				operation.pc,
+				field,
+			)
+		}
 	case opReturnOne, opReturn:
 		resultCount := int(operation.returnCount)
 		if operation.op == opReturnOne {
@@ -1656,6 +1842,15 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		return false, fmt.Errorf("emit backend Go numeric proof: PC %d uses unsupported opcode %s", operation.pc, opcodeName(operation.op))
 	}
 	return false, nil
+}
+
+func (emitter *backendGoNumericEmitter) scalarField(fieldIndex int) string {
+	if fieldIndex >= 0 &&
+		fieldIndex < len(emitter.plan.tables.fields) &&
+		emitter.plan.tables.fields[fieldIndex].key.table == emitter.plan.tables.externalRoot {
+		return fmt.Sprintf("*r%d", fieldIndex)
+	}
+	return fmt.Sprintf("f%d", fieldIndex)
 }
 
 func (emitter *backendGoNumericEmitter) emitNumericBinary(destination, left backendValueID, right string, op opcode) {

@@ -538,6 +538,126 @@ func TestMachinePreparedScalarMetatableIndexAvoidsTablesAndReplaysEntry(t *testi
 	}
 }
 
+func TestMachinePreparedScalarMethodAvoidsTablesClosuresAndReplaysEntry(t *testing.T) {
+	image := machinePreparedTestImageForSource(t, backendMethodProofSource)
+	calls := 0
+	var observed machinePreparedExit
+	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
+		calls++
+		observed = backendGeneratedMethodPreparedFixture(context)
+		return observed
+	})
+	prepared, err := newMachineOwnerWithPrepared(image, program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generic, err := newMachineOwner(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := prepared.close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := generic.close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	baseTables := len(prepared.tables.tables)
+	baseClosures := len(prepared.closures.closures)
+	preparedArg, err := prepared.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericArg, err := generic.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runMachinePreparedTestProto(t, prepared, 1, []slot{preparedArg}, nil)
+	runMachinePreparedTestProto(t, generic, 1, []slot{genericArg}, nil)
+	assertMachineOwnerNumberResult(t, prepared, 5040)
+	assertMachineOwnerNumberResult(t, generic, 5040)
+	if calls != 1 || observed.kind != machinePreparedExitReturnOneNumber {
+		t.Fatalf("prepared scalar method success = calls %d exit %#v", calls, observed)
+	}
+	if len(prepared.tables.tables) != baseTables ||
+		len(prepared.closures.closures) != baseClosures {
+		t.Fatalf(
+			"prepared scalar method materialized tables/closures = %d/%d, want %d/%d",
+			len(prepared.tables.tables),
+			len(prepared.closures.closures),
+			baseTables,
+			baseClosures,
+		)
+	}
+
+	preparedController, err := newExecutionController(context.Background(), ExecutionLimits{
+		MaxInstructions:   10,
+		MaxRuntimeObjects: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericController, err := newExecutionController(context.Background(), ExecutionLimits{
+		MaxInstructions:   10,
+		MaxRuntimeObjects: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedLimitErr := runMachinePreparedTestProtoError(t, prepared, 1, []slot{preparedArg}, preparedController)
+	genericLimitErr := runMachinePreparedTestProtoError(t, generic, 1, []slot{genericArg}, genericController)
+	if calls != 1 {
+		t.Fatalf("prepared scalar method function ran under execution policy %d times", calls)
+	}
+	if preparedLimitErr == nil || genericLimitErr == nil || preparedLimitErr.Error() != genericLimitErr.Error() {
+		t.Fatalf("prepared/generic scalar method limit errors = %v / %v", preparedLimitErr, genericLimitErr)
+	}
+
+	preparedStringID, err := prepared.strings.internStringStopped("29")
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedString, err := slotPackHandle(slotTagString, uint32(preparedStringID), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericStringID, err := generic.strings.internStringStopped("29")
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericString, err := slotPackHandle(slotTagString, uint32(genericStringID), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runMachinePreparedTestProto(t, prepared, 1, []slot{preparedString}, nil)
+	runMachinePreparedTestProto(t, generic, 1, []slot{genericString}, nil)
+	assertMachineOwnerNumberResult(t, prepared, 5040)
+	assertMachineOwnerNumberResult(t, generic, 5040)
+	if calls != 2 || observed.kind != machinePreparedExitReplayEntry {
+		t.Fatalf("prepared scalar method fallback = calls %d exit %#v", calls, observed)
+	}
+
+	if !checkptrInstrumentedTest() {
+		lease, err := prepared.beginRun()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var runErr error
+		allocations := testing.AllocsPerRun(1000, func() {
+			runErr = prepared.executeStopped(0, 1, machineClosureHandle{}, []slot{preparedArg}, nil, machineRunEffects{})
+		})
+		lease.end()
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if allocations != 0 {
+			t.Fatalf("prepared scalar method owner allocations = %v, want 0", allocations)
+		}
+	}
+}
+
 func TestMachinePreparedScalarArrayIterationAvoidsTablesAndReplaysEntry(t *testing.T) {
 	image := machinePreparedTestImageForSource(t, backendArrayIterationProofSource)
 	calls := 0
@@ -1429,6 +1549,17 @@ func BenchmarkMachinePreparedScalarMetatableIndexOwner(b *testing.B) {
 
 func BenchmarkMachineGenericScalarMetatableIndexOwner(b *testing.B) {
 	image := machinePreparedBenchmarkImage(b, backendMetatableIndexProofSource)
+	benchmarkMachineNumericOwner(b, image, nil)
+}
+
+func BenchmarkMachinePreparedScalarMethodOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendMethodProofSource)
+	program := machinePreparedBenchmarkProgram(b, image, backendGeneratedMethodPreparedFixture)
+	benchmarkMachineNumericOwner(b, image, program)
+}
+
+func BenchmarkMachineGenericScalarMethodOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendMethodProofSource)
 	benchmarkMachineNumericOwner(b, image, nil)
 }
 

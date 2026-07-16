@@ -368,6 +368,9 @@ func backendAccessClassification(operation *backendOperationIR) backendAccessIR 
 	case opGetStringField, opGetStringFieldIndex:
 		result.kind = backendAccessStaticProperty
 		result.constant = operation.c
+	case opCallMethodOne:
+		result.kind = backendAccessStaticProperty
+		result.constant = operation.c
 	case opGetIndex, opSetIndex:
 		result.kind = backendAccessDynamicIndex
 	case opPrepareIter, opArrayNext, opArrayNextJump2:
