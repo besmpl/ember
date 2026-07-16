@@ -1237,6 +1237,15 @@ func verifyBackendGoNumericOperation(
 			return nil
 		}
 		return require(operation.c, field.tags)
+	case opSetStringFieldIndex:
+		fused, ok := plan.records.fusedSetByPC[operation.pc]
+		if !ok {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no fused child-record mutation", operation.pc)
+		}
+		if err := require(operation.c, backendTagString); err != nil {
+			return err
+		}
+		return require(operation.d, plan.records.childRecords[fused.family].fieldTags)
 	case opSetField:
 		if _, ok := plan.records.arraySetByPC[operation.pc]; ok {
 			return nil
@@ -2120,6 +2129,11 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			return false, err
 		}
 		fmt.Fprintf(&emitter.body, "\t%s = v%d\n", emitter.scalarField(fieldIndex), source)
+	case opSetStringFieldIndex:
+		if handled, err := emitter.emitRecordFusedSet(operation, use); handled {
+			return false, err
+		}
+		return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no fused child-record mutation", operation.pc)
 	case opSetField:
 		if handled, err := emitter.emitRecordArraySet(operation); handled {
 			return false, err

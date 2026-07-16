@@ -609,6 +609,32 @@ The retained path has moved beyond the original starting state:
   128 bytes for the wrapper; generated bodies contain only cold
   bounds/stack-growth calls and no opcode, descriptor, Machine table, runtime
   string, interning, or VM dispatch.
+- The fused child-record mutation slice extends the same verified selector
+  model to `SET_STRING_FIELD_INDEX`. A dynamic finite string ID selects one
+  uniformly typed field in one nonescaping child record, and generated Go
+  writes the typed scalar local directly. Unknown parent selectors or field
+  IDs replay canonical entry; mixed child-field kinds, kind-changing writes,
+  child escape, unsupported bases, and unresolved keys fail closed. A
+  parameterized `threat_aggro_table` holdout proves three fixed record arrays,
+  three nested threat records, two fused dynamic reads, one fused dynamic
+  write, finite-string decisions, and mutation inside nested loops. Generated
+  Go, the prepared owner, generic Machine, and the independent interpreter
+  agree across negative, ordinary, and large seeds. Controlled execution stays
+  on generic Machine; invalid prepared arguments replay entry; owner
+  table/string counts remain unchanged; direct and prepared paths allocate
+  zero when warmed. The direct kernel has a five-sample median of about 6.464
+  microseconds (6.459-6.513 microseconds observed), while the prepared owner
+  path has a median of about 6.572 microseconds (6.560-6.593 microseconds
+  observed), versus about 1.008 milliseconds through generic Machine
+  (1.006-1.011 milliseconds observed). The pinned Luau CLI warmed to a
+  five-sample median of about 66.21 microseconds per call after the cold first
+  sample, making prepared about `0.099x` Luau. Deterministic generated source
+  is 30,048 bytes. Linked ARM64 is 2,560 bytes for the direct kernel and 2,800
+  bytes for the prepared body; both contain only cold bounds/stack-growth
+  calls and no opcode, descriptor, Machine table, runtime string, interning,
+  or VM dispatch. Twelve of the 25 Scenario kernels now emit through the
+  single-Proto proof route; the six nested-Proto cases require the direct-call
+  route before they can be classified by the same observer.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
