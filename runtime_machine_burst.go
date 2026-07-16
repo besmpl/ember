@@ -2,7 +2,10 @@ package ember
 
 import "math"
 
-const machineBurstMaxOperations = 4096
+const (
+	machineBurstMaxOperations      = 4096
+	machineBurstWorkspaceRegisters = 32
+)
 
 type machineBurstStatus uint32
 
@@ -346,7 +349,7 @@ func machineBurstSlicesValid(region machineBurstRegion, operations []machineBurs
 func machineBurstOperationRegistersValid(operation machineBurstOperation, base, registerCount, numberCount int) bool {
 	valid := func(register int32) bool {
 		cell := base + int(register)
-		return register >= 0 && cell >= 0 && cell < registerCount && cell < numberCount
+		return register >= 0 && register < machineBurstWorkspaceRegisters && cell >= 0 && cell < registerCount && cell < numberCount
 	}
 	switch operation.op {
 	case opNumericForCheck:
