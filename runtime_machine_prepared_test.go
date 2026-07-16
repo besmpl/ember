@@ -765,6 +765,124 @@ func TestMachinePreparedScalarClosureAvoidsClosureAndCellMaterialization(t *test
 	}
 }
 
+func TestMachinePreparedRecursiveCallAvoidsSelfClosureMaterialization(t *testing.T) {
+	image := machinePreparedTestImageForSource(t, backendRecursiveProofSource)
+	calls := 0
+	var observed machinePreparedExit
+	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
+		calls++
+		observed = backendGeneratedRecursivePreparedFixture(context)
+		return observed
+	})
+	prepared, err := newMachineOwnerWithPrepared(image, program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generic, err := newMachineOwner(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := prepared.close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := generic.close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	baseClosures := len(prepared.closures.closures)
+	baseCells := len(prepared.closures.cells)
+	preparedArg, err := prepared.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericArg, err := generic.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runMachinePreparedTestProto(t, prepared, 1, []slot{preparedArg}, nil)
+	runMachinePreparedTestProto(t, generic, 1, []slot{genericArg}, nil)
+	assertMachineOwnerNumberResult(t, prepared, backendRecursiveExpected(29))
+	assertMachineOwnerNumberResult(t, generic, backendRecursiveExpected(29))
+	if calls != 1 || observed.kind != machinePreparedExitReturnOneNumber {
+		t.Fatalf("prepared recursive success = calls %d exit %#v", calls, observed)
+	}
+	if len(prepared.closures.closures) != baseClosures ||
+		len(prepared.closures.cells) != baseCells {
+		t.Fatalf(
+			"prepared recursion materialized closures/cells = %d/%d, want %d/%d",
+			len(prepared.closures.closures),
+			len(prepared.closures.cells),
+			baseClosures,
+			baseCells,
+		)
+	}
+
+	preparedController, err := newExecutionController(context.Background(), ExecutionLimits{
+		MaxInstructions: 1_000_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericController, err := newExecutionController(context.Background(), ExecutionLimits{
+		MaxInstructions: 1_000_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runMachinePreparedTestProto(t, prepared, 1, []slot{preparedArg}, preparedController)
+	runMachinePreparedTestProto(t, generic, 1, []slot{genericArg}, genericController)
+	if calls != 1 {
+		t.Fatalf("prepared recursive function ran under execution policy %d times", calls)
+	}
+	if preparedController.remaining != genericController.remaining {
+		t.Fatalf("controlled recursive remaining = %d, generic %d", preparedController.remaining, genericController.remaining)
+	}
+
+	preparedStringID, err := prepared.strings.internStringStopped("29")
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedString, err := slotPackHandle(slotTagString, uint32(preparedStringID), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericStringID, err := generic.strings.internStringStopped("29")
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericString, err := slotPackHandle(slotTagString, uint32(genericStringID), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runMachinePreparedTestProto(t, prepared, 1, []slot{preparedString}, nil)
+	runMachinePreparedTestProto(t, generic, 1, []slot{genericString}, nil)
+	assertMachineOwnerNumberResult(t, prepared, backendRecursiveExpected(29))
+	assertMachineOwnerNumberResult(t, generic, backendRecursiveExpected(29))
+	if calls != 2 || observed.kind != machinePreparedExitReplayEntry {
+		t.Fatalf("prepared recursive parameter fallback = calls %d exit %#v", calls, observed)
+	}
+
+	if !checkptrInstrumentedTest() {
+		lease, err := prepared.beginRun()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var runErr error
+		allocations := testing.AllocsPerRun(1000, func() {
+			runErr = prepared.executeStopped(0, 1, machineClosureHandle{}, []slot{preparedArg}, nil, machineRunEffects{})
+		})
+		lease.end()
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if allocations != 0 {
+			t.Fatalf("prepared recursive owner allocations = %v, want 0", allocations)
+		}
+	}
+}
+
 func TestMachinePreparedRejectsMalformedReplayBeforeCanonicalMutation(t *testing.T) {
 	image := machinePreparedTestImageForSource(t, backendNumericExitProofSource)
 	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
@@ -947,6 +1065,17 @@ func BenchmarkMachinePreparedScalarClosureOwner(b *testing.B) {
 
 func BenchmarkMachineGenericScalarClosureOwner(b *testing.B) {
 	image := machinePreparedBenchmarkImage(b, backendClosureProofSource)
+	benchmarkMachineNumericOwner(b, image, nil)
+}
+
+func BenchmarkMachinePreparedRecursiveOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendRecursiveProofSource)
+	program := machinePreparedBenchmarkProgram(b, image, backendGeneratedRecursivePreparedFixture)
+	benchmarkMachineNumericOwner(b, image, program)
+}
+
+func BenchmarkMachineGenericRecursiveOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendRecursiveProofSource)
 	benchmarkMachineNumericOwner(b, image, nil)
 }
 

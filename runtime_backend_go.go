@@ -12,11 +12,13 @@ type backendGoNumericOptions struct {
 	functionName         string
 	preparedFunctionName string
 	directTargets        []backendGoNumericTarget
+	selfRecursive        bool
 }
 
 type backendGoNumericTarget struct {
-	ir           *backendProtoIR
-	functionName string
+	ir            *backendProtoIR
+	functionName  string
+	selfRecursive bool
 }
 
 type backendGoNumericPlan struct {
@@ -56,6 +58,9 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	if options.preparedFunctionName != "" && len(ir.upvalues) != 0 {
 		return nil, fmt.Errorf("emit backend Go numeric proof: prepared entry has %d upvalues", len(ir.upvalues))
 	}
+	if options.selfRecursive && !backendGoNumericSelfRecursiveTarget(ir) {
+		return nil, fmt.Errorf("emit backend Go numeric proof: function is not a bounded self-recursive target")
+	}
 	if err := verifyBackendGoNumericTargets(options.directTargets); err != nil {
 		return nil, err
 	}
@@ -66,6 +71,9 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	directEmitter := backendGoNumericEmitter{ir: ir, plan: plan, options: options}
 	if err := directEmitter.emitBody(); err != nil {
 		return nil, err
+	}
+	if options.selfRecursive {
+		directEmitter.needsMath = true
 	}
 	preparedEmitter := backendGoNumericEmitter{ir: ir, plan: plan, prepared: true, options: options}
 	if options.preparedFunctionName != "" {
@@ -80,22 +88,37 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	if directEmitter.needsMath || preparedEmitter.needsMath {
 		source.WriteString("import \"math\"\n\n")
 	}
-	fmt.Fprintf(&source, "func %s(", options.functionName)
-	for upvalue := range ir.upvalues {
-		if upvalue != 0 {
-			source.WriteString(", ")
-		}
-		fmt.Fprintf(&source, "u%d *float64", upvalue)
+	pointerUpvalues := len(ir.upvalues)
+	if options.selfRecursive {
+		pointerUpvalues = 0
 	}
-	for parameter := 0; parameter < ir.params; parameter++ {
-		if len(ir.upvalues) != 0 || parameter != 0 {
-			source.WriteString(", ")
+	if options.selfRecursive {
+		fmt.Fprintf(
+			&source,
+			"func %s(p0 float64) (float64, bool) {\n\tif math.IsNaN(p0) || p0 > %d {\n\t\treturn 0, false\n\t}\n\treturn %sBody(p0), true\n}\n\n",
+			options.functionName,
+			backendGoMaxPreparedRecursiveArgument,
+			options.functionName,
+		)
+		fmt.Fprintf(&source, "func %sBody(p0 float64) float64 {\n", options.functionName)
+	} else {
+		fmt.Fprintf(&source, "func %s(", options.functionName)
+		for upvalue := 0; upvalue < pointerUpvalues; upvalue++ {
+			if upvalue != 0 {
+				source.WriteString(", ")
+			}
+			fmt.Fprintf(&source, "u%d *float64", upvalue)
 		}
-		fmt.Fprintf(&source, "p%d float64", parameter)
-	}
-	source.WriteString(") (float64, bool) {\n")
-	for upvalue := range ir.upvalues {
-		fmt.Fprintf(&source, "\tif u%d == nil {\n\t\treturn 0, false\n\t}\n", upvalue)
+		for parameter := 0; parameter < ir.params; parameter++ {
+			if pointerUpvalues != 0 || parameter != 0 {
+				source.WriteString(", ")
+			}
+			fmt.Fprintf(&source, "p%d float64", parameter)
+		}
+		source.WriteString(") (float64, bool) {\n")
+		for upvalue := 0; upvalue < pointerUpvalues; upvalue++ {
+			fmt.Fprintf(&source, "\tif u%d == nil {\n\t\treturn 0, false\n\t}\n", upvalue)
+		}
 	}
 	for valueIndex := range ir.values {
 		if !plan.used[valueIndex] {
@@ -147,7 +170,8 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		if _, _, factory := plan.closures.factory(operation); factory {
 			continue
 		}
-		if !backendGoNumericOperationDead(plan, operation) && operation.op == opCallLocalOne {
+		if !backendGoNumericOperationDead(plan, operation) &&
+			operation.op == opCallLocalOne {
 			fmt.Fprintf(&source, "\tvar ok%d bool\n", operation.pc)
 		}
 	}
@@ -213,7 +237,8 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			if _, _, factory := plan.closures.factory(operation); factory {
 				continue
 			}
-			if !backendGoNumericOperationDead(plan, operation) && operation.op == opCallLocalOne {
+			if !backendGoNumericOperationDead(plan, operation) &&
+				operation.op == opCallLocalOne {
 				fmt.Fprintf(&source, "\tvar ok%d bool\n", operation.pc)
 			}
 		}
@@ -270,7 +295,14 @@ func verifyBackendGoNumericTargets(targets []backendGoNumericTarget) error {
 		if err := verifyBackendProtoIR(target.ir); err != nil {
 			return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d: %w", protoID, err)
 		}
-		if _, err := buildBackendGoNumericPlan(target.ir, backendGoNumericOptions{}); err != nil {
+		targetOptions := backendGoNumericOptions{
+			functionName:  target.functionName,
+			selfRecursive: target.selfRecursive,
+		}
+		if target.selfRecursive && !backendGoNumericSelfRecursiveTarget(target.ir) {
+			return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d is not bounded self recursion", protoID)
+		}
+		if _, err := buildBackendGoNumericPlan(target.ir, targetOptions); err != nil {
 			if _, ok := backendGoNumericClosureFactory(target.ir, targets); !ok {
 				return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d is not a numeric leaf or closure factory: %w", protoID, err)
 			}
@@ -390,6 +422,10 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 					} else if _, ok := plan.closures.call(operation); ok {
 						tags = backendTagNumber
 					} else if _, ok := backendGoNumericDirectTarget(options, operation); ok {
+						tags = backendTagNumber
+					}
+				case opCallUpvalueOne:
+					if options.selfRecursive && operation.b == 0 {
 						tags = backendTagNumber
 					}
 				case opGetUpvalue:
@@ -570,7 +606,7 @@ func backendGoNumericScalarReplacedCall(
 		return false
 	}
 	target, ok := backendGoNumericDirectTarget(options, operation)
-	if !ok || target.ir.variadic || len(target.ir.upvalues) != 0 {
+	if !ok || target.ir.variadic {
 		return false
 	}
 	valueID := backendOperationUse(operation, operation.b)
@@ -578,11 +614,17 @@ func backendGoNumericScalarReplacedCall(
 		return false
 	}
 	value := &ir.values[valueID-1]
-	return value.object == backendObjectClosure &&
-		!value.escapes &&
-		!value.targetUnknown &&
-		len(value.targetProtos) == 1 &&
-		value.targetProtos[0] == operation.call.targetProto
+	if value.object != backendObjectClosure ||
+		value.escapes ||
+		value.targetUnknown ||
+		len(value.targetProtos) != 1 ||
+		value.targetProtos[0] != operation.call.targetProto {
+		return false
+	}
+	if target.selfRecursive {
+		return backendGoNumericSelfClosure(ir, valueID, target.ir)
+	}
+	return len(target.ir.upvalues) == 0
 }
 
 func backendGoNumericPureProducer(op opcode) bool {
@@ -866,7 +908,7 @@ func verifyBackendGoNumericOperation(
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no direct numeric target", operation.pc)
 		}
 		if target.ir.variadic ||
-			len(target.ir.upvalues) != 0 ||
+			!target.selfRecursive && len(target.ir.upvalues) != 0 ||
 			operation.callArgCount != int32(target.ir.params) ||
 			operation.callArgCount < 0 {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported direct call shape", operation.pc)
@@ -877,6 +919,14 @@ func verifyBackendGoNumericOperation(
 			}
 		}
 		return nil
+	case opCallUpvalueOne:
+		if !options.selfRecursive ||
+			operation.b != 0 ||
+			operation.callArgCount != int32(ir.params) ||
+			operation.callArgCount != 1 {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported recursive call shape", operation.pc)
+		}
+		return require(operation.callArgStart, backendTagNumber)
 	case opReturnOne:
 		return require(operation.a, backendTagNumber)
 	case opReturn:
@@ -1185,6 +1235,26 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 	case opJump:
 		emitter.emitGoto(int32(block.id), emitter.ir.pcToBlock[operation.targetPC], 1)
 		return true, nil
+	case opCallUpvalueOne:
+		if !emitter.options.selfRecursive || operation.b != 0 {
+			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no recursive self target", operation.pc)
+		}
+		destination, err := definition(operation.a)
+		if err != nil {
+			return false, err
+		}
+		fmt.Fprintf(&emitter.body, "\tv%d = %sBody(", destination, emitter.options.functionName)
+		for argument := int32(0); argument < operation.callArgCount; argument++ {
+			if argument != 0 {
+				emitter.body.WriteString(", ")
+			}
+			value, err := use(operation.callArgStart + argument)
+			if err != nil {
+				return false, err
+			}
+			fmt.Fprintf(&emitter.body, "v%d", value)
+		}
+		emitter.body.WriteString(")\n")
 	case opCallLocalOne:
 		if factory, cell, ok := emitter.plan.closures.factory(operation); ok {
 			source, err := use(operation.callArgStart + factory.captureArgument)
@@ -1244,7 +1314,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		emitter.body.WriteString("\t}\n")
 	case opReturnOne, opReturn:
 		result, _ := use(operation.a)
-		if emitter.prepared {
+		if emitter.options.selfRecursive {
+			fmt.Fprintf(&emitter.body, "\treturn v%d\n", result)
+		} else if emitter.prepared {
 			fmt.Fprintf(&emitter.body, "\treturn machinePreparedReturnOneNumber(v%d)\n", result)
 		} else {
 			fmt.Fprintf(&emitter.body, "\treturn v%d, true\n", result)
@@ -1285,6 +1357,9 @@ func (emitter *backendGoNumericEmitter) numericConstant(index int32) string {
 
 func (emitter *backendGoNumericEmitter) emitNaNGuard(operation *backendOperationIR, indent int, values ...backendValueID) {
 	emitter.needsMath = true
+	if emitter.options.selfRecursive {
+		return
+	}
 	prefix := strings.Repeat("\t", indent)
 	for _, value := range values {
 		fmt.Fprintf(&emitter.body, "%sif math.IsNaN(v%d) {\n", prefix, value)

@@ -114,6 +114,20 @@ end
 return kernel
 `
 
+const backendRecursiveProofSource = `
+local function kernel(seed)
+    local function fib(n)
+        if n < 2 then
+            return n
+        end
+        return fib(n - 1) + fib(n - 2)
+    end
+    local result = fib(20 + seed % 2)
+    return result
+end
+return kernel
+`
+
 func TestBackendGoNumericProofEmitsDeterministicDirectSource(t *testing.T) {
 	ir := backendNumericProofIR(t)
 	options := backendGoNumericOptions{
@@ -362,6 +376,34 @@ func TestBackendGoScalarClosureIgnoresSourceIdentity(t *testing.T) {
 	}
 	if !bytes.Equal(emit(base), emit(renamed)) {
 		t.Fatal("source or entrypoint identity selected scalar closure code")
+	}
+}
+
+func TestBackendGoRecursiveCallIgnoresSourceIdentity(t *testing.T) {
+	base := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "source/main", Text: backendRecursiveProofSource},
+	}, []Entrypoint{{Name: "main", Module: LogicalModule("main")}})
+	renamed := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "opaque/renamed/source", Text: backendRecursiveProofSource},
+	}, []Entrypoint{{Name: "renamed-entrypoint", Module: LogicalModule("main")}})
+	if base.programHash == renamed.programHash {
+		t.Fatal("identity-mutated recursive Programs unexpectedly share a binding hash")
+	}
+	emit := func(program *backendProgramIR) []byte {
+		t.Helper()
+		targets := backendRecursiveProofTargets(program.modules[0].protos)
+		source, err := emitBackendGoNumericProof(program.modules[0].protos[1], backendGoNumericOptions{
+			packageName:   "ember",
+			functionName:  "identityBlindRecursiveKernel",
+			directTargets: targets,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return source
+	}
+	if !bytes.Equal(emit(base), emit(renamed)) {
+		t.Fatal("source or entrypoint identity selected recursive code")
 	}
 }
 
@@ -1102,6 +1144,208 @@ return kernel
 	}
 }
 
+func TestBackendGoRecursiveFixturesAreFreshAndCorrect(t *testing.T) {
+	irs := backendRecursiveProofIRs(t)
+	targetOptions := backendGoNumericOptions{
+		packageName:   "ember",
+		functionName:  "backendGeneratedRecursiveFib",
+		selfRecursive: true,
+	}
+	generatedTarget, err := emitBackendGoNumericProof(irs[2], targetOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := backendRecursiveProofTargets(irs)
+	callerOptions := backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedRecursiveKernel",
+		preparedFunctionName: "backendGeneratedRecursivePreparedFixture",
+		directTargets:        targets,
+	}
+	generatedCaller, err := emitBackendGoNumericProof(irs[1], callerOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range []struct {
+		path      string
+		generated []byte
+	}{
+		{path: "runtime_backend_recursive_fib_generated_test.go", generated: generatedTarget},
+		{path: "runtime_backend_recursive_kernel_generated_test.go", generated: generatedCaller},
+	} {
+		onDisk, err := os.ReadFile(fixture.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(fixture.generated, onDisk) {
+			t.Fatalf("generated recursive fixture %s is stale", fixture.path)
+		}
+		if _, err := goparser.ParseFile(token.NewFileSet(), fixture.path, fixture.generated, goparser.AllErrors); err != nil {
+			t.Fatalf("parse %s: %v", fixture.path, err)
+		}
+	}
+	targetText := string(generatedTarget)
+	for _, required := range []string{
+		"math.IsNaN(p0) || p0 > 24",
+		"backendGeneratedRecursiveFibBody(v5)",
+		"backendGeneratedRecursiveFibBody(v8)",
+	} {
+		if !strings.Contains(targetText, required) {
+			t.Fatalf("generated recursive target lacks %q:\n%s", required, targetText)
+		}
+	}
+	for _, forbidden := range []string{
+		"u0 *float64", "machineClosure", "machineUpvalue",
+		"CALL_UPVALUE_ONE", "switch", "opcode", "descriptor",
+	} {
+		if strings.Contains(targetText, forbidden) || strings.Contains(string(generatedCaller), forbidden) {
+			t.Fatalf("generated recursive source contains runtime dispatch/materialization marker %q", forbidden)
+		}
+	}
+
+	root, err := Compile(backendRecursiveProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seed := range []float64{-29, -1, 0, 1, 7, 29, 1_000_000_000_005} {
+		got, ok := backendGeneratedRecursiveKernel(seed)
+		want := backendRecursiveExpected(seed)
+		if !ok || got != want {
+			t.Fatalf("generated recursive fixture(%v) = (%v, %t), want (%v, true)", seed, got, ok, want)
+		}
+		oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+			args: []Value{NumberValue(seed)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(oracle) != 1 {
+			t.Fatalf("recursive oracle result count = %d, want 1", len(oracle))
+		}
+		oracleNumber, ok := oracle[0].Number()
+		if !ok || oracleNumber != got {
+			t.Fatalf("generated/oracle recursion seed %v = %v/%v (%t)", seed, got, oracleNumber, ok)
+		}
+	}
+	if _, ok := backendGeneratedRecursiveFib(33); ok {
+		t.Fatal("generated recursive target accepted an unproved recursion argument")
+	}
+	if !checkptrInstrumentedTest() {
+		if allocations := testing.AllocsPerRun(1000, func() {
+			_, _ = backendGeneratedRecursiveKernel(29)
+		}); allocations != 0 {
+			t.Fatalf("generated recursive allocations = %v, want 0", allocations)
+		}
+	}
+}
+
+func TestBackendGoRecursiveTargetRejectsUnboundedSelfCall(t *testing.T) {
+	tests := map[string]string{
+		"nondecreasing": `
+local function kernel(seed)
+    local function recurse(n)
+        if n < 1 then
+            return n
+        end
+        return recurse(n + 1)
+    end
+    local result = recurse(seed)
+    return result
+end
+return kernel
+`,
+		"subunit decrement": `
+local function kernel(seed)
+    local function recurse(n)
+        if n < 1 then
+            return n
+        end
+        return recurse(n - 0.5)
+    end
+    local result = recurse(seed)
+    return result
+end
+return kernel
+`,
+	}
+	for name, source := range tests {
+		t.Run(name, func(t *testing.T) {
+			proto, err := Compile(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			image, err := proto.preparedCodeImage()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ir, err := buildBackendProtoIR(&image.prototypes[2])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+				packageName:   "ember",
+				functionName:  "rejectUnboundedRecursion",
+				selfRecursive: true,
+			}); err == nil {
+				t.Fatal("emitted unbounded self recursion")
+			}
+		})
+	}
+}
+
+func TestBackendGoRecursiveTargetRejectsUnsupportedSelfCapture(t *testing.T) {
+	irs := backendRecursiveProofIRs(t)
+	for name, mutate := range map[string]func(*machineUpvalue){
+		"nonlocal": func(upvalue *machineUpvalue) {
+			upvalue.local = 0
+		},
+		"copied": func(upvalue *machineUpvalue) {
+			upvalue.copy = 1
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			target := *irs[2]
+			target.upvalues = append([]machineUpvalue(nil), target.upvalues...)
+			mutate(&target.upvalues[0])
+			if _, err := emitBackendGoNumericProof(&target, backendGoNumericOptions{
+				packageName:   "ember",
+				functionName:  "rejectUnsupportedSelfCapture",
+				selfRecursive: true,
+			}); err == nil {
+				t.Fatal("emitted recursion through an unsupported capture")
+			}
+		})
+	}
+}
+
+func TestBackendGoRecursiveCallerRejectsDifferentCapturedClosure(t *testing.T) {
+	irs := backendRecursiveProofIRs(t)
+	target := *irs[2]
+	target.upvalues = append([]machineUpvalue(nil), target.upvalues...)
+	target.upvalues[0].index++
+	targets := backendRecursiveProofTargets(irs)
+	targets[2].ir = &target
+	if _, err := emitBackendGoNumericProof(irs[1], backendGoNumericOptions{
+		packageName:   "ember",
+		functionName:  "rejectDifferentCapturedClosure",
+		directTargets: targets,
+	}); err == nil {
+		t.Fatal("emitted a captured call that was not proven to target itself")
+	}
+}
+
+func backendRecursiveExpected(seed float64) float64 {
+	n := 20 + seed - math.Floor(seed/2)*2
+	var fib func(float64) float64
+	fib = func(value float64) float64 {
+		if value < 2 {
+			return value
+		}
+		return fib(value-1) + fib(value-2)
+	}
+	return fib(n)
+}
+
 func backendClosureExpected(seed float64) float64 {
 	value := 10 + seed - math.Floor(seed/3)*3
 	total := 0.0
@@ -1281,6 +1525,39 @@ func backendClosureProofTargets(irs []*backendProtoIR) []backendGoNumericTarget 
 	return targets
 }
 
+func backendRecursiveProofIRs(t *testing.T) []*backendProtoIR {
+	t.Helper()
+	proto, err := Compile(backendRecursiveProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(image.prototypes) != 3 {
+		t.Fatalf("recursive proof Proto count = %d, want 3", len(image.prototypes))
+	}
+	irs := make([]*backendProtoIR, len(image.prototypes))
+	for protoID := range image.prototypes {
+		irs[protoID], err = buildBackendProtoIR(&image.prototypes[protoID])
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return irs
+}
+
+func backendRecursiveProofTargets(irs []*backendProtoIR) []backendGoNumericTarget {
+	targets := make([]backendGoNumericTarget, len(irs))
+	targets[2] = backendGoNumericTarget{
+		ir:            irs[2],
+		functionName:  "backendGeneratedRecursiveFib",
+		selfRecursive: true,
+	}
+	return targets
+}
+
 func BenchmarkBackendGeneratedNumericFixture(b *testing.B) {
 	var result float64
 	b.ReportAllocs()
@@ -1337,6 +1614,20 @@ func BenchmarkBackendGeneratedClosureKernel(b *testing.B) {
 	backendGeneratedNumericSink = result
 }
 
+func BenchmarkBackendGeneratedRecursiveKernel(b *testing.B) {
+	var result float64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		value, ok := backendGeneratedRecursiveKernel(float64(iteration & 31))
+		if !ok {
+			b.Fatal("generated recursive fixture exited")
+		}
+		result = value
+	}
+	backendGeneratedNumericSink = result
+}
+
 var backendGeneratedNumericSink float64
 
 func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
@@ -1347,6 +1638,7 @@ func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
 		backendArrayIterationProofSource,
 		backendArrayOpsProofSource,
 		backendClosureProofSource,
+		backendRecursiveProofSource,
 		"local function add(value) return value + 1 end return add",
 		"return { field = 1 }",
 	} {

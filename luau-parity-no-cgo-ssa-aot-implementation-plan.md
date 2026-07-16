@@ -245,13 +245,30 @@ The retained path has moved beyond the original starting state:
   takes roughly 73-87 ns. Go inlines the 53-cost captured-cell helper into a
   160-byte prepared body containing no calls, stack frame, opcode/descriptor
   dispatch, closure lookup, or upvalue lookup.
+- The current bounded-recursion slice scalar-replaces the self-capturing local
+  closure in a parameterized `classic/recursive_fibonacci` shape and emits an
+  ordinary direct recursive Go function. It accepts one numeric parameter, one
+  self upvalue, a finite numeric base guard, and recursive arguments proven to
+  subtract finite constants of at least one from that parameter. Other upvalue
+  access, nondecreasing recursion, variadic calls, unsupported operations, or
+  an entry argument above 24 fail closed to Machine. A checked wrapper
+  validates the entry once; the generated 128-byte recursive body returns one
+  scalar directly, avoiding a result/guard branch on every recursive edge. The
+  prepared owner path has a five-sample median of about 38.3 microseconds on
+  the checkpoint machine (37.2-44.7 microseconds observed), versus about
+  4.58 milliseconds through generic Machine (4.54-4.86 milliseconds
+  observed), with zero prepared allocations and no materialized self closure
+  or cell. The direct generated kernel has a five-sample median of about
+  30.8 microseconds (30.0-31.1 microseconds observed). Linked ARM64 contains
+  only the two intentional recursive calls plus Go's stack-growth slow path,
+  with no opcode, descriptor, closure, or upvalue dispatch.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
 all-37 parity. Non-dense iteration, general table mutation, strings,
-general closures/upvalues and dynamic call sets, varargs/results, recursion,
-metatables, host/effect exits, modules, and coroutines remain on the active
-path.
+general closures/upvalues and dynamic call sets, varargs/results,
+general recursion and logical-frame/error cases, metatables, host/effect exits,
+modules, and coroutines remain on the active path.
 
 ## Active execution path
 
