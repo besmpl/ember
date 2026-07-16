@@ -144,6 +144,21 @@ end
 return kernel
 `
 
+const backendTupleProofSource = `
+local function kernel(seed)
+    local function split(value)
+        return value, value + 1, value + 2
+    end
+    local total = 0
+    for i = 1, 50 + seed % 2 do
+        local a, b, c = split(i)
+        total = total + a + b * 2 + c * 3
+    end
+    return total
+end
+return kernel
+`
+
 func TestBackendGoNumericProofEmitsDeterministicDirectSource(t *testing.T) {
 	ir := backendNumericProofIR(t)
 	options := backendGoNumericOptions{
@@ -292,6 +307,34 @@ func TestBackendGoNumericDirectCallIgnoresSourceIdentity(t *testing.T) {
 	}
 	if !bytes.Equal(emit(base), emit(renamed)) {
 		t.Fatal("source or entrypoint identity selected generated direct-call code")
+	}
+}
+
+func TestBackendGoFixedTuplesIgnoreSourceIdentity(t *testing.T) {
+	base := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "source/main", Text: backendTupleProofSource},
+	}, []Entrypoint{{Name: "main", Module: LogicalModule("main")}})
+	renamed := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "opaque/renamed/source", Text: backendTupleProofSource},
+	}, []Entrypoint{{Name: "renamed-entrypoint", Module: LogicalModule("main")}})
+	if base.programHash == renamed.programHash {
+		t.Fatal("identity-mutated fixed-tuple Programs unexpectedly share a binding hash")
+	}
+	emit := func(program *backendProgramIR) []byte {
+		t.Helper()
+		targets := backendTupleProofTargets(program.modules[0].protos)
+		source, err := emitBackendGoNumericProof(program.modules[0].protos[1], backendGoNumericOptions{
+			packageName:   "ember",
+			functionName:  "identityBlindTupleKernel",
+			directTargets: targets,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return source
+	}
+	if !bytes.Equal(emit(base), emit(renamed)) {
+		t.Fatal("source or entrypoint identity selected fixed-tuple code")
 	}
 }
 
@@ -1571,6 +1614,140 @@ return score
 	}
 }
 
+func TestBackendGoFixedTupleFixturesAreFreshAndCorrect(t *testing.T) {
+	irs := backendTupleProofIRs(t)
+	generatedTarget, err := emitBackendGoNumericProof(irs[2], backendGoNumericOptions{
+		packageName:  "ember",
+		functionName: "backendGeneratedTupleSplit",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := backendTupleProofTargets(irs)
+	generatedCaller, err := emitBackendGoNumericProof(irs[1], backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedTupleKernel",
+		preparedFunctionName: "backendGeneratedTuplePreparedFixture",
+		directTargets:        targets,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range []struct {
+		path      string
+		generated []byte
+	}{
+		{path: "runtime_backend_tuple_split_generated_test.go", generated: generatedTarget},
+		{path: "runtime_backend_tuple_kernel_generated_test.go", generated: generatedCaller},
+	} {
+		onDisk, err := os.ReadFile(fixture.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(fixture.generated, onDisk) {
+			t.Fatalf("generated fixed-tuple fixture %s is stale", fixture.path)
+		}
+		if _, err := goparser.ParseFile(token.NewFileSet(), fixture.path, fixture.generated, goparser.AllErrors); err != nil {
+			t.Fatalf("parse %s: %v", fixture.path, err)
+		}
+	}
+	targetText := string(generatedTarget)
+	callerText := string(generatedCaller)
+	for _, required := range []string{
+		"backendGeneratedTupleSplit(p0 float64) (float64, float64, float64, bool)",
+		"return v5, v7, v9, true",
+		"v40, v41, v42, ok14 = backendGeneratedTupleSplit(v39)",
+	} {
+		if !strings.Contains(targetText, required) && !strings.Contains(callerText, required) {
+			t.Fatalf("generated fixed-tuple source lacks %q:\ntarget:\n%s\ncaller:\n%s", required, targetText, callerText)
+		}
+	}
+	for _, forbidden := range []string{
+		"[]float64", "machineClosure", "CALL", "RETURN",
+		"switch", "opcode", "descriptor",
+	} {
+		if strings.Contains(targetText, forbidden) || strings.Contains(callerText, forbidden) {
+			t.Fatalf("generated fixed-tuple source contains materialization/dispatch marker %q", forbidden)
+		}
+	}
+
+	root, err := Compile(backendTupleProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seed := range []float64{-29, -1, 0, 1, 7, 29, 1_000_000_000_005} {
+		got, ok := backendGeneratedTupleKernel(seed)
+		want := backendTupleExpected(seed)
+		if !ok || got != want {
+			t.Fatalf("generated fixed-tuple fixture(%v) = (%v, %t), want (%v, true)", seed, got, ok, want)
+		}
+		oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+			args: []Value{NumberValue(seed)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(oracle) != 1 {
+			t.Fatalf("fixed-tuple oracle result count = %d, want 1", len(oracle))
+		}
+		oracleNumber, ok := oracle[0].Number()
+		if !ok || oracleNumber != got {
+			t.Fatalf("generated/oracle fixed tuple seed %v = %v/%v (%t)", seed, got, oracleNumber, ok)
+		}
+	}
+	if !checkptrInstrumentedTest() {
+		if allocations := testing.AllocsPerRun(1000, func() {
+			_, _ = backendGeneratedTupleKernel(29)
+		}); allocations != 0 {
+			t.Fatalf("generated fixed-tuple allocations = %v, want 0", allocations)
+		}
+	}
+}
+
+func TestBackendGoFixedTupleRejectsUnboundedOrMismatchedResults(t *testing.T) {
+	irs := backendTupleProofIRs(t)
+	targets := backendTupleProofTargets(irs)
+
+	if _, err := emitBackendGoNumericProof(irs[2], backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "rejectPreparedTupleEntry",
+		preparedFunctionName: "rejectPreparedTupleEntryOwner",
+	}); err == nil {
+		t.Fatal("emitted a multiple-result prepared entry")
+	}
+
+	caller := *irs[1]
+	caller.ops = append([]backendOperationIR(nil), caller.ops...)
+	for pc := range caller.ops {
+		if caller.ops[pc].op == opCall {
+			caller.ops[pc].callResults--
+			break
+		}
+	}
+	if _, err := emitBackendGoNumericProof(&caller, backendGoNumericOptions{
+		packageName:   "ember",
+		functionName:  "rejectMismatchedTupleResults",
+		directTargets: targets,
+	}); err == nil {
+		t.Fatal("emitted a fixed tuple with mismatched call results")
+	}
+
+	target := *irs[2]
+	target.ops = append([]backendOperationIR(nil), target.ops...)
+	for pc := range target.ops {
+		if target.ops[pc].op == opReturn {
+			target.ops[pc].returnCount = backendGoMaxFixedResultCount + 1
+			break
+		}
+	}
+	if _, err := emitBackendGoNumericProof(&target, backendGoNumericOptions{
+		packageName:  "ember",
+		functionName: "rejectUnboundedTupleResults",
+	}); err == nil {
+		t.Fatal("emitted a fixed tuple above the code-size bound")
+	}
+}
+
 func backendRecursiveExpected(seed float64) float64 {
 	n := 20 + seed - math.Floor(seed/2)*2
 	var fib func(float64) float64
@@ -1593,6 +1770,15 @@ func backendVarargExpected(seed float64) float64 {
 			(index+2)*5 +
 			(index+3)*7 +
 			(index+4)*11
+	}
+	return total
+}
+
+func backendTupleExpected(seed float64) float64 {
+	limit := 50 + seed - math.Floor(seed/2)*2
+	total := 0.0
+	for value := 1.0; value <= limit; value++ {
+		total += value + (value+1)*2 + (value+2)*3
 	}
 	return total
 }
@@ -1842,6 +2028,38 @@ func backendVarargProofTargets(irs []*backendProtoIR) []backendGoNumericTarget {
 	return targets
 }
 
+func backendTupleProofIRs(t *testing.T) []*backendProtoIR {
+	t.Helper()
+	proto, err := Compile(backendTupleProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(image.prototypes) != 3 {
+		t.Fatalf("fixed-tuple proof Proto count = %d, want 3", len(image.prototypes))
+	}
+	irs := make([]*backendProtoIR, len(image.prototypes))
+	for protoID := range image.prototypes {
+		irs[protoID], err = buildBackendProtoIR(&image.prototypes[protoID])
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return irs
+}
+
+func backendTupleProofTargets(irs []*backendProtoIR) []backendGoNumericTarget {
+	targets := make([]backendGoNumericTarget, len(irs))
+	targets[2] = backendGoNumericTarget{
+		ir:           irs[2],
+		functionName: "backendGeneratedTupleSplit",
+	}
+	return targets
+}
+
 func BenchmarkBackendGeneratedNumericFixture(b *testing.B) {
 	var result float64
 	b.ReportAllocs()
@@ -1926,6 +2144,20 @@ func BenchmarkBackendGeneratedVarargKernel(b *testing.B) {
 	backendGeneratedNumericSink = result
 }
 
+func BenchmarkBackendGeneratedTupleKernel(b *testing.B) {
+	var result float64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		value, ok := backendGeneratedTupleKernel(float64(iteration & 31))
+		if !ok {
+			b.Fatal("generated fixed-tuple fixture exited")
+		}
+		result = value
+	}
+	backendGeneratedNumericSink = result
+}
+
 var backendGeneratedNumericSink float64
 
 func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
@@ -1938,6 +2170,7 @@ func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
 		backendClosureProofSource,
 		backendRecursiveProofSource,
 		backendVarargProofSource,
+		backendTupleProofSource,
 		"local function add(value) return value + 1 end return add",
 		"return { field = 1 }",
 	} {

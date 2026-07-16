@@ -35,12 +35,13 @@ type backendGoNumericPlan struct {
 }
 
 type backendGoNumericEmitter struct {
-	ir        *backendProtoIR
-	plan      backendGoNumericPlan
-	body      strings.Builder
-	needsMath bool
-	prepared  bool
-	options   backendGoNumericOptions
+	ir          *backendProtoIR
+	plan        backendGoNumericPlan
+	body        strings.Builder
+	needsMath   bool
+	prepared    bool
+	resultCount int
+	options     backendGoNumericOptions
 }
 
 func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptions) ([]byte, error) {
@@ -63,11 +64,18 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	if options.preparedFunctionName != "" && ir.variadic {
 		return nil, fmt.Errorf("emit backend Go numeric proof: prepared entry is variadic")
 	}
+	resultCount, ok := backendGoNumericFixedResultCount(ir)
+	if !ok {
+		return nil, fmt.Errorf("emit backend Go numeric proof: function has no bounded fixed result shape")
+	}
+	if options.preparedFunctionName != "" && resultCount != 1 {
+		return nil, fmt.Errorf("emit backend Go numeric proof: prepared entry returns %d values, want 1", resultCount)
+	}
 	parameterCount, ok := backendGoNumericArgumentCount(ir, options.fixedVarargCount)
 	if !ok {
 		return nil, fmt.Errorf("emit backend Go numeric proof: invalid fixed vararg count %d", options.fixedVarargCount)
 	}
-	if options.selfRecursive && !backendGoNumericSelfRecursiveTarget(ir) {
+	if options.selfRecursive && (resultCount != 1 || !backendGoNumericSelfRecursiveTarget(ir)) {
 		return nil, fmt.Errorf("emit backend Go numeric proof: function is not a bounded self-recursive target")
 	}
 	if err := verifyBackendGoNumericTargets(options.directTargets); err != nil {
@@ -77,14 +85,14 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	if err != nil {
 		return nil, err
 	}
-	directEmitter := backendGoNumericEmitter{ir: ir, plan: plan, options: options}
+	directEmitter := backendGoNumericEmitter{ir: ir, plan: plan, resultCount: resultCount, options: options}
 	if err := directEmitter.emitBody(); err != nil {
 		return nil, err
 	}
 	if options.selfRecursive {
 		directEmitter.needsMath = true
 	}
-	preparedEmitter := backendGoNumericEmitter{ir: ir, plan: plan, prepared: true, options: options}
+	preparedEmitter := backendGoNumericEmitter{ir: ir, plan: plan, prepared: true, resultCount: resultCount, options: options}
 	if options.preparedFunctionName != "" {
 		if err := preparedEmitter.emitBody(); err != nil {
 			return nil, err
@@ -124,9 +132,11 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			}
 			fmt.Fprintf(&source, "p%d float64", parameter)
 		}
-		source.WriteString(") (float64, bool) {\n")
+		source.WriteString(") (")
+		writeBackendGoNumericResultTypes(&source, resultCount)
+		source.WriteString(") {\n")
 		for upvalue := 0; upvalue < pointerUpvalues; upvalue++ {
-			fmt.Fprintf(&source, "\tif u%d == nil {\n\t\treturn 0, false\n\t}\n", upvalue)
+			fmt.Fprintf(&source, "\tif u%d == nil {\n\t\t%s\n\t}\n", upvalue, backendGoNumericFailureReturn(resultCount))
 		}
 	}
 	for valueIndex := range ir.values {
@@ -180,7 +190,8 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			continue
 		}
 		if !backendGoNumericOperationDead(plan, operation) &&
-			operation.op == opCallLocalOne {
+			(operation.op == opCallLocalOne ||
+				operation.op == opCall && backendGoNumericScalarReplacedCall(ir, options, operation)) {
 			fmt.Fprintf(&source, "\tvar ok%d bool\n", operation.pc)
 		}
 	}
@@ -247,7 +258,8 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 				continue
 			}
 			if !backendGoNumericOperationDead(plan, operation) &&
-				operation.op == opCallLocalOne {
+				(operation.op == opCallLocalOne ||
+					operation.op == opCall && backendGoNumericScalarReplacedCall(ir, options, operation)) {
 				fmt.Fprintf(&source, "\tvar ok%d bool\n", operation.pc)
 			}
 		}
@@ -313,6 +325,35 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	return formatted, nil
 }
 
+func writeBackendGoNumericResultTypes(source *strings.Builder, resultCount int) {
+	for result := 0; result < resultCount; result++ {
+		if result != 0 {
+			source.WriteString(", ")
+		}
+		source.WriteString("float64")
+	}
+	if resultCount != 0 {
+		source.WriteString(", ")
+	}
+	source.WriteString("bool")
+}
+
+func backendGoNumericFailureReturn(resultCount int) string {
+	var result strings.Builder
+	result.WriteString("return ")
+	for index := 0; index < resultCount; index++ {
+		if index != 0 {
+			result.WriteString(", ")
+		}
+		result.WriteString("0")
+	}
+	if resultCount != 0 {
+		result.WriteString(", ")
+	}
+	result.WriteString("false")
+	return result.String()
+}
+
 func verifyBackendGoNumericTargets(targets []backendGoNumericTarget) error {
 	for protoID, target := range targets {
 		if target.ir == nil && target.functionName == "" {
@@ -329,12 +370,16 @@ func verifyBackendGoNumericTargets(targets []backendGoNumericTarget) error {
 		if _, ok := backendGoNumericArgumentCount(target.ir, target.fixedVarargCount); !ok {
 			return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d has invalid fixed vararg count", protoID)
 		}
+		resultCount, ok := backendGoNumericFixedResultCount(target.ir)
+		if !ok {
+			return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d has no bounded fixed result shape", protoID)
+		}
 		targetOptions := backendGoNumericOptions{
 			functionName:     target.functionName,
 			selfRecursive:    target.selfRecursive,
 			fixedVarargCount: target.fixedVarargCount,
 		}
-		if target.selfRecursive && !backendGoNumericSelfRecursiveTarget(target.ir) {
+		if target.selfRecursive && (resultCount != 1 || !backendGoNumericSelfRecursiveTarget(target.ir)) {
 			return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d is not bounded self recursion", protoID)
 		}
 		if _, err := buildBackendGoNumericPlan(target.ir, targetOptions); err != nil {
@@ -461,6 +506,12 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 					); ok {
 						tags = backendTagNumber
 					}
+				case opCall:
+					if backendGoNumericScalarReplacedCall(ir, options, operation) &&
+						value.register >= operation.a &&
+						value.register < operation.a+operation.callResults {
+						tags = backendTagNumber
+					}
 				case opCallLocalOne:
 					if _, _, ok := plan.closures.factory(operation); ok {
 						tags = backendTagFunction
@@ -528,6 +579,53 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 			markScalarReplaced(backendValueID(valueIndex + 1))
 		}
 	}
+	originUsers := make([][]backendValueID, len(ir.values))
+	remainingOrigins := make([]int, len(ir.values))
+	hasExternalOrigins := make([]bool, len(ir.values))
+	queue := make([]backendValueID, 0, len(ir.values))
+	for valueIndex, scalar := range plan.scalarReplacedValues {
+		if scalar {
+			queue = append(queue, backendValueID(valueIndex+1))
+		}
+	}
+	for valueIndex := range ir.values {
+		id := backendValueID(valueIndex + 1)
+		for _, origin := range ir.values[valueIndex].origins {
+			if !ir.validBackendValue(origin) || origin == id {
+				continue
+			}
+			hasExternalOrigins[valueIndex] = true
+			originUsers[origin-1] = append(originUsers[origin-1], id)
+			if !plan.scalarReplacedValues[origin-1] {
+				remainingOrigins[valueIndex]++
+			}
+		}
+	}
+	for valueIndex := range ir.values {
+		if plan.scalarReplacedValues[valueIndex] ||
+			!hasExternalOrigins[valueIndex] ||
+			remainingOrigins[valueIndex] != 0 {
+			continue
+		}
+		id := backendValueID(valueIndex + 1)
+		markScalarReplaced(id)
+		queue = append(queue, id)
+	}
+	for len(queue) != 0 {
+		id := queue[0]
+		queue = queue[1:]
+		for _, user := range originUsers[id-1] {
+			if plan.scalarReplacedValues[user-1] || remainingOrigins[user-1] == 0 {
+				continue
+			}
+			remainingOrigins[user-1]--
+			if remainingOrigins[user-1] != 0 {
+				continue
+			}
+			markScalarReplaced(user)
+			queue = append(queue, user)
+		}
+	}
 	for pc := range ir.ops {
 		operation := &ir.ops[pc]
 		for _, spill := range operation.spillValues {
@@ -563,7 +661,7 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 				continue
 			}
 			for _, use := range operation.uses {
-				if operation.op == opCallLocalOne &&
+				if (operation.op == opCall || operation.op == opCallLocalOne) &&
 					use.register == operation.b &&
 					(backendGoNumericScalarReplacedCall(ir, options, operation) ||
 						plan.closures.scalarValue(use.value)) {
@@ -592,7 +690,7 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		case backendValueOperation:
 			operation := &ir.ops[value.pc]
 			for _, use := range operation.uses {
-				if operation.op == opCallLocalOne &&
+				if (operation.op == opCall || operation.op == opCallLocalOne) &&
 					use.register == operation.b &&
 					(backendGoNumericScalarReplacedCall(ir, options, operation) ||
 						plan.closures.scalarValue(use.value)) {
@@ -647,7 +745,19 @@ func backendGoNumericScalarReplacedCall(
 	options backendGoNumericOptions,
 	operation *backendOperationIR,
 ) bool {
-	if ir == nil || operation == nil || operation.op != opCallLocalOne {
+	if ir == nil || operation == nil {
+		return false
+	}
+	switch operation.op {
+	case opCall:
+		if operation.callArgCount < 0 || operation.callResults < 2 {
+			return false
+		}
+	case opCallLocalOne:
+		if operation.callArgCount < 0 || operation.callResults != 1 {
+			return false
+		}
+	default:
 		return false
 	}
 	target, ok := backendGoNumericDirectTarget(options, operation)
@@ -656,6 +766,10 @@ func backendGoNumericScalarReplacedCall(
 	}
 	argumentCount, ok := backendGoNumericArgumentCount(target.ir, target.fixedVarargCount)
 	if !ok || operation.callArgCount != int32(argumentCount) {
+		return false
+	}
+	resultCount, ok := backendGoNumericFixedResultCount(target.ir)
+	if !ok || operation.callResults != int32(resultCount) {
 		return false
 	}
 	valueID := backendOperationUse(operation, operation.b)
@@ -953,6 +1067,49 @@ func verifyBackendGoNumericOperation(
 		return nil
 	case opJump:
 		return nil
+	case opCall:
+		target, ok := backendGoNumericDirectTarget(options, operation)
+		if !ok || !backendGoNumericScalarReplacedCall(ir, options, operation) {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no fixed-result numeric target", operation.pc)
+		}
+		argumentCount, argsOK := backendGoNumericArgumentCount(target.ir, target.fixedVarargCount)
+		resultCount, resultsOK := backendGoNumericFixedResultCount(target.ir)
+		if !argsOK || !resultsOK ||
+			operation.callArgCount != int32(argumentCount) ||
+			operation.callResults != int32(resultCount) {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported fixed-result call shape", operation.pc)
+		}
+		for register := operation.callArgStart; register < operation.callArgStart+operation.callArgCount; register++ {
+			if err := require(register, backendTagNumber); err != nil {
+				return err
+			}
+		}
+		for register := operation.a; register < operation.a+operation.callResults; register++ {
+			found := false
+			for _, definition := range operation.defs {
+				if definition.register != register {
+					continue
+				}
+				found = true
+				if plan.tags[definition.value-1] != backendTagNumber {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d result register %d is not numeric", operation.pc, register)
+				}
+				break
+			}
+			if !found {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d has no result definition for register %d", operation.pc, register)
+			}
+		}
+		for _, definition := range operation.defs {
+			if definition.register >= operation.a &&
+				definition.register < operation.a+operation.callResults {
+				continue
+			}
+			if plan.used[definition.value-1] {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d uses borrowed call suffix register %d", operation.pc, definition.register)
+			}
+		}
+		return nil
 	case opCallLocalOne:
 		if factory, _, ok := plan.closures.factory(operation); ok {
 			if factory.captureArgument < 0 ||
@@ -1003,10 +1160,16 @@ func verifyBackendGoNumericOperation(
 	case opReturnOne:
 		return require(operation.a, backendTagNumber)
 	case opReturn:
-		if operation.returnCount != 1 {
-			return fmt.Errorf("emit backend Go numeric proof: PC %d returns %d values, want 1", operation.pc, operation.returnCount)
+		resultCount, ok := backendGoNumericFixedResultCount(ir)
+		if !ok || operation.returnCount != int32(resultCount) {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has inconsistent fixed result count %d", operation.pc, operation.returnCount)
 		}
-		return require(operation.a, backendTagNumber)
+		for register := operation.a; register < operation.a+operation.returnCount; register++ {
+			if err := require(register, backendTagNumber); err != nil {
+				return err
+			}
+		}
+		return nil
 	default:
 		return fmt.Errorf("emit backend Go numeric proof: PC %d uses unsupported opcode %s", operation.pc, opcodeName(operation.op))
 	}
@@ -1349,6 +1512,36 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			fmt.Fprintf(&emitter.body, "v%d", value)
 		}
 		emitter.body.WriteString(")\n")
+	case opCall:
+		target, ok := backendGoNumericDirectTarget(emitter.options, operation)
+		if !ok || !backendGoNumericScalarReplacedCall(emitter.ir, emitter.options, operation) {
+			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar-replaced fixed-result target", operation.pc)
+		}
+		for result := int32(0); result < operation.callResults; result++ {
+			if result != 0 {
+				emitter.body.WriteString(", ")
+			}
+			destination, err := definition(operation.a + result)
+			if err != nil {
+				return false, err
+			}
+			fmt.Fprintf(&emitter.body, "\tv%d", destination)
+		}
+		fmt.Fprintf(&emitter.body, ", ok%d = %s(", operation.pc, target.functionName)
+		for argument := int32(0); argument < operation.callArgCount; argument++ {
+			if argument != 0 {
+				emitter.body.WriteString(", ")
+			}
+			value, err := use(operation.callArgStart + argument)
+			if err != nil {
+				return false, err
+			}
+			fmt.Fprintf(&emitter.body, "v%d", value)
+		}
+		emitter.body.WriteString(")\n")
+		fmt.Fprintf(&emitter.body, "\tif !ok%d {\n", operation.pc)
+		emitter.emitReplayEntry(2)
+		emitter.body.WriteString("\t}\n")
 	case opCallLocalOne:
 		if factory, cell, ok := emitter.plan.closures.factory(operation); ok {
 			source, err := use(operation.callArgStart + factory.captureArgument)
@@ -1400,20 +1593,34 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		}
 		emitter.body.WriteString(")\n")
 		fmt.Fprintf(&emitter.body, "\tif !ok%d {\n", operation.pc)
-		if emitter.prepared {
-			emitter.body.WriteString("\t\treturn machinePreparedReplayEntry()\n")
-		} else {
-			emitter.body.WriteString("\t\treturn 0, false\n")
-		}
+		emitter.emitReplayEntry(2)
 		emitter.body.WriteString("\t}\n")
 	case opReturnOne, opReturn:
-		result, _ := use(operation.a)
+		resultCount := int(operation.returnCount)
+		if operation.op == opReturnOne {
+			resultCount = 1
+		}
+		results := make([]backendValueID, resultCount)
+		for result := 0; result < resultCount; result++ {
+			value, err := use(operation.a + int32(result))
+			if err != nil {
+				return false, err
+			}
+			results[result] = value
+		}
 		if emitter.options.selfRecursive {
-			fmt.Fprintf(&emitter.body, "\treturn v%d\n", result)
+			fmt.Fprintf(&emitter.body, "\treturn v%d\n", results[0])
 		} else if emitter.prepared {
-			fmt.Fprintf(&emitter.body, "\treturn machinePreparedReturnOneNumber(v%d)\n", result)
+			fmt.Fprintf(&emitter.body, "\treturn machinePreparedReturnOneNumber(v%d)\n", results[0])
 		} else {
-			fmt.Fprintf(&emitter.body, "\treturn v%d, true\n", result)
+			emitter.body.WriteString("\treturn ")
+			for result, value := range results {
+				if result != 0 {
+					emitter.body.WriteString(", ")
+				}
+				fmt.Fprintf(&emitter.body, "v%d", value)
+			}
+			emitter.body.WriteString(", true\n")
 		}
 		return true, nil
 	default:
@@ -1460,7 +1667,7 @@ func (emitter *backendGoNumericEmitter) emitNaNGuard(operation *backendOperation
 		if emitter.prepared {
 			emitter.emitReplayBeforeOperation(operation, indent+1)
 		} else {
-			fmt.Fprintf(&emitter.body, "%s\treturn 0, false\n", prefix)
+			fmt.Fprintf(&emitter.body, "%s\t%s\n", prefix, backendGoNumericFailureReturn(emitter.resultCount))
 		}
 		fmt.Fprintf(&emitter.body, "%s}\n", prefix)
 	}
@@ -1495,7 +1702,7 @@ func (emitter *backendGoNumericEmitter) emitReplayEntry(indent int) {
 		fmt.Fprintf(&emitter.body, "%sreturn machinePreparedReplayEntry()\n", prefix)
 		return
 	}
-	fmt.Fprintf(&emitter.body, "%sreturn 0, false\n", prefix)
+	fmt.Fprintf(&emitter.body, "%s%s\n", prefix, backendGoNumericFailureReturn(emitter.resultCount))
 }
 
 func (emitter *backendGoNumericEmitter) emitBranch(from int32, targetPC int32, condition string, indent int) {
@@ -1531,7 +1738,7 @@ func (emitter *backendGoNumericEmitter) emitGoto(from, to int32, indent int) {
 	if emitter.prepared {
 		fmt.Fprintf(&emitter.body, "%sreturn machinePreparedExit{}\n", prefix)
 	} else {
-		fmt.Fprintf(&emitter.body, "%sreturn 0, false\n", prefix)
+		fmt.Fprintf(&emitter.body, "%s%s\n", prefix, backendGoNumericFailureReturn(emitter.resultCount))
 	}
 }
 

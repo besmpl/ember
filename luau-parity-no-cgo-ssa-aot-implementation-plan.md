@@ -278,11 +278,31 @@ The retained path has moved beyond the original starting state:
   observed). Its 64-byte score helper is straight floating-point code; the
   prepared body contains one direct helper call and no opcode, descriptor,
   intrinsic, closure, or vararg dispatch.
+- `2fc39584` repaired generic fixed-result CALL frame reservation so a scratch
+  destination owns its complete result window before register compaction.
+  The regression covers a natural loop with a three-result nested call.
+- The current fixed-tuple slice scalar-replaces a proven nonescaping local
+  closure and its three numeric results in a seed-dependent natural loop.
+  Every reachable target return must have one identical fixed arity, capped at
+  32 results; open, inconsistent, mismatched, nonnumeric, escaping, or
+  otherwise unsupported shapes fail closed. Fixed results become ordinary Go
+  multiple returns and bind directly to caller SSA locals without a slice,
+  Machine result pack, or materialized closure. Scalar replacement propagates
+  through proven SSA aliases, including the loop-carried closure phi. The
+  prepared owner path has a five-sample median of about 203 ns on the
+  checkpoint machine (201-208 ns observed), versus about 12.0 microseconds
+  through generic Machine (11.99-12.10 microseconds observed), with zero
+  allocations. The direct generated kernel has a five-sample median of about
+  102 ns (101-111 ns observed), while live pinned Luau `-O2 -g0` has a warmed
+  median of about 657 ns on the same source. Go inlines the tuple helper into a
+  176-byte kernel with no call instruction, stack frame, opcode/descriptor
+  dispatch, closure lookup, or tuple allocation.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
 all-37 parity. Non-dense iteration, general table mutation, strings,
-general closures/upvalues and dynamic call sets, open varargs/multiple results,
+general closures/upvalues and dynamic call sets, open varargs/results,
+heterogeneous or dynamically shaped multiple results,
 general recursion and logical-frame/error cases, metatables, host/effect exits,
 modules, and coroutines remain on the active path.
 
