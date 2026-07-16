@@ -393,7 +393,7 @@ func emitCompilerStageWithCapacity(artifact sourceArtifact, capacity int) (compi
 	if err := c.compileStatements(statements); err != nil {
 		return compilerStageEmission{}, err
 	}
-	if !statementIDsHaveReturn(artifact.tree, statements) {
+	if !statementIDsAlwaysReturn(artifact.tree, statements) {
 		c.emit(instruction{op: opReturn})
 	}
 	if c.conversionErr != nil {

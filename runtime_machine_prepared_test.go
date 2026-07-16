@@ -2,6 +2,7 @@ package ember
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 )
@@ -161,6 +162,86 @@ func TestMachinePreparedBindingRejectsMismatchBeforeExecutionAndCopiesInventory(
 	}
 }
 
+func TestMachinePreparedExactNonEntryReplayMatchesGeneric(t *testing.T) {
+	image := machinePreparedTestImageForSource(t, backendNumericExitProofSource)
+	var observed machinePreparedExit
+	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
+		observed = backendGeneratedNumericExitPreparedFixture(context)
+		return observed
+	})
+	prepared, err := newMachineOwnerWithPrepared(image, program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generic, err := newMachineOwner(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := prepared.close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := generic.close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	preparedArg, err := prepared.importValueStopped(NumberValue(math.NaN()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericArg, err := generic.importValueStopped(NumberValue(math.NaN()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedErr := runMachinePreparedTestProtoError(t, prepared, 1, []slot{preparedArg}, nil)
+	genericErr := runMachinePreparedTestProtoError(t, generic, 1, []slot{genericArg}, nil)
+	if observed.kind != machinePreparedExitReplayBeforeOperation ||
+		observed.pc != 2 ||
+		observed.spillCount != 1 {
+		t.Fatalf("prepared replay exit = %#v, want PC 2 with one spill", observed)
+	}
+	if preparedErr == nil || genericErr == nil || preparedErr.Error() != genericErr.Error() {
+		t.Fatalf("prepared/generic replay errors = %v / %v", preparedErr, genericErr)
+	}
+	if prepared.restartPC != 0 {
+		t.Fatalf("prepared restart PC after replay = %d, want consumed by generic loop", prepared.restartPC)
+	}
+	spilled, err := prepared.number(prepared.registers[1])
+	if err != nil || !math.IsNaN(spilled) {
+		t.Fatalf("prepared spilled register = (%v, %v), want NaN", spilled, err)
+	}
+}
+
+func TestMachinePreparedRejectsMalformedReplayBeforeCanonicalMutation(t *testing.T) {
+	image := machinePreparedTestImageForSource(t, backendNumericExitProofSource)
+	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
+		exit := context.replayBeforeOperation(2, 1)
+		context.spillNumber(0, 99, math.NaN())
+		return exit
+	})
+	owner, err := newMachineOwnerWithPrepared(image, program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := owner.close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	arg, err := owner.importValueStopped(NumberValue(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runErr := runMachinePreparedTestProtoError(t, owner, 1, []slot{arg}, nil)
+	if runErr == nil || !strings.Contains(runErr.Error(), "invalid register 99") {
+		t.Fatalf("malformed prepared replay = %v", runErr)
+	}
+	if owner.registers[1] != slotNil {
+		t.Fatalf("malformed replay mutated canonical register 1 to %#x", owner.registers[1])
+	}
+}
+
 func machinePreparedTestProgram(
 	t *testing.T,
 	image *programImage,
@@ -190,8 +271,12 @@ func machinePreparedTestProgram(
 }
 
 func machinePreparedTestImage(t *testing.T) *programImage {
+	return machinePreparedTestImageForSource(t, backendNumericProofSource)
+}
+
+func machinePreparedTestImageForSource(t *testing.T, source string) *programImage {
 	t.Helper()
-	image := machineOwnerProgramImage(t, []string{backendNumericProofSource})
+	image := machineOwnerProgramImage(t, []string{source})
 	image.entrypoints = []programImageEntrypoint{{name: "main", moduleID: 0}}
 	globalNames, err := programImageGlobalNames(image.modules)
 	if err != nil {
@@ -219,6 +304,22 @@ func runMachinePreparedTestProto(
 	}
 }
 
+func runMachinePreparedTestProtoError(
+	t *testing.T,
+	owner *machineOwner,
+	protoID int32,
+	args []slot,
+	controller *executionController,
+) error {
+	t.Helper()
+	lease, err := owner.beginRun()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.end()
+	return owner.executeStopped(0, protoID, machineClosureHandle{}, args, controller, machineRunEffects{})
+}
+
 func backendNumericProofExpected(seed float64) float64 {
 	total := seed
 	for index := 1.0; index <= 64; index++ {
@@ -229,4 +330,99 @@ func backendNumericProofExpected(seed float64) float64 {
 		}
 	}
 	return total
+}
+
+func BenchmarkMachinePreparedNumericOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendNumericProofSource)
+	program := machinePreparedBenchmarkProgram(b, image, backendGeneratedNumericPreparedFixture)
+	benchmarkMachineNumericOwner(b, image, program)
+}
+
+func BenchmarkMachineGenericNumericOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendNumericProofSource)
+	benchmarkMachineNumericOwner(b, image, nil)
+}
+
+func benchmarkMachineNumericOwner(b *testing.B, image *programImage, program *machinePreparedProgram) {
+	b.Helper()
+	owner, err := newMachineOwnerWithPrepared(image, program)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() {
+		if err := owner.close(); err != nil {
+			b.Fatal(err)
+		}
+	})
+	arg, err := owner.importValueStopped(NumberValue(29))
+	if err != nil {
+		b.Fatal(err)
+	}
+	args := []slot{arg}
+	lease, err := owner.beginRun()
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer lease.end()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		if err := owner.executeStopped(0, 1, machineClosureHandle{}, args, nil, machineRunEffects{}); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	value, err := owner.number(owner.results[0])
+	if err != nil {
+		b.Fatal(err)
+	}
+	backendGeneratedNumericSink = value
+}
+
+func machinePreparedBenchmarkImage(tb testing.TB, source string) *programImage {
+	tb.Helper()
+	proto, err := Compile(source)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	code, err := proto.preparedCodeImage()
+	if err != nil {
+		tb.Fatal(err)
+	}
+	image := &programImage{
+		modules: []programImageModule{{
+			moduleID: 0,
+			key:      moduleKey{kind: moduleKeyLogical, path: "benchmark"},
+			code:     code,
+		}},
+		entrypoints: []programImageEntrypoint{{name: "main", moduleID: 0}},
+	}
+	image.globalNames, err = programImageGlobalNames(image.modules)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return image
+}
+
+func machinePreparedBenchmarkProgram(
+	tb testing.TB,
+	image *programImage,
+	function machinePreparedFunction,
+) *machinePreparedProgram {
+	tb.Helper()
+	ir, err := buildBackendProgramIR(image)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	functions := make([]machinePreparedFunction, len(ir.modules[0].protos))
+	functions[1] = function
+	return &machinePreparedProgram{
+		abiVersion:      ir.abiVersion,
+		semanticVersion: ir.semanticVersion,
+		programHash:     ir.programHash,
+		modules: []machinePreparedModule{{
+			moduleID:  0,
+			functions: functions,
+		}},
+	}
 }

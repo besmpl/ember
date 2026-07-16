@@ -26,6 +26,17 @@ end
 return kernel
 `
 
+const backendNumericExitProofSource = `
+local function guarded(seed)
+    local adjusted = seed + 1
+    if adjusted < 10 then
+        return adjusted
+    end
+    return adjusted * 2
+end
+return guarded
+`
+
 func TestBackendGoNumericProofEmitsDeterministicDirectSource(t *testing.T) {
 	ir := backendNumericProofIR(t)
 	options := backendGoNumericOptions{
@@ -56,7 +67,8 @@ func TestBackendGoNumericProofEmitsDeterministicDirectSource(t *testing.T) {
 	if !strings.Contains(text, "math.Floor") ||
 		!strings.Contains(text, "goto b") ||
 		!strings.Contains(text, "context.numberParameter(0)") ||
-		!strings.Contains(text, "machinePreparedReturnOneNumber(result)") {
+		!strings.Contains(text, "context.replayBeforeOperation(") ||
+		!strings.Contains(text, "machinePreparedReturnOneNumber(v") {
 		t.Fatalf("generated source does not contain direct arithmetic CFG:\n%s", text)
 	}
 }
@@ -169,6 +181,40 @@ func TestBackendGoNumericProofGeneratedFixtureIsFreshAndCorrect(t *testing.T) {
 	}
 }
 
+func TestBackendGoNumericPreparedExitFixtureIsFreshAndDirect(t *testing.T) {
+	generated, err := emitBackendGoNumericProof(backendNumericExitProofIR(t), backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedNumericExitFixture",
+		preparedFunctionName: "backendGeneratedNumericExitPreparedFixture",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk, err := os.ReadFile("runtime_backend_numeric_exit_generated_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(generated, onDisk) {
+		t.Fatal("generated numeric exit fixture is stale")
+	}
+	for _, test := range []struct {
+		seed float64
+		want float64
+	}{
+		{seed: 1, want: 2},
+		{seed: 9, want: 20},
+		{seed: 29, want: 60},
+	} {
+		got, ok := backendGeneratedNumericExitFixture(test.seed)
+		if !ok || got != test.want {
+			t.Fatalf("numeric exit fixture(%v) = (%v, %t), want (%v, true)", test.seed, got, ok, test.want)
+		}
+	}
+	if _, ok := backendGeneratedNumericExitFixture(math.NaN()); ok {
+		t.Fatal("numeric exit fixture accepted NaN comparison")
+	}
+}
+
 func backendNumericProofIR(t *testing.T) *backendProtoIR {
 	t.Helper()
 	proto, err := Compile(backendNumericProofSource)
@@ -181,6 +227,26 @@ func backendNumericProofIR(t *testing.T) *backendProtoIR {
 	}
 	if len(image.prototypes) != 2 {
 		t.Fatalf("numeric proof Proto count = %d, want 2", len(image.prototypes))
+	}
+	ir, err := buildBackendProtoIR(&image.prototypes[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ir
+}
+
+func backendNumericExitProofIR(t *testing.T) *backendProtoIR {
+	t.Helper()
+	proto, err := Compile(backendNumericExitProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(image.prototypes) != 2 {
+		t.Fatalf("numeric exit proof Proto count = %d, want 2", len(image.prototypes))
 	}
 	ir, err := buildBackendProtoIR(&image.prototypes[1])
 	if err != nil {
@@ -208,6 +274,7 @@ var backendGeneratedNumericSink float64
 func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
 	for _, source := range []string{
 		backendNumericProofSource,
+		backendNumericExitProofSource,
 		"local function add(value) return value + 1 end return add",
 		"return { field = 1 }",
 	} {
@@ -231,7 +298,11 @@ func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
 			if err != nil {
 				t.Fatalf("build Proto %d: %v", protoIndex, err)
 			}
-			options := backendGoNumericOptions{packageName: "proof", functionName: "Run"}
+			options := backendGoNumericOptions{
+				packageName:          "proof",
+				functionName:         "Run",
+				preparedFunctionName: "RunPrepared",
+			}
 			first, firstErr := emitBackendGoNumericProof(ir, options)
 			second, secondErr := emitBackendGoNumericProof(ir, options)
 			if (firstErr == nil) != (secondErr == nil) ||

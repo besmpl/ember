@@ -98,6 +98,15 @@ func buildBackendSSA(ir *backendProtoIR) {
 		current := append([]backendValueID(nil), block.entryValues...)
 		for pc := int(block.first); pc < int(block.last); pc++ {
 			operation := &ir.ops[pc]
+			operation.spillValues = operation.spillValues[:0]
+			for register := 0; register < ir.registers; register++ {
+				if operation.spill.has(register) {
+					operation.spillValues = append(operation.spillValues, backendValueRef{
+						register: int32(register),
+						value:    current[register],
+					})
+				}
+			}
 			operation.uses = operation.uses[:0]
 			for register := 0; register < ir.registers; register++ {
 				if operation.reads.has(register) {

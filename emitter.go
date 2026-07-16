@@ -92,7 +92,7 @@ func compileProgram(source sourceArtifact) (*Proto, error) {
 	return compileProgramWithOptions(source, defaultCompilerOptions())
 }
 
-func statementIDsHaveReturn(tree syntaxTree, statements []statementID) bool {
+func statementIDsAlwaysReturn(tree syntaxTree, statements []statementID) bool {
 	for _, id := range statements {
 		node, ok := tree.statementNode(id)
 		if !ok {
@@ -105,14 +105,9 @@ func statementIDsHaveReturn(tree syntaxTree, statements []statementID) bool {
 			if branch, ok := tree.ifArena(id); ok {
 				thenBody, _ := tree.statementChildren(branch.thenStatements)
 				elseBody, _ := tree.statementChildren(branch.elseStatements)
-				if statementIDsHaveReturn(tree, thenBody) || statementIDsHaveReturn(tree, elseBody) {
-					return true
-				}
-			}
-		case syntaxStatementWhile:
-			if loop, ok := tree.whileArena(id); ok {
-				body, _ := tree.statementChildren(loop.statements)
-				if statementIDsHaveReturn(tree, body) {
+				if len(elseBody) != 0 &&
+					statementIDsAlwaysReturn(tree, thenBody) &&
+					statementIDsAlwaysReturn(tree, elseBody) {
 					return true
 				}
 			}
@@ -151,7 +146,7 @@ func compileProgramWithOptions(source sourceArtifact, options compilerOptions) (
 		}
 		return nil, err
 	}
-	if !statementIDsHaveReturn(source.tree, statements) {
+	if !statementIDsAlwaysReturn(source.tree, statements) {
 		c.emit(instruction{op: opReturn})
 	}
 	if c.conversionErr != nil {
@@ -675,7 +670,7 @@ func (c *compiler) compileFunctionDraft(closure closurePlan, selfFunctionSymbol 
 		}
 		return nil, err
 	}
-	if !statementIDsHaveReturn(fn.tree, closure.body) {
+	if !statementIDsAlwaysReturn(fn.tree, closure.body) {
 		fn.emit(instruction{op: opReturn})
 	}
 	if fn.conversionErr != nil {

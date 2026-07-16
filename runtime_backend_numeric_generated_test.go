@@ -89,14 +89,113 @@ b6:
 	return v9, true
 }
 
+func backendGeneratedNumericPreparedFixtureBody(context machinePreparedContext, p0 float64) machinePreparedExit {
+	var v1 float64
+	var v8 float64
+	var v9 float64
+	var v10 float64
+	var v11 float64
+	var v12 float64
+	var v15 float64
+	var v16 float64
+	var v17 float64
+	var v18 float64
+	var v19 float64
+	var v22 float64
+	var v23 float64
+	var v24 float64
+	var v25 float64
+	var v26 float64
+	var v27 float64
+	var v28 float64
+	var v29 float64
+	var v30 float64
+	var v31 float64
+	var v32 float64
+	v1 = p0
+	v22 = v1
+	v23 = math.Float64frombits(0x3ff0000000000000)
+	v24 = math.Float64frombits(0x4050000000000000)
+	v25 = math.Float64frombits(0x3ff0000000000000)
+	v8 = v1
+	v9 = v22
+	v10 = v23
+	v11 = v24
+	v12 = v25
+	goto b1
+b1:
+	if math.IsNaN(v10) {
+		exit := context.replayBeforeOperation(4, 5)
+		context.spillNumber(0, 0, v8)
+		context.spillNumber(1, 1, v9)
+		context.spillNumber(2, 2, v10)
+		context.spillNumber(3, 3, v11)
+		context.spillNumber(4, 4, v12)
+		return exit
+	}
+	if math.IsNaN(v11) {
+		exit := context.replayBeforeOperation(4, 5)
+		context.spillNumber(0, 0, v8)
+		context.spillNumber(1, 1, v9)
+		context.spillNumber(2, 2, v10)
+		context.spillNumber(3, 3, v11)
+		context.spillNumber(4, 4, v12)
+		return exit
+	}
+	if math.IsNaN(v12) {
+		exit := context.replayBeforeOperation(4, 5)
+		context.spillNumber(0, 0, v8)
+		context.spillNumber(1, 1, v9)
+		context.spillNumber(2, 2, v10)
+		context.spillNumber(3, 3, v11)
+		context.spillNumber(4, 4, v12)
+		return exit
+	}
+	if (v12 > 0 && v10 > v11) || (v12 <= 0 && v10 < v11) {
+		goto b6
+	}
+	goto b2
+b2:
+	v26 = v10 - math.Floor(v10/math.Float64frombits(0x4000000000000000))*math.Float64frombits(0x4000000000000000)
+	if v26 != math.Float64frombits(0x0000000000000000) {
+		goto b4
+	}
+	goto b3
+b3:
+	v27 = v10
+	v28 = v8
+	v29 = v27 * v28
+	v30 = v9 + v29
+	v15 = v8
+	v16 = v30
+	v17 = v10
+	v18 = v11
+	v19 = v12
+	goto b5
+b4:
+	v31 = v9 - math.Float64frombits(0x3ff0000000000000)
+	v15 = v8
+	v16 = v31
+	v17 = v10
+	v18 = v11
+	v19 = v12
+	goto b5
+b5:
+	v32 = v17 + v19
+	v8 = v15
+	v9 = v16
+	v10 = v32
+	v11 = v18
+	v12 = v19
+	goto b1
+b6:
+	return machinePreparedReturnOneNumber(v9)
+}
+
 func backendGeneratedNumericPreparedFixture(context machinePreparedContext) machinePreparedExit {
 	p0, ok := context.numberParameter(0)
 	if !ok {
 		return machinePreparedReplayEntry()
 	}
-	result, ok := backendGeneratedNumericFixture(p0)
-	if !ok {
-		return machinePreparedReplayEntry()
-	}
-	return machinePreparedReturnOneNumber(result)
+	return backendGeneratedNumericPreparedFixtureBody(context, p0)
 }

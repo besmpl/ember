@@ -57,6 +57,20 @@ return total
 			if operation.exit != backendExitBeforeOperation || !operation.spill.equal(operation.liveBefore) {
 				t.Fatalf("PC %d effect exit/spill = %d/%v, want exact pre-operation spill", pc, operation.exit, operation.spill)
 			}
+			spillIndex := 0
+			for register := 0; register < first.registers; register++ {
+				if !operation.spill.has(register) {
+					continue
+				}
+				if spillIndex >= len(operation.spillValues) ||
+					operation.spillValues[spillIndex].register != int32(register) {
+					t.Fatalf("PC %d register %d has no ordered SSA spill", pc, register)
+				}
+				spillIndex++
+			}
+			if spillIndex != len(operation.spillValues) {
+				t.Fatalf("PC %d SSA spill count = %d, want %d", pc, len(operation.spillValues), spillIndex)
+			}
 		}
 	}
 	if loopHeaders == 0 {

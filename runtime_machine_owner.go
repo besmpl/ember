@@ -149,6 +149,9 @@ func newMachineOwnerWithPrepared(image *programImage, prepared *machinePreparedP
 	owner.registers = make([]slot, 0, maxRegisters)
 	owner.results = make([]slot, 0, maxResults)
 	owner.numberBits = make([]uint64, 0, maxRegisters+maxResults+1)
+	if binding != nil && binding.maxSpills != 0 {
+		owner.preparedSpills = make([]machinePreparedSpill, 0, binding.maxSpills)
+	}
 	return owner, nil
 }
 
@@ -423,6 +426,7 @@ func (owner *machineOwner) executeStopped(moduleID programModuleID, protoID int3
 	machine.operandScratch = machine.operandScratch[:0]
 	machine.callScratch = machine.callScratch[:0]
 	machine.generatedStrings = machine.generatedStrings[:0]
+	machine.preparedSpills = machine.preparedSpills[:0]
 	machine.resultCount = 0
 	machine.skipCharge = 0
 	machine.resume = machineSemanticResume{}
@@ -861,6 +865,7 @@ func (owner *machineOwner) closeStopped() {
 	owner.numberBits = nil
 	owner.tableNumbers = nil
 	owner.generatedStrings = nil
+	owner.preparedSpills = nil
 	owner.baseGlobals = nil
 	owner.basePresent = nil
 	owner.baseTableIndexes = nil

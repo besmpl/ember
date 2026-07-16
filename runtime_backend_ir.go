@@ -249,6 +249,7 @@ type backendOperationIR struct {
 	liveBefore   backendRegisterSet
 	liveAfter    backendRegisterSet
 	spill        backendRegisterSet
+	spillValues  []backendValueRef
 	uses         []backendValueRef
 	defs         []backendValueRef
 	call         backendCallIR

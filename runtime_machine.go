@@ -25,6 +25,7 @@ type scalarMachine struct {
 	operandScratch    []machineScalarOperand
 	callScratch       []slot
 	generatedStrings  []machineStringID
+	preparedSpills    []machinePreparedSpill
 	scratch           slot
 	numberBits        []uint64
 	tableNumbers      []uint64
@@ -148,6 +149,7 @@ func bindScalarMachine(image *codeImage, controller *executionController) (*scal
 	machine.operandScratch = machine.operandScratch[:0]
 	machine.callScratch = machine.callScratch[:0]
 	machine.generatedStrings = machine.generatedStrings[:0]
+	machine.preparedSpills = machine.preparedSpills[:0]
 	machine.numberBits = resizeUint64s(machine.numberBits, numberCells)
 	machine.tableNumbers = machine.tableNumbers[:0]
 	machine.strings.reset()
@@ -206,6 +208,7 @@ func releaseScalarMachine(machine *scalarMachine) {
 	machine.operandScratch = machine.operandScratch[:0]
 	machine.callScratch = machine.callScratch[:0]
 	machine.generatedStrings = machine.generatedStrings[:0]
+	machine.preparedSpills = machine.preparedSpills[:0]
 	machine.numberBits = machine.numberBits[:0]
 	machine.tableNumbers = machine.tableNumbers[:0]
 	machine.strings.reset()

@@ -166,6 +166,22 @@ func verifyBackendProtoIR(ir *backendProtoIR) error {
 			if operation.exit == backendExitBeforeOperation && !operation.spill.equal(operation.liveBefore) {
 				return fmt.Errorf("verify backend IR: PC %d spill map is not exact", pc)
 			}
+			spillIndex := 0
+			for register := 0; register < ir.registers; register++ {
+				if !operation.spill.has(register) {
+					continue
+				}
+				if spillIndex >= len(operation.spillValues) ||
+					operation.spillValues[spillIndex].register != int32(register) ||
+					operation.spillValues[spillIndex].value != currentValues[register] ||
+					!ir.validBackendValue(operation.spillValues[spillIndex].value) {
+					return fmt.Errorf("verify backend IR: PC %d register %d has invalid SSA spill", pc, register)
+				}
+				spillIndex++
+			}
+			if spillIndex != len(operation.spillValues) {
+				return fmt.Errorf("verify backend IR: PC %d has extra SSA spills", pc)
+			}
 			registerSets := [...]struct {
 				name string
 				set  backendRegisterSet
