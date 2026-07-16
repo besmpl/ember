@@ -1080,6 +1080,87 @@ func TestMachinePreparedSparseGridAvoidsRuntimeTablesAndStrings(t *testing.T) {
 	}
 }
 
+func TestMachinePreparedProjectileSweepAvoidsRuntimeTables(t *testing.T) {
+	image := machinePreparedTestImageForSource(t, backendProjectileSweepProofSource)
+	calls := 0
+	var observed machinePreparedExit
+	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
+		calls++
+		observed = backendGeneratedProjectileSweepPreparedFixture(context)
+		return observed
+	})
+	prepared, err := newMachineOwnerWithPrepared(image, program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generic, err := newMachineOwner(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := prepared.close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := generic.close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	preparedArg, err := prepared.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericArg, err := generic.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tableCount := len(prepared.tables.tables)
+	stringCount := len(prepared.strings.records)
+	want, ok := backendGeneratedProjectileSweep(29)
+	if !ok {
+		t.Fatal("generated projectile-sweep oracle exited")
+	}
+	runMachinePreparedTestProto(t, prepared, 1, []slot{preparedArg}, nil)
+	runMachinePreparedTestProto(t, generic, 1, []slot{genericArg}, nil)
+	assertMachineOwnerNumberResult(t, prepared, want)
+	assertMachineOwnerNumberResult(t, generic, want)
+	if calls != 1 || observed.kind != machinePreparedExitReturnOneNumber {
+		t.Fatalf("prepared projectile-sweep success = calls %d exit %#v", calls, observed)
+	}
+	if len(prepared.tables.tables) != tableCount {
+		t.Fatalf(
+			"prepared projectile-sweep path changed owner table count from %d to %d",
+			tableCount,
+			len(prepared.tables.tables),
+		)
+	}
+	if len(prepared.strings.records) != stringCount {
+		t.Fatalf(
+			"prepared projectile-sweep path changed owner string count from %d to %d",
+			stringCount,
+			len(prepared.strings.records),
+		)
+	}
+
+	if !checkptrInstrumentedTest() {
+		lease, err := prepared.beginRun()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var runErr error
+		allocations := testing.AllocsPerRun(1000, func() {
+			runErr = prepared.executeStopped(0, 1, machineClosureHandle{}, []slot{preparedArg}, nil, machineRunEffects{})
+		})
+		lease.end()
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if allocations != 0 {
+			t.Fatalf("prepared projectile-sweep owner allocations = %v, want 0", allocations)
+		}
+	}
+}
+
 func TestMachinePreparedScalarArrayOpsAvoidLocalTablesAndGuardIntrinsics(t *testing.T) {
 	image := machinePreparedTestImageForSource(t, backendArrayOpsProofSource)
 	calls := 0
@@ -2106,6 +2187,17 @@ func BenchmarkMachinePreparedSparseGridOwner(b *testing.B) {
 
 func BenchmarkMachineGenericSparseGridOwner(b *testing.B) {
 	image := machinePreparedBenchmarkImage(b, backendSparseGridProofSource)
+	benchmarkMachineNumericOwner(b, image, nil)
+}
+
+func BenchmarkMachinePreparedProjectileSweepOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendProjectileSweepProofSource)
+	program := machinePreparedBenchmarkProgram(b, image, backendGeneratedProjectileSweepPreparedFixture)
+	benchmarkMachineNumericOwner(b, image, program)
+}
+
+func BenchmarkMachineGenericProjectileSweepOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendProjectileSweepProofSource)
 	benchmarkMachineNumericOwner(b, image, nil)
 }
 

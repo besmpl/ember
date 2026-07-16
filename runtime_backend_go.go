@@ -631,8 +631,8 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						tags = backendTagTable
 					}
 				case opGetStringField:
-					if _, ok := plan.records.fieldsByPC[operation.pc]; ok {
-						tags = backendTagNumber
+					if field, ok := plan.records.fieldsByPC[operation.pc]; ok {
+						tags = plan.records.fieldTagsFor(plan.tags, field)
 					} else if _, field, ok := plan.tables.operationField(ir, operation); ok {
 						if field.child != invalidBackendValueID {
 							tags = backendTagTable
@@ -757,6 +757,12 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		if !changed {
 			break
 		}
+	}
+	if plan.records.enabled && !plan.records.finalizeFieldTags(ir, plan.tags) {
+		return backendGoNumericPlan{}, fmt.Errorf(
+			"emit backend Go numeric proof: %s",
+			plan.records.rejectReason,
+		)
 	}
 	var markScalarReplaced func(backendValueID)
 	markScalarReplaced = func(id backendValueID) {
@@ -1153,8 +1159,8 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opSetStringField:
-		if _, ok := plan.records.fieldsByPC[operation.pc]; ok {
-			return require(operation.c, backendTagNumber)
+		if field, ok := plan.records.fieldsByPC[operation.pc]; ok {
+			return require(operation.c, plan.records.fieldTags(field))
 		}
 		_, field, ok := plan.tables.operationField(ir, operation)
 		if !ok {
@@ -1202,10 +1208,16 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opGetStringField:
-		if _, ok := plan.records.fieldsByPC[operation.pc]; ok {
+		if field, ok := plan.records.fieldsByPC[operation.pc]; ok {
+			fieldTags := plan.records.fieldTags(field)
 			for _, definition := range operation.defs {
-				if plan.tags[definition.value-1] != backendTagNumber {
-					return fmt.Errorf("emit backend Go numeric proof: PC %d record field result is not numeric", operation.pc)
+				if plan.tags[definition.value-1] != fieldTags {
+					return fmt.Errorf(
+						"emit backend Go numeric proof: PC %d record field result has tags %x, want %x",
+						operation.pc,
+						plan.tags[definition.value-1],
+						fieldTags,
+					)
 				}
 			}
 			return nil

@@ -23,10 +23,12 @@ type backendGoRecordRef struct {
 }
 
 type backendGoRecord struct {
-	root       backendValueID
-	fieldNames []machineStringID
-	fieldIndex map[machineStringID]int
-	setByPC    map[int32]int
+	root        backendValueID
+	fieldNames  []machineStringID
+	fieldIndex  map[machineStringID]int
+	fieldValues []backendValueID
+	fieldTags   []backendTagMask
+	setByPC     map[int32]int
 }
 
 type backendGoRecordKey struct {
@@ -45,6 +47,8 @@ type backendGoRecordMap struct {
 	root        backendValueID
 	fieldNames  []machineStringID
 	fieldIndex  map[machineStringID]int
+	fieldTags   []backendTagMask
+	records     []int
 	domain      int32
 	separator   machineStringID
 	recordCount int
@@ -60,6 +64,8 @@ type backendGoRecordArray struct {
 	root       backendValueID
 	fieldNames []machineStringID
 	fieldIndex map[machineStringID]int
+	fieldTags  []backendTagMask
+	records    []int
 	length     uint32
 }
 
@@ -76,6 +82,7 @@ type backendGoRecordFieldOperation struct {
 	index   int
 	field   int
 	ref     backendValueID
+	source  backendValueID
 }
 
 type backendGoRecordTablePlan struct {
@@ -167,6 +174,10 @@ func analyzeBackendGoRecordTables(
 		}
 		field := len(record.fieldNames)
 		record.fieldNames = append(record.fieldNames, name)
+		record.fieldValues = append(
+			record.fieldValues,
+			backendOperationUse(operation, operation.c),
+		)
 		record.fieldIndex[name] = field
 		record.setByPC[operation.pc] = field
 	}
@@ -206,8 +217,8 @@ func analyzeBackendGoRecordTables(
 			}
 		}
 	}
-	if len(plan.maps) == 0 {
-		plan.rejectReason = "no maps"
+	if len(plan.maps) == 0 && len(plan.arrays) == 0 {
+		plan.rejectReason = "no record containers"
 		return plan
 	}
 	for pc := range ir.ops {
@@ -569,6 +580,7 @@ func (plan *backendGoRecordTablePlan) finishShapesAndKeys(
 			!plan.setShapeFromRecords(&current.fieldNames, &current.fieldIndex, recordIndexes) {
 			return false
 		}
+		current.records = append([]int(nil), recordIndexes...)
 		for pc, operation := range plan.mapSetByPC {
 			if operation.index != mapIndex || operation.key.dynamic {
 				continue
@@ -619,6 +631,7 @@ func (plan *backendGoRecordTablePlan) finishShapesAndKeys(
 		if !plan.setShapeFromRecords(&current.fieldNames, &current.fieldIndex, recordIndexes) {
 			return false
 		}
+		current.records = append([]int(nil), recordIndexes...)
 	}
 	for _, uses := range recordUses {
 		if uses != 1 {
@@ -671,10 +684,15 @@ func (plan *backendGoRecordTablePlan) classifyFields(ir *backendProtoIR) bool {
 				plan.rejectReason = "record field mismatch at PC " + strconv.Itoa(int(operation.pc))
 				return false
 			}
+			source := invalidBackendValueID
+			if operation.op == opSetStringField {
+				source = backendOperationUse(operation, operation.c)
+			}
 			plan.fieldsByPC[operation.pc] = backendGoRecordFieldOperation{
 				storage: backendGoRecordFieldScratch,
 				index:   record,
 				field:   field,
+				source:  source,
 			}
 			continue
 		}
@@ -694,11 +712,193 @@ func (plan *backendGoRecordTablePlan) classifyFields(ir *backendProtoIR) bool {
 			plan.rejectReason = "record reference field is missing at PC " + strconv.Itoa(int(operation.pc))
 			return false
 		}
+		source := invalidBackendValueID
+		if operation.op == opSetStringField {
+			source = backendOperationUse(operation, operation.c)
+		}
 		plan.fieldsByPC[operation.pc] = backendGoRecordFieldOperation{
 			storage: backendGoRecordFieldStorage(ref.kind + 1),
 			index:   ref.index,
 			field:   field,
 			ref:     base,
+			source:  source,
+		}
+	}
+	return true
+}
+
+func (plan *backendGoRecordTablePlan) fieldTagsFor(
+	tags []backendTagMask,
+	field backendGoRecordFieldOperation,
+) backendTagMask {
+	switch field.storage {
+	case backendGoRecordFieldScratch:
+		if field.index < 0 || field.index >= len(plan.records) {
+			return 0
+		}
+		record := &plan.records[field.index]
+		if field.field < 0 || field.field >= len(record.fieldValues) {
+			return 0
+		}
+		return backendGoRecordValueTags(tags, record.fieldValues[field.field])
+	case backendGoRecordFieldMap:
+		if field.index < 0 || field.index >= len(plan.maps) {
+			return 0
+		}
+		return plan.containerFieldTags(
+			tags,
+			backendGoRecordFieldMap,
+			field.index,
+			field.field,
+			plan.maps[field.index].fieldNames,
+			plan.maps[field.index].records,
+		)
+	case backendGoRecordFieldArray:
+		if field.index < 0 || field.index >= len(plan.arrays) {
+			return 0
+		}
+		return plan.containerFieldTags(
+			tags,
+			backendGoRecordFieldArray,
+			field.index,
+			field.field,
+			plan.arrays[field.index].fieldNames,
+			plan.arrays[field.index].records,
+		)
+	default:
+		return 0
+	}
+}
+
+func (plan backendGoRecordTablePlan) fieldTags(
+	field backendGoRecordFieldOperation,
+) backendTagMask {
+	switch field.storage {
+	case backendGoRecordFieldScratch:
+		if field.index >= 0 && field.index < len(plan.records) &&
+			field.field >= 0 && field.field < len(plan.records[field.index].fieldTags) {
+			return plan.records[field.index].fieldTags[field.field]
+		}
+	case backendGoRecordFieldMap:
+		if field.index >= 0 && field.index < len(plan.maps) &&
+			field.field >= 0 && field.field < len(plan.maps[field.index].fieldTags) {
+			return plan.maps[field.index].fieldTags[field.field]
+		}
+	case backendGoRecordFieldArray:
+		if field.index >= 0 && field.index < len(plan.arrays) &&
+			field.field >= 0 && field.field < len(plan.arrays[field.index].fieldTags) {
+			return plan.arrays[field.index].fieldTags[field.field]
+		}
+	}
+	return 0
+}
+
+func (plan *backendGoRecordTablePlan) containerFieldTags(
+	tags []backendTagMask,
+	storage backendGoRecordFieldStorage,
+	index int,
+	field int,
+	names []machineStringID,
+	records []int,
+) backendTagMask {
+	if field < 0 || field >= len(names) {
+		return 0
+	}
+	name := names[field]
+	var result backendTagMask
+	for _, recordIndex := range records {
+		if recordIndex < 0 || recordIndex >= len(plan.records) {
+			return 0
+		}
+		record := &plan.records[recordIndex]
+		recordField, ok := record.fieldIndex[name]
+		if !ok || recordField < 0 || recordField >= len(record.fieldValues) {
+			return 0
+		}
+		result |= backendGoRecordValueTags(tags, record.fieldValues[recordField])
+	}
+	for _, operationField := range plan.fieldsByPC {
+		if operationField.storage != storage ||
+			operationField.index != index ||
+			operationField.field != field ||
+			operationField.source == invalidBackendValueID {
+			continue
+		}
+		result |= backendGoRecordValueTags(tags, operationField.source)
+	}
+	return result
+}
+
+func backendGoRecordValueTags(tags []backendTagMask, value backendValueID) backendTagMask {
+	if value == invalidBackendValueID || int(value) > len(tags) {
+		return 0
+	}
+	return tags[value-1]
+}
+
+func (plan *backendGoRecordTablePlan) finalizeFieldTags(
+	ir *backendProtoIR,
+	tags []backendTagMask,
+) bool {
+	for recordIndex := range plan.records {
+		record := &plan.records[recordIndex]
+		record.fieldTags = make([]backendTagMask, len(record.fieldNames))
+		for field, value := range record.fieldValues {
+			fieldTags := backendGoRecordValueTags(tags, value)
+			if _, ok := backendGoNumericType(fieldTags); !ok {
+				plan.rejectReason = "unsupported record field tags"
+				return false
+			}
+			record.fieldTags[field] = fieldTags
+		}
+	}
+	for mapIndex := range plan.maps {
+		recordMap := &plan.maps[mapIndex]
+		recordMap.fieldTags = make([]backendTagMask, len(recordMap.fieldNames))
+		for field := range recordMap.fieldNames {
+			fieldTags := plan.containerFieldTags(
+				tags,
+				backendGoRecordFieldMap,
+				mapIndex,
+				field,
+				recordMap.fieldNames,
+				recordMap.records,
+			)
+			if _, ok := backendGoNumericType(fieldTags); !ok {
+				plan.rejectReason = "unsupported record-map field tags"
+				return false
+			}
+			recordMap.fieldTags[field] = fieldTags
+		}
+	}
+	for arrayIndex := range plan.arrays {
+		array := &plan.arrays[arrayIndex]
+		array.fieldTags = make([]backendTagMask, len(array.fieldNames))
+		for field := range array.fieldNames {
+			fieldTags := plan.containerFieldTags(
+				tags,
+				backendGoRecordFieldArray,
+				arrayIndex,
+				field,
+				array.fieldNames,
+				array.records,
+			)
+			if _, ok := backendGoNumericType(fieldTags); !ok {
+				plan.rejectReason = "unsupported record-array field tags"
+				return false
+			}
+			array.fieldTags[field] = fieldTags
+		}
+	}
+	for pc, field := range plan.fieldsByPC {
+		operation := &ir.ops[pc]
+		if operation.op != opSetStringField {
+			continue
+		}
+		source := backendOperationUse(operation, operation.c)
+		if backendGoRecordValueTags(tags, source) != plan.fieldTagsFor(tags, field) {
+			plan.rejectReason = "record field changes scalar tags"
+			return false
 		}
 	}
 	return true
@@ -965,7 +1165,8 @@ func writeBackendGoRecordDeclarations(
 ) {
 	for recordIndex, record := range plan.records {
 		for field := range record.fieldNames {
-			fmt.Fprintf(source, "\tvar r%d_%d float64\n", recordIndex, field)
+			goType, _ := backendGoNumericType(record.fieldTags[field])
+			fmt.Fprintf(source, "\tvar r%d_%d %s\n", recordIndex, field, goType)
 			fmt.Fprintf(source, "\t_ = r%d_%d\n", recordIndex, field)
 		}
 	}
@@ -973,12 +1174,14 @@ func writeBackendGoRecordDeclarations(
 		fmt.Fprintf(source, "\tvar mk%d [%d]backendPreparedStringKey\n", mapIndex, backendGoRecordMapCapacity)
 		fmt.Fprintf(source, "\tvar mu%d [%d]bool\n", mapIndex, backendGoRecordMapCapacity)
 		for field := range recordMap.fieldNames {
-			fmt.Fprintf(source, "\tvar mf%d_%d [%d]float64\n", mapIndex, field, backendGoRecordMapCapacity)
+			goType, _ := backendGoNumericType(recordMap.fieldTags[field])
+			fmt.Fprintf(source, "\tvar mf%d_%d [%d]%s\n", mapIndex, field, backendGoRecordMapCapacity, goType)
 		}
 	}
 	for arrayIndex, array := range plan.arrays {
 		for field := range array.fieldNames {
-			fmt.Fprintf(source, "\tvar ra%d_%d [%d]float64\n", arrayIndex, field, array.length)
+			goType, _ := backendGoNumericType(array.fieldTags[field])
+			fmt.Fprintf(source, "\tvar ra%d_%d [%d]%s\n", arrayIndex, field, array.length, goType)
 		}
 		fmt.Fprintf(source, "\tvar ri%d int\n", arrayIndex)
 		fmt.Fprintf(source, "\t_ = ri%d\n", arrayIndex)

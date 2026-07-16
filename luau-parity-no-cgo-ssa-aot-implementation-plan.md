@@ -435,6 +435,29 @@ The retained path has moved beyond the original starting state:
   two direct structural-key helper calls, cold bounds/stack-growth helpers,
   and no opcode, descriptor, Machine table, runtime string, interning, or VM
   dispatch.
+- The bounded typed-record-array slice removes the map prerequisite from the
+  record scalarizer and infers one exact scalar kind per field from every
+  initialization and mutation. Fixed arrays can now store number, boolean, or
+  interned-string-ID fields directly in typed Go arrays; unresolved, mixed,
+  nil-union, shape-changing, escaping, or otherwise unsupported fields fail
+  closed. A parameterized `projectile_sweep` holdout proves two independent
+  four-record arrays, nested iteration, mutable numeric fields, mutable
+  booleans, loop breaks, and seed-dependent behavior. Generated code and the
+  prepared owner agree with the independent interpreter across negative,
+  ordinary, and large holdout seeds, allocate zero when warmed, and materialize
+  no owner tables or strings. Private-function renaming produces byte-identical
+  output; mixed boolean/number fields, shape drift, and array escape are
+  rejected. The direct kernel has a five-sample median of about 810.9 ns
+  (809.3-842.9 ns observed), while the prepared owner path has a median of
+  about 878.3 ns (871.7-908.0 ns observed), versus about 268.3 microseconds
+  through generic Machine (267.0-287.8 microseconds observed). Live pinned
+  Luau `-O2 -g0` produced the same warmed result and checksum with a
+  five-sample median of about 17.79 microseconds per call
+  (17.69-17.97 microseconds observed), making prepared about `0.049x` Luau.
+  Deterministic generated source is 23,072 bytes. Linked ARM64 is 1,184 bytes
+  for the direct kernel and 1,328 bytes for the prepared body; each has only
+  cold bounds/stack-growth calls and no opcode, descriptor, Machine table,
+  runtime string, interning, or VM dispatch.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final

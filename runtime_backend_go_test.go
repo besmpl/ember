@@ -238,6 +238,52 @@ end
 return kernel
 `
 
+const backendProjectileSweepProofSource = `
+local function kernel(seed)
+    local projectiles = {
+        {x = seed % 3, y = 0, vx = 3, vy = 1, damage = 12, live = true},
+        {x = 5, y = -2, vx = 2, vy = 2, damage = 9, live = true},
+        {x = -4, y = 3, vx = 4, vy = -1, damage = 15, live = true},
+        {x = 8, y = 1, vx = 1, vy = 3, damage = 7, live = true},
+    }
+    local targets = {
+        {x = 24, y = 8, radius = 5, hp = 80},
+        {x = 38, y = 16, radius = 4, hp = 70},
+        {x = 52, y = 18, radius = 6, hp = 110},
+        {x = 64, y = 28, radius = 5, hp = 90},
+    }
+    local score = 0
+    for step = 1, 30 do
+        for _, projectile in projectiles do
+            if projectile.live then
+                projectile.x = projectile.x + projectile.vx
+                projectile.y = projectile.y + projectile.vy
+                for _, target in targets do
+                    if target.hp > 0 then
+                        local dx = projectile.x - target.x
+                        local dy = projectile.y - target.y
+                        if dx * dx + dy * dy <= target.radius * target.radius then
+                            target.hp = target.hp - projectile.damage
+                            projectile.live = false
+                            score = score + target.hp + step
+                            break
+                        end
+                    end
+                end
+                if projectile.x > 80 or projectile.y > 40 then
+                    projectile.live = false
+                end
+            end
+        end
+    end
+    for _, target in targets do
+        score = score + target.hp
+    end
+    return score
+end
+return kernel
+`
+
 const backendArrayOpsProofSource = `
 local function kernel(seed)
     local values = {}
@@ -1903,6 +1949,178 @@ func TestBackendGoSparseGridIsIdentityBlindAndRejectsUnprovedShapes(t *testing.T
 	}
 }
 
+func TestBackendGoProjectileSweepRecordArraysAreRecognized(t *testing.T) {
+	ir := backendRecordArrayProofIR(t, backendProjectileSweepProofSource)
+	records := analyzeBackendGoRecordTables(ir, analyzeBackendGoStructuralKeys(ir, backendGoNumericOptions{}))
+	if !records.enabled {
+		t.Fatalf("projectile-sweep record arrays were not recognized: %s", records.rejectReason)
+	}
+	if len(records.maps) != 0 || len(records.arrays) != 2 || len(records.records) != 8 {
+		t.Fatalf(
+			"projectile-sweep record inventory = maps %d arrays %d records %d, want 0/2/8",
+			len(records.maps),
+			len(records.arrays),
+			len(records.records),
+		)
+	}
+	generated, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedProjectileSweep",
+		preparedFunctionName: "backendGeneratedProjectileSweepPrepared",
+	})
+	if err != nil {
+		t.Fatalf("emit projectile-sweep record arrays: %v", err)
+	}
+	if _, err := goparser.ParseFile(token.NewFileSet(), "generated_projectile_sweep.go", generated, goparser.AllErrors); err != nil {
+		t.Fatalf("parse generated projectile-sweep source: %v", err)
+	}
+	text := string(generated)
+	if !strings.Contains(text, "var ra0_5 [4]bool") ||
+		!strings.Contains(text, "var ra1_3 [4]float64") {
+		t.Fatalf("generated projectile-sweep source lacks typed record arrays:\n%s", text)
+	}
+}
+
+func TestBackendGoProjectileSweepFixtureIsFreshAndCorrect(t *testing.T) {
+	ir := backendRecordArrayProofIR(t, backendProjectileSweepProofSource)
+	generated, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedProjectileSweep",
+		preparedFunctionName: "backendGeneratedProjectileSweepPreparedFixture",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fixture = "runtime_backend_projectile_sweep_generated_test.go"
+	onDisk, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(generated, onDisk) {
+		t.Fatal("generated projectile-sweep fixture is stale")
+	}
+	if _, err := goparser.ParseFile(token.NewFileSet(), fixture, generated, goparser.AllErrors); err != nil {
+		t.Fatalf("parse generated projectile-sweep source: %v", err)
+	}
+	text := string(generated)
+	for _, required := range []string{
+		"var ra0_0 [4]float64",
+		"var ra0_5 [4]bool",
+		"var ra1_0 [4]float64",
+		"var ra1_3 [4]float64",
+		"ri0",
+		"ri1",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("generated projectile-sweep source lacks %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"map[", "make(", "machineTable", "machineString", "opcode", "descriptor",
+		"NEW_TABLE", "SET_FIELD", "GET_FIELD", "PREPARE_ITER", "ARRAY_NEXT_JUMP2",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("generated projectile-sweep source contains runtime table/dispatch marker %q", forbidden)
+		}
+	}
+
+	root, err := Compile(backendProjectileSweepProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seed := range []float64{-29, -1, 0, 1, 7, 29, 1_000_005} {
+		got, ok := backendGeneratedProjectileSweep(seed)
+		if !ok {
+			t.Fatalf("generated projectile-sweep fixture exited for seed %v", seed)
+		}
+		oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+			args: []Value{NumberValue(seed)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(oracle) != 1 {
+			t.Fatalf("projectile-sweep oracle result count = %d, want 1", len(oracle))
+		}
+		oracleNumber, ok := oracle[0].Number()
+		if !ok || oracleNumber != got {
+			t.Fatalf("generated/oracle projectile-sweep seed %v = %v/%v (%t)", seed, got, oracleNumber, ok)
+		}
+	}
+	if !checkptrInstrumentedTest() {
+		if allocations := testing.AllocsPerRun(1000, func() {
+			_, _ = backendGeneratedProjectileSweep(29)
+		}); allocations != 0 {
+			t.Fatalf("generated projectile-sweep allocations = %v, want 0", allocations)
+		}
+	}
+}
+
+func TestBackendGoProjectileSweepIsIdentityBlindAndRejectsUnprovedShapes(t *testing.T) {
+	emit := func(source string) []byte {
+		generated, err := emitBackendGoNumericProof(
+			backendRecordArrayProofIR(t, source),
+			backendGoNumericOptions{
+				packageName:          "ember",
+				functionName:         "identityBlindProjectileSweep",
+				preparedFunctionName: "identityBlindProjectileSweepPrepared",
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return generated
+	}
+	renamed := strings.Replace(
+		backendProjectileSweepProofSource,
+		"local function kernel(seed)",
+		"local function opaque(seed)",
+		1,
+	)
+	if !bytes.Equal(emit(backendProjectileSweepProofSource), emit(renamed)) {
+		t.Fatal("projectile-sweep source depends on private function identity")
+	}
+
+	tests := map[string]string{
+		"mixed boolean and number field": strings.Replace(
+			backendProjectileSweepProofSource,
+			"damage = 9, live = true",
+			"damage = 9, live = 1",
+			1,
+		),
+		"record shape mismatch": strings.Replace(
+			backendProjectileSweepProofSource,
+			"x = 38, y = 16, radius = 4, hp = 70",
+			"x = 38, y = 16, reach = 4, hp = 70",
+			1,
+		),
+		"escaping record array": strings.Replace(
+			backendProjectileSweepProofSource,
+			"return score",
+			"return projectiles",
+			1,
+		),
+	}
+	for name, source := range tests {
+		t.Run(name, func(t *testing.T) {
+			ir := backendRecordArrayProofIR(t, source)
+			records := analyzeBackendGoRecordTables(
+				ir,
+				analyzeBackendGoStructuralKeys(ir, backendGoNumericOptions{}),
+			)
+			if name != "mixed boolean and number field" && records.enabled {
+				t.Fatalf("record-array analyzer accepted %s", name)
+			}
+			if _, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+				packageName:  "ember",
+				functionName: "rejectUnprovedProjectileSweep",
+			}); err == nil {
+				t.Fatalf("record-array compiler accepted %s", name)
+			}
+		})
+	}
+}
+
 func TestBackendGoFiniteStringStateFixtureIsFreshAndCorrect(t *testing.T) {
 	generated, err := emitBackendGoNumericProof(backendFiniteStringStateProofIR(t), backendGoNumericOptions{
 		packageName:          "ember",
@@ -3455,6 +3673,30 @@ func backendStructuralStringKeyProofTargets(irs []*backendProtoIR) []backendGoNu
 	return targets
 }
 
+func backendRecordArrayProofIR(t *testing.T, source string) *backendProtoIR {
+	t.Helper()
+	proto, err := Compile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(image.prototypes) != 2 {
+		t.Fatalf("record-array proof Proto count = %d, want 2", len(image.prototypes))
+	}
+	ir, err := buildBackendProtoIRWithStrings(
+		&image.prototypes[1],
+		image.stringRecords,
+		image.stringData,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ir
+}
+
 func backendArrayOpsProofIR(t *testing.T) *backendProtoIR {
 	t.Helper()
 	proto, err := Compile(backendArrayOpsProofSource)
@@ -3728,6 +3970,20 @@ func BenchmarkBackendGeneratedSparseGrid(b *testing.B) {
 		value, ok := backendGeneratedSparseGrid(float64(iteration & 31))
 		if !ok {
 			b.Fatal("generated sparse-grid fixture exited")
+		}
+		result = value
+	}
+	backendGeneratedNumericSink = result
+}
+
+func BenchmarkBackendGeneratedProjectileSweep(b *testing.B) {
+	var result float64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		value, ok := backendGeneratedProjectileSweep(float64(iteration & 31))
+		if !ok {
+			b.Fatal("generated projectile-sweep fixture exited")
 		}
 		result = value
 	}
