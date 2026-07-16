@@ -87,21 +87,170 @@ const (
 	backendExitBeforeOperation
 )
 
+type backendValueID uint32
+
+const invalidBackendValueID backendValueID = 0
+
+type backendValueKind uint8
+
+const (
+	backendValueUndef backendValueKind = iota
+	backendValueParameter
+	backendValueOperation
+	backendValuePhi
+)
+
+type backendTagMask uint16
+
+const (
+	backendTagNil backendTagMask = 1 << iota
+	backendTagBool
+	backendTagNumber
+	backendTagString
+	backendTagTable
+	backendTagUserData
+	backendTagFunction
+	backendTagHostFunction
+)
+
+const backendTagAny = backendTagNil |
+	backendTagBool |
+	backendTagNumber |
+	backendTagString |
+	backendTagTable |
+	backendTagUserData |
+	backendTagFunction |
+	backendTagHostFunction
+
+type backendRepresentation uint8
+
+const (
+	backendRepresentationGeneric backendRepresentation = iota
+	backendRepresentationNil
+	backendRepresentationBool
+	backendRepresentationNumber
+	backendRepresentationString
+	backendRepresentationTable
+	backendRepresentationFunction
+)
+
+type backendObjectKind uint8
+
+const (
+	backendObjectNone backendObjectKind = iota
+	backendObjectTable
+	backendObjectClosure
+	backendObjectString
+	backendObjectMixed
+)
+
+type backendCallKind uint8
+
+const (
+	backendCallNone backendCallKind = iota
+	backendCallDirectProto
+	backendCallDirectNative
+	backendCallGuarded
+	backendCallDynamic
+)
+
+type backendCallIR struct {
+	kind        backendCallKind
+	targetProto int32
+	nativeID    int32
+}
+
+type backendAccessKind uint8
+
+const (
+	backendAccessNone backendAccessKind = iota
+	backendAccessGlobal
+	backendAccessStaticProperty
+	backendAccessDynamicIndex
+	backendAccessArrayIteration
+	backendAccessMetatableGuard
+)
+
+type backendAccessIR struct {
+	kind        backendAccessKind
+	constant    int32
+	globalIndex int32
+}
+
+type backendValueIR struct {
+	id             backendValueID
+	kind           backendValueKind
+	register       int32
+	block          int32
+	pc             int32
+	tags           backendTagMask
+	representation backendRepresentation
+	object         backendObjectKind
+	fromVararg     bool
+	escapes        bool
+	origins        []backendValueID
+	targetProtos   []int32
+	targetUnknown  bool
+}
+
+type backendValueRef struct {
+	register int32
+	value    backendValueID
+}
+
+type backendPhiIR struct {
+	register int32
+	value    backendValueID
+	inputs   []backendValueID
+}
+
+type backendPhiCopyIR struct {
+	register    int32
+	source      backendValueID
+	destination backendValueID
+}
+
+type backendEdgeIR struct {
+	id        int32
+	from      int32
+	to        int32
+	critical  bool
+	phiCopies []backendPhiCopyIR
+}
+
 type backendOperationIR struct {
-	op          opcode
-	pc          int32
-	wordPC      int32
-	line        int32
-	block       int32
-	targetPC    int32
-	guestCharge uint8
-	effects     backendEffect
-	exit        backendExitPolicy
-	reads       backendRegisterSet
-	writes      backendRegisterSet
-	liveBefore  backendRegisterSet
-	liveAfter   backendRegisterSet
-	spill       backendRegisterSet
+	op           opcode
+	pc           int32
+	wordPC       int32
+	line         int32
+	block        int32
+	targetPC     int32
+	a            int32
+	b            int32
+	c            int32
+	d            int32
+	targetProto  int32
+	callArgStart int32
+	callArgCount int32
+	callPrefix   int32
+	callResults  int32
+	returnCount  int32
+	tailCall     uint8
+	globalIndex  int32
+	nativeID     int32
+	guardField   machineStringID
+	guestCharge  uint8
+	effects      backendEffect
+	exit         backendExitPolicy
+	reads        backendRegisterSet
+	writes       backendRegisterSet
+	liveBefore   backendRegisterSet
+	liveAfter    backendRegisterSet
+	spill        backendRegisterSet
+	uses         []backendValueRef
+	defs         []backendValueRef
+	call         backendCallIR
+	access       backendAccessIR
 }
 
 type backendBlockIR struct {
@@ -119,6 +268,9 @@ type backendBlockIR struct {
 	liveIn             backendRegisterSet
 	liveOut            backendRegisterSet
 	dominators         []uint64
+	phis               []backendPhiIR
+	entryValues        []backendValueID
+	exitValues         []backendValueID
 }
 
 type backendProtoIR struct {
@@ -128,4 +280,8 @@ type backendProtoIR struct {
 	blocks    []backendBlockIR
 	ops       []backendOperationIR
 	pcToBlock []int32
+	values    []backendValueIR
+	initial   []backendValueID
+	constants []machineConstant
+	edges     []backendEdgeIR
 }

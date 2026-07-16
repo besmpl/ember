@@ -22,6 +22,7 @@ func buildBackendProtoIR(proto *machineProto) (*backendProtoIR, error) {
 		blocks:    make([]backendBlockIR, len(proto.blocks)),
 		ops:       make([]backendOperationIR, len(proto.operations)),
 		pcToBlock: make([]int32, len(proto.operations)),
+		constants: append([]machineConstant(nil), proto.constants...),
 	}
 	for blockIndex, source := range proto.blocks {
 		block := &ir.blocks[blockIndex]
@@ -57,18 +58,32 @@ func buildBackendProtoIR(proto *machineProto) (*backendProtoIR, error) {
 		blockID := ir.pcToBlock[pc]
 		operation := &ir.ops[pc]
 		*operation = backendOperationIR{
-			op:          source.op,
-			pc:          int32(pc),
-			wordPC:      source.wordPC,
-			line:        source.line,
-			block:       blockID,
-			targetPC:    targetPC,
-			guestCharge: source.guestCharge,
-			effects:     effects,
-			exit:        exit,
-			reads:       reads,
-			writes:      writes,
-			spill:       newBackendRegisterSet(proto.registers),
+			op:           source.op,
+			pc:           int32(pc),
+			wordPC:       source.wordPC,
+			line:         source.line,
+			block:        blockID,
+			targetPC:     targetPC,
+			a:            source.a,
+			b:            source.b,
+			c:            source.c,
+			d:            source.d,
+			targetProto:  source.targetProto,
+			callArgStart: source.callArgStart,
+			callArgCount: source.callArgCount,
+			callPrefix:   source.callPrefix,
+			callResults:  source.callResults,
+			returnCount:  source.returnCount,
+			tailCall:     source.tailCall,
+			globalIndex:  source.globalIndex,
+			nativeID:     source.nativeID,
+			guardField:   source.guardField,
+			guestCharge:  source.guestCharge,
+			effects:      effects,
+			exit:         exit,
+			reads:        reads,
+			writes:       writes,
+			spill:        newBackendRegisterSet(proto.registers),
 		}
 		block := &ir.blocks[blockID]
 		block.guestCharge += uint64(source.guestCharge)
@@ -87,6 +102,9 @@ func buildBackendProtoIR(proto *machineProto) (*backendProtoIR, error) {
 	analyzeBackendDominators(ir)
 	analyzeBackendLoops(ir)
 	analyzeBackendLiveness(ir)
+	buildBackendSSA(ir)
+	buildBackendEdges(ir)
+	analyzeBackendFacts(ir)
 	if err := verifyBackendProtoIR(ir); err != nil {
 		return nil, err
 	}
