@@ -11,6 +11,13 @@ type machineTableID uint32
 
 const invalidMachineTableID machineTableID = 0
 
+type machineTableLayoutID uint32
+
+const (
+	machineTableDynamicLayout machineTableLayoutID = 0
+	machineTableRootLayout    machineTableLayoutID = 1
+)
+
 // machineTableRecord addresses this table's spans in the owner arena. It has
 // no Go pointers; stopped mutations may relocate spans without changing the
 // table ID observed by the guest kernel.
@@ -28,6 +35,7 @@ type machineTableRecord struct {
 	orderTombstone uint32
 	entryCount     uint32
 	metatable      machineTableID
+	layout         machineTableLayoutID
 	rawVersion     uint32
 	metaVersion    uint32
 	protection     slot
@@ -81,10 +89,12 @@ type machineTableOrderEntry struct {
 // are stopped-boundary storage; guest-visible records and elements contain
 // only scalar offsets, IDs, keys, and values.
 type machineTableArena struct {
-	tables []machineTableRecord
-	arrays []slot
-	fields []machineTableField
-	orders []machineTableOrderEntry
+	tables              []machineTableRecord
+	arrays              []slot
+	fields              []machineTableField
+	orders              []machineTableOrderEntry
+	layouts             []machineTableLayout
+	layoutsByTransition map[machineTableLayoutTransition]machineTableLayoutID
 	// The allocation cursors may be shorter than the backing slices after a
 	// callback rollback. Reusing that high-water storage avoids append-driven
 	// clearing on the next warmed call.
@@ -114,7 +124,19 @@ type machineTableCursor struct {
 const (
 	machineTableInitialFieldCapacity uint32 = 8
 	machineTableCompactOrderMinimum  uint32 = 32
+	machineTableLayoutLimit                 = 16 * 1024
 )
+
+type machineTableLayout struct {
+	parent machineTableLayoutID
+	key    machineTableKey
+	offset uint32
+}
+
+type machineTableLayoutTransition struct {
+	parent machineTableLayoutID
+	key    machineTableKey
+}
 
 var (
 	errMachineTableArenaClosed = errors.New("machine table arena is closed")
@@ -160,6 +182,7 @@ func (arena *machineTableArena) newTableStopped(arrayCapacity, recordCapacity ui
 	arrayOffset := arena.reserveArraysStopped(arrayCapacity)
 	fieldOffset := arena.reserveFieldsStopped(fieldCapacity)
 	orderOffset := arena.reserveOrdersStopped(uint32(orderCapacity))
+	arena.ensureLayoutDomainStopped()
 
 	record := machineTableRecord{
 		arrayOffset:   arrayOffset,
@@ -168,6 +191,7 @@ func (arena *machineTableArena) newTableStopped(arrayCapacity, recordCapacity ui
 		fieldCapacity: fieldCapacity,
 		orderOffset:   orderOffset,
 		orderCapacity: uint32(orderCapacity),
+		layout:        machineTableRootLayout,
 		protection:    slotNil,
 	}
 	if fieldCapacity != 0 {
@@ -197,6 +221,7 @@ func (arena *machineTableArena) setArrayStopped(id machineTableID, index uint32,
 		arena.arrays[int(record.arrayOffset+index-1)] = slotNil
 		arena.markOrderDeletedStopped(tableIndex, key)
 		record.entryCount--
+		record.layout = machineTableDynamicLayout
 		record.rawVersion = machineTableNextVersion(record.rawVersion)
 		for record.arrayLength > 0 && arena.arrays[int(record.arrayOffset+record.arrayLength-1)] == slotNil {
 			record.arrayLength--
@@ -225,6 +250,7 @@ func (arena *machineTableArena) setArrayStopped(id machineTableID, index uint32,
 	arena.arrays[int(record.arrayOffset+index-1)] = value
 	if previous == slotNil {
 		record.entryCount++
+		arena.noteLayoutInsertStopped(tableIndex, key)
 	}
 	record.rawVersion = machineTableNextVersion(record.rawVersion)
 	if index > record.arrayLength {
@@ -352,6 +378,8 @@ func (arena *machineTableArena) reset() {
 	arena.arrays = arena.arrays[:0]
 	arena.fields = arena.fields[:0]
 	arena.orders = arena.orders[:0]
+	arena.layouts = nil
+	arena.layoutsByTransition = nil
 	arena.arrayCursor = 0
 	arena.fieldCursor = 0
 	arena.orderCursor = 0
@@ -368,6 +396,8 @@ func (arena *machineTableArena) close() {
 	arena.arrays = nil
 	arena.fields = nil
 	arena.orders = nil
+	arena.layouts = nil
+	arena.layoutsByTransition = nil
 	arena.arrayCursor = 0
 	arena.fieldCursor = 0
 	arena.orderCursor = 0
@@ -391,6 +421,7 @@ func (arena *machineTableArena) setRecordStopped(id machineTableID, key machineT
 			record.fieldCount--
 			record.fieldTombstone++
 			record.entryCount--
+			record.layout = machineTableDynamicLayout
 			record.rawVersion = machineTableNextVersion(record.rawVersion)
 			arena.markOrderDeletedStopped(tableIndex, key)
 			return nil
@@ -427,6 +458,7 @@ func (arena *machineTableArena) setRecordStopped(id machineTableID, key machineT
 	arena.fields[fieldIndex] = machineTableField{hash: hash, orderIndex: orderIndex, state: machineTableFieldLive}
 	arena.tables[tableIndex].fieldCount++
 	arena.tables[tableIndex].entryCount++
+	arena.noteLayoutInsertStopped(tableIndex, key)
 	arena.tables[tableIndex].rawVersion = machineTableNextVersion(arena.tables[tableIndex].rawVersion)
 	if wasDeleted {
 		arena.tables[tableIndex].fieldTombstone--
@@ -471,7 +503,92 @@ func (arena *machineTableArena) lookup(id machineTableID) (machineTableRecord, b
 		(record.metatable != invalidMachineTableID && uint64(record.metatable) > uint64(len(arena.tables))) {
 		return machineTableRecord{}, false
 	}
+	if record.layout != machineTableDynamicLayout && uint64(record.layout) > uint64(len(arena.layouts)) {
+		return machineTableRecord{}, false
+	}
 	return record, true
+}
+
+func (arena *machineTableArena) ensureLayoutDomainStopped() {
+	if arena == nil || len(arena.layouts) != 0 {
+		return
+	}
+	arena.layouts = append(arena.layouts, machineTableLayout{})
+	arena.layoutsByTransition = make(map[machineTableLayoutTransition]machineTableLayoutID)
+}
+
+func (arena *machineTableArena) noteLayoutInsertStopped(tableIndex int, key machineTableKey) {
+	if arena == nil || tableIndex < 0 || tableIndex >= len(arena.tables) {
+		return
+	}
+	record := &arena.tables[tableIndex]
+	if record.layout == machineTableDynamicLayout {
+		return
+	}
+	orderIndex, ok := arena.orderIndex(*record, key)
+	if !ok {
+		record.layout = machineTableDynamicLayout
+		return
+	}
+	transition := machineTableLayoutTransition{parent: record.layout, key: key}
+	if layout, ok := arena.layoutsByTransition[transition]; ok {
+		if int(layout-1) >= len(arena.layouts) || arena.layouts[layout-1].offset != orderIndex {
+			record.layout = machineTableDynamicLayout
+			return
+		}
+		record.layout = layout
+		return
+	}
+	if len(arena.layouts) >= machineTableLayoutLimit {
+		record.layout = machineTableDynamicLayout
+		return
+	}
+	layout := machineTableLayoutID(len(arena.layouts) + 1)
+	arena.layouts = append(arena.layouts, machineTableLayout{
+		parent: record.layout,
+		key:    key,
+		offset: orderIndex,
+	})
+	arena.layoutsByTransition[transition] = layout
+	record.layout = layout
+}
+
+func (arena *machineTableArena) tableLayout(id machineTableID) (machineTableLayoutID, uint32, uint32, error) {
+	record, ok := arena.lookup(id)
+	if !ok {
+		return machineTableDynamicLayout, 0, 0, arena.tableError()
+	}
+	return record.layout, record.rawVersion, record.metaVersion, nil
+}
+
+func (arena *machineTableArena) layoutPropertyOffset(layout machineTableLayoutID, key machineTableKey) (uint32, bool) {
+	if arena == nil || layout == machineTableDynamicLayout {
+		return 0, false
+	}
+	for layout > machineTableRootLayout {
+		index := int(layout - 1)
+		if index < 0 || index >= len(arena.layouts) {
+			return 0, false
+		}
+		record := arena.layouts[index]
+		if record.key == key {
+			return record.offset, true
+		}
+		layout = record.parent
+	}
+	return 0, false
+}
+
+func (arena *machineTableArena) getAtLayoutOffset(id machineTableID, layout machineTableLayoutID, key machineTableKey, offset uint32) (slot, bool) {
+	record, ok := arena.lookupStopped(id)
+	if !ok || layout == machineTableDynamicLayout || record.layout != layout || offset >= record.orderLength {
+		return slotNil, false
+	}
+	entry := arena.orders[int(record.orderOffset+offset)]
+	if entry.present == 0 || entry.value == slotNil || entry.key != key {
+		return slotNil, false
+	}
+	return entry.value, true
 }
 
 // lookupStopped is the hot internal lookup after a scalar table handle has
