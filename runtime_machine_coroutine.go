@@ -51,7 +51,8 @@ type machineCoroutineExit struct {
 // dispatch when coroutine.yield suspends the active scalar frame. It is not a
 // script failure; the caller-side resume seam consumes it immediately.
 type machineCoroutineLoopSignal struct {
-	exit machineCoroutineExit
+	exit      machineCoroutineExit
+	hostToken any
 }
 
 func (signal *machineCoroutineLoopSignal) Error() string {

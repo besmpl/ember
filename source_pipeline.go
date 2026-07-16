@@ -77,7 +77,7 @@ func parseSourceWithLimits(source Source, limits CompileLimits) (sourceArtifact,
 	p := parser{source: source.Text, limits: limits}
 	tree, err := p.parse()
 	if err != nil {
-		return sourceArtifact{}, err
+		return sourceArtifact{}, sourceErrorFor(source, err)
 	}
 	return sourceArtifact{
 		source: source,
@@ -204,7 +204,7 @@ func (s *sourceArtifactStore) compileWithLimits(source Source, identity sourceId
 	}
 	proto, err := compileProgram(artifact)
 	if err != nil {
-		return nil, err
+		return nil, sourceErrorFor(source, err)
 	}
 	return s.storeCompiled(identity, artifact, proto), nil
 }
@@ -233,6 +233,28 @@ func (s *sourceArtifactStore) checkWithLimits(source Source, identity sourceIden
 		return checkArtifact{}, err
 	}
 	return s.storeChecked(identity, artifact, check), nil
+}
+
+func (s *sourceArtifactStore) checkWithEnvWithLimits(
+	source Source,
+	identity sourceIdentity,
+	limits CompileLimits,
+	env typeEnv,
+	summaries moduleSummaryEnv,
+) (checkArtifact, error) {
+	var (
+		artifact sourceArtifact
+		err      error
+	)
+	if s == nil {
+		artifact, err = parseSourceWithLimits(source, limits)
+	} else {
+		artifact, err = s.parseWithLimits(source, identity, limits)
+	}
+	if err != nil {
+		return checkArtifact{}, err
+	}
+	return buildCheckArtifactWithEnv(artifact, env, summaries)
 }
 
 func (s *sourceArtifactStore) storeCompiled(identity sourceIdentity, artifact sourceArtifact, proto *Proto) *Proto {

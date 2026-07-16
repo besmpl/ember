@@ -1,7 +1,6 @@
 package ember
 
 import (
-	"fmt"
 	"math"
 	"strings"
 )
@@ -2566,5 +2565,11 @@ func (p *parser) advanceTokenIndex() {
 }
 
 func (p *parser) errorf(format string, args ...any) error {
-	return fmt.Errorf("compile: byte %d: %s", p.pos, fmt.Sprintf(format, args...))
+	start, end := sourceTokenRange(p.tokens, p.tokenIndex, p.pos, len(p.source))
+	return positionedSourceError(
+		"parse",
+		start,
+		end,
+		formatSourceStageError("compile", p.pos, format, args...),
+	)
 }

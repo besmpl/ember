@@ -46,8 +46,8 @@ func baseGlobalDefinitions() []baseGlobalDefinition {
 			{name: "rawlen", value: func() Value { return nativeFuncValueWithID(baseRawLenNative, nativeFuncRawLen) }},
 			{name: "select", value: func() Value { return nativeFuncValueWithID(baseSelectNative, nativeFuncSelect) }},
 			{name: "unpack", value: func() Value { return HostFuncValue(baseTableUnpack) }},
-			{name: "pcall", value: func() Value { return nativeFuncValue(basePCall) }},
-			{name: "xpcall", value: func() Value { return nativeFuncValue(baseXPCall) }},
+			{name: "pcall", value: func() Value { return nativeFuncValueWithID(basePCall, nativeFuncPCall) }},
+			{name: "xpcall", value: func() Value { return nativeFuncValueWithID(baseXPCall, nativeFuncXPCall) }},
 			{name: "math", value: func() Value { return TableValue(baseMath()) }, cache: true},
 			{name: "table", value: func() Value { return TableValue(baseTable()) }, cache: true},
 			{name: "coroutine", value: func() Value { return TableValue(baseCoroutine()) }, cache: true, summary: coroutineLibrarySummary},
@@ -76,6 +76,8 @@ func baseFieldIntrinsics() []baseFieldIntrinsicDefinition {
 			{id: nativeFuncTableNext, name: "TABLE_NEXT"},
 			{id: nativeFuncSetMetatable, name: "SET_METATABLE"},
 			{id: nativeFuncGetMetatable, name: "GET_METATABLE"},
+			{id: nativeFuncPCall, name: "PCALL"},
+			{id: nativeFuncXPCall, name: "XPCALL"},
 		}
 		for _, intrinsic := range baseFieldIntrinsicsCache {
 			nativeFuncDefinitionsCache = append(nativeFuncDefinitionsCache, nativeFuncDefinition{
@@ -147,6 +149,10 @@ func nativeFuncByID(nativeID nativeFuncID) (nativeFunc, bool) {
 		return baseCoroutineCreate, true
 	case nativeFuncCoroutineYield:
 		return baseCoroutineYield, true
+	case nativeFuncPCall:
+		return basePCall, true
+	case nativeFuncXPCall:
+		return baseXPCall, true
 	default:
 		return nil, false
 	}

@@ -1117,6 +1117,7 @@ type vmProtectedCall struct {
 
 type vmPendingHostCall struct {
 	continuation vmHostContinuation
+	token        any
 }
 
 type vmHostContinuation func(globals *globalEnv, args []Value) vmHostCallResult
@@ -1131,6 +1132,7 @@ type vmHostCallResult struct {
 type vmHostYield struct {
 	values       []Value
 	continuation vmHostContinuation
+	token        any
 }
 
 type vmScriptCall struct {
@@ -1435,6 +1437,7 @@ type vmYieldRequest struct {
 	values    []Value
 	protected *vmProtectedCall
 	host      *vmPendingHostCall
+	hostToken any
 }
 
 func vmReturnedValues(values []Value) vmFrameResult {
@@ -2235,6 +2238,7 @@ func (thread *vmThread) continueHostCall(frame *vmFrame, args []Value) ([]Value,
 				values:    yield.values,
 				protected: call.protected,
 				host:      yield.host,
+				hostToken: yield.hostToken,
 			}
 		}
 		if recovered, escapeErr := thread.recoverProtectedError(err); recovered {
@@ -7273,7 +7277,9 @@ func finishHostCallResult(result vmHostCallResult) ([]Value, error) {
 			values: result.yield.values,
 			host: &vmPendingHostCall{
 				continuation: result.yield.continuation,
+				token:        result.yield.token,
 			},
+			hostToken: result.yield.token,
 		}
 	}
 	return result.values, nil

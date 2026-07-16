@@ -1,6 +1,7 @@
 package ember
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -1251,7 +1252,7 @@ func (machine *scalarMachine) enterExplicitCall(request machineCallRequest) (int
 		return -1, machine.activeBase, nil
 	}
 	if slotTagOf(callable) == slotTagHostCallable {
-		if err := machine.callFastHostStopped(callable, arguments, request.destination, request.resultCount); err != nil {
+		if err := machine.callFastHostStopped(callable, arguments, request.destination, request.resultCount, request.returnPC); err != nil {
 			return 0, 0, err
 		}
 		if request.tailCall != 0 {
@@ -1395,6 +1396,12 @@ func (machine *scalarMachine) callNativeArgumentsStopped(callable slot, argument
 	}
 	if nativeID == nativeFuncCoroutineCreate || nativeID == nativeFuncCoroutineStatus || nativeID == nativeFuncCoroutineResume || nativeID == nativeFuncCoroutineYield {
 		return machine.callCoroutineNativeStopped(nativeID, arguments, destination, resultCount, returnPC)
+	}
+	if nativeID == nativeFuncPCall || nativeID == nativeFuncXPCall {
+		if len(arguments) != 0 && slotTagOf(arguments[0]) == slotTagClosure {
+			return machine.callProtectedNativeStopped(nativeID, arguments, destination, resultCount, returnPC)
+		}
+		return machine.callNativeAdapterArgumentsStopped(nativeID, arguments, destination, resultCount)
 	}
 	if nativeID == nativeFuncSetMetatable || nativeID == nativeFuncGetMetatable {
 		first, second := slotNil, slotNil
@@ -2727,7 +2734,9 @@ func (exporter *machineTableExporter) value(value slot) (Value, error) {
 		if err != nil {
 			return NilValue(), err
 		}
-		exported := ContextHostFuncValue(fn)
+		exported := ResumableHostFuncValue(func(ctx context.Context, args []Value) HostResult {
+			return fn(ctx, args)
+		})
 		exporter.rememberValue(value, exported)
 		return exported, nil
 	case UserDataKind:
@@ -2855,7 +2864,7 @@ func captureMachineTableReconcileCheckpoint(exporter *machineTableExporter) mach
 	checkpoint.strings.records = append([]machineStringRecord(nil), machine.strings.records...)
 	checkpoint.strings.data = append([]byte(nil), machine.strings.data...)
 	checkpoint.strings.index = append([]machineStringID(nil), machine.strings.index...)
-	checkpoint.hosts.values = append([]ContextHostFunc(nil), machine.persistentOwner.hosts.values...)
+	checkpoint.hosts.values = append([]machineHostFunc(nil), machine.persistentOwner.hosts.values...)
 	for table, value := range exporter.originals {
 		checkpoint.originals[table] = value
 	}

@@ -163,6 +163,11 @@ func (probe *runtimeExecutionRoutingProbe) runHook(_ *Runtime, _ context.Context
 	return nil
 }
 
+func (probe *runtimeExecutionRoutingProbe) runHookResumable(_ *Runtime, _ context.Context, _ string, _ []Value) (resumableOutcome, error) {
+	probe.runHooks++
+	return resumableOutcome{}, nil
+}
+
 func (probe *runtimeExecutionRoutingProbe) captureCallback(invocationScope, Value) (callbackTarget, error) {
 	probe.captures++
 	return runtimeExecutionCallbackProbe{probe: probe}, nil
@@ -180,6 +185,11 @@ type runtimeExecutionCallbackProbe struct {
 func (target runtimeExecutionCallbackProbe) call(context.Context, []Value) ([]Value, error) {
 	target.probe.callbackCalls++
 	return []Value{NumberValue(7)}, nil
+}
+
+func (target runtimeExecutionCallbackProbe) callResumable(context.Context, []Value) (resumableOutcome, error) {
+	target.probe.callbackCalls++
+	return resumableOutcome{values: []Value{NumberValue(7)}}, nil
 }
 
 func (target runtimeExecutionCallbackProbe) close() error {

@@ -11,6 +11,8 @@ type machineRunEffects struct {
 	ctx context.Context
 }
 
+type machineHostFunc func(context.Context, []Value) HostResult
+
 func reconcileMachineExportedTablesStopped(machine *scalarMachine, exporter *machineTableExporter) error {
 	limit := uint64(0)
 	if machine != nil && machine.window.controller != nil {
@@ -24,7 +26,7 @@ func reconcileMachineExportedTablesStopped(machine *scalarMachine, exporter *mac
 
 type machineHostCallableArena struct {
 	owner  uint64
-	values []ContextHostFunc
+	values []machineHostFunc
 	closed bool
 }
 
@@ -38,7 +40,7 @@ func (arena *machineHostCallableArena) bindStopped(owner uint64) error {
 	return nil
 }
 
-func (arena *machineHostCallableArena) importStopped(fn ContextHostFunc) (slot, error) {
+func (arena *machineHostCallableArena) importStopped(fn machineHostFunc) (slot, error) {
 	if arena == nil || arena.closed || arena.owner == 0 || fn == nil {
 		return slotNil, errors.New("machine host callable is invalid")
 	}
@@ -49,7 +51,7 @@ func (arena *machineHostCallableArena) importStopped(fn ContextHostFunc) (slot, 
 	return slotPackHandle(slotTagHostCallable, uint32(len(arena.values)), 1)
 }
 
-func (arena *machineHostCallableArena) replaceStopped(value slot, fn ContextHostFunc) error {
+func (arena *machineHostCallableArena) replaceStopped(value slot, fn machineHostFunc) error {
 	index, err := arena.index(value)
 	if err != nil || fn == nil {
 		return errors.New("machine host callable is invalid")
@@ -58,7 +60,7 @@ func (arena *machineHostCallableArena) replaceStopped(value slot, fn ContextHost
 	return nil
 }
 
-func (arena *machineHostCallableArena) lookup(value slot) (ContextHostFunc, error) {
+func (arena *machineHostCallableArena) lookup(value slot) (machineHostFunc, error) {
 	index, err := arena.index(value)
 	if err != nil {
 		return nil, err
@@ -111,7 +113,7 @@ func (owner *machineOwner) importGlobalsStopped(values map[string]Value) error {
 		}
 		var imported slot
 		var err error
-		if fn, isHost := value.contextHostFunction(); isHost && owner.globals.present[dense] != 0 && slotTagOf(owner.globals.values[dense]) == slotTagHostCallable {
+		if fn, isHost := machineHostFunction(value, owner); isHost && owner.globals.present[dense] != 0 && slotTagOf(owner.globals.values[dense]) == slotTagHostCallable {
 			imported = owner.globals.values[dense]
 			err = owner.hosts.replaceStopped(imported, fn)
 		} else {
@@ -287,22 +289,7 @@ func (owner *machineOwner) importValueWithTablesStopped(value Value, importedTab
 		if nativeID := valueNativeID(value); nativeID != nativeFuncUnknown {
 			return slotNativeID(nativeID), nil
 		}
-		fn, ok := value.contextHostFunction()
-		if !ok {
-			if host, hostOK := value.hostFunction(); hostOK {
-				fn = func(_ context.Context, args []Value) ([]Value, error) { return host(args) }
-				ok = true
-			}
-		}
-		if !ok {
-			if native, nativeOK := value.nativeFunction(); nativeOK {
-				fn = func(_ context.Context, args []Value) ([]Value, error) {
-					env := globalEnv{controller: owner.scalarMachine.window.controller}
-					return native(&env, args)
-				}
-				ok = true
-			}
-		}
+		fn, ok := machineHostFunction(value, owner)
 		if !ok {
 			return slotNil, errors.New("host function is not supported by compact Machine")
 		}
@@ -368,6 +355,46 @@ func (owner *machineOwner) importValueWithTablesStopped(value Value, importedTab
 	}
 }
 
+func machineHostFunction(value Value, owner *machineOwner) (machineHostFunc, bool) {
+	if host, ok := value.resumableHostFunction(); ok {
+		return func(ctx context.Context, args []Value) HostResult {
+			return host(ctx, args)
+		}, true
+	}
+	if host, ok := value.contextHostFunction(); ok {
+		return func(ctx context.Context, args []Value) HostResult {
+			values, err := host(ctx, args)
+			if err != nil {
+				return HostError(err)
+			}
+			return HostReturn(values...)
+		}, true
+	}
+	if host, ok := value.hostFunction(); ok {
+		return func(_ context.Context, args []Value) HostResult {
+			values, err := host(args)
+			if err != nil {
+				return HostError(err)
+			}
+			return HostReturn(values...)
+		}, true
+	}
+	if native, ok := value.nativeFunction(); ok {
+		return func(_ context.Context, args []Value) HostResult {
+			env := globalEnv{}
+			if owner != nil {
+				env.controller = owner.scalarMachine.window.controller
+			}
+			values, err := native(&env, args)
+			if err != nil {
+				return HostError(err)
+			}
+			return HostReturn(values...)
+		}, true
+	}
+	return nil, false
+}
+
 func machineBaseGlobalValue(name string) (Value, bool, error) {
 	value, ok := baseGlobalValue(name)
 	return value, ok, nil
@@ -424,15 +451,19 @@ func (machine *scalarMachine) callHostStopped(operation machineOperation, callab
 		}
 		defer machine.window.controller.leaveCall()
 	}
-	returned, callErr := fn(ctx, args)
+	result := fn(ctx, args)
 	checkpoint := captureMachineTableReconcileCheckpoint(&exporter)
 	reconcileErr := reconcileMachineExportedTablesStopped(machine, &exporter)
-	if callErr != nil {
-		return callErr
+	if result.err != nil {
+		return result.err
 	}
 	if reconcileErr != nil {
 		return reconcileErr
 	}
+	if result.suspended {
+		return fmt.Errorf("host suspension is unavailable on the legacy Machine host-call path")
+	}
+	returned := result.values
 	resultCount := int(operation.callResults)
 	if resultCount < 0 {
 		resultCount = len(returned)
@@ -626,7 +657,7 @@ func (machine *scalarMachine) callNativeAdapterArgumentsStopped(nativeID nativeF
 	return nil
 }
 
-func (machine *scalarMachine) callFastHostStopped(callable slot, arguments []slot, destination, resultCount int) error {
+func (machine *scalarMachine) callFastHostStopped(callable slot, arguments []slot, destination, resultCount, returnPC int) error {
 	if machine == nil || machine.persistentOwner == nil {
 		return errors.New("compact Machine fast host call requires a persistent owner")
 	}
@@ -652,15 +683,19 @@ func (machine *scalarMachine) callFastHostStopped(callable slot, arguments []slo
 		}
 		defer machine.window.controller.leaveCall()
 	}
-	returned, callErr := fn(ctx, args)
+	result := fn(ctx, args)
 	checkpoint := captureMachineTableReconcileCheckpoint(&exporter)
 	reconcileErr := reconcileMachineExportedTablesStopped(machine, &exporter)
-	if callErr != nil {
-		return fmt.Errorf("run: call failed: %w", callErr)
+	if result.err != nil {
+		return fmt.Errorf("run: call failed: %w", result.err)
 	}
 	if reconcileErr != nil {
 		return reconcileErr
 	}
+	if result.suspended {
+		return machine.suspendHostCallStopped(result.token, destination, resultCount, returnPC)
+	}
+	returned := result.values
 	if resultCount < 0 {
 		resultCount = len(returned)
 		if destination+resultCount > len(machine.registers) {
@@ -694,4 +729,26 @@ func (machine *scalarMachine) callFastHostStopped(callable slot, arguments []slo
 		}
 	}
 	return nil
+}
+
+func (machine *scalarMachine) suspendHostCallStopped(token any, destination, resultCount, returnPC int) error {
+	if machine == nil || machine.persistentOwner == nil || machine.activeCoroutine.index == 0 {
+		return fmt.Errorf("host suspension requires a resumable runtime operation")
+	}
+	var snapshot machineCoroutineSnapshot
+	if err := captureMachineCoroutineStopped(machine, machineCoroutineFrameState{
+		pc:             int32(returnPC),
+		resumeRegister: int32(destination),
+		resumeCount:    int32(resultCount),
+	}, &snapshot); err != nil {
+		return err
+	}
+	if err := machine.persistentOwner.coroutines.setActiveDepthStopped(machine.activeCoroutine, snapshot.frame.callDepth); err != nil {
+		return err
+	}
+	exit, err := machine.persistentOwner.coroutines.yieldStopped(machine.activeCoroutine, snapshot, nil)
+	if err != nil {
+		return err
+	}
+	return &machineCoroutineLoopSignal{exit: exit, hostToken: token}
 }

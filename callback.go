@@ -16,6 +16,7 @@ type Callback struct {
 
 type callbackTarget interface {
 	call(context.Context, []Value) ([]Value, error)
+	callResumable(context.Context, []Value) (resumableOutcome, error)
 	close() error
 }
 
@@ -84,6 +85,26 @@ func (cb Callback) Call(ctx context.Context, args ...Value) ([]Value, error) {
 		return nil, fmt.Errorf("callback: not captured")
 	}
 	return cb.target.call(ctx, args)
+}
+
+// CallResumable invokes the captured callback until completion or host
+// suspension.
+func (cb Callback) CallResumable(ctx context.Context, args ...Value) (ExecutionResult, error) {
+	if cb.target == nil {
+		return ExecutionResult{}, fmt.Errorf("callback: not captured")
+	}
+	outcome, err := cb.target.callResumable(ctx, args)
+	if err != nil {
+		return ExecutionResult{}, err
+	}
+	var runtime *Runtime
+	switch target := cb.target.(type) {
+	case *vmCallbackTarget:
+		runtime = target.scope.runtime
+	case *machineCallbackTarget:
+		runtime = target.runtime
+	}
+	return runtime.executionResult(outcome), nil
 }
 
 func (target *vmCallbackTarget) call(ctx context.Context, args []Value) ([]Value, error) {

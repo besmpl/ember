@@ -64,6 +64,33 @@ type HostFunc func(args []Value) ([]Value, error)
 // runtime context.
 type ContextHostFunc func(context.Context, []Value) ([]Value, error)
 
+// ResumableHostFunc is a context-aware host callback that may return values,
+// fail, or suspend the current resumable script invocation.
+type ResumableHostFunc func(context.Context, []Value) HostResult
+
+// HostResult is the result of a ResumableHostFunc.
+type HostResult struct {
+	values    []Value
+	err       error
+	token     any
+	suspended bool
+}
+
+// HostReturn completes a host call with values.
+func HostReturn(values ...Value) HostResult {
+	return HostResult{values: append([]Value(nil), values...)}
+}
+
+// HostError fails a host call with err.
+func HostError(err error) HostResult {
+	return HostResult{err: err}
+}
+
+// HostSuspend suspends a host call with an opaque host-owned token.
+func HostSuspend(token any) HostResult {
+	return HostResult{token: token, suspended: true}
+}
+
 type nativeFunc func(globals *globalEnv, args []Value) ([]Value, error)
 type yieldableHostFunc func(globals *globalEnv, args []Value) vmHostCallResult
 
@@ -86,6 +113,8 @@ const (
 	nativeFuncGetMetatable
 	nativeFuncCoroutineCreate
 	nativeFuncCoroutineYield
+	nativeFuncPCall
+	nativeFuncXPCall
 )
 
 // Value is an Ember runtime value.
@@ -199,6 +228,7 @@ var (
 type hostCallable struct {
 	hostFunc      HostFunc
 	contextHost   ContextHostFunc
+	resumableHost ResumableHostFunc
 	native        nativeFunc
 	yieldableHost yieldableHostFunc
 }
@@ -896,6 +926,43 @@ func ContextHostFuncValue(fn ContextHostFunc) Value {
 		return fn(ctx, ownedHostArgs(args))
 	}
 	return valueWithRef(HostFuncKind, unsafe.Pointer(callable))
+}
+
+// ResumableHostFuncValue returns a context-aware host callback value that may
+// suspend explicit resumable hook and callback operations.
+func ResumableHostFuncValue(fn ResumableHostFunc) Value {
+	callable := &hostCallable{resumableHost: fn}
+	callable.yieldableHost = func(globals *globalEnv, args []Value) vmHostCallResult {
+		if fn == nil {
+			return vmHostCallResult{err: fmt.Errorf("call target is nil host_function")}
+		}
+		ctx := contextFromGlobalEnv(globals)
+		if scope, ok := invocationScopeFromGlobalEnv(globals); ok {
+			ctx = contextWithInvocationScope(ctx, scope)
+		}
+		return vmHostResult(fn(ctx, ownedHostArgs(args)))
+	}
+	return valueWithRef(HostFuncKind, unsafe.Pointer(callable))
+}
+
+func vmHostResult(result HostResult) vmHostCallResult {
+	if result.suspended {
+		return vmHostCallResult{
+			yield: &vmHostYield{
+				token: result.token,
+				continuation: func(_ *globalEnv, args []Value) vmHostCallResult {
+					if failure, ok := hostResumeFailureFromValues(args); ok {
+						return vmHostCallResult{err: failure}
+					}
+					return vmHostCallResult{values: append([]Value(nil), args...)}
+				},
+			},
+		}
+	}
+	if result.err != nil {
+		return vmHostCallResult{err: result.err}
+	}
+	return vmHostCallResult{values: append([]Value(nil), result.values...)}
 }
 
 // ownedHostArgs creates the escape-barrier copy passed to public host
@@ -2643,6 +2710,14 @@ func (v Value) contextHostFunction() (ContextHostFunc, bool) {
 		return nil, false
 	}
 	return callable.contextHost, true
+}
+
+func (v Value) resumableHostFunction() (ResumableHostFunc, bool) {
+	callable := v.hostCallableRef()
+	if callable == nil || callable.resumableHost == nil {
+		return nil, false
+	}
+	return callable.resumableHost, true
 }
 
 func (v Value) nativeFunction() (nativeFunc, bool) {

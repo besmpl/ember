@@ -33,6 +33,10 @@ testable seam.
   host-provided global type facts to analyzer checks. These facts affect typed
   analysis only; runtime globals still enter through runtime host seams such as
   `RunWithGlobals`.
+- `AnalysisConfig` is the copy-owned typed-analysis input shared by
+  `NewAnalyzer` through `WithAnalysisConfig` and by `LoadProgram` through
+  `ProgramOptions.Analysis`. Host global and module-summary maps are cloned at
+  the boundary.
 - `WithModuleSummaries(summaries map[string]ModuleSummary) AnalyzerOption` adds
   trusted module summaries for single-source analyzer checks. Literal
   `require(...)` local bindings can use a dependency's exported return value
@@ -107,6 +111,14 @@ testable seam.
 - `Check(source string) error` is the convenience typed-analysis entry point.
   It requires an explicit check-mode directive and returns the first typed
   diagnostic as an error.
+- Program diagnostics include `SourceName`, `Module`, and exact source-relative
+  byte ranges. `LoadProgram` checks dependencies before consumers, lends only
+  trusted current dependency summaries, and returns the same sorted report at
+  every parallelism. Environment-dependent checks are rebuilt rather than
+  stored in the shared source artifact cache.
+- Syntax and compile failures expose `*SourceError` through `errors.As`.
+  `SourceError.Source`, `Code`, `Start`, and `End` are structured source data;
+  its wrapped cause preserves `errors.Is`, `errors.As`, and existing error text.
 - `Run(proto *Proto) ([]Value, error)` executes with Ember's pure base globals
   and without host globals.
 - `RunWithGlobals(proto *Proto, globals map[string]Value) ([]Value, error)`
@@ -142,6 +154,21 @@ testable seam.
   a fresh budget from the runtime's configured limits. A callback shares mutable
   state with its owning runtime, so hosts should serialize calls with other work
   on that runtime.
+- `ResumableHostFuncValue` exposes a context-aware callback that returns
+  `HostReturn`, `HostError`, or `HostSuspend`. A suspension carries an opaque
+  host-owned token and creates no goroutine, timer, channel, retry, or
+  scheduler.
+- `Runtime.RunHookResumable` and `Callback.CallResumable` run until completion
+  or suspension and return `ExecutionResult`. `Suspension.Token` exposes the
+  host token; single-use `Resume` supplies call results and `Fail` injects an
+  ordinary error at the original call site. A resumed script may return a
+  successor suspension.
+- Every resumable step uses normal runtime serialization and receives a fresh
+  context and execution budget. Several idle suspended invocations may coexist.
+  `Runtime.Close` releases their retained execution state and tokens; later
+  handle use reports `ErrSuspensionStale`.
+- Existing `RunHook` and `Callback.Call` remain completion-only for hosts that
+  do not suspend.
 - Seeded base globals are `type`, which returns Luau-style kind names for the
   current value model, and `math`, which currently provides `abs`, `floor`,
   `min`, `max`, and `pi`, plus `table`, which currently provides `pack`,

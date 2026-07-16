@@ -27,11 +27,13 @@ const (
 
 // Diagnostic describes one typed-analysis finding.
 type Diagnostic struct {
-	Code    string
-	Message string
-	Start   int
-	End     int
-	Path    []string
+	Code       string
+	Message    string
+	SourceName string
+	Module     ModuleID
+	Start      int
+	End        int
+	Path       []string
 }
 
 // ModuleExportKind names a public exported module fact.
@@ -187,6 +189,13 @@ type Analyzer struct {
 	moduleSummaries moduleSummaryEnv
 }
 
+// AnalysisConfig contains copy-owned host and dependency facts used by typed
+// analysis. NewAnalyzer and LoadProgram both accept this same configuration.
+type AnalysisConfig struct {
+	Globals         map[string]TypeSummary
+	ModuleSummaries map[string]ModuleSummary
+}
+
 type checkResult = checkArtifact
 
 type checkArtifact struct {
@@ -231,16 +240,26 @@ func NewAnalyzer(options ...AnalyzerOption) *Analyzer {
 	return analyzer
 }
 
+// WithAnalysisConfig applies a copied analysis configuration.
+func WithAnalysisConfig(config AnalysisConfig) AnalyzerOption {
+	copied := cloneAnalysisConfig(config)
+	return func(analyzer *Analyzer) {
+		analyzer.typeEnv = typeEnvFromAnalysisConfig(copied)
+		analyzer.moduleSummaries = moduleSummaryEnvFromMap(copied.ModuleSummaries)
+	}
+}
+
 // WithGlobalTypes adds host-provided global type facts to typed analysis.
 //
 // The supplied map is copied. Host globals are analysis facts only; runtime
 // globals still enter through RunWithGlobals or Program host adapters.
 func WithGlobalTypes(globals map[string]TypeSummary) AnalyzerOption {
+	copied := cloneTypeSummaryMap(globals)
 	return func(analyzer *Analyzer) {
 		if analyzer.typeEnv.globals == nil {
 			analyzer.typeEnv = defaultTypeEnv()
 		}
-		for name, summary := range globals {
+		for name, summary := range copied {
 			analyzer.typeEnv.setGlobalSummary(name, summary)
 		}
 	}
@@ -249,8 +268,9 @@ func WithGlobalTypes(globals map[string]TypeSummary) AnalyzerOption {
 // WithModuleSummaries adds trusted module summaries for single-source analyzer
 // require facts. It does not load or execute modules.
 func WithModuleSummaries(summaries map[string]ModuleSummary) AnalyzerOption {
+	copied := cloneModuleSummaryMap(summaries)
 	return func(analyzer *Analyzer) {
-		analyzer.moduleSummaries = moduleSummaryEnvFromMap(summaries)
+		analyzer.moduleSummaries = moduleSummaryEnvFromMap(copied)
 	}
 }
 
@@ -327,7 +347,37 @@ func analyzeSyntaxTreeWithMode(source Source, tree syntaxTree, bind bindResult, 
 	if !policyForMode(mode).analyzesTypes() {
 		return nil
 	}
-	return analyzeSyntaxTree(source, tree, bind, mode, env, summaries)
+	diagnostics := analyzeSyntaxTree(source, tree, bind, mode, env, summaries)
+	for i := range diagnostics {
+		diagnostics[i].SourceName = source.Name
+	}
+	return diagnostics
+}
+
+func cloneAnalysisConfig(config AnalysisConfig) AnalysisConfig {
+	return AnalysisConfig{
+		Globals:         cloneTypeSummaryMap(config.Globals),
+		ModuleSummaries: cloneModuleSummaryMap(config.ModuleSummaries),
+	}
+}
+
+func cloneModuleSummaryMap(summaries map[string]ModuleSummary) map[string]ModuleSummary {
+	if len(summaries) == 0 {
+		return nil
+	}
+	cloned := make(map[string]ModuleSummary, len(summaries))
+	for name, summary := range summaries {
+		cloned[name] = cloneModuleSummary(summary)
+	}
+	return cloned
+}
+
+func typeEnvFromAnalysisConfig(config AnalysisConfig) typeEnv {
+	env := defaultTypeEnv()
+	for name, summary := range config.Globals {
+		env.setGlobalSummary(name, summary)
+	}
+	return env
 }
 
 func requireCheckMode(tree syntaxTree) error {

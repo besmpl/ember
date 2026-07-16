@@ -443,5 +443,15 @@ func (l *lexer) done() bool {
 }
 
 func (l *lexer) errorf(format string, args ...any) error {
-	return fmt.Errorf("lex: byte %d: %s", l.pos, fmt.Sprintf(format, args...))
+	start := clampSourceOffset(l.pos, len(l.source))
+	end := start
+	if start < len(l.source) {
+		end++
+	}
+	return positionedSourceError(
+		"lex",
+		start,
+		end,
+		formatSourceStageError("lex", l.pos, format, args...),
+	)
 }

@@ -13,6 +13,7 @@ const runtimeEngineEnvironment = "EMBER_RUNTIME_ENGINE"
 type runtimeExecution interface {
 	initialize(*Runtime) error
 	runHook(*Runtime, context.Context, string, []Value, *HookReport) error
+	runHookResumable(*Runtime, context.Context, string, []Value) (resumableOutcome, error)
 	captureCallback(invocationScope, Value) (callbackTarget, error)
 	close(*Runtime) error
 }

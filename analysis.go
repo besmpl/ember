@@ -81,6 +81,7 @@ type tableIndexerFact struct {
 type functionFact struct {
 	typeParams      []string
 	params          []simpleType
+	paramSingletons []string
 	paramGenerics   []string
 	variadic        simpleType
 	variadicGeneric string
@@ -89,6 +90,7 @@ type functionFact struct {
 	returnSpan      sourceRange
 	returnPack      returnPackFact
 	returnGeneric   string
+	overloads       []functionFact
 }
 
 type returnPackFact struct {
@@ -1952,16 +1954,19 @@ func (a *analysisState) functionFactForCallWithDiagnostics(call arenaCallID, dia
 	}
 	if use, ok := a.bind.use(a.tree.termID(target)); ok {
 		if len(selectors) != 0 {
-			if fact, ok := a.tableFunctionFactForCallTarget(target, diagnoseAccess); ok {
+			if fact, ok := a.tableFunctionFactForCallTarget(call, target, diagnoseAccess); ok {
 				return fact, true
 			}
 			return functionFact{}, false
 		}
 		fact, ok := a.functions[use.symbol]
-		return fact, ok
+		if !ok {
+			return functionFact{}, false
+		}
+		return a.selectFunctionOverload(fact, call), true
 	}
 	if len(selectors) != 0 {
-		if fact, ok := a.tableFunctionFactForCallTarget(target, diagnoseAccess); ok {
+		if fact, ok := a.tableFunctionFactForCallTarget(call, target, diagnoseAccess); ok {
 			return fact, true
 		}
 		return functionFact{}, false
@@ -1969,13 +1974,13 @@ func (a *analysisState) functionFactForCallWithDiagnostics(call arenaCallID, dia
 	if len(selectors) == 0 {
 		fact, ok := a.typeEnv.lookup(name)
 		if ok && fact.hasFunction {
-			return fact.function, true
+			return a.selectFunctionOverload(fact.function, call), true
 		}
 	}
 	return functionFact{}, false
 }
 
-func (a *analysisState) tableFunctionFactForCallTarget(target termID, diagnoseAccess bool) (functionFact, bool) {
+func (a *analysisState) tableFunctionFactForCallTarget(call arenaCallID, target termID, diagnoseAccess bool) (functionFact, bool) {
 	tree := a.tree
 	name := tree.termName(target)
 	selectors, _ := tree.termSelectors(target)
@@ -2003,7 +2008,10 @@ func (a *analysisState) tableFunctionFactForCallTarget(target termID, diagnoseAc
 		return functionFact{}, false
 	}
 	fact, ok := table.functions[field]
-	return fact, ok
+	if !ok {
+		return functionFact{}, false
+	}
+	return a.selectFunctionOverload(fact, call), true
 }
 
 func (a *analysisState) functionFactFromAnnotation(annotation typeID) (functionFact, bool) {
@@ -2183,6 +2191,17 @@ func (a *analysisState) checkCallArguments(fact functionFact, call arenaCallID) 
 				expected = actual
 			}
 		}
+		if singleton := genericAt(fact.paramSingletons, i); singleton != "" {
+			if actualSingleton, ok := callArgumentSingleton(a.tree, call, i); ok && actualSingleton != singleton {
+				a.diagnostics = append(a.diagnostics, singletonArgumentDiagnostic(
+					singleton,
+					actualSingleton,
+					span.start,
+					span.end,
+				))
+				continue
+			}
+		}
 		if expected == simpleTypeUnknown {
 			continue
 		}
@@ -2206,6 +2225,124 @@ func (a *analysisState) checkCallArguments(fact functionFact, call arenaCallID) 
 		return simpleTypeUnknown
 	}
 	return fact.returnType
+}
+
+func (a *analysisState) selectFunctionOverload(fact functionFact, call arenaCallID) functionFact {
+	if len(fact.overloads) == 0 {
+		return fact
+	}
+	matches := make([]functionFact, 0, len(fact.overloads))
+	for _, candidate := range fact.overloads {
+		if functionOverloadMatches(a.tree, call, candidate) {
+			matches = append(matches, candidate)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0]
+	}
+	if len(matches) > 1 {
+		return conservativeFunctionOverload(matches)
+	}
+	if overloadCallHasDynamicSingleton(a.tree, call, fact.overloads) {
+		return conservativeFunctionOverload(fact.overloads)
+	}
+	return fact.overloads[0]
+}
+
+func overloadCallHasDynamicSingleton(tree syntaxTree, call arenaCallID, overloads []functionFact) bool {
+	for _, overload := range overloads {
+		for i, singleton := range overload.paramSingletons {
+			if singleton == "" || (methodReceiverOffset(tree, call) == 1 && i == 0) {
+				continue
+			}
+			if _, ok := callArgumentSingleton(tree, call, i); !ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func functionOverloadMatches(tree syntaxTree, call arenaCallID, fact functionFact) bool {
+	args, _ := tree.callArgs(call)
+	receiverOffset := methodReceiverOffset(tree, call)
+	required := len(fact.params) - receiverOffset
+	if required < 0 {
+		required = 0
+	}
+	if len(args) < required {
+		return false
+	}
+	if fact.variadic == simpleTypeUnknown && fact.variadicGeneric == "" && len(args) > required {
+		return false
+	}
+	for i, singleton := range fact.paramSingletons {
+		if singleton == "" || (receiverOffset == 1 && i == 0) {
+			continue
+		}
+		actual, ok := callArgumentSingleton(tree, call, i)
+		if !ok || actual != singleton {
+			return false
+		}
+	}
+	return true
+}
+
+func callArgumentSingleton(tree syntaxTree, call arenaCallID, paramIndex int) (string, bool) {
+	receiverOffset := methodReceiverOffset(tree, call)
+	if receiverOffset == 1 && paramIndex == 0 {
+		return "", false
+	}
+	args, _ := tree.callArgs(call)
+	argIndex := paramIndex - receiverOffset
+	if argIndex < 0 || argIndex >= len(args) {
+		return "", false
+	}
+	term, ok := expressionSingleTerm(tree, args[argIndex])
+	if !ok {
+		return "", false
+	}
+	literal, ok := tree.termLiteral(term)
+	if !ok {
+		return "", false
+	}
+	switch literal.Kind() {
+	case StringKind:
+		value, _ := literal.String()
+		return `"` + value + `"`, true
+	case BoolKind:
+		value, _ := literal.Bool()
+		if value {
+			return "true", true
+		}
+		return "false", true
+	case NilKind:
+		return "nil", true
+	default:
+		return "", false
+	}
+}
+
+func conservativeFunctionOverload(matches []functionFact) functionFact {
+	if len(matches) == 0 {
+		return functionFact{}
+	}
+	fact := matches[0]
+	fact.returnType = simpleTypeUnknown
+	fact.returnTable = tableFact{}
+	fact.returnPack = returnPackFact{}
+	fact.returnGeneric = ""
+	fact.overloads = nil
+	return fact
+}
+
+func singletonArgumentDiagnostic(expected, actual string, start, end int) Diagnostic {
+	return Diagnostic{
+		Code:    "type-mismatch",
+		Message: fmt.Sprintf("expected literal %s, got %s", expected, actual),
+		Start:   start,
+		End:     end,
+	}
 }
 
 func (a *analysisState) checkVariadicCallArguments(fact functionFact, call arenaCallID, substitutions map[string]simpleType) {

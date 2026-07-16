@@ -60,6 +60,7 @@ type ProgramOptions struct {
 	Check       bool
 	Parallelism int
 	Limits      ProgramLimits
+	Analysis    AnalysisConfig
 }
 
 // ProgramLimits bounds module graph discovery and compilation. Zero means
@@ -146,6 +147,7 @@ type HostCall struct {
 // reports an active runtime without tearing down the in-flight call.
 type Runtime struct {
 	closeMu         sync.Mutex
+	suspensionMu    sync.Mutex
 	execution       runtimeExecution
 	owner           *runtimeOwner
 	program         *Program
@@ -157,6 +159,7 @@ type Runtime struct {
 	limits          ExecutionLimits
 	stack           []moduleKey
 	closed          bool
+	suspensions     map[*suspensionState]struct{}
 }
 
 // HookReport describes one RunHook call.
@@ -219,7 +222,7 @@ func loadProgramWithArtifactStore(ctx context.Context, loader ModuleLoader, opti
 	}
 	var summaries map[moduleKey]moduleSummaryArtifact
 	if options.Check {
-		checkReport, err := checkProgramModules(ctx, combined, artifacts, parallelism, options.Limits.Compile)
+		checkReport, err := checkProgramModules(ctx, combined, artifacts, parallelism, options.Limits.Compile, options.Analysis)
 		if err != nil {
 			return nil, report, err
 		}
@@ -273,6 +276,19 @@ func (r *Runtime) RunHook(ctx context.Context, hook string, args ...Value) (Hook
 	report := HookReport{Hook: hook}
 	err := r.runHook(ctx, hook, args, &report)
 	return report, err
+}
+
+// RunHookResumable runs a hook until completion or host suspension.
+func (r *Runtime) RunHookResumable(ctx context.Context, hook string, args ...Value) (ExecutionResult, error) {
+	execution, err := r.executionAdapter()
+	if err != nil {
+		return ExecutionResult{}, err
+	}
+	outcome, err := execution.runHookResumable(r, ctx, hook, args)
+	if err != nil {
+		return ExecutionResult{}, err
+	}
+	return r.executionResult(outcome), nil
 }
 
 // runHook executes one hook invocation. A nil report keeps the same execution
@@ -418,6 +434,7 @@ func (r *Runtime) Close() error {
 	if r == nil {
 		return nil
 	}
+	r.closeSuspensions()
 	// Preserve the public zero-value contract without silently assigning the
 	// old VM to a Runtime that has lost or never received execution ownership.
 	r.closeMu.Lock()
@@ -882,83 +899,40 @@ type programCheckReport struct {
 	summaries   map[moduleKey]moduleSummaryArtifact
 }
 
-func checkProgramModules(ctx context.Context, graph moduleGraph, cache *sourceArtifactStore, parallelism int, compileLimits CompileLimits) (programCheckReport, error) {
-	if parallelism > 1 && len(graph.Nodes) > 1 {
-		return checkProgramModulesParallel(ctx, graph, cache, parallelism, compileLimits)
-	}
+func checkProgramModules(
+	ctx context.Context,
+	graph moduleGraph,
+	cache *sourceArtifactStore,
+	parallelism int,
+	compileLimits CompileLimits,
+	config AnalysisConfig,
+) (programCheckReport, error) {
+	config = cloneAnalysisConfig(config)
+	summaries := make(map[moduleKey]moduleSummaryArtifact, len(graph.Nodes))
 	var diagnostics []programDiagnostic
-	results := make(map[moduleKey]CheckResult, len(graph.Nodes))
-	for _, key := range sortedModuleKeys(graph.Nodes) {
-		if err := ctx.Err(); err != nil {
+	for _, level := range programDependencyLevels(graph) {
+		results, err := checkProgramLevel(ctx, graph, cache, level, parallelism, compileLimits, config, summaries)
+		if err != nil {
 			return programCheckReport{}, err
 		}
-		node := graph.Nodes[key]
-		artifact, err := cache.checkWithLimits(node.Source, node.Identity, compileLimits)
-		if err != nil {
-			return programCheckReport{}, fmt.Errorf("load program: check %s: %w", key.String(), err)
-		}
-		results[key] = artifact.result
-		for _, diagnostic := range artifact.result.Diagnostics {
-			diagnostics = append(diagnostics, programDiagnostic{
-				module:     key,
-				diagnostic: diagnostic,
-			})
-		}
-	}
-	return programCheckReport{
-		diagnostics: sortedProgramDiagnostics(diagnostics),
-		summaries:   programModuleSummaries(graph, results),
-	}, nil
-}
-
-func checkProgramModulesParallel(ctx context.Context, graph moduleGraph, cache *sourceArtifactStore, parallelism int, compileLimits CompileLimits) (programCheckReport, error) {
-	jobs := uniqueProgramArtifactJobs(graph)
-	results := make([]programCheckArtifact, len(jobs))
-	workers := boundedProgramWorkers(parallelism, len(jobs))
-	indexes := make(chan int)
-
-	var wg sync.WaitGroup
-	wg.Add(workers)
-	for range workers {
-		go func() {
-			defer wg.Done()
-			for index := range indexes {
-				job := jobs[index]
-				if err := ctx.Err(); err != nil {
-					results[index].err = err
-					continue
-				}
-				artifact, err := cache.checkWithLimits(job.source, job.identity, compileLimits)
-				if err != nil {
-					results[index].err = err
-					continue
-				}
-				results[index] = programCheckArtifact{
-					artifact: artifact,
-				}
+		for _, key := range level {
+			result := results[key]
+			node := graph.Nodes[key]
+			summary := result.Summary
+			summary.Dependencies = moduleDependencySummaries(graph, node.Requires)
+			artifact := moduleSummaryArtifact{
+				Summary: summary,
+				Trusted: len(result.Diagnostics) == 0,
 			}
-		}()
-	}
-
-	if err := sendProgramArtifactJobs(ctx, indexes, len(jobs)); err != nil {
-		wg.Wait()
-		return programCheckReport{}, err
-	}
-	wg.Wait()
-
-	var diagnostics []programDiagnostic
-	checks := make(map[moduleKey]CheckResult, len(graph.Nodes))
-	for index, result := range results {
-		job := jobs[index]
-		if result.err != nil {
-			if result.err == context.Canceled || result.err == context.DeadlineExceeded {
-				return programCheckReport{}, result.err
+			if artifact.Trusted {
+				artifact.Summary = enrichModuleSummaryFromRequireBindings(artifact.Summary, node, summaries)
 			}
-			return programCheckReport{}, fmt.Errorf("load program: check %s: %w", job.key.String(), result.err)
-		}
-		for _, key := range job.keys {
-			checks[key] = result.artifact.result
-			for _, diagnostic := range result.artifact.result.Diagnostics {
+			summaries[key] = artifact
+			for _, diagnostic := range result.Diagnostics {
+				diagnostic.Module = moduleIDFromKey(key)
+				if diagnostic.SourceName == "" {
+					diagnostic.SourceName = node.Source.Name
+				}
 				diagnostics = append(diagnostics, programDiagnostic{
 					module:     key,
 					diagnostic: diagnostic,
@@ -968,8 +942,138 @@ func checkProgramModulesParallel(ctx context.Context, graph moduleGraph, cache *
 	}
 	return programCheckReport{
 		diagnostics: sortedProgramDiagnostics(diagnostics),
-		summaries:   programModuleSummaries(graph, checks),
+		summaries:   summaries,
 	}, nil
+}
+
+func checkProgramLevel(
+	ctx context.Context,
+	graph moduleGraph,
+	cache *sourceArtifactStore,
+	level []moduleKey,
+	parallelism int,
+	compileLimits CompileLimits,
+	config AnalysisConfig,
+	checked map[moduleKey]moduleSummaryArtifact,
+) (map[moduleKey]CheckResult, error) {
+	results := make([]programCheckArtifact, len(level))
+	workers := boundedProgramWorkers(parallelism, len(level))
+	if workers == 0 {
+		return map[moduleKey]CheckResult{}, nil
+	}
+	indexes := make(chan int)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for index := range indexes {
+				key := level[index]
+				if err := ctx.Err(); err != nil {
+					results[index].err = err
+					continue
+				}
+				node := graph.Nodes[key]
+				moduleSummaries := analysisModuleSummaries(config.ModuleSummaries, node.Requires, checked)
+				artifact, err := cache.checkWithEnvWithLimits(
+					node.Source,
+					node.Identity,
+					compileLimits,
+					typeEnvFromAnalysisConfig(config),
+					moduleSummaryEnvFromMap(moduleSummaries),
+				)
+				results[index] = programCheckArtifact{artifact: artifact, err: err}
+			}
+		}()
+	}
+	if err := sendProgramArtifactJobs(ctx, indexes, len(level)); err != nil {
+		wg.Wait()
+		return nil, err
+	}
+	wg.Wait()
+
+	checks := make(map[moduleKey]CheckResult, len(level))
+	for index, result := range results {
+		key := level[index]
+		if result.err != nil {
+			if result.err == context.Canceled || result.err == context.DeadlineExceeded {
+				return nil, result.err
+			}
+			return nil, fmt.Errorf("load program: check %s: %w", key.String(), result.err)
+		}
+		checks[key] = result.artifact.result
+	}
+	return checks, nil
+}
+
+func analysisModuleSummaries(
+	configured map[string]ModuleSummary,
+	requires []moduleKey,
+	checked map[moduleKey]moduleSummaryArtifact,
+) map[string]ModuleSummary {
+	summaries := cloneModuleSummaryMap(configured)
+	if summaries == nil {
+		summaries = make(map[string]ModuleSummary)
+	}
+	for _, required := range requires {
+		artifact, ok := checked[required]
+		if !ok || !artifact.Trusted {
+			summary := ModuleSummary{SourceName: required.String()}
+			summaries[required.String()] = summary
+			summaries[required.path] = summary
+			continue
+		}
+		summary := cloneModuleSummary(artifact.Summary)
+		summaries[required.String()] = summary
+		summaries[required.path] = summary
+		if summary.SourceName != "" {
+			summaries[summary.SourceName] = summary
+		}
+	}
+	return summaries
+}
+
+func programDependencyLevels(graph moduleGraph) [][]moduleKey {
+	remaining := make(map[moduleKey]int, len(graph.Nodes))
+	dependents := make(map[moduleKey][]moduleKey, len(graph.Nodes))
+	for key, node := range graph.Nodes {
+		seen := make(map[moduleKey]struct{}, len(node.Requires))
+		for _, required := range node.Requires {
+			if _, ok := graph.Nodes[required]; !ok {
+				continue
+			}
+			if _, duplicate := seen[required]; duplicate {
+				continue
+			}
+			seen[required] = struct{}{}
+			remaining[key]++
+			dependents[required] = append(dependents[required], key)
+		}
+	}
+	var ready []moduleKey
+	for key := range graph.Nodes {
+		if remaining[key] == 0 {
+			ready = append(ready, key)
+		}
+	}
+	sort.Slice(ready, func(i, j int) bool { return ready[i].String() < ready[j].String() })
+	levels := make([][]moduleKey, 0)
+	for len(ready) != 0 {
+		level := append([]moduleKey(nil), ready...)
+		levels = append(levels, level)
+		next := make([]moduleKey, 0)
+		for _, key := range level {
+			for _, dependent := range dependents[key] {
+				remaining[dependent]--
+				if remaining[dependent] == 0 {
+					next = append(next, dependent)
+				}
+			}
+		}
+		sort.Slice(next, func(i, j int) bool { return next[i].String() < next[j].String() })
+		ready = next
+	}
+	return levels
 }
 
 func programModuleSummaries(graph moduleGraph, results map[moduleKey]CheckResult) map[moduleKey]moduleSummaryArtifact {

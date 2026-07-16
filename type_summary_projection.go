@@ -4,9 +4,9 @@ import "strings"
 
 func globalFactFromSummary(summary TypeSummary) globalTypeFact {
 	fact := globalTypeFact{typ: simpleTypeFromSummary(summary)}
-	if summary.Kind == TypeSummaryFunction || summary.Kind == TypeSummaryGenericFunction {
+	if summary.Kind == TypeSummaryFunction || summary.Kind == TypeSummaryGenericFunction || summary.Kind == TypeSummaryIntersection {
 		fact.function = functionFactFromSummary(summary)
-		fact.hasFunction = true
+		fact.hasFunction = summary.Kind != TypeSummaryIntersection || len(fact.function.overloads) != 0
 	}
 	if summary.Kind == TypeSummaryTable {
 		fact.table = tableFactFromSummary(summary)
@@ -15,18 +15,34 @@ func globalFactFromSummary(summary TypeSummary) globalTypeFact {
 }
 
 func functionFactFromSummary(summary TypeSummary) functionFact {
+	if summary.Kind == TypeSummaryIntersection {
+		fact := functionFact{}
+		for _, option := range summary.Types {
+			if option.Kind != TypeSummaryFunction && option.Kind != TypeSummaryGenericFunction {
+				continue
+			}
+			fact.overloads = append(fact.overloads, functionFactFromSummary(option))
+		}
+		return fact
+	}
 	params := summary.Params
 	if len(params) == 0 {
 		params = summary.ParamPack.Head
 	}
 	fact := functionFact{
-		typeParams:    append([]string(nil), summary.TypeParams...),
-		params:        make([]simpleType, 0, len(params)),
-		paramGenerics: make([]string, 0, len(params)),
-		returnType:    simpleTypeUnknown,
+		typeParams:      append([]string(nil), summary.TypeParams...),
+		params:          make([]simpleType, 0, len(params)),
+		paramSingletons: make([]string, 0, len(params)),
+		paramGenerics:   make([]string, 0, len(params)),
+		returnType:      simpleTypeUnknown,
 	}
 	for _, param := range params {
 		fact.params = append(fact.params, simpleTypeFromSummary(param))
+		if param.Kind == TypeSummarySingleton {
+			fact.paramSingletons = append(fact.paramSingletons, param.Display)
+		} else {
+			fact.paramSingletons = append(fact.paramSingletons, "")
+		}
 		fact.paramGenerics = append(fact.paramGenerics, genericSummaryName(param, summary.TypeParams))
 	}
 	if summary.ParamPack.Tail != nil {
@@ -38,14 +54,41 @@ func functionFactFromSummary(summary TypeSummary) functionFact {
 	}
 	if summary.Return != nil {
 		fact.returnType = simpleTypeFromSummary(*summary.Return)
+		if summary.Return.Kind == TypeSummaryTable {
+			fact.returnTable = tableFactFromSummary(*summary.Return)
+		}
+		fact.returnPack = returnPackFactFromSummary([]TypeSummary{*summary.Return})
 		fact.returnGeneric = genericSummaryName(*summary.Return, summary.TypeParams)
 		return fact
 	}
 	if len(summary.ReturnPack.Head) != 0 {
 		fact.returnType = simpleTypeFromSummary(summary.ReturnPack.Head[0])
+		if summary.ReturnPack.Head[0].Kind == TypeSummaryTable {
+			fact.returnTable = tableFactFromSummary(summary.ReturnPack.Head[0])
+		}
+		fact.returnPack = returnPackFactFromSummary(summary.ReturnPack.Head)
 		fact.returnGeneric = genericSummaryName(summary.ReturnPack.Head[0], summary.TypeParams)
 	}
 	return fact
+}
+
+func returnPackFactFromSummary(summaries []TypeSummary) returnPackFact {
+	if len(summaries) == 0 {
+		return returnPackFact{}
+	}
+	pack := returnPackFact{
+		known:  true,
+		types:  make([]simpleType, len(summaries)),
+		tables: make([]tableFact, len(summaries)),
+		spans:  make([]sourceRange, len(summaries)),
+	}
+	for i, summary := range summaries {
+		pack.types[i] = simpleTypeFromSummary(summary)
+		if summary.Kind == TypeSummaryTable {
+			pack.tables[i] = tableFactFromSummary(summary)
+		}
+	}
+	return pack
 }
 
 func tableFactFromSummary(summary TypeSummary) tableFact {
@@ -61,7 +104,7 @@ func tableFactFromSummary(summary TypeSummary) tableFact {
 		if property.Access != "" {
 			fact.access[property.Name] = property.Access
 		}
-		if property.Type.Kind == TypeSummaryFunction || property.Type.Kind == TypeSummaryGenericFunction {
+		if property.Type.Kind == TypeSummaryFunction || property.Type.Kind == TypeSummaryGenericFunction || property.Type.Kind == TypeSummaryIntersection {
 			fact.functions[property.Name] = functionFactFromSummary(property.Type)
 		}
 	}
