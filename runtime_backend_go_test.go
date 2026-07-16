@@ -416,6 +416,47 @@ end
 return kernel
 `
 
+const backendProcgenRoomScoringProofSource = `
+local function kernel(seed)
+    local rooms = {
+        {kind = "start", exits = 2, loot = 1, danger = 0, size = 4},
+        {kind = "combat", exits = 3, loot = 3, danger = 7, size = 6},
+        {kind = "treasure", exits = 1, loot = 9, danger = 3, size = 3},
+        {kind = "puzzle", exits = 2, loot = 5, danger = 2, size = 5},
+        {kind = "boss", exits = 1, loot = 12, danger = 12, size = 8},
+    }
+    local total = 0
+    local depth = seed % 3
+    for step = 1, 70 do
+        local bestScore = -999
+        local bestIndex = 1
+        for i, room in rooms do
+            local score = room.loot * 5 + room.exits * 8 + room.size * 2 - room.danger * 3 - depth
+            if room.kind == "combat" and step % 3 == 0 then
+                score = score + 12
+            elseif room.kind == "treasure" and depth > 8 then
+                score = score + 18
+            elseif room.kind == "boss" and depth < 10 then
+                score = score - 30
+            end
+            if score > bestScore then
+                bestScore = score
+                bestIndex = i
+            end
+        end
+        local chosen = rooms[bestIndex]
+        total = total + bestScore + chosen.loot
+        depth = depth + chosen.exits
+        chosen.danger = chosen.danger + step % 4
+        chosen.loot = chosen.loot - 1
+        if chosen.loot < 0 then chosen.loot = step % 3 end
+        if depth > 20 then depth = depth - 11 end
+    end
+    return total + depth
+end
+return kernel
+`
+
 const backendArrayOpsProofSource = `
 local function kernel(seed)
     local values = {}
@@ -2724,6 +2765,189 @@ func TestBackendGoAIUtilityScoringIsIdentityBlindAndRejectsUnprovedRecords(t *te
 	}
 }
 
+func TestBackendGoProcgenRoomScoringDynamicRecordReferenceIsRecognized(t *testing.T) {
+	ir := backendRecordArrayProofIR(t, backendProcgenRoomScoringProofSource)
+	records := analyzeBackendGoRecordTables(ir, analyzeBackendGoStructuralKeys(ir, backendGoNumericOptions{}))
+	if !records.enabled {
+		t.Fatalf("procgen room-scoring records were not recognized: %s", records.rejectReason)
+	}
+	if len(records.maps) != 0 || len(records.arrays) != 1 || len(records.records) != 5 {
+		t.Fatalf(
+			"procgen room-scoring inventory = maps %d arrays %d records %d, want 0/1/5",
+			len(records.maps),
+			len(records.arrays),
+			len(records.records),
+		)
+	}
+	if len(records.arrayGetByPC) != 1 {
+		t.Fatalf("procgen room-scoring dynamic array gets = %d, want 1", len(records.arrayGetByPC))
+	}
+	if len(records.arrayKeyValues) == 0 {
+		t.Fatal("procgen room-scoring guest-visible iterator key was not retained")
+	}
+	if _, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedProcgenRoomScoring",
+		preparedFunctionName: "backendGeneratedProcgenRoomScoringPrepared",
+	}); err != nil {
+		t.Fatalf("emit procgen room-scoring records: %v", err)
+	}
+}
+
+func TestBackendGoProcgenRoomScoringFixtureIsFreshAndCorrect(t *testing.T) {
+	ir := backendRecordArrayProofIR(t, backendProcgenRoomScoringProofSource)
+	generated, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedProcgenRoomScoring",
+		preparedFunctionName: "backendGeneratedProcgenRoomScoringPreparedFixture",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fixture = "runtime_backend_procgen_room_generated_test.go"
+	onDisk, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(generated, onDisk) {
+		t.Fatal("generated procgen room-scoring fixture is stale")
+	}
+	if _, err := goparser.ParseFile(token.NewFileSet(), fixture, generated, goparser.AllErrors); err != nil {
+		t.Fatalf("parse generated procgen room-scoring source: %v", err)
+	}
+	text := string(generated)
+	for _, required := range []string{
+		"var ra0_0 [5]uint32",
+		"var ra0_1 [5]float64",
+		"float64(ri0 + 1)",
+		"math.Trunc(",
+		"int(v",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("generated procgen room-scoring source lacks %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"map[", "make(", "machineTable", "machineString", "opcode", "descriptor",
+		"NEW_TABLE", "SET_FIELD", "GET_FIELD", "GET_INDEX", "PREPARE_ITER", "ARRAY_NEXT_JUMP2",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("generated procgen room-scoring source contains runtime table/dispatch marker %q", forbidden)
+		}
+	}
+
+	root, err := Compile(backendProcgenRoomScoringProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seed := range []float64{-29, -1, 0, 1, 7, 29, 1_000_005} {
+		got, ok := backendGeneratedProcgenRoomScoring(seed)
+		if !ok {
+			t.Fatalf("generated procgen room-scoring fixture exited for seed %v", seed)
+		}
+		oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+			args: []Value{NumberValue(seed)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(oracle) != 1 {
+			t.Fatalf("procgen room-scoring oracle result count = %d, want 1", len(oracle))
+		}
+		oracleNumber, ok := oracle[0].Number()
+		if !ok || oracleNumber != got {
+			t.Fatalf("generated/oracle procgen room-scoring seed %v = %v/%v (%t)", seed, got, oracleNumber, ok)
+		}
+	}
+	if _, ok := backendGeneratedProcgenRoomScoring(math.NaN()); ok {
+		t.Fatal("generated procgen room-scoring accepted an invalid dynamic record index")
+	}
+	if !checkptrInstrumentedTest() {
+		if allocations := testing.AllocsPerRun(1000, func() {
+			_, _ = backendGeneratedProcgenRoomScoring(29)
+		}); allocations != 0 {
+			t.Fatalf("generated procgen room-scoring allocations = %v, want 0", allocations)
+		}
+	}
+}
+
+func TestBackendGoProcgenRoomScoringIsIdentityBlindAndRejectsUnprovedArrays(t *testing.T) {
+	emit := func(source string) []byte {
+		generated, err := emitBackendGoNumericProof(
+			backendRecordArrayProofIR(t, source),
+			backendGoNumericOptions{
+				packageName:          "ember",
+				functionName:         "identityBlindProcgenRoomScoring",
+				preparedFunctionName: "identityBlindProcgenRoomScoringPrepared",
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return generated
+	}
+	renamed := strings.Replace(
+		backendProcgenRoomScoringProofSource,
+		"local function kernel(seed)",
+		"local function opaque(seed)",
+		1,
+	)
+	baseGenerated := emit(backendProcgenRoomScoringProofSource)
+	renamedGenerated := emit(renamed)
+	for _, marker := range []string{
+		"var ra0_0 [5]uint32",
+		"var ra0_1 [5]float64",
+		"float64(ri0 + 1)",
+		"math.Trunc(",
+	} {
+		if strings.Count(string(baseGenerated), marker) != strings.Count(string(renamedGenerated), marker) {
+			t.Fatalf("procgen room-scoring private rename changed structural lowering marker %q", marker)
+		}
+	}
+	if strings.Contains(string(renamedGenerated), "machineTable") ||
+		strings.Contains(string(renamedGenerated), "opcode") {
+		t.Fatal("renamed procgen room-scoring source lost structural lowering")
+	}
+
+	tests := map[string]string{
+		"escaping record array": strings.Replace(
+			backendProcgenRoomScoringProofSource,
+			"return total + depth",
+			"return rooms",
+			1,
+		),
+		"mixed record field tags": strings.Replace(
+			backendProcgenRoomScoringProofSource,
+			"chosen.loot = chosen.loot - 1",
+			"chosen.loot = true",
+			1,
+		),
+		"nonnumeric dynamic index": strings.Replace(
+			backendProcgenRoomScoringProofSource,
+			"bestIndex = i",
+			"bestIndex = room.kind",
+			1,
+		),
+		"sparse record array": strings.Replace(
+			backendProcgenRoomScoringProofSource,
+			"{kind = \"boss\", exits = 1, loot = 12, danger = 12, size = 8},",
+			"[6] = {kind = \"boss\", exits = 1, loot = 12, danger = 12, size = 8},",
+			1,
+		),
+	}
+	for name, source := range tests {
+		t.Run(name, func(t *testing.T) {
+			ir := backendRecordArrayProofIR(t, source)
+			if _, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+				packageName:  "ember",
+				functionName: "rejectUnprovedProcgenRoomScoring",
+			}); err == nil {
+				t.Fatalf("dynamic record-array compiler accepted %s", name)
+			}
+		})
+	}
+}
+
 func TestBackendGoFiniteStringStateFixtureIsFreshAndCorrect(t *testing.T) {
 	generated, err := emitBackendGoNumericProof(backendFiniteStringStateProofIR(t), backendGoNumericOptions{
 		packageName:          "ember",
@@ -4629,6 +4853,20 @@ func BenchmarkBackendGeneratedAIUtilityScoring(b *testing.B) {
 		value, ok := backendGeneratedAIUtilityScoring(float64(iteration & 31))
 		if !ok {
 			b.Fatal("generated AI utility-scoring fixture exited")
+		}
+		result = value
+	}
+	backendGeneratedNumericSink = result
+}
+
+func BenchmarkBackendGeneratedProcgenRoomScoring(b *testing.B) {
+	var result float64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		value, ok := backendGeneratedProcgenRoomScoring(float64(iteration & 31))
+		if !ok {
+			b.Fatal("generated procgen room-scoring fixture exited")
 		}
 		result = value
 	}

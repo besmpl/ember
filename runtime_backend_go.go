@@ -667,6 +667,8 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 				case opGetIndex:
 					if _, ok := plan.records.mapGetByPC[operation.pc]; ok {
 						tags = backendTagNumber
+					} else if _, ok := plan.records.arrayGetByPC[operation.pc]; ok {
+						tags = backendTagNumber
 					}
 				case opPrepareIter:
 					if _, ok := plan.records.arrayPreparePC[operation.pc]; ok {
@@ -771,6 +773,9 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 				default:
 					return backendGoNumericPlan{}, fmt.Errorf("emit backend Go numeric proof: PC %d writes through unsupported opcode %s", value.pc, opcodeName(operation.op))
 				}
+			}
+			if _, ok := plan.records.arrayKeyValues[value.id]; ok {
+				tags |= backendTagNumber
 			}
 			next := plan.tags[valueIndex] | tags
 			if next != plan.tags[valueIndex] {
@@ -1222,12 +1227,19 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opGetIndex:
-		if _, ok := plan.records.mapGetByPC[operation.pc]; !ok {
-			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record-map lookup", operation.pc)
+		_, mapGet := plan.records.mapGetByPC[operation.pc]
+		_, arrayGet := plan.records.arrayGetByPC[operation.pc]
+		if !mapGet && !arrayGet {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record lookup", operation.pc)
+		}
+		if arrayGet {
+			if err := require(operation.c, backendTagNumber); err != nil {
+				return err
+			}
 		}
 		for _, definition := range operation.defs {
 			if plan.tags[definition.value-1] != backendTagNumber {
-				return fmt.Errorf("emit backend Go numeric proof: PC %d record-map result is not scalar", operation.pc)
+				return fmt.Errorf("emit backend Go numeric proof: PC %d record lookup result is not scalar", operation.pc)
 			}
 		}
 		return nil
@@ -1291,8 +1303,12 @@ func verifyBackendGoNumericOperation(
 			for _, definition := range operation.defs {
 				switch definition.register {
 				case operation.a:
-					if !plan.records.iteratorValue(definition.value) {
-						return fmt.Errorf("emit backend Go numeric proof: PC %d materializes record iterator key", operation.pc)
+					if _, observed := plan.records.arrayKeyValues[definition.value]; observed {
+						if plan.tags[definition.value-1] != backendTagNumber {
+							return fmt.Errorf("emit backend Go numeric proof: PC %d loses observed record iterator key", operation.pc)
+						}
+					} else if !plan.records.iteratorValue(definition.value) {
+						return fmt.Errorf("emit backend Go numeric proof: PC %d materializes record iterator control", operation.pc)
 					}
 				case operation.a + 1:
 					if _, ok := plan.records.ref(definition.value); !ok ||
@@ -2077,7 +2093,10 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		if handled, err := emitter.emitRecordMapGet(operation, definition); handled {
 			return false, err
 		}
-		return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record-map lookup", operation.pc)
+		if handled, err := emitter.emitRecordArrayGet(operation, definition); handled {
+			return false, err
+		}
+		return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record lookup", operation.pc)
 	case opGetStringField:
 		if handled, err := emitter.emitRecordGetStringField(operation, definition); handled {
 			return false, err

@@ -100,6 +100,8 @@ type backendGoRecordTablePlan struct {
 	arrayByRoot    map[backendValueID]int
 	arrays         []backendGoRecordArray
 	arraySetByPC   map[int32]backendGoRecordArrayOperation
+	arrayGetByPC   map[int32]int
+	arrayKeyValues map[backendValueID]int
 	arrayPreparePC map[int32]int
 	arrayNextPC    map[int32]int
 	fieldsByPC     map[int32]backendGoRecordFieldOperation
@@ -124,6 +126,8 @@ func analyzeBackendGoRecordTables(
 		mapGetByPC:     make(map[int32]backendGoRecordMapOperation),
 		arrayByRoot:    make(map[backendValueID]int),
 		arraySetByPC:   make(map[int32]backendGoRecordArrayOperation),
+		arrayGetByPC:   make(map[int32]int),
+		arrayKeyValues: make(map[backendValueID]int),
 		arrayPreparePC: make(map[int32]int),
 		arrayNextPC:    make(map[int32]int),
 		fieldsByPC:     make(map[int32]backendGoRecordFieldOperation),
@@ -243,13 +247,21 @@ func analyzeBackendGoRecordTables(
 		switch operation.op {
 		case opGetIndex:
 			table := plan.root(backendOperationUse(operation, operation.b))
-			mapIndex, ok := plan.mapByRoot[table]
-			if !ok || len(operation.defs) != 1 {
+			if len(operation.defs) != 1 {
 				continue
 			}
-			plan.mapGetByPC[operation.pc] = backendGoRecordMapOperation{index: mapIndex}
-			plan.refs[operation.defs[0].value] = backendGoRecordRef{
-				kind: backendGoRecordRefMap, index: mapIndex,
+			if mapIndex, ok := plan.mapByRoot[table]; ok {
+				plan.mapGetByPC[operation.pc] = backendGoRecordMapOperation{index: mapIndex}
+				plan.refs[operation.defs[0].value] = backendGoRecordRef{
+					kind: backendGoRecordRefMap, index: mapIndex,
+				}
+				continue
+			}
+			if arrayIndex, ok := plan.arrayByRoot[table]; ok {
+				plan.arrayGetByPC[operation.pc] = arrayIndex
+				plan.refs[operation.defs[0].value] = backendGoRecordRef{
+					kind: backendGoRecordRefArray, index: arrayIndex,
+				}
 			}
 		case opPrepareIter:
 			table := plan.root(backendOperationUse(operation, operation.a))
@@ -276,6 +288,11 @@ func analyzeBackendGoRecordTables(
 		plan.rejectReason = "reference propagation"
 		return plan
 	}
+	if !plan.propagateArrayKeys(ir) {
+		plan.rejectReason = "array-key propagation"
+		return plan
+	}
+	plan.retainObservedArrayKeys(ir)
 	if !plan.finishShapesAndKeys(ir, keys) {
 		plan.rejectReason = "shapes or keys"
 		return plan
@@ -298,7 +315,7 @@ func analyzeBackendGoRecordTables(
 		}
 	}
 	for valueIndex, iterator := range plan.iteratorValues {
-		if iterator {
+		if _, key := plan.arrayKeyValues[backendValueID(valueIndex+1)]; iterator && !key {
 			plan.scalarValues[valueIndex] = true
 		}
 	}
@@ -379,6 +396,7 @@ func (plan *backendGoRecordTablePlan) analyzeIterators(ir *backendProtoIR) bool 
 				if !plan.iteratorValues[definition.value-1] {
 					return false
 				}
+				plan.arrayKeyValues[definition.value] = arrayIndex
 			case operation.a + 1:
 				plan.refs[definition.value] = backendGoRecordRef{
 					kind: backendGoRecordRefArray, index: arrayIndex,
@@ -386,7 +404,134 @@ func (plan *backendGoRecordTablePlan) analyzeIterators(ir *backendProtoIR) bool 
 			}
 		}
 	}
-	return len(plan.arrayNextPC) != 0
+	return len(plan.arrayNextPC) != 0 || len(plan.arrayGetByPC) != 0
+}
+
+func (plan *backendGoRecordTablePlan) propagateArrayKeys(ir *backendProtoIR) bool {
+	for iteration := 0; iteration <= len(ir.values); iteration++ {
+		changed := false
+		for valueIndex := range ir.values {
+			value := &ir.values[valueIndex]
+			if _, ok := plan.arrayKeyValues[value.id]; ok {
+				continue
+			}
+			var origins []backendValueID
+			switch value.kind {
+			case backendValuePhi:
+				block := &ir.blocks[value.block]
+				origins = block.phis[value.register].inputs
+			case backendValueOperation:
+				if value.pc < 0 || int(value.pc) >= len(ir.ops) ||
+					ir.ops[value.pc].op != opMove {
+					continue
+				}
+				origins = []backendValueID{
+					backendOperationUse(&ir.ops[value.pc], ir.ops[value.pc].b),
+				}
+			default:
+				continue
+			}
+			arrayIndex := -1
+			foundKey := false
+			allKeys := len(origins) != 0
+			for _, origin := range origins {
+				if origin == value.id {
+					continue
+				}
+				candidate, ok := plan.arrayKeyValues[origin]
+				if ok {
+					if foundKey && candidate != arrayIndex {
+						return false
+					}
+					arrayIndex = candidate
+					foundKey = true
+				} else if value.kind != backendValuePhi ||
+					!backendGoRecordRefAliasCandidate(ir, origin, value.register) {
+					allKeys = false
+				}
+			}
+			if foundKey && allKeys {
+				plan.arrayKeyValues[value.id] = arrayIndex
+				changed = true
+			}
+		}
+		if !changed {
+			return true
+		}
+	}
+	return false
+}
+
+func (plan *backendGoRecordTablePlan) retainObservedArrayKeys(ir *backendProtoIR) {
+	adjacent := make(map[backendValueID][]backendValueID, len(plan.arrayKeyValues))
+	observed := make(map[backendValueID]bool, len(plan.arrayKeyValues))
+	queue := make([]backendValueID, 0, len(plan.arrayKeyValues))
+	observe := func(id backendValueID) {
+		if _, ok := plan.arrayKeyValues[id]; !ok || observed[id] {
+			return
+		}
+		observed[id] = true
+		queue = append(queue, id)
+	}
+	connect := func(left, right backendValueID) {
+		if _, ok := plan.arrayKeyValues[left]; !ok {
+			return
+		}
+		if _, ok := plan.arrayKeyValues[right]; !ok {
+			return
+		}
+		adjacent[left] = append(adjacent[left], right)
+		adjacent[right] = append(adjacent[right], left)
+	}
+	for valueIndex := range ir.values {
+		value := &ir.values[valueIndex]
+		switch value.kind {
+		case backendValuePhi:
+			block := &ir.blocks[value.block]
+			for _, input := range block.phis[value.register].inputs {
+				if _, valueIsKey := plan.arrayKeyValues[value.id]; valueIsKey {
+					connect(value.id, input)
+				} else if !plan.iteratorValue(value.id) {
+					observe(input)
+				}
+			}
+		case backendValueOperation:
+			if value.pc >= 0 && int(value.pc) < len(ir.ops) && ir.ops[value.pc].op == opMove {
+				source := backendOperationUse(&ir.ops[value.pc], ir.ops[value.pc].b)
+				if _, valueIsKey := plan.arrayKeyValues[value.id]; valueIsKey {
+					connect(value.id, source)
+				} else if !plan.iteratorValue(value.id) {
+					observe(source)
+				}
+			}
+		}
+	}
+
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op == opMove || operation.op == opArrayNextJump2 {
+			continue
+		}
+		for _, use := range operation.uses {
+			observe(use.value)
+		}
+	}
+	for len(queue) != 0 {
+		id := queue[0]
+		queue = queue[1:]
+		for _, next := range adjacent[id] {
+			if observed[next] {
+				continue
+			}
+			observed[next] = true
+			queue = append(queue, next)
+		}
+	}
+	for id := range plan.arrayKeyValues {
+		if !observed[id] {
+			delete(plan.arrayKeyValues, id)
+		}
+	}
 }
 
 func (plan *backendGoRecordTablePlan) propagateRoots(ir *backendProtoIR) bool {
@@ -1009,7 +1154,10 @@ func (plan *backendGoRecordTablePlan) validateUses(ir *backendProtoIR) bool {
 						return false
 					}
 				case opGetIndex:
-					if _, ok := plan.mapGetByPC[operation.pc]; !ok {
+					if _, mapGet := plan.mapGetByPC[operation.pc]; !mapGet {
+						if _, arrayGet := plan.arrayGetByPC[operation.pc]; arrayGet {
+							break
+						}
 						plan.rejectReason = "unclassified map get at PC " + strconv.Itoa(int(operation.pc))
 						return false
 					}
@@ -1378,6 +1526,21 @@ func (emitter *backendGoNumericEmitter) emitRecordArrayNext(
 	if !ok {
 		return false, false, nil
 	}
+	keyObserved := false
+	for _, current := range operation.defs {
+		if current.register == operation.a {
+			_, keyObserved = emitter.plan.records.arrayKeyValues[current.value]
+			break
+		}
+	}
+	key := invalidBackendValueID
+	var err error
+	if keyObserved {
+		key, err = definition(operation.a)
+		if err != nil {
+			return true, false, err
+		}
+	}
 	value, err := definition(operation.a + 1)
 	if err != nil {
 		return true, false, err
@@ -1387,7 +1550,12 @@ func (emitter *backendGoNumericEmitter) emitRecordArrayNext(
 	fmt.Fprintf(&emitter.body, "\tif ri%d >= %d {\n", arrayIndex, array.length)
 	emitter.emitGoto(int32(block.id), target, 2)
 	emitter.body.WriteString("\t}\n")
-	fmt.Fprintf(&emitter.body, "\tv%d = float64(ri%d + 1)\n", value, arrayIndex)
+	if keyObserved {
+		fmt.Fprintf(&emitter.body, "\tv%d = float64(ri%d + 1)\n", key, arrayIndex)
+		fmt.Fprintf(&emitter.body, "\tv%d = v%d\n", value, key)
+	} else {
+		fmt.Fprintf(&emitter.body, "\tv%d = float64(ri%d + 1)\n", value, arrayIndex)
+	}
 	fmt.Fprintf(&emitter.body, "\tri%d++\n", arrayIndex)
 	nextBlock := int32(-1)
 	if int(block.last) < len(emitter.ir.ops) {
@@ -1489,6 +1657,39 @@ func (emitter *backendGoNumericEmitter) emitRecordMapGet(
 	fmt.Fprintf(&emitter.body, "\t\t\tif mk%d[rx%d] == rk%d {\n", mapOperation.index, operation.pc, operation.pc)
 	fmt.Fprintf(&emitter.body, "\t\t\t\tv%d = float64(rx%d + 1)\n\t\t\t\tbreak\n\t\t\t}\n", destination, operation.pc)
 	emitter.body.WriteString("\t\t}\n\t}\n")
+	return true, nil
+}
+
+func (emitter *backendGoNumericEmitter) emitRecordArrayGet(
+	operation *backendOperationIR,
+	definition func(int32) (backendValueID, error),
+) (bool, error) {
+	arrayIndex, ok := emitter.plan.records.arrayGetByPC[operation.pc]
+	if !ok {
+		return false, nil
+	}
+	destination, err := definition(operation.a)
+	if err != nil {
+		return true, err
+	}
+	key := backendOperationUse(operation, operation.c)
+	if key == invalidBackendValueID || arrayIndex < 0 || arrayIndex >= len(emitter.plan.records.arrays) {
+		return true, fmt.Errorf("emit backend Go numeric proof: PC %d has invalid record-array lookup", operation.pc)
+	}
+	emitter.needsMath = true
+	length := emitter.plan.records.arrays[arrayIndex].length
+	fmt.Fprintf(&emitter.body, "\tv%d = 0\n", destination)
+	fmt.Fprintf(
+		&emitter.body,
+		"\tif v%d >= 1 && v%d <= %d && v%d == math.Trunc(v%d) {\n",
+		key,
+		key,
+		length,
+		key,
+		key,
+	)
+	fmt.Fprintf(&emitter.body, "\t\tv%d = v%d\n", destination, key)
+	emitter.body.WriteString("\t}\n")
 	return true, nil
 }
 

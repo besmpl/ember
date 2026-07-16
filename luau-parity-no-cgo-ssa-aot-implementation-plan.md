@@ -534,6 +534,31 @@ The retained path has moved beyond the original starting state:
   dispatch. This supplies the second representative private compiler shape;
   the formal guest-batch capture contract still remains to be wired and run
   before any public prepared API.
+- The dense record-array slice now preserves guest-visible iterator keys as
+  ordinary numeric SSA values across loop phis and moves while keeping
+  unobserved iterator control compiler-private. Verified integral dynamic
+  indexing returns a scalar record reference; invalid, nonintegral, or
+  out-of-range indices become nil and replay before dereference. A
+  parameterized `procgen_room_scoring` holdout proves selection by a computed
+  iterator index followed by repeated mutation of the selected record.
+  Generated code, prepared owner, generic Machine, and the independent
+  interpreter agree across negative, ordinary, and large seeds; NaN reaches
+  the exact replay exit. Private-function mutation retains the structural
+  lowering, while escaping arrays, mixed field kinds, nonnumeric keys, and
+  sparse record arrays fail closed. Controlled execution remains on generic
+  Machine, owner table/string counts do not change, and direct and prepared
+  paths allocate zero when warmed. The direct kernel has a five-sample median
+  of about 3.929 microseconds (3.765-4.303 microseconds observed), while the
+  prepared owner path has a median of about 4.032 microseconds
+  (3.951-4.397 microseconds observed), versus about 974.1 microseconds through
+  generic Machine (958.3-990.1 microseconds observed). Pinned Luau `-O2 -g0`
+  produced the warmed checksum with a five-sample median of about
+  77.879 microseconds per call (50.300-90.837 microseconds observed), making
+  prepared about `0.052x` Luau. Deterministic generated source is 22,616
+  bytes. Linked ARM64 is 1,024 bytes for the direct kernel and 1,120 bytes for
+  the prepared body; each has only cold bounds/stack-growth helpers and no
+  opcode, descriptor, Machine table, runtime string, interning, or VM
+  dispatch.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
