@@ -6674,6 +6674,46 @@ return getmetatable(object).__index.answer
 	}
 }
 
+func TestCompilerUsesGuardedToStringFastCall(t *testing.T) {
+	proto, err := Compile(`return tostring(42)`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	joined := strings.Join(disassembleProto(proto), "\n")
+	if !strings.Contains(joined, "FAST_CALL") || !strings.Contains(joined, "TOSTRING") {
+		t.Fatalf("compiled tostring is missing guarded TOSTRING fast call:\n%s", joined)
+	}
+	facts := strings.Join(disassembleProtoFacts(proto), "\n")
+	for _, want := range []string{"global tostring", "native TOSTRING"} {
+		if !strings.Contains(facts, want) {
+			t.Fatalf("compiled tostring facts lack %q:\n%s", want, facts)
+		}
+	}
+}
+
+func TestRunGuardedToStringFastCallRespectsReboundGlobal(t *testing.T) {
+	proto, err := Compile(`
+tostring = function(value)
+    return "custom:" .. value
+end
+return tostring(42)
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	joined := strings.Join(disassembleProto(proto), "\n")
+	if !strings.Contains(joined, "FAST_CALL") || !strings.Contains(joined, "TOSTRING") {
+		t.Fatalf("compiled rebound tostring is missing guarded TOSTRING fast call:\n%s", joined)
+	}
+	results, err := Run(proto)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if got, ok := results[0].String(); !ok || got != "custom:42" {
+		t.Fatalf("rebound tostring result = %v (%t), want custom:42", results[0], ok)
+	}
+}
+
 func TestRunGuardedMetatableFastCallsRespectReboundGlobals(t *testing.T) {
 	proto, err := Compile(`
 setmetatable = function()

@@ -4941,6 +4941,17 @@ func (thread *vmThread) runColdFastCall(frame *vmFrame, nativeID nativeFuncID, s
 			}
 			frame.applyInlineResultDestination(destination, [2]Value{value}, 1)
 			return vmFrameResult{}, false, nil
+		case nativeFuncToString:
+			value := NilValue()
+			if len(args) > 0 {
+				value = args[0]
+			}
+			result, err := baseToStringValue(thread.globals, value)
+			if err != nil {
+				return vmFrameResult{}, true, fmt.Errorf("run: call failed: host function failed: %w", err)
+			}
+			frame.applyInlineResultDestination(destination, [2]Value{result}, 1)
+			return vmFrameResult{}, false, nil
 		case nativeFuncSetMetatable:
 			results, err := baseSetMetatable(thread.globals, args)
 			if err != nil {
@@ -4987,6 +4998,8 @@ func fastCallNativeUnchanged(globals *globalEnv, nativeID nativeFuncID) bool {
 		return globals == nil || globals.nativeGlobalUnchanged("rawlen", nativeID)
 	case nativeFuncSelect:
 		return globals == nil || globals.nativeGlobalUnchanged("select", nativeID)
+	case nativeFuncToString:
+		return globals == nil || globals.nativeGlobalUnchanged("tostring", nativeID)
 	case nativeFuncSetMetatable:
 		return globals == nil || globals.nativeGlobalUnchanged("setmetatable", nativeID)
 	case nativeFuncGetMetatable:
@@ -5016,6 +5029,8 @@ func fastCallCallee(globals *globalEnv, nativeID nativeFuncID) (Value, bool, err
 		return rawLenIntrinsicCallee(globals)
 	case nativeFuncSelect:
 		return selectIntrinsicCallee(globals)
+	case nativeFuncToString:
+		return baseGlobalIntrinsicCallee(globals, "tostring", nativeID)
 	case nativeFuncSetMetatable:
 		return baseGlobalIntrinsicCallee(globals, "setmetatable", nativeID)
 	case nativeFuncGetMetatable:

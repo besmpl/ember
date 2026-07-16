@@ -460,6 +460,7 @@ func (builder *machineImageBuilder) prepare(proto *Proto, id int32) (machineProt
 func machineFastCallSupported(nativeID nativeFuncID) bool {
 	switch nativeID {
 	case nativeFuncMathMin, nativeFuncRawLen, nativeFuncSelect,
+		nativeFuncToString,
 		nativeFuncTableInsert, nativeFuncTableRemove,
 		nativeFuncSetMetatable, nativeFuncGetMetatable,
 		nativeFuncCoroutineCreate, nativeFuncCoroutineStatus,

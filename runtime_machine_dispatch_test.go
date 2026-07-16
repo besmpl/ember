@@ -422,6 +422,22 @@ return coroutine.resume()
 	}
 }
 
+func TestMachineOwnerToStringFastCallMatchesVMAndEntersReboundScript(t *testing.T) {
+	for name, source := range map[string]string{
+		"base scalar": `return tostring(42)`,
+		"rebound script": `
+tostring = function(value)
+    return "custom:" .. value
+end
+return tostring(42)
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertMachineOwnerDispatchMatchesVM(t, source, nil)
+		})
+	}
+}
+
 func assertMachineOwnerDispatchMatchesVM(t *testing.T, source string, globals map[string]Value) {
 	t.Helper()
 	proto, err := Compile(source)

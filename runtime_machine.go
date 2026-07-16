@@ -1435,48 +1435,72 @@ func (machine *scalarMachine) callNativeArgumentsStopped(callable slot, argument
 	return machine.applyIntrinsicOutcome(destination, resultCount, outcome)
 }
 
-func (machine *scalarMachine) fastCall(operation machineOperation, returnPC int) error {
+func (machine *scalarMachine) fastCall(operation machineOperation, returnPC int) (int32, int, error) {
 	if machine == nil || machine.persistentOwner == nil {
-		return fmt.Errorf("compact Machine FAST_CALL requires a persistent owner")
+		return 0, 0, fmt.Errorf("compact Machine FAST_CALL requires a persistent owner")
 	}
 	dense, err := machine.persistentOwner.globalIndexStopped(machine.activeModule, operation.globalIndex)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	callee, present, err := machine.persistentOwner.globals.getAt(dense)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	if !present {
-		return fmt.Errorf("run: undefined intrinsic global")
+		return 0, 0, fmt.Errorf("run: undefined intrinsic global")
 	}
 	if operation.guardField != invalidMachineStringID {
 		globalTable, tableErr := machine.tableID(callee)
 		if tableErr != nil {
-			return fmt.Errorf("run: intrinsic guard target is %s, want table", slotValueKind(callee))
+			return 0, 0, fmt.Errorf("run: intrinsic guard target is %s, want table", slotValueKind(callee))
 		}
 		field, translateErr := machine.persistentOwner.translateImageStringIDStopped(machine.activeModule, operation.guardField)
 		if translateErr != nil {
-			return translateErr
+			return 0, 0, translateErr
 		}
 		callee, err = machine.tables.rawGet(globalTable, machineTableStringKey(field))
 		if err != nil {
-			return err
+			return 0, 0, err
 		}
 	}
 	start := machine.activeBase + int(operation.a)
 	argCount := int(operation.c)
 	if start < machine.activeBase || argCount < 0 || start+argCount > len(machine.registers) {
-		return fmt.Errorf("compact Machine FAST_CALL argument window is out of range")
+		return 0, 0, fmt.Errorf("compact Machine FAST_CALL argument window is out of range")
 	}
 	nativeID := nativeFuncID(operation.nativeID)
 	if machineCoroutineNativeID(nativeID) && slotTagOf(callee) == slotTagNativeID {
 		actual, nativeErr := slotNativeIDValue(callee)
 		if nativeErr != nil {
-			return nativeErr
+			return 0, 0, nativeErr
 		}
 		if actual == nativeID {
-			return machine.callCoroutineNativeStopped(nativeID, machine.registers[start:start+argCount], start, int(operation.d), returnPC)
+			err := machine.callCoroutineNativeStopped(
+				nativeID,
+				machine.registers[start:start+argCount],
+				start,
+				int(operation.d),
+				returnPC,
+			)
+			return -1, machine.activeBase, err
+		}
+	}
+	if nativeID == nativeFuncToString && slotTagOf(callee) == slotTagNativeID {
+		actual, nativeErr := slotNativeIDValue(callee)
+		if nativeErr != nil {
+			return 0, 0, nativeErr
+		}
+		if actual == nativeID {
+			value := slotNil
+			if argCount > 0 {
+				value = machine.registers[start]
+			}
+			if err := machine.toString(start, value); err != nil {
+				return 0, 0, fmt.Errorf("run: call failed: host function failed: %w", err)
+			}
+			err := machine.fillFixedCallResults(start, int(operation.d), 1)
+			return -1, machine.activeBase, err
 		}
 	}
 	if nativeID == nativeFuncSetMetatable || nativeID == nativeFuncGetMetatable {
@@ -1491,17 +1515,18 @@ func (machine *scalarMachine) fastCall(operation machineOperation, returnPC int)
 			callee: callee, first: first, second: second, argumentCount: uint32(argCount), nativeID: nativeID,
 		})
 		if err != nil {
-			return fmt.Errorf("run: call failed: host function failed: %w", err)
+			return 0, 0, fmt.Errorf("run: call failed: host function failed: %w", err)
 		}
 		if outcome.matched {
-			return machine.applyIntrinsicOutcome(start, int(operation.d), machineIntrinsicOutcome{
+			err := machine.applyIntrinsicOutcome(start, int(operation.d), machineIntrinsicOutcome{
 				value: outcome.value, resultCount: outcome.resultCount, matched: true,
 			})
+			return -1, machine.activeBase, err
 		}
-		if slotTagOf(callee) != slotTagHostCallable {
-			return fmt.Errorf("run: call failed: intrinsic guard replacement is %s, want function", slotValueKind(callee))
-		}
-		return machine.callFastHostStopped(callee, machine.registers[start:start+argCount], start, int(operation.d))
+		return machine.enterExplicitCall(machineCallRequest{
+			callable: callee, arguments: machine.registers[start : start+argCount],
+			destination: start, resultCount: int(operation.d), returnPC: returnPC,
+		})
 	}
 	request := machineIntrinsicRequest{
 		nativeID:          nativeID,
@@ -1514,39 +1539,39 @@ func (machine *scalarMachine) fastCall(operation machineOperation, returnPC int)
 	}
 	outcome, err := runMachineGuardedIntrinsicStopped(machine, request)
 	if err != nil {
-		return fmt.Errorf("run: call failed: host function failed: %w", err)
+		return 0, 0, fmt.Errorf("run: call failed: host function failed: %w", err)
 	}
 	if outcome.matched {
 		if outcome.additionalGuestCharge != 0 && machine.window.controller != nil {
 			if err := machine.window.controller.chargeInstructions(uint64(outcome.additionalGuestCharge)); err != nil {
-				return err
+				return 0, 0, err
 			}
 		}
-		return machine.applyIntrinsicOutcome(start, int(operation.d), outcome)
-	}
-	if slotTagOf(callee) != slotTagHostCallable {
-		return fmt.Errorf("run: call failed: intrinsic guard replacement is %s, want function", slotValueKind(callee))
+		err := machine.applyIntrinsicOutcome(start, int(operation.d), outcome)
+		return -1, machine.activeBase, err
 	}
 	args := machine.registers[start : start+argCount]
 	if nativeID == nativeFuncSelect {
-		machine.callScratch = machine.callScratch[:0]
 		hashID, internErr := machine.strings.internStringStopped("#")
 		if internErr != nil {
-			return internErr
+			return 0, 0, internErr
 		}
 		hashSlot, internErr := slotPackHandle(slotTagString, uint32(hashID), 1)
 		if internErr != nil {
-			return internErr
+			return 0, 0, internErr
 		}
-		machine.callScratch = append(machine.callScratch, hashSlot)
 		varargStart := machine.activeVarargStart
 		if varargStart < 0 || varargStart+machine.activeVarargCount > len(machine.registers) {
-			return fmt.Errorf("compact Machine select vararg window is unavailable")
+			return 0, 0, fmt.Errorf("compact Machine select vararg window is unavailable")
 		}
-		machine.callScratch = append(machine.callScratch, machine.registers[varargStart:varargStart+machine.activeVarargCount]...)
-		args = machine.callScratch
+		args = make([]slot, 1+machine.activeVarargCount)
+		args[0] = hashSlot
+		copy(args[1:], machine.registers[varargStart:varargStart+machine.activeVarargCount])
 	}
-	return machine.callFastHostStopped(callee, args, start, int(operation.d))
+	return machine.enterExplicitCall(machineCallRequest{
+		callable: callee, arguments: args,
+		destination: start, resultCount: int(operation.d), returnPC: returnPC,
+	})
 }
 
 func (machine *scalarMachine) applyIntrinsicOutcome(destination, requested int, outcome machineIntrinsicOutcome) error {

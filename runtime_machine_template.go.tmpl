@@ -280,9 +280,18 @@ func runScalarMachineLoop(machine *scalarMachine) (int, error) {
 			continue
 
 		case opFastCall:
-			if err := machine.fastCall(operation, next); err != nil {
+			targetID, targetBase, err := machine.fastCall(operation, next)
+			if err != nil {
 				return pc, err
 			}
+			if targetID < 0 {
+				pc = next
+				continue
+			}
+			protoID = targetID
+			base = targetBase
+			pc = 0
+			continue
 
 		case opCall, opCallOne, opCallLocalOne, opCallUpvalueOne:
 			targetID, targetBase, err := machine.enterCall(operation, next)

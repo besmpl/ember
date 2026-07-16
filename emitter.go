@@ -3431,6 +3431,8 @@ func (c *compiler) baseGlobalIntrinsicCall(lowered callPlan) (nativeFuncID, bool
 		return nativeFuncUnknown, false
 	}
 	switch name {
+	case "tostring":
+		return nativeFuncToString, true
 	case "setmetatable":
 		return nativeFuncSetMetatable, true
 	case "getmetatable":

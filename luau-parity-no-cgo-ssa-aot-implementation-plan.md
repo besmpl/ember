@@ -382,6 +382,14 @@ The retained path has moved beyond the original starting state:
   17,235 bytes; linked ARM64 is 656 bytes for the direct kernel, 704 bytes for
   the prepared body, and 128 bytes for the wrapper. The direct kernel has no
   call instruction or runtime dispatch.
+- The generated-key prerequisite promotes unbound `tostring` calls to guarded
+  `FAST_CALL` operations. The VM retains its allocation-free scalar and
+  `__tostring` path, while a Machine guard miss now enters the ordinary
+  callable path rather than accepting only a host replacement; rebound script
+  functions therefore preserve the same continuation and result semantics as
+  an ordinary call. Prepared code can now guard the exact `tostring` identity
+  before specializing numeric string construction without weakening canonical
+  fallback behavior.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final

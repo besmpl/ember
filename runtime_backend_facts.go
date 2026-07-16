@@ -159,6 +159,8 @@ func (ir *backendProtoIR) backendOperationValueFacts(value *backendValueIR) back
 		switch nativeFuncID(operation.nativeID) {
 		case nativeFuncMathMin, nativeFuncRawLen:
 			return backendValueFacts{tags: backendTagNumber}
+		case nativeFuncToString:
+			return backendValueFacts{tags: backendTagString, object: backendObjectString}
 		default:
 			return backendValueFacts{tags: backendTagAny, targetUnknown: true}
 		}
