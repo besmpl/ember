@@ -4,7 +4,8 @@ internal/architectureproof/capture_test.go	sampleLoad	runner-fingerprint	Read co
 internal/architectureproof/capture_test.go	sampleExternalCPU	runner-fingerprint	Read controlled runner CPU measurements for architecture captures.
 runtime_parity_test.go	parityCommandOutput	runner-fingerprint	Run pinned parity and fingerprint helper commands.
 runtime_parity_test.go	sampleParitySystem	runner-fingerprint	Read controlled runner load and CPU measurements.
-runtime_parity_test.go	measureParityLuau	pinned-luau	Execute the digest-validated Luau oracle.
+runtime_parity_test.go	measureParityLuauGuestBatch	pinned-luau	Execute the digest-validated Luau guest-batch oracle.
+runtime_parity_test.go	measureParityLuauPublicCall	pinned-luau	Execute the digest-validated Luau public-call oracle.
 runtime_execution_test.go	TestRuntimeExecutionEngineSelection	test-helper	Verify process-scoped runtime engine selection and lifetime pinning.
 top10_luau_benchmark_test.go	runTop10LuauScript	pinned-luau	Execute the benchmark's pinned Luau oracle.
 vm_dispatch_structure_test.go	TestGeneratedDispatchMatchesSemanticSource	generator-check	Run the checked-in VM dispatch generator validation.

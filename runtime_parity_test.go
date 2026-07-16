@@ -26,10 +26,13 @@ const (
 	parityLuauVersion = "0.728"
 	parityPlatform    = "Darwin 24.6.0 arm64"
 	parityCPU         = "Apple M1"
-	parityRawHeader   = "schema_version\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\tengine\trepeat\tacquisition_order\tn_calls\telapsed_ns\tresult_sha256\tcallable_scope\tenvironment_sha256\tcontaminated"
-	paritySlopeHeader = "schema_version\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\tengine\trepeat\tslope_ns_per_call\tintercept_ns\tresult_sha256\tcallable_scope\tenvironment_sha256"
+	parityRawHeader   = "schema_version\tcapture_phase\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\texecution_mode\tengine\trepeat\tacquisition_order\tn_guest_calls\truntime_seed\telapsed_ns\tresult_integer\tworkload_sha256\tprogram_sha256\tenvironment_sha256\tcontaminated"
+	paritySlopeHeader = "schema_version\tcapture_phase\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\texecution_mode\tengine\trepeat\tslope_ns_per_guest_call\tintercept_ns\tresult_set_sha256\tworkload_sha256\tprogram_sha256\tenvironment_sha256"
 	parityRawDefault  = "tmp/runtime-parity/raw.tsv"
 	parityRepeatCount = 3
+	parityCaptureSeed = int64(0x454d42455206)
+	paritySeedVersion = "guest-seed-v1"
+	paritySeedHash    = "391b333d0af12e8757b34878f0f601c550c1dce902e7077bab3a532889c375fa"
 
 	// The acceptance host has eight logical CPUs. This caps external activity
 	// at three cores. The live CPU sample excludes this measuring process.
@@ -42,6 +45,27 @@ const (
 var parityIterations = [...]int{1, 10, 100, 1000}
 
 const parityPairCount = 9
+
+type parityCaptureContract struct {
+	Phase         string
+	Lifecycle     string
+	CallableScope string
+	GuestBatch    bool
+}
+
+func parityContractForPhase(phase string) (parityCaptureContract, error) {
+	switch phase {
+	case "full", "speed2x", "prepared-parity1x":
+		return parityCaptureContract{
+			Phase:         phase,
+			Lifecycle:     "guest_batch",
+			CallableScope: "guest_batch_v1",
+			GuestBatch:    true,
+		}, nil
+	default:
+		return parityCaptureContract{}, fmt.Errorf("unknown parity capture phase %q", phase)
+	}
+}
 
 type parityFit struct {
 	Entry float64
@@ -218,20 +242,45 @@ func parityScalarString(values []ember.Value) (string, error) {
 	return "", fmt.Errorf("Ember returned %s, want scalar benchmark result", value.Kind())
 }
 
-func parityCaseFunction(source string) string {
-	return fmt.Sprintf("local __case = function()\n%s\nend\n", source)
+func parityExactIntegerResult(values []ember.Value) (string, error) {
+	result, err := parityScalarString(values)
+	if err != nil {
+		return "", err
+	}
+	return parityCanonicalIntegerString(result)
 }
 
-func parityCaseLoop(iterations int) string {
-	return fmt.Sprintf("for __i = 1, %d do\n    __result = __case()\nend\n", iterations)
+func parityValidateIntegerString(result string) error {
+	_, err := parityCanonicalIntegerString(result)
+	return err
+}
+
+func parityCanonicalIntegerString(result string) (string, error) {
+	value, err := strconv.ParseFloat(result, 64)
+	if err != nil || !finiteParityFloat(value) || math.Trunc(value) != value {
+		return "", fmt.Errorf("guest result %q is not an exact integer", result)
+	}
+	const maxExactInteger = float64(1 << 53)
+	if value <= -maxExactInteger || value >= maxExactInteger {
+		return "", fmt.Errorf("guest result %q exceeds exact Float64 integer range", result)
+	}
+	return strconv.FormatInt(int64(value), 10), nil
 }
 
 func parityCaseSource(source string, iterations int) string {
-	return runtimeParityTimerFixture(source, iterations, false)
+	return runtimeParityPublicCallFixture(source, iterations, false)
 }
 
 func parityLuauCaseSource(source string, iterations int) string {
-	return runtimeParityTimerFixture(source, iterations, true)
+	return runtimeParityPublicCallFixture(source, iterations, true)
+}
+
+func parityGuestBatchSource(source string, variant parityFixtureVariant) (string, error) {
+	return runtimeParityGuestBatchFixture(source, variant, false)
+}
+
+func parityGuestBatchLuauSource(source string, variant parityFixtureVariant) (string, error) {
+	return runtimeParityGuestBatchFixture(source, variant, true)
 }
 
 func parityCaseSelection(spec string) ([]top10LuauCase, error) {
@@ -510,6 +559,7 @@ type parityPointMeasurement struct {
 	engineIndex int
 	engine      string
 	elapsed     float64
+	result      string
 }
 
 func acquireCleanParityPoint(
@@ -556,17 +606,17 @@ func acquireCleanParityPoint(
 	return nil, fmt.Errorf("parity point %s sample contaminated after %d attempts: load=%.6f cpu=%.6f", stage, maxAttempts, last.Load, last.CPU)
 }
 
-type parityModuleLoader map[string]string
+type paritySourceLoader map[string]ember.Source
 
-func (loader parityModuleLoader) LoadModule(ctx context.Context, id ember.ModuleID) (ember.Source, error) {
+func (loader paritySourceLoader) LoadModule(ctx context.Context, id ember.ModuleID) (ember.Source, error) {
 	if err := ctx.Err(); err != nil {
 		return ember.Source{}, err
 	}
-	text, ok := loader[id.String()]
+	source, ok := loader[id.String()]
 	if !ok {
 		return ember.Source{}, fmt.Errorf("parity runner: missing module %s", id)
 	}
-	return ember.Source{Name: id.String(), Text: text}, nil
+	return source, nil
 }
 
 type parityPreparedCallable struct {
@@ -575,9 +625,20 @@ type parityPreparedCallable struct {
 }
 
 func prepareParityEmberRuntime(source string) (*parityPreparedCallable, error) {
-	entry := ember.LogicalModule("parity/case")
-	program, _, err := ember.LoadProgram(context.Background(), parityModuleLoader{entry.String(): source}, ember.ProgramOptions{
-		Entrypoints: []ember.Entrypoint{{Name: "parity", Module: entry}},
+	return prepareParityEmberRuntimeNamed(source, "parity/case")
+}
+
+func prepareParityEmberRuntimeNamed(source, moduleName string) (*parityPreparedCallable, error) {
+	return prepareParityEmberRuntimeIdentity(source, moduleName, moduleName, "parity")
+}
+
+func prepareParityEmberRuntimeIdentity(source, moduleName, sourceName, entrypointName string) (*parityPreparedCallable, error) {
+	entry := ember.LogicalModule(moduleName)
+	program, _, err := ember.LoadProgram(context.Background(), paritySourceLoader{entry.String(): {
+		Name: sourceName,
+		Text: source,
+	}}, ember.ProgramOptions{
+		Entrypoints: []ember.Entrypoint{{Name: entrypointName, Module: entry}},
 		Parallelism: 1,
 	})
 	if err != nil {
@@ -612,6 +673,22 @@ func (callable *parityPreparedCallable) close() error {
 }
 
 type parityTimedCall func() ([]ember.Value, error)
+type parityTimedBatch func(int, int64) ([]ember.Value, error)
+
+func measureParityTimedCall(call parityTimedCall, now func() time.Time, since func(time.Time) time.Duration) (time.Duration, []ember.Value, error) {
+	start := now()
+	values, err := call()
+	if err != nil {
+		return 0, nil, err
+	}
+	return since(start), values, nil
+}
+
+func measureParityTimedBatch(iterations int, seed int64, call parityTimedBatch, now func() time.Time, since func(time.Time) time.Duration) (time.Duration, []ember.Value, error) {
+	return measureParityTimedCall(func() ([]ember.Value, error) {
+		return call(iterations, seed)
+	}, now, since)
+}
 
 func measureParityTimedCalls(iterations int, call parityTimedCall, now func() time.Time, since func(time.Time) time.Duration) (time.Duration, []ember.Value, error) {
 	start := now()
@@ -626,7 +703,7 @@ func measureParityTimedCalls(iterations int, call parityTimedCall, now func() ti
 	return since(start), values, nil
 }
 
-func measureParityEmber(callable *parityPreparedCallable, iterations int) (float64, string, error) {
+func measureParityEmberPublicCall(callable *parityPreparedCallable, iterations int) (float64, string, error) {
 	elapsed, values, err := measureParityTimedCalls(iterations, func() ([]ember.Value, error) {
 		return callable.callback.Call(context.Background())
 	}, time.Now, time.Since)
@@ -640,12 +717,57 @@ func measureParityEmber(callable *parityPreparedCallable, iterations int) (float
 	return float64(elapsed.Nanoseconds()), result, nil
 }
 
-func measureParityLuau(luauPath, scriptPath string) (float64, string, error) {
-	output, err := exec.Command(luauPath, scriptPath).Output()
+func measureParityEmberGuestBatch(callable *parityPreparedCallable, iterations int, seed int64) (float64, string, error) {
+	elapsed, values, err := measureParityTimedBatch(iterations, seed, func(iterations int, seed int64) ([]ember.Value, error) {
+		return callable.callback.Call(
+			context.Background(),
+			ember.NumberValue(float64(iterations)),
+			ember.NumberValue(float64(seed)),
+		)
+	}, time.Now, time.Since)
+	if err != nil {
+		return float64(elapsed.Nanoseconds()), "", err
+	}
+	result, err := parityExactIntegerResult(values)
+	if err != nil {
+		return float64(elapsed.Nanoseconds()), "", err
+	}
+	return float64(elapsed.Nanoseconds()), result, nil
+}
+
+func measureParityLuauGuestBatch(luauPath, scriptPath string, iterations int, seed int64) (float64, string, error) {
+	commandArgs := []string{scriptPath, "-a"}
+	commandArgs = append(commandArgs, strconv.Itoa(iterations), strconv.FormatInt(seed, 10))
+	output, err := exec.Command(luauPath, commandArgs...).CombinedOutput()
+	if err != nil {
+		return 0, "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+	}
+	elapsed, result, err := parseParityLuauOutput(output)
+	if err != nil {
+		return 0, "", err
+	}
+	result, err = parityCanonicalIntegerString(result)
+	return elapsed, result, err
+}
+
+func measureParityLuauPublicCall(luauPath, scriptPath string, iterations int) (float64, string, error) {
+	output, err := exec.Command(luauPath, scriptPath, "-a", strconv.Itoa(iterations)).Output()
 	if err != nil {
 		return 0, "", err
 	}
 	return parseParityLuauOutput(output)
+}
+
+func parityResultSetSHA256(results map[int]string) (string, error) {
+	var builder strings.Builder
+	for _, n := range parityIterations {
+		result, ok := results[n]
+		if !ok || result == "" {
+			return "", fmt.Errorf("result set: missing N=%d", n)
+		}
+		fmt.Fprintf(&builder, "%d=%s\n", n, result)
+	}
+	return parityStringSHA256(builder.String()), nil
 }
 
 func parseParityLuauOutput(output []byte) (float64, string, error) {
@@ -665,6 +787,11 @@ func parseParityLuauOutput(output []byte) (float64, string, error) {
 }
 
 func TestRuntimeParityHarness(t *testing.T) {
+	const wantRawHeader = "schema_version\tcapture_phase\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\texecution_mode\tengine\trepeat\tacquisition_order\tn_guest_calls\truntime_seed\telapsed_ns\tresult_integer\tworkload_sha256\tprogram_sha256\tenvironment_sha256\tcontaminated"
+	const wantSlopeHeader = "schema_version\tcapture_phase\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\texecution_mode\tengine\trepeat\tslope_ns_per_guest_call\tintercept_ns\tresult_set_sha256\tworkload_sha256\tprogram_sha256\tenvironment_sha256"
+	if parityRawHeader != wantRawHeader || paritySlopeHeader != wantSlopeHeader {
+		t.Fatal("runtime parity schema v2 changed")
+	}
 	if !reflectDeepEqualInts(parityIterations[:], []int{1, 10, 100, 1000}) {
 		t.Fatalf("iteration points changed: %v", parityIterations)
 	}
@@ -872,7 +999,7 @@ func TestRuntimeParityHarness(t *testing.T) {
 	}
 
 	if source := parityCaseSource("return 7", 10); !strings.Contains(source, "return 7") || strings.Contains(source, "for __i") || !strings.Contains(source, "__parity_capture(__case)") {
-		t.Fatalf("Ember parity wrapper changed: %q", source)
+		t.Fatalf("Ember public-call wrapper changed: %q", source)
 	}
 	luauSource := parityLuauCaseSource("return 7", 1000)
 	warm := strings.Index(luauSource, "local __warm = __case()")
@@ -882,7 +1009,24 @@ func TestRuntimeParityHarness(t *testing.T) {
 	printElapsed := strings.Index(luauSource, "print(__elapsed_ns)")
 	printResult := strings.Index(luauSource, "print(__sink)")
 	if !(warm >= 0 && warm < start && start < timedCall && timedCall < stop && stop < printElapsed && printElapsed < printResult) || strings.Contains(luauSource[start:stop], "print(") {
-		t.Fatalf("Luau timer/output placement changed: %q", luauSource)
+		t.Fatalf("Luau public-call timer/output placement changed: %q", luauSource)
+	}
+	guestSource, err := parityGuestBatchSource("local x = 7\nreturn x + 1", parityDefaultFixtureVariant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(guestSource, "__parity_capture(__batch)") != 1 ||
+		!strings.Contains(guestSource, "(7 + (__seed % 3))") ||
+		strings.Contains(guestSource, "(1 + (__seed % 3))") {
+		t.Fatalf("Ember guest-batch wrapper changed: %q", guestSource)
+	}
+	guestLuauSource, err := parityGuestBatchLuauSource("local x = 7\nreturn x + 1", parityDefaultFixtureVariant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	region, err := timerRegion(guestLuauSource)
+	if err != nil || region != "\nlocal __sink = __batch(__n, __seed)\n" {
+		t.Fatalf("Luau guest-batch timer changed: %q, %v", region, err)
 	}
 	elapsed, result, err := parseParityLuauOutput([]byte("1250.5\n1595\n"))
 	if err != nil || elapsed != 1250.5 || result != "1595" {
@@ -921,13 +1065,29 @@ func TestRuntimeParityLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	contract, err := parityContractForPhase(os.Getenv("RUNTIME_PARITY_PHASE"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	role := os.Getenv("RUNTIME_PARITY_CAPTURE_ROLE")
 	pair := os.Getenv("RUNTIME_PARITY_CAPTURE_PAIR")
 	captureID := os.Getenv("RUNTIME_PARITY_CAPTURE_ID")
 	sourceCommit := os.Getenv("RUNTIME_PARITY_SOURCE_COMMIT")
 	environmentHash := os.Getenv("RUNTIME_PARITY_ENVIRONMENT_SHA256")
-	if (role != "frozen-current" && role != "candidate") || (pair != "a" && pair != "b") || captureID == "" || !parityHexDigest(sourceCommit, 40, 64) || !parityHexDigest(environmentHash, 64) {
+	executionMode := os.Getenv("RUNTIME_PARITY_EXECUTION_MODE")
+	if (role != "frozen-current" && role != "candidate") ||
+		(pair != "a" && pair != "b") ||
+		(executionMode != "vm" && executionMode != "machine" && executionMode != "prepared") ||
+		captureID == "" ||
+		!parityHexDigest(sourceCommit, 40, 64) ||
+		!parityHexDigest(environmentHash, 64) {
 		t.Fatal("runtime parity capture metadata is incomplete or invalid")
+	}
+	if contract.Phase == "prepared-parity1x" && executionMode != "prepared" {
+		t.Fatal("prepared-parity1x requires prepared execution")
+	}
+	if contract.Phase != "prepared-parity1x" && executionMode == "prepared" {
+		t.Fatal("dynamic parity phase cannot emit prepared evidence")
 	}
 	rawPath, err := parityRawPath(os.Getenv("RUNTIME_PARITY_RAW"))
 	if err != nil {
@@ -969,38 +1129,59 @@ func TestRuntimeParityLive(t *testing.T) {
 
 	for _, entry := range selected {
 		tc := entry.Case
-		owners := make(map[int]*parityPreparedCallable, len(parityIterations))
-		scripts := make(map[int]string, len(parityIterations))
-		for _, n := range parityIterations {
-			owner, err := prepareParityEmberRuntime(parityCaseSource(tc.source, n))
-			if err != nil {
-				t.Fatalf("%s prepare Ember runtime N=%d: %v", tc.name, n, err)
-			}
-			owners[n] = owner
-			warm, err := owner.callback.Call(context.Background())
-			if err != nil {
-				t.Fatalf("%s warm Ember callable N=%d: %v", tc.name, n, err)
-			}
-			warmResult, err := parityScalarString(warm)
-			if err != nil || warmResult != tc.want {
-				t.Fatalf("%s warm Ember callable N=%d result=%q error=%v, want %q", tc.name, n, warmResult, err, tc.want)
-			}
-			scriptPath := filepath.Join(filepath.Dir(rawPath), "scripts", entry.Corpus+"-"+tc.name+"-"+strconv.Itoa(n)+".luau")
-			if err := os.MkdirAll(filepath.Dir(scriptPath), 0o700); err != nil {
-				t.Fatalf("%s create script directory: %v", tc.name, err)
-			}
-			if err := os.WriteFile(scriptPath, []byte(parityLuauCaseSource(tc.source, n)), 0o700); err != nil {
-				t.Fatalf("%s write Luau script: %v", tc.name, err)
-			}
-			scripts[n] = scriptPath
+		programSource, seededSource, err := runtimeParityGuestBatchProgram(tc.source, parityDefaultFixtureVariant)
+		if err != nil {
+			t.Fatalf("%s seed guest workload: %v", tc.name, err)
+		}
+		emberSource, err := parityGuestBatchSource(tc.source, parityDefaultFixtureVariant)
+		if err != nil {
+			t.Fatalf("%s create Ember guest workload: %v", tc.name, err)
+		}
+		luauSource, err := parityGuestBatchLuauSource(tc.source, parityDefaultFixtureVariant)
+		if err != nil {
+			t.Fatalf("%s create Luau guest workload: %v", tc.name, err)
+		}
+		owner, err := prepareParityEmberRuntimeNamed(emberSource, "parity/"+entry.Corpus+"/"+entry.Name)
+		if err != nil {
+			t.Fatalf("%s prepare Ember guest runtime: %v", tc.name, err)
+		}
+		warm, err := owner.callback.Call(
+			context.Background(),
+			ember.NumberValue(1),
+			ember.NumberValue(float64(parityCaptureSeed)),
+		)
+		if err != nil {
+			_ = owner.close()
+			t.Fatalf("%s warm Ember guest batch: %v", tc.name, err)
+		}
+		if _, err := parityExactIntegerResult(warm); err != nil {
+			_ = owner.close()
+			t.Fatalf("%s warm Ember guest batch: %v", tc.name, err)
+		}
+		scriptPath := filepath.Join(filepath.Dir(rawPath), "scripts", entry.Corpus+"-"+tc.name+".luau")
+		if err := os.MkdirAll(filepath.Dir(scriptPath), 0o700); err != nil {
+			_ = owner.close()
+			t.Fatalf("%s create script directory: %v", tc.name, err)
+		}
+		if err := os.WriteFile(scriptPath, []byte(luauSource), 0o700); err != nil {
+			_ = owner.close()
+			t.Fatalf("%s write Luau script: %v", tc.name, err)
 		}
 		timings := map[string]map[int]map[int]float64{"ember": {}, "luau": {}}
-		resultHash := parityStringSHA256(tc.want)
+		results := map[string]map[int]map[int]string{"ember": {}, "luau": {}}
+		workloadHash := parityStringSHA256(seededSource)
+		programHash := parityStringSHA256(programSource)
+		pairIndex := 1
+		if pair == "b" {
+			pairIndex = 2
+		}
 		for repeat := 1; repeat <= parityRepeatCount; repeat++ {
 			timings["ember"][repeat] = make(map[int]float64, len(parityIterations))
 			timings["luau"][repeat] = make(map[int]float64, len(parityIterations))
+			results["ember"][repeat] = make(map[int]string, len(parityIterations))
+			results["luau"][repeat] = make(map[int]string, len(parityIterations))
 			for iterationIndex, n := range parityIterations {
-				order := parityEngineOrderFor(1, repeat, iterationIndex)
+				order := parityEngineOrderFor(pairIndex, repeat, iterationIndex)
 				point, err := acquireCleanParityPoint(parityPointAttemptLimit, sampleParitySystem, func() ([]parityPointMeasurement, error) {
 					measurements := make([]parityPointMeasurement, 0, len(order))
 					for engineIndex, engine := range order {
@@ -1009,9 +1190,9 @@ func TestRuntimeParityLive(t *testing.T) {
 						var measureErr error
 						switch engine {
 						case "ember":
-							elapsed, result, measureErr = measureParityEmber(owners[n], n)
+							elapsed, result, measureErr = measureParityEmberGuestBatch(owner, n, parityCaptureSeed)
 						case "luau":
-							elapsed, result, measureErr = measureParityLuau(environment.LuauPath, scripts[n])
+							elapsed, result, measureErr = measureParityLuauGuestBatch(environment.LuauPath, scriptPath, n, parityCaptureSeed)
 						default:
 							return nil, fmt.Errorf("unknown parity engine %q", engine)
 						}
@@ -1021,14 +1202,18 @@ func TestRuntimeParityLive(t *testing.T) {
 						if elapsed <= 0 || !finiteParityFloat(elapsed) {
 							return nil, fmt.Errorf("engine=%s: invalid timing %v", engine, elapsed)
 						}
-						if result != tc.want {
-							return nil, fmt.Errorf("engine=%s: result %q, want %q", engine, result, tc.want)
+						if err := parityValidateIntegerString(result); err != nil {
+							return nil, fmt.Errorf("engine=%s: %w", engine, err)
 						}
 						measurements = append(measurements, parityPointMeasurement{
 							engineIndex: engineIndex,
 							engine:      engine,
 							elapsed:     elapsed,
+							result:      result,
 						})
+					}
+					if len(measurements) != 2 || measurements[0].result != measurements[1].result {
+						return nil, fmt.Errorf("guest result mismatch: %s=%q %s=%q", measurements[0].engine, measurements[0].result, measurements[1].engine, measurements[1].result)
 					}
 					return measurements, nil
 				}, func() {
@@ -1042,8 +1227,28 @@ func TestRuntimeParityLive(t *testing.T) {
 					engine := measurement.engine
 					elapsed := measurement.elapsed
 					timings[engine][repeat][n] = elapsed
+					results[engine][repeat][n] = measurement.result
 					acquisitionOrder := (repeat-1)*len(parityIterations)*2 + parityOrderForRepeat(repeat, measurement.engineIndex, iterationIndex)
-					pointRows = append(pointRows, fmt.Sprintf("1\t%s\t%s\t%s\t%s\t%s\t%s\twarm_call\t%s\t%d\t%d\t%d\t%.17g\t%s\twarmed_callable_v1\t%s\t", role, pair, captureID, sourceCommit, entry.Corpus, entry.Name, engine, repeat, acquisitionOrder, n, elapsed, resultHash, environmentHash))
+					pointRows = append(pointRows, fmt.Sprintf("2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tguest_batch\t%s\t%s\t%d\t%d\t%d\t%d\t%.17g\t%s\t%s\t%s\t%s\t",
+						contract.Phase,
+						role,
+						pair,
+						captureID,
+						sourceCommit,
+						entry.Corpus,
+						entry.Name,
+						executionMode,
+						engine,
+						repeat,
+						acquisitionOrder,
+						n,
+						parityCaptureSeed,
+						elapsed,
+						measurement.result,
+						workloadHash,
+						programHash,
+						environmentHash,
+					))
 				}
 				for _, row := range pointRows {
 					writeRaw("%s0\n", row)
@@ -1056,13 +1261,32 @@ func TestRuntimeParityLive(t *testing.T) {
 				if err != nil {
 					t.Fatalf("%s %s repeat=%d fit: %v", tc.name, engine, repeat, err)
 				}
-				writeSlope("1\t%s\t%s\t%s\t%s\t%s\t%s\twarm_call\t%s\t%d\t%.17g\t%.17g\t%s\twarmed_callable_v1\t%s\n", role, pair, captureID, sourceCommit, entry.Corpus, entry.Name, engine, repeat, fit.Inner, fit.Entry, resultHash, environmentHash)
+				resultSetHash, err := parityResultSetSHA256(results[engine][repeat])
+				if err != nil {
+					t.Fatalf("%s %s repeat=%d result set: %v", tc.name, engine, repeat, err)
+				}
+				writeSlope("2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tguest_batch\t%s\t%s\t%d\t%.17g\t%.17g\t%s\t%s\t%s\t%s\n",
+					contract.Phase,
+					role,
+					pair,
+					captureID,
+					sourceCommit,
+					entry.Corpus,
+					entry.Name,
+					executionMode,
+					engine,
+					repeat,
+					fit.Inner,
+					fit.Entry,
+					resultSetHash,
+					workloadHash,
+					programHash,
+					environmentHash,
+				)
 			}
 		}
-		for _, owner := range owners {
-			if err := owner.close(); err != nil {
-				t.Fatalf("%s close warmed callable: %v", tc.name, err)
-			}
+		if err := owner.close(); err != nil {
+			t.Fatalf("%s close warmed callable: %v", tc.name, err)
 		}
 	}
 	if err := raw.Close(); err != nil {
@@ -1116,6 +1340,202 @@ func TestRuntimeParityCommandVarargWrapperKeepsCallerRegistersAfterNestedGrowth(
 	}
 	if got, ok := results[0].Number(); !ok || got != 824780 {
 		t.Fatalf("wrapped command result = %v, %t; want 824780", got, ok)
+	}
+}
+
+func TestRuntimeParityGuestBatchAll37(t *testing.T) {
+	seeds := []int64{0, 1, 7, 29}
+	for _, entry := range parityCaseManifest() {
+		entry := entry
+		t.Run(entry.Corpus+"/"+entry.Name, func(t *testing.T) {
+			source, err := parityGuestBatchSource(entry.Case.source, parityDefaultFixtureVariant)
+			if err != nil {
+				t.Fatal(err)
+			}
+			callable, err := prepareParityEmberRuntimeNamed(source, "parity-seeded/"+entry.Corpus+"/"+entry.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := callable.close(); err != nil {
+					t.Errorf("close guest batch: %v", err)
+				}
+			}()
+			seen := make(map[string]bool, len(seeds))
+			for _, seed := range seeds {
+				values, err := callable.callback.Call(
+					context.Background(),
+					ember.NumberValue(3),
+					ember.NumberValue(float64(seed)),
+				)
+				if err != nil {
+					t.Fatalf("seed=%d: %v", seed, err)
+				}
+				result, err := parityExactIntegerResult(values)
+				if err != nil {
+					t.Fatalf("seed=%d: %v", seed, err)
+				}
+				seen[result] = true
+			}
+			if len(seen) < 2 {
+				t.Fatalf("runtime seed did not change the guest result: %v", seen)
+			}
+		})
+	}
+}
+
+func TestRuntimeParitySeededManifest(t *testing.T) {
+	hash := sha256.New()
+	fmt.Fprintln(hash, paritySeedVersion)
+	for _, entry := range parityCaseManifest() {
+		program, seeded, err := runtimeParityGuestBatchProgram(entry.Case.source, parityDefaultFixtureVariant)
+		if err != nil {
+			t.Fatalf("%s/%s: %v", entry.Corpus, entry.Name, err)
+		}
+		fmt.Fprintf(hash, "%s/%s\t%s\t%s\n",
+			entry.Corpus,
+			entry.Name,
+			parityStringSHA256(seeded),
+			parityStringSHA256(program),
+		)
+	}
+	got := hex.EncodeToString(hash.Sum(nil))
+	if got != paritySeedHash {
+		t.Fatalf("seeded all-37 manifest hash = %s, want %s", got, paritySeedHash)
+	}
+}
+
+func TestRuntimeParityIdentityHoldoutAll37(t *testing.T) {
+	for _, entry := range parityCaseManifest() {
+		entry := entry
+		t.Run(entry.Corpus+"/"+entry.Name, func(t *testing.T) {
+			standardSource, err := parityGuestBatchSource(entry.Case.source, parityDefaultFixtureVariant)
+			if err != nil {
+				t.Fatal(err)
+			}
+			holdoutSource, err := parityGuestBatchSource(entry.Case.source, parityHoldoutFixtureVariant)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if standardSource == holdoutSource {
+				t.Fatal("identity holdout source did not change")
+			}
+			standard, err := prepareParityEmberRuntimeIdentity(
+				standardSource,
+				"parity-standard/"+entry.Corpus+"/"+entry.Name,
+				"standard-"+entry.Name,
+				"standard-entry",
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := standard.close(); err != nil {
+					t.Errorf("close standard: %v", err)
+				}
+			}()
+			holdout, err := prepareParityEmberRuntimeIdentity(
+				holdoutSource,
+				"parity-holdout/"+entry.Corpus+"/"+entry.Name,
+				"holdout-"+entry.Name,
+				"holdout-entry",
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := holdout.close(); err != nil {
+					t.Errorf("close holdout: %v", err)
+				}
+			}()
+			for _, seed := range []int64{1, 7, 29} {
+				standardValues, err := standard.callback.Call(
+					context.Background(),
+					ember.NumberValue(3),
+					ember.NumberValue(float64(seed)),
+				)
+				if err != nil {
+					t.Fatalf("standard seed=%d: %v", seed, err)
+				}
+				holdoutValues, err := holdout.callback.Call(
+					context.Background(),
+					ember.NumberValue(3),
+					ember.NumberValue(float64(seed)),
+				)
+				if err != nil {
+					t.Fatalf("holdout seed=%d: %v", seed, err)
+				}
+				standardResult, err := parityExactIntegerResult(standardValues)
+				if err != nil {
+					t.Fatal(err)
+				}
+				holdoutResult, err := parityExactIntegerResult(holdoutValues)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if standardResult != holdoutResult {
+					t.Fatalf("seed=%d standard=%s holdout=%s", seed, standardResult, holdoutResult)
+				}
+			}
+		})
+	}
+}
+
+func TestRuntimeParityGuestBatchAll37MatchLuau(t *testing.T) {
+	if os.Getenv("EMBER_RUNTIME_PARITY_SEEDED_LIVE") != "1" {
+		t.Skip("set EMBER_RUNTIME_PARITY_SEEDED_LIVE=1 to compare seeded all-37 workloads with Luau")
+	}
+	environment, err := inspectParityEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptDir := t.TempDir()
+	for _, entry := range parityCaseManifest() {
+		entry := entry
+		t.Run(entry.Corpus+"/"+entry.Name, func(t *testing.T) {
+			emberSource, err := parityGuestBatchSource(entry.Case.source, parityDefaultFixtureVariant)
+			if err != nil {
+				t.Fatal(err)
+			}
+			luauSource, err := parityGuestBatchLuauSource(entry.Case.source, parityDefaultFixtureVariant)
+			if err != nil {
+				t.Fatal(err)
+			}
+			callable, err := prepareParityEmberRuntimeNamed(emberSource, "parity-live/"+entry.Corpus+"/"+entry.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := callable.close(); err != nil {
+					t.Errorf("close guest batch: %v", err)
+				}
+			}()
+			scriptPath := filepath.Join(scriptDir, entry.Corpus+"-"+entry.Name+".luau")
+			if err := os.WriteFile(scriptPath, []byte(luauSource), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, seed := range []int64{0, 1, 7, 29} {
+				values, err := callable.callback.Call(
+					context.Background(),
+					ember.NumberValue(3),
+					ember.NumberValue(float64(seed)),
+				)
+				if err != nil {
+					t.Fatalf("Ember seed=%d: %v", seed, err)
+				}
+				emberResult, err := parityExactIntegerResult(values)
+				if err != nil {
+					t.Fatalf("Ember seed=%d: %v", seed, err)
+				}
+				_, luauResult, err := measureParityLuauGuestBatch(environment.LuauPath, scriptPath, 3, seed)
+				if err != nil {
+					t.Fatalf("Luau seed=%d: %v", seed, err)
+				}
+				if emberResult != luauResult {
+					t.Fatalf("seed=%d Ember=%s Luau=%s", seed, emberResult, luauResult)
+				}
+			}
+		})
 	}
 }
 

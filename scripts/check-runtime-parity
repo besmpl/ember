@@ -63,15 +63,49 @@ output_is_available() {
 }
 
 gate_single_capture() {
-	slopes=$1
-	awk -F '\t' -v median_max="${RUNTIME_MEDIAN_MAX:-1.85}" -v p90_max="${RUNTIME_P90_MAX:-2.00}" '
-		NR == 1 { next }
+	capture_phase=$1
+	execution_mode=$2
+	slopes=$3
+	case "$capture_phase" in
+		prepared-parity1x)
+			median_max=${RUNTIME_MEDIAN_MAX:-1.00}
+			p90_max=${RUNTIME_P90_MAX:-1.05}
+			;;
+		*)
+			median_max=${RUNTIME_MEDIAN_MAX:-1.85}
+			p90_max=${RUNTIME_P90_MAX:-2.00}
+			;;
+	esac
+	awk -F '\t' -v capture_phase="$capture_phase" -v execution_mode="$execution_mode" -v median_max="$median_max" -v p90_max="$p90_max" '
+		BEGIN {
+			header = "schema_version\tcapture_phase\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\texecution_mode\tengine\trepeat\tslope_ns_per_guest_call\tintercept_ns\tresult_set_sha256\tworkload_sha256\tprogram_sha256\tenvironment_sha256"
+			hex = "^[0-9a-f][0-9a-f]*$"
+		}
+		NR == 1 {
+			if ($0 != header) invalid = 1
+			next
+		}
 		{
-			id = $6 "/" $7
-			key = id SUBSEP $9 SUBSEP $10
+			if (NF != 18 || $1 != "2" || $2 != capture_phase ||
+				$9 != "guest_batch" || $10 != execution_mode ||
+				($11 != "ember" && $11 != "luau") ||
+				$12 !~ "^[123]$" || $13 <= 0 ||
+				length($15) != 64 || $15 !~ hex ||
+				length($16) != 64 || $16 !~ hex ||
+				length($17) != 64 || $17 !~ hex ||
+				length($18) != 64 || $18 !~ hex) invalid = 1
+			id = $7 "/" $8
+			key = id SUBSEP $11 SUBSEP $12
 			if (seen[key]++) invalid = 1
-			slope[key] = $11 + 0
+			slope[key] = $13 + 0
 			ids[id] = 1
+			meta = id SUBSEP $12
+			if (!(meta in result_set)) result_set[meta] = $15
+			else if (result_set[meta] != $15) invalid = 1
+			if (!(id in workload)) {
+				workload[id] = $16
+				program[id] = $17
+			} else if (workload[id] != $16 || program[id] != $17) invalid = 1
 		}
 		END {
 			for (id in ids) {
@@ -106,9 +140,10 @@ apply_capture_policy() {
 	policy_phase=$1
 	policy_capture_only=$2
 	slopes=$3
-	[ "$policy_phase" = speed2x ] || return 0
+	policy_mode=$4
+	[ "$policy_phase" = speed2x ] || [ "$policy_phase" = prepared-parity1x ] || return 0
 	[ "$policy_capture_only" -eq 0 ] || return 0
-	gate_single_capture "$slopes"
+	gate_single_capture "$policy_phase" "$policy_mode" "$slopes"
 }
 
 phase_cases() {
@@ -117,27 +152,44 @@ phase_cases() {
 		calls) printf '%s\n' 'scenario/event_dispatch,scenario/signal_bus_callbacks,scenario/command_vararg_router' ;;
 		data) printf '%s\n' 'scenario/dirty_metatable_writes,scenario/array_hole_compaction' ;;
 		canaries) printf '%s\n' 'scenario/combat_tick,scenario/inventory_value,scenario/event_dispatch,scenario/buff_stack_tick,scenario/ability_resolution,scenario/dirty_metatable_writes,scenario/array_hole_compaction,scenario/command_vararg_router' ;;
-		full|speed2x) printf '\n' ;;
+		full|speed2x|prepared-parity1x) printf '\n' ;;
 		*) return 1 ;;
 	esac
 }
 
 capture_engine() {
-	case "$1" in
+	phase=$1
+	role=$2
+	if [ "$phase" = prepared-parity1x ]; then
+		[ "$role" = candidate ] || return 1
+		printf '%s\n' prepared
+		return
+	fi
+	case "$role" in
 		frozen-current) printf '%s\n' vm ;;
 		candidate) printf '%s\n' machine ;;
 		*) return 1 ;;
 	esac
 }
 
+capture_execution_mode() {
+	phase=$1
+	role=$2
+	capture_engine "$phase" "$role"
+}
+
 self_test() {
 	[ "$phase" = full ] || die '--self-test does not accept --phase'
 	[ -z "$(phase_cases full)" ] || die 'full is not all-37'
 	[ -z "$(phase_cases speed2x)" ] || die 'speed2x is not all-37'
+	[ -z "$(phase_cases prepared-parity1x)" ] || die 'prepared-parity1x is not all-37'
 	[ "$(phase_cases dispatch)" = top10/arithmetic_for ] || die 'dispatch case changed'
-	[ "$(capture_engine frozen-current)" = vm ] || die 'frozen-current engine changed'
-	[ "$(capture_engine candidate)" = machine ] || die 'candidate engine changed'
-	if capture_engine invalid >/dev/null 2>&1; then die 'invalid capture role selected an engine'; fi
+	[ "$(capture_engine full frozen-current)" = vm ] || die 'frozen-current engine changed'
+	[ "$(capture_engine full candidate)" = machine ] || die 'candidate engine changed'
+	[ "$(capture_engine prepared-parity1x candidate)" = prepared ] || die 'prepared engine changed'
+	[ "$(capture_execution_mode prepared-parity1x candidate)" = prepared ] || die 'prepared execution mode changed'
+	if capture_execution_mode prepared-parity1x frozen-current >/dev/null 2>&1; then die 'prepared phase accepted frozen-current role'; fi
+	if capture_engine full invalid >/dev/null 2>&1; then die 'invalid capture role selected an engine'; fi
 	q=$(mktemp -d "${TMPDIR:-/tmp}/runtime-parity.XXXXXX")
 	trap 'rm -rf "$q"' EXIT HUP INT TERM
 	printf '%s\n' '99 0' '99 0' '99 0' >"$q/high-load"
@@ -151,16 +203,19 @@ self_test() {
 	mkdir "$q/existing"
 	if output_is_available "$q/existing"; then die 'accepted reused output'; fi
 	cat >"$q/failing-slopes.tsv" <<'EOF'
-schema_version	capture_role	capture_pair	capture_id	source_commit	corpus	name	lifecycle	engine	repeat	slope_ns_per_call	intercept_ns	result_sha256	callable_scope	environment_sha256
-1	candidate	a	fixture	0000000000000000000000000000000000000001	top10	arithmetic_for	warm_call	ember	1	210	1	0000000000000000000000000000000000000000000000000000000000000001	warmed_callable_v1	0000000000000000000000000000000000000000000000000000000000000001
-1	candidate	a	fixture	0000000000000000000000000000000000000001	top10	arithmetic_for	warm_call	ember	2	210	1	0000000000000000000000000000000000000000000000000000000000000001	warmed_callable_v1	0000000000000000000000000000000000000000000000000000000000000001
-1	candidate	a	fixture	0000000000000000000000000000000000000001	top10	arithmetic_for	warm_call	ember	3	210	1	0000000000000000000000000000000000000000000000000000000000000001	warmed_callable_v1	0000000000000000000000000000000000000000000000000000000000000001
-1	candidate	a	fixture	0000000000000000000000000000000000000001	top10	arithmetic_for	warm_call	luau	1	100	1	0000000000000000000000000000000000000000000000000000000000000001	warmed_callable_v1	0000000000000000000000000000000000000000000000000000000000000001
-1	candidate	a	fixture	0000000000000000000000000000000000000001	top10	arithmetic_for	warm_call	luau	2	100	1	0000000000000000000000000000000000000000000000000000000000000001	warmed_callable_v1	0000000000000000000000000000000000000000000000000000000000000001
-1	candidate	a	fixture	0000000000000000000000000000000000000001	top10	arithmetic_for	warm_call	luau	3	100	1	0000000000000000000000000000000000000000000000000000000000000001	warmed_callable_v1	0000000000000000000000000000000000000000000000000000000000000001
+schema_version	capture_phase	capture_role	capture_pair	capture_id	source_commit	corpus	name	lifecycle	execution_mode	engine	repeat	slope_ns_per_guest_call	intercept_ns	result_set_sha256	workload_sha256	program_sha256	environment_sha256
+2	speed2x	candidate	a	fixture	0000000000000000000000000000000000000001	top10	arithmetic_for	guest_batch	machine	ember	1	210	1	0000000000000000000000000000000000000000000000000000000000000001	0000000000000000000000000000000000000000000000000000000000000002	0000000000000000000000000000000000000000000000000000000000000003	0000000000000000000000000000000000000000000000000000000000000004
+2	speed2x	candidate	a	fixture	0000000000000000000000000000000000000001	top10	arithmetic_for	guest_batch	machine	ember	2	210	1	0000000000000000000000000000000000000000000000000000000000000001	0000000000000000000000000000000000000000000000000000000000000002	0000000000000000000000000000000000000000000000000000000000000003	0000000000000000000000000000000000000000000000000000000000000004
+2	speed2x	candidate	a	fixture	0000000000000000000000000000000000000001	top10	arithmetic_for	guest_batch	machine	ember	3	210	1	0000000000000000000000000000000000000000000000000000000000000001	0000000000000000000000000000000000000000000000000000000000000002	0000000000000000000000000000000000000000000000000000000000000003	0000000000000000000000000000000000000000000000000000000000000004
+2	speed2x	candidate	a	fixture	0000000000000000000000000000000000000001	top10	arithmetic_for	guest_batch	machine	luau	1	100	1	0000000000000000000000000000000000000000000000000000000000000001	0000000000000000000000000000000000000000000000000000000000000002	0000000000000000000000000000000000000000000000000000000000000003	0000000000000000000000000000000000000000000000000000000000000004
+2	speed2x	candidate	a	fixture	0000000000000000000000000000000000000001	top10	arithmetic_for	guest_batch	machine	luau	2	100	1	0000000000000000000000000000000000000000000000000000000000000001	0000000000000000000000000000000000000000000000000000000000000002	0000000000000000000000000000000000000000000000000000000000000003	0000000000000000000000000000000000000000000000000000000000000004
+2	speed2x	candidate	a	fixture	0000000000000000000000000000000000000001	top10	arithmetic_for	guest_batch	machine	luau	3	100	1	0000000000000000000000000000000000000000000000000000000000000001	0000000000000000000000000000000000000000000000000000000000000002	0000000000000000000000000000000000000000000000000000000000000003	0000000000000000000000000000000000000000000000000000000000000004
 EOF
-	if apply_capture_policy speed2x 0 "$q/failing-slopes.tsv" >/dev/null 2>&1; then die 'known-failing speed2x fixture passed'; fi
-	apply_capture_policy speed2x 1 "$q/failing-slopes.tsv" >/dev/null || die 'capture-only rejected valid failing evidence'
+	if apply_capture_policy speed2x 0 "$q/failing-slopes.tsv" machine >/dev/null 2>&1; then die 'known-failing speed2x fixture passed'; fi
+	apply_capture_policy speed2x 1 "$q/failing-slopes.tsv" machine >/dev/null || die 'capture-only rejected valid failing evidence'
+	sed 's/speed2x/prepared-parity1x/g; s/	guest_batch	machine	/	guest_batch	prepared	/g; s/	210	/	101	/g' "$q/failing-slopes.tsv" >"$q/prepared-slopes.tsv"
+	if apply_capture_policy prepared-parity1x 0 "$q/prepared-slopes.tsv" prepared >/dev/null 2>&1; then die 'prepared 1.01x fixture passed'; fi
+	if gate_single_capture prepared-parity1x prepared "$q/failing-slopes.tsv" >/dev/null 2>&1; then die 'prepared policy accepted dynamic evidence'; fi
 	printf '%s\n' 'runtime parity self-test: PASS'
 }
 
@@ -179,7 +234,7 @@ while [ "$#" -gt 0 ]; do
 		--output) [ "$#" -ge 2 ] || die '--output needs a path'; output=$2; shift 2 ;;
 		--self-test) self_test_requested=1; shift ;;
 		-h|--help)
-			printf '%s\n' 'usage: scripts/check-runtime-parity --phase dispatch|calls|data|canaries|full|speed2x --output DIR [--capture-only] [--capture-role frozen-current|candidate] [--capture-pair a|b]'
+			printf '%s\n' 'usage: scripts/check-runtime-parity --phase dispatch|calls|data|canaries|full|speed2x|prepared-parity1x --output DIR [--capture-only] [--capture-role frozen-current|candidate] [--capture-pair a|b]'
 			exit 0
 			;;
 		*) die "unknown argument: $1" ;;
@@ -194,11 +249,12 @@ fi
 cases=$(phase_cases "$phase") || die "invalid phase $phase"
 [ "$role" = frozen-current ] || [ "$role" = candidate ] || die 'capture role must be frozen-current or candidate'
 [ "$pair" = a ] || [ "$pair" = b ] || die 'capture pair must be a or b'
-engine=$(capture_engine "$role") || die "capture role $role has no runtime engine"
+engine=$(capture_engine "$phase" "$role") || die "$phase does not accept capture role $role"
+execution_mode=$(capture_execution_mode "$phase" "$role") || die "$phase does not accept capture role $role"
 [ -n "$output" ] || die '--output is required'
 output_is_available "$output" || die "output already exists: $output"
 [ -n "${LUAU_BIN:-}" ] || die 'LUAU_BIN is required'
-[ -z "$(git status --porcelain --untracked-files=all)" ] || die 'capture requires a clean worktree'
+[ -z "$(git status --porcelain --untracked-files=no)" ] || die 'capture requires clean tracked files'
 
 # Refuse to create an acquisition until the runner has been quiet for three
 # consecutive samples. Tests replace live samples with a deterministic file.
@@ -216,10 +272,12 @@ command="CGO_ENABLED=0 GOMAXPROCS=1 EMBER_RUNTIME_ENGINE=$engine LUAU_BIN=$LUAU_
 [ "$capture_only" -eq 0 ] || command="$command --capture-only"
 printf '%s\n' "$command" >"$output/command.txt"
 printf '%s\n' "${cases:-all-37}" >"$output/cases.txt"
-capture_id=$(printf '%s\n%s\n%s\n%s\n%s\n' "$source_commit" "$environment_hash" "$role" "$pair" "$output" | shasum -a 256 | awk '{print $1}')
+capture_id=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$source_commit" "$environment_hash" "$phase" "$execution_mode" "$role" "$pair" "$output" | shasum -a 256 | awk '{print $1}')
 
 if ! CGO_ENABLED=0 GOMAXPROCS=1 EMBER_RUNTIME_ENGINE="$engine" LUAU_BIN="$LUAU_BIN" \
 	EMBER_RUNTIME_PARITY_LIVE=1 \
+	RUNTIME_PARITY_PHASE="$phase" \
+	RUNTIME_PARITY_EXECUTION_MODE="$execution_mode" \
 	RUNTIME_PARITY_CASES="$cases" \
 	RUNTIME_PARITY_RAW="$output/raw.tsv" \
 	RUNTIME_PARITY_SLOPES="$output/slopes.tsv" \
@@ -236,5 +294,5 @@ fi
 [ -s "$output/slopes.tsv" ] || die 'slopes.tsv missing or empty'
 rm -f "$output/INCOMPLETE"
 trap - EXIT HUP INT TERM
-apply_capture_policy "$phase" "$capture_only" "$output/slopes.tsv" || die 'speed2x ratio target missed (artifact preserved; use --capture-only for baseline acquisition)'
+apply_capture_policy "$phase" "$capture_only" "$output/slopes.tsv" "$execution_mode" || die "$phase ratio target missed (artifact preserved; use --capture-only for baseline acquisition)"
 printf 'check-runtime-parity: captured %s (%s/%s) in %s\n' "$phase" "$role" "$pair" "$output"

@@ -69,9 +69,13 @@ Failed runs leave an `INCOMPLETE` marker in the newly created directory.
 
 `full` and `speed2x` both use the frozen corpus-qualified inventory: 10 Top10,
 2 Classic, and 25 Scenario cases. `full` is the all-37 correctness capture;
-`speed2x` additionally names the acceptance intent. Both use the same matched
-warmed-callable timer contract and exact `N={1,10,100,1000}`, three-repeat
-sampling. Output directories are caller-owned and must not already exist.
+`speed2x` additionally names the dynamic-runtime acceptance intent. Both use
+the breaking `guest_batch_v1` contract: one parameterized program and callable
+per case, one positive runtime seed shared by every N point and repeat, runtime
+`N={1,10,100,1000}`, one timed outer entry that executes N seed-dependent guest
+calls, exact integer checksums, and three fitted-slope repeats. Public-call
+lifecycle and allocation measurements remain separate. Output directories are
+caller-owned and must not already exist.
 
 ```sh
 CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau \
@@ -90,9 +94,12 @@ contamination, or slope validation. Gate two independent captures and derive
 their immutable manifest separately:
 
 The capture role selects the whole runtime before binding: `frozen-current`
-uses `EMBER_RUNTIME_ENGINE=vm`, while `candidate` uses
-`EMBER_RUNTIME_ENGINE=machine`. The selected engine is recorded in
-`command.txt`; workload identity never participates in engine selection.
+uses `EMBER_RUNTIME_ENGINE=vm`, while dynamic `candidate` uses
+`EMBER_RUNTIME_ENGINE=machine`. `prepared-parity1x` accepts only `candidate`
+and selects `EMBER_RUNTIME_ENGINE=prepared`; it therefore fails closed until a
+real prepared backend exists and cannot relabel Machine evidence. The phase and
+execution mode are recorded in schema-v2 artifacts and `command.txt`; workload
+identity never participates in engine selection.
 
 On the pinned eight-logical-CPU M1, acquisition starts after three one-second
 samples with aggregate CPU at most 300%. One-minute load remains diagnostic but
@@ -107,19 +114,21 @@ emitted, and exhaustion still fails the capture.
 scripts/runtime-ratio-gate --derive \
   --baseline-a /tmp/ember-speed2x-a \
   --baseline-b /tmp/ember-speed2x-b \
-  --output /tmp/ember-speed2x-baselines-v1.tsv
+  --output /tmp/ember-speed2x-baselines-v2.tsv
 
 scripts/runtime-ratio-gate --capture-a /tmp/ember-speed2x-a \
   --capture-b /tmp/ember-speed2x-b --report-only \
-  --baseline-manifest /tmp/ember-speed2x-baselines-v1.tsv
+  --baseline-manifest /tmp/ember-speed2x-baselines-v2.tsv
 ```
 
 The ratio gate rejects any missing, extra, duplicate, contaminated, malformed,
-or nonpositive row and independently checks all 37 cases in both captures.
-Acceptance is per row: the nine Cartesian Ember/Luau slope ratios must have
-median at most 1.85 and p90 at most 2.0. Candidate/current comparisons bind the
-manifest and both baseline directories and require each paired median to stay
-at or below 1.05.
+nonpositive, cross-schema, dynamically relabeled, seed-changing, result-
+mismatched, workload-mismatched, or provenance-mismatched row. It recomputes
+every slope result-set hash from raw integer checksums and independently checks
+all 37 cases in both captures. Dynamic acceptance defaults to per-row median at
+most 1.85 and p90 at most 2.0. Prepared final evidence uses median at most 1.0
+and p90 at most 1.05. Candidate/current comparisons bind the manifest and both
+baseline directories and require each paired median to stay at or below 1.05.
 
 Allocation evidence is separate. Capture two baselines with explicit pairs,
 derive the exact 56-row ceiling manifest, then compare candidate evidence:
@@ -178,7 +187,7 @@ log and `testdata/fuzz/<target>` corpus, including when the fuzz process fails.
 The runtime parity job runs caller-named `full` and `speed2x` all-37 captures on the
 controlled self-hosted Darwin 24.6.0 arm64 Apple M1 runner labeled
 `[self-hosted, macOS, ARM64, apple-m1, ember-parity]`, with the pinned Luau
-executable. It uploads exact v1 raw and fitted-slope artifacts plus the command,
+executable. It uploads exact schema-v2 raw and fitted-slope artifacts plus the command,
 source, toolchain, Luau, CPU, OS, and environment fingerprint. Invalid or
 contaminated acquisition fails; a baseline speed miss is retained honestly.
 

@@ -14,14 +14,45 @@ usage: scripts/runtime-ratio-gate --capture-a DIR --capture-b DIR [options]
        scripts/runtime-ratio-gate --self-test
 EOF
 }
-die() { printf 'runtime-ratio-gate: %s\n' "$1" >&2; exit 2; }
-hash_file() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else return 1; fi; }
-hash_stdin() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'; elif command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'; else return 1; fi; }
+
+die() {
+	printf 'runtime-ratio-gate: %s\n' "$1" >&2
+	exit 2
+}
+
+hash_file() {
+	if command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 "$1" | awk '{ print $1 }'
+	elif command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | awk '{ print $1 }'
+	else
+		return 1
+	fi
+}
+
+hash_stdin() {
+	if command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 | awk '{ print $1 }'
+	elif command -v sha256sum >/dev/null 2>&1; then
+		sha256sum | awk '{ print $1 }'
+	else
+		return 1
+	fi
+}
+
 directory_hash() {
 	[ -d "$1" ] && [ ! -L "$1" ] || return 1
 	[ -z "$(find "$1" -type l -print -quit)" ] || return 1
-	(cd "$1"; find . -type f -print | LC_ALL=C sort | while IFS= read -r p; do p=${p#./}; printf '%s\t%s\n' "$p" "$(hash_file "$p")"; done) | hash_stdin
+	(
+		cd "$1"
+		find . -type f -print | LC_ALL=C sort |
+			while IFS= read -r path; do
+				path=${path#./}
+				printf '%s\t%s\n' "$path" "$(hash_file "$path")"
+			done
+	) | hash_stdin
 }
+
 case_list='top10/arithmetic_for top10/while_branching top10/table_fields top10/array_ops top10/generic_iteration top10/closures_upvalues top10/method_calls top10/metatable_index top10/varargs_select top10/coroutine_yield classic/recursive_fibonacci classic/iterative_fibonacci scenario/combat_tick scenario/inventory_value scenario/event_dispatch scenario/buff_stack_tick scenario/ability_resolution scenario/ai_utility_scoring scenario/cooldown_scheduler scenario/projectile_sweep scenario/quest_progress_update scenario/behavior_tree_tick scenario/threat_aggro_table scenario/economy_market_tick scenario/formation_layout_score scenario/dialogue_condition_eval scenario/procgen_room_scoring scenario/save_state_diff scenario/path_relaxation scenario/component_churn scenario/prototype_fallback scenario/signal_bus_callbacks scenario/state_machine_transitions scenario/sparse_grid_neighbors scenario/dirty_metatable_writes scenario/array_hole_compaction scenario/command_vararg_router'
 
 while [ "$#" -gt 0 ]; do
@@ -43,190 +74,556 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 
-if [ "$self_test" -eq 1 ]; then
-	t=$(mktemp -d "${TMPDIR:-/tmp}/runtime-ratio-gate.XXXXXX")
-	trap 'rm -rf "$t"' EXIT HUP INT TERM
-	make_fixture() {
-		d=$1; ratio=$2; role=$3; pair=$4; source=$5; env=$6; mkdir -p "$d"
-		printf '%s\n' 'fixture environment' >"$d/environment.tsv"
-		env=$(hash_file "$d/environment.tsv")
-		awk -v ratio="$ratio" -v role="$role" -v pair="$pair" -v source="$source" -v env="$env" -v id="id-$role-$pair" '
-		BEGIN {
-			OFS="\t"
-			print "schema_version","capture_role","capture_pair","capture_id","source_commit","corpus","name","lifecycle","engine","repeat","acquisition_order","n_calls","elapsed_ns","result_sha256","callable_scope","environment_sha256","contaminated" > "'"$d"'/raw.tsv"
-			print "schema_version","capture_role","capture_pair","capture_id","source_commit","corpus","name","lifecycle","engine","repeat","slope_ns_per_call","intercept_ns","result_sha256","callable_scope","environment_sha256" > "'"$d"'/slopes.tsv"
-			names="arithmetic_for while_branching table_fields array_ops generic_iteration closures_upvalues method_calls metatable_index varargs_select coroutine_yield recursive_fibonacci iterative_fibonacci combat_tick inventory_value event_dispatch buff_stack_tick ability_resolution ai_utility_scoring cooldown_scheduler projectile_sweep quest_progress_update behavior_tree_tick threat_aggro_table economy_market_tick formation_layout_score dialogue_condition_eval procgen_room_scoring save_state_diff path_relaxation component_churn prototype_fallback signal_bus_callbacks state_machine_transitions sparse_grid_neighbors dirty_metatable_writes array_hole_compaction command_vararg_router"
-			cnt=split(names,a," ")
-			for(c=1;c<=cnt;c++){corp=(c<=10?"top10":c<=12?"classic":"scenario"); nm=a[c]
-				for(r=1;r<=3;r++)for(j=1;j<=4;j++){n=(j==1?1:j==2?10:j==3?100:1000)
-					for(e=1;e<=2;e++){eng=(e==1?"ember":"luau");s=(eng=="ember"?ratio*100:100);order=(r-1)*8+(j-1)*2+e;printf "1\t%s\t%s\t%s\t%s\t%s\t%s\twarm_call\t%s\t%d\t%d\t%d\t%.17g\t0000000000000000000000000000000000000000000000000000000000000001\twarmed_callable_v1\t%s\t0\n",role,pair,id,source,corp,nm,eng,r,order,n,1000+s*n,env >> "'"$d"'/raw.tsv"}
-					if(j==1){printf "1\t%s\t%s\t%s\t%s\t%s\t%s\twarm_call\tember\t%d\t%.17g\t1000\t0000000000000000000000000000000000000000000000000000000000000001\twarmed_callable_v1\t%s\n",role,pair,id,source,corp,nm,r,ratio*100,env >> "'"$d"'/slopes.tsv"; printf "1\t%s\t%s\t%s\t%s\t%s\t%s\twarm_call\tluau\t%d\t100\t1000\t0000000000000000000000000000000000000000000000000000000000000001\twarmed_callable_v1\t%s\n",role,pair,id,source,corp,nm,r,env >> "'"$d"'/slopes.tsv"}
+make_fixture() {
+	directory=$1
+	ratio=$2
+	role=$3
+	pair=$4
+	source_commit=$5
+	phase=${6:-speed2x}
+	mkdir -p "$directory"
+	printf '%s\n' 'fixture environment' >"$directory/environment.tsv"
+	environment_hash=$(hash_file "$directory/environment.tsv")
+	case "$phase/$role" in
+		prepared-parity1x/candidate) execution_mode=prepared ;;
+		*/frozen-current) execution_mode=vm ;;
+		*/candidate) execution_mode=machine ;;
+		*) die 'self-test fixture has invalid phase/role' ;;
+	esac
+	awk -v ratio="$ratio" -v phase="$phase" -v role="$role" -v pair="$pair" \
+		-v source="$source_commit" -v environment="$environment_hash" \
+		-v execution_mode="$execution_mode" -v capture_id="id-$phase-$role-$pair" '
+	BEGIN {
+		OFS = "\t"
+		raw = "'"$directory"'/raw.tsv"
+		slopes = "'"$directory"'/slopes.tsv"
+		print "schema_version","capture_phase","capture_role","capture_pair","capture_id","source_commit","corpus","name","lifecycle","execution_mode","engine","repeat","acquisition_order","n_guest_calls","runtime_seed","elapsed_ns","result_integer","workload_sha256","program_sha256","environment_sha256","contaminated" > raw
+		print "schema_version","capture_phase","capture_role","capture_pair","capture_id","source_commit","corpus","name","lifecycle","execution_mode","engine","repeat","slope_ns_per_guest_call","intercept_ns","result_set_sha256","workload_sha256","program_sha256","environment_sha256" > slopes
+		names = "arithmetic_for while_branching table_fields array_ops generic_iteration closures_upvalues method_calls metatable_index varargs_select coroutine_yield recursive_fibonacci iterative_fibonacci combat_tick inventory_value event_dispatch buff_stack_tick ability_resolution ai_utility_scoring cooldown_scheduler projectile_sweep quest_progress_update behavior_tree_tick threat_aggro_table economy_market_tick formation_layout_score dialogue_condition_eval procgen_room_scoring save_state_diff path_relaxation component_churn prototype_fallback signal_bus_callbacks state_machine_transitions sparse_grid_neighbors dirty_metatable_writes array_hole_compaction command_vararg_router"
+		count = split(names, cases, " ")
+		workload = "0000000000000000000000000000000000000000000000000000000000000002"
+		program = "0000000000000000000000000000000000000000000000000000000000000003"
+		result_set = "f9cda8b66c4353bdde7ecf26d8427260c23b5a6798a2a8dbfc343274d348778e"
+		for (case_index = 1; case_index <= count; case_index++) {
+			corpus = (case_index <= 10 ? "top10" : case_index <= 12 ? "classic" : "scenario")
+			name = cases[case_index]
+			for (repeat = 1; repeat <= 3; repeat++) {
+				for (point = 1; point <= 4; point++) {
+					n = (point == 1 ? 1 : point == 2 ? 10 : point == 3 ? 100 : 1000)
+					result = n * 17
+					for (engine_index = 1; engine_index <= 2; engine_index++) {
+						engine = (engine_index == 1 ? "ember" : "luau")
+						slope = (engine == "ember" ? ratio * 100 : 100)
+						order = (repeat - 1) * 8 + (point - 1) * 2 + engine_index
+						print 2,phase,role,pair,capture_id,source,corpus,name,"guest_batch",execution_mode,engine,repeat,order,n,76198126637574,1000+slope*n,result,workload,program,environment,0 >> raw
+					}
 				}
+				print 2,phase,role,pair,capture_id,source,corpus,name,"guest_batch",execution_mode,"ember",repeat,ratio*100,1000,result_set,workload,program,environment >> slopes
+				print 2,phase,role,pair,capture_id,source,corpus,name,"guest_batch",execution_mode,"luau",repeat,100,1000,result_set,workload,program,environment >> slopes
 			}
-		}' /dev/null
-	}
-	make_fixture "$t/a" 1.5 frozen-current a 0000000000000000000000000000000000000001 0000000000000000000000000000000000000000000000000000000000000001
-	make_fixture "$t/b" 1.5 frozen-current b 0000000000000000000000000000000000000001 0000000000000000000000000000000000000000000000000000000000000001
-	make_fixture "$t/exact-a" 2.0 frozen-current a 0000000000000000000000000000000000000001 0000000000000000000000000000000000000000000000000000000000000001
-	make_fixture "$t/exact-b" 2.0 frozen-current b 0000000000000000000000000000000000000001 0000000000000000000000000000000000000000000000000000000000000001
-	make_fixture "$t/ca" 1.56 candidate a 0000000000000000000000000000000000000002 0000000000000000000000000000000000000000000000000000000000000001
-	make_fixture "$t/cb" 1.59 candidate b 0000000000000000000000000000000000000002 0000000000000000000000000000000000000000000000000000000000000001
-	make_fixture "$t/over-b" 2.1 candidate b 0000000000000000000000000000000000000002 0000000000000000000000000000000000000000000000000000000000000001
-	m="$t/manifest.tsv"; "$0" --derive --baseline-a "$t/a" --baseline-b "$t/b" --output "$m" >/dev/null
-	cp -R "$t/a" "$t/incomplete"; touch "$t/incomplete/INCOMPLETE"; if "$0" --capture-a "$t/incomplete" --capture-b "$t/b" >/dev/null 2>&1; then die 'self-test incomplete'; fi
-	cp -R "$t/b" "$t/reused-id"; sed -i.bak 's/id-frozen-current-b/id-frozen-current-a/g' "$t/reused-id/raw.tsv" "$t/reused-id/slopes.tsv"; rm -f "$t/reused-id/raw.tsv.bak" "$t/reused-id/slopes.tsv.bak"
-	if "$0" --capture-a "$t/a" --capture-b "$t/reused-id" >/dev/null 2>&1; then die 'self-test reused capture ID'; fi
-	if "$0" --capture-a "$t/exact-a" --capture-b "$t/exact-b" --median-max 2 --p90-max 2 >/dev/null; then :; else die 'self-test exactly-2x'; fi
-	if "$0" --capture-a "$t/ca" --capture-b "$t/over-b" >/dev/null 2>&1; then die 'self-test over-2x'; fi
-	if "$0" --capture-a "$t/ca" --capture-b "$t/cb" --baseline-a "$t/a" --baseline-b "$t/b" --baseline-manifest "$m" >/dev/null 2>&1; then die 'self-test one-pass-one-fail'; fi
-	cp -R "$t/a" "$t/missing"; sed -i.bak '2d' "$t/missing/raw.tsv"; rm -f "$t/missing/raw.tsv.bak"
-	if "$0" --capture-a "$t/missing" --capture-b "$t/b" >/dev/null 2>&1; then die 'self-test missing'; fi
-	cp -R "$t/a" "$t/duplicate"; tail -n 1 "$t/a/raw.tsv" >> "$t/duplicate/raw.tsv"
-	if "$0" --capture-a "$t/duplicate" --capture-b "$t/b" >/dev/null 2>&1; then die 'self-test duplicate'; fi
-	cp -R "$t/a" "$t/extra"; sed -n '2p' "$t/a/raw.tsv" | sed 's/\tarithmetic_for\t/\textra_case\t/' >>"$t/extra/raw.tsv"
-	if "$0" --capture-a "$t/extra" --capture-b "$t/b" >/dev/null 2>&1; then die 'self-test extra'; fi
-	cp -R "$t/a" "$t/malformed"; sed -i.bak '2s/^[^\t]*\t/garbage\t/' "$t/malformed/slopes.tsv"; rm -f "$t/malformed/slopes.tsv.bak"
-	if "$0" --capture-a "$t/malformed" --capture-b "$t/b" >/dev/null 2>&1; then die 'self-test malformed'; fi
-	cp -R "$t/a" "$t/nonpositive"; sed -i.bak '2s/\t150\t/\t0\t/' "$t/nonpositive/slopes.tsv"; rm -f "$t/nonpositive/slopes.tsv.bak"
-	if "$0" --capture-a "$t/nonpositive" --capture-b "$t/b" >/dev/null 2>&1; then die 'self-test nonpositive'; fi
-	cp -R "$t/a" "$t/contaminated"; sed -i.bak '2s/\t0$/\t1/' "$t/contaminated/raw.tsv"; rm -f "$t/contaminated/raw.tsv.bak"
-	if "$0" --capture-a "$t/contaminated" --capture-b "$t/b" >/dev/null 2>&1; then die 'self-test contaminated'; fi
-	cp -R "$t/a" "$t/bad-ols"; sed -i.bak '2s/\t1150\t/\t1151\t/' "$t/bad-ols/raw.tsv"; rm -f "$t/bad-ols/raw.tsv.bak"
-	if "$0" --capture-a "$t/bad-ols" --capture-b "$t/b" >/dev/null 2>&1; then die 'self-test invalid OLS'; fi
-	cp -R "$t/a" "$t/wrong-env"; printf '%s\n' changed >"$t/wrong-env/environment.tsv"
-	if "$0" --capture-a "$t/wrong-env" --capture-b "$t/b" >/dev/null 2>&1; then die 'self-test environment hash'; fi
-	"$0" --capture-a "$t/a" --capture-b "$t/b" --baseline-manifest "$m" --report-only >/dev/null || die 'self-test manifest validation'
-	cp "$m" "$t/bad-manifest.tsv"; awk 'BEGIN{FS=OFS="\t"} NR==2{$12=$12+1} {print}' "$t/bad-manifest.tsv" >"$t/bad-manifest.tmp"; mv "$t/bad-manifest.tmp" "$t/bad-manifest.tsv"
-	if "$0" --capture-a "$t/a" --capture-b "$t/b" --baseline-manifest "$t/bad-manifest.tsv" --report-only >/dev/null 2>&1; then die 'self-test manifest mismatch'; fi
-	if "$0" --derive --baseline-a "$t/a" --baseline-b "$t/b" --output "$m" >/dev/null 2>&1; then die 'self-test reused output'; fi
-	printf '%s\n' 'runtime-ratio-gate self-test: PASS'; exit 0
+		}
+	}' /dev/null
+}
+
+if [ "$self_test" -eq 1 ]; then
+	test_root=$(mktemp -d "${TMPDIR:-/tmp}/runtime-ratio-gate.XXXXXX")
+	trap 'rm -rf "$test_root"' EXIT HUP INT TERM
+	source_one=0000000000000000000000000000000000000001
+	source_two=0000000000000000000000000000000000000002
+	make_fixture "$test_root/a" 1.5 frozen-current a "$source_one"
+	make_fixture "$test_root/b" 1.5 frozen-current b "$source_one"
+	make_fixture "$test_root/exact-a" 2 frozen-current a "$source_one"
+	make_fixture "$test_root/exact-b" 2 frozen-current b "$source_one"
+	make_fixture "$test_root/ca" 1.56 candidate a "$source_two"
+	make_fixture "$test_root/cb" 1.59 candidate b "$source_two"
+	make_fixture "$test_root/over-b" 2.1 candidate b "$source_two"
+	make_fixture "$test_root/prepared-a" 1 candidate a "$source_two" prepared-parity1x
+	make_fixture "$test_root/prepared-b" 1 candidate b "$source_two" prepared-parity1x
+	manifest=$test_root/manifest.tsv
+	"$0" --derive --baseline-a "$test_root/a" --baseline-b "$test_root/b" --output "$manifest" >/dev/null
+	cp -R "$test_root/a" "$test_root/incomplete"
+	touch "$test_root/incomplete/INCOMPLETE"
+	if "$0" --capture-a "$test_root/incomplete" --capture-b "$test_root/b" >/dev/null 2>&1; then die 'self-test incomplete'; fi
+	cp -R "$test_root/b" "$test_root/reused-id"
+	sed -i.bak 's/id-speed2x-frozen-current-b/id-speed2x-frozen-current-a/g' "$test_root/reused-id/raw.tsv" "$test_root/reused-id/slopes.tsv"
+	rm -f "$test_root/reused-id/raw.tsv.bak" "$test_root/reused-id/slopes.tsv.bak"
+	if "$0" --capture-a "$test_root/a" --capture-b "$test_root/reused-id" >/dev/null 2>&1; then die 'self-test reused capture ID'; fi
+	"$0" --capture-a "$test_root/exact-a" --capture-b "$test_root/exact-b" --median-max 2 --p90-max 2 >/dev/null || die 'self-test exactly-2x'
+	if "$0" --capture-a "$test_root/ca" --capture-b "$test_root/over-b" >/dev/null 2>&1; then die 'self-test over-2x'; fi
+	if "$0" --capture-a "$test_root/ca" --capture-b "$test_root/cb" --baseline-a "$test_root/a" --baseline-b "$test_root/b" --baseline-manifest "$manifest" >/dev/null 2>&1; then die 'self-test one-pass-one-fail'; fi
+	"$0" --capture-a "$test_root/prepared-a" --capture-b "$test_root/prepared-b" --median-max 1 --p90-max 1.05 >/dev/null || die 'self-test prepared evidence'
+	cp -R "$test_root/a" "$test_root/missing"
+	sed -i.bak '2d' "$test_root/missing/raw.tsv"
+	rm -f "$test_root/missing/raw.tsv.bak"
+	if "$0" --capture-a "$test_root/missing" --capture-b "$test_root/b" >/dev/null 2>&1; then die 'self-test missing'; fi
+	cp -R "$test_root/a" "$test_root/duplicate"
+	tail -n 1 "$test_root/a/raw.tsv" >>"$test_root/duplicate/raw.tsv"
+	if "$0" --capture-a "$test_root/duplicate" --capture-b "$test_root/b" >/dev/null 2>&1; then die 'self-test duplicate'; fi
+	cp -R "$test_root/a" "$test_root/legacy"
+	sed -i.bak '1s/schema_version/capture_role/' "$test_root/legacy/raw.tsv"
+	rm -f "$test_root/legacy/raw.tsv.bak"
+	if "$0" --capture-a "$test_root/legacy" --capture-b "$test_root/b" >/dev/null 2>&1; then die 'self-test legacy schema'; fi
+	cp -R "$test_root/a" "$test_root/dynamic-prepared"
+	sed -i.bak 's/\tvm\t/\tprepared\t/g' "$test_root/dynamic-prepared/raw.tsv" "$test_root/dynamic-prepared/slopes.tsv"
+	rm -f "$test_root/dynamic-prepared/raw.tsv.bak" "$test_root/dynamic-prepared/slopes.tsv.bak"
+	if "$0" --capture-a "$test_root/dynamic-prepared" --capture-b "$test_root/b" >/dev/null 2>&1; then die 'self-test relabeled prepared evidence'; fi
+	cp -R "$test_root/a" "$test_root/bad-result-set"
+	sed -i.bak '2s/f9cda8b66c4353bdde7ecf26d8427260c23b5a6798a2a8dbfc343274d348778e/0000000000000000000000000000000000000000000000000000000000000001/' "$test_root/bad-result-set/slopes.tsv"
+	rm -f "$test_root/bad-result-set/slopes.tsv.bak"
+	if "$0" --capture-a "$test_root/bad-result-set" --capture-b "$test_root/b" >/dev/null 2>&1; then die 'self-test result-set hash'; fi
+	cp -R "$test_root/a" "$test_root/wrong-env"
+	printf '%s\n' changed >"$test_root/wrong-env/environment.tsv"
+	if "$0" --capture-a "$test_root/wrong-env" --capture-b "$test_root/b" >/dev/null 2>&1; then die 'self-test environment hash'; fi
+	"$0" --capture-a "$test_root/a" --capture-b "$test_root/b" --baseline-manifest "$manifest" --report-only >/dev/null || die 'self-test manifest validation'
+	if "$0" --derive --baseline-a "$test_root/a" --baseline-b "$test_root/b" --output "$manifest" >/dev/null 2>&1; then die 'self-test reused output'; fi
+	printf '%s\n' 'runtime-ratio-gate self-test: PASS'
+	exit 0
 fi
 
 if [ "$derive" -eq 1 ]; then
 	[ -n "$baseline_a" ] && [ -n "$baseline_b" ] && [ -n "$output" ] || die '--derive requires --baseline-a, --baseline-b, and --output'
 	[ ! -e "$output" ] || die "output already exists: $output"
-	left=$baseline_a; right=$baseline_b; mode=derive
+	left=$baseline_a
+	right=$baseline_b
+	mode=derive
 else
 	[ -n "$capture_a" ] && [ -n "$capture_b" ] || die 'requires --capture-a and --capture-b'
-	left=$capture_a; right=$capture_b; mode=gate
+	left=$capture_a
+	right=$capture_b
+	mode=gate
 fi
-[ -d "$left" ] && [ ! -L "$left" ] && [ ! -e "$left/INCOMPLETE" ] && [ -d "$right" ] && [ ! -L "$right" ] && [ ! -e "$right/INCOMPLETE" ] || die 'capture directories must be complete, real directories'
-[ -f "$left/raw.tsv" ] && [ ! -L "$left/raw.tsv" ] && [ -f "$left/slopes.tsv" ] && [ ! -L "$left/slopes.tsv" ] || die "missing, non-regular, or symlinked raw.tsv/slopes.tsv in $left"
-[ -f "$right/raw.tsv" ] && [ ! -L "$right/raw.tsv" ] && [ -f "$right/slopes.tsv" ] && [ ! -L "$right/slopes.tsv" ] || die "missing, non-regular, or symlinked raw.tsv/slopes.tsv in $right"
-[ -f "$left/environment.tsv" ] && [ ! -L "$left/environment.tsv" ] && [ -f "$right/environment.tsv" ] && [ ! -L "$right/environment.tsv" ] || die 'capture directories must contain regular, non-symlinked environment.tsv'
+
+for directory in "$left" "$right"; do
+	[ -d "$directory" ] && [ ! -L "$directory" ] && [ ! -e "$directory/INCOMPLETE" ] || die 'capture directories must be complete, real directories'
+	[ -f "$directory/raw.tsv" ] && [ ! -L "$directory/raw.tsv" ] || die "missing or invalid raw.tsv in $directory"
+	[ -f "$directory/slopes.tsv" ] && [ ! -L "$directory/slopes.tsv" ] || die "missing or invalid slopes.tsv in $directory"
+	[ -f "$directory/environment.tsv" ] && [ ! -L "$directory/environment.tsv" ] || die "missing or invalid environment.tsv in $directory"
+done
+
 left_environment_hash=$(hash_file "$left/environment.tsv") || die 'cannot hash first environment'
 right_environment_hash=$(hash_file "$right/environment.tsv") || die 'cannot hash second environment'
 left_hash=$(directory_hash "$left") || die 'cannot hash first capture directory'
 right_hash=$(directory_hash "$right") || die 'cannot hash second capture directory'
 
+validate_result_sets() {
+	directory=$1
+	result_root=$(mktemp -d "${TMPDIR:-/tmp}/runtime-result-sets.XXXXXX") || return 1
+	awk -F '\t' -v root="$result_root" '
+		NR > 1 {
+			key = $7 "__" $8 "__" $11 "__" $12
+			keys[key] = 1
+			results[key SUBSEP $14] = $17
+		}
+		END {
+			points[1] = 1
+			points[2] = 10
+			points[3] = 100
+			points[4] = 1000
+			for (key in keys) {
+				path = root "/" key ".set"
+				for (point_index = 1; point_index <= 4; point_index++) {
+					n = points[point_index]
+					if (!((key SUBSEP n) in results)) exit 2
+					printf "%d=%s\n", n, results[key SUBSEP n] > path
+				}
+				close(path)
+			}
+		}
+	' "$directory/raw.tsv" || {
+		rm -rf "$result_root"
+		return 1
+	}
+	awk -F '\t' 'NR > 1 { print $7 "__" $8 "__" $11 "__" $12 ".set\t" $15 }' "$directory/slopes.tsv" |
+		LC_ALL=C sort >"$result_root/expected.tsv"
+	(
+		cd "$result_root"
+		if command -v shasum >/dev/null 2>&1; then
+			shasum -a 256 ./*.set
+		else
+			sha256sum ./*.set
+		fi
+	) | awk '{ name = $2; if (substr(name, 1, 2) == "./") name = substr(name, 3); print name "\t" $1 }' | LC_ALL=C sort >"$result_root/actual.tsv"
+	cmp -s "$result_root/expected.tsv" "$result_root/actual.tsv"
+	status=$?
+	rm -rf "$result_root"
+	return "$status"
+}
+
+validate_result_sets "$left" || die 'first capture result-set hash mismatch'
+validate_result_sets "$right" || die 'second capture result-set hash mismatch'
+
 if [ -n "$baseline_manifest" ]; then
 	[ -r "$baseline_manifest" ] || die "cannot read baseline manifest: $baseline_manifest"
-	expected_header='schema_version	capture_role	capture_pair	capture_sha256	capture_id	source_commit	environment_sha256	corpus	name	engine	repeat	slope_ns_per_call'
-	actual_header=$(sed -n '1p' "$baseline_manifest")
-	[ "$actual_header" = "$expected_header" ] || die 'baseline manifest header mismatch'
-	manifest_left=$(awk -F '\t' '$1=="1"&&$2=="frozen-current"&&$3=="a"{if(!h)h=$4; if($4!=h)bad=1;n++} END{if(n!=222||bad)exit 1;print h}' "$baseline_manifest") || die 'baseline manifest A rows invalid'
-	manifest_right=$(awk -F '\t' '$1=="1"&&$2=="frozen-current"&&$3=="b"{if(!h)h=$4; if($4!=h)bad=1;n++} END{if(n!=222||bad)exit 1;print h}' "$baseline_manifest") || die 'baseline manifest B rows invalid'
-	bind_left=$left_hash; bind_right=$right_hash
-	manifest_dir_a=$left; manifest_dir_b=$right
+	expected_header='schema_version	capture_phase	capture_role	capture_pair	capture_sha256	capture_id	source_commit	environment_sha256	corpus	name	execution_mode	engine	repeat	slope_ns_per_guest_call	workload_sha256	program_sha256'
+	[ "$(sed -n '1p' "$baseline_manifest")" = "$expected_header" ] || die 'baseline manifest header mismatch'
+	manifest_left=$(awk -F '\t' '$1=="2"&&$3=="frozen-current"&&$4=="a"{if(!h)h=$5;if($5!=h)bad=1;n++}END{if(n!=222||bad)exit 1;print h}' "$baseline_manifest") || die 'baseline manifest A rows invalid'
+	manifest_right=$(awk -F '\t' '$1=="2"&&$3=="frozen-current"&&$4=="b"{if(!h)h=$5;if($5!=h)bad=1;n++}END{if(n!=222||bad)exit 1;print h}' "$baseline_manifest") || die 'baseline manifest B rows invalid'
+	bind_left=$left_hash
+	bind_right=$right_hash
+	manifest_dir_a=$left
+	manifest_dir_b=$right
 	if [ -n "$baseline_a$baseline_b" ]; then
 		[ -n "$baseline_a" ] && [ -n "$baseline_b" ] || die 'paired baselines require both paths'
-		bind_left=$(directory_hash "$baseline_a"); bind_right=$(directory_hash "$baseline_b")
-		manifest_dir_a=$baseline_a; manifest_dir_b=$baseline_b
+		bind_left=$(directory_hash "$baseline_a")
+		bind_right=$(directory_hash "$baseline_b")
+		manifest_dir_a=$baseline_a
+		manifest_dir_b=$baseline_b
 	fi
 	[ "$manifest_left" = "$bind_left" ] || die 'baseline manifest capture A hash mismatch'
 	[ "$manifest_right" = "$bind_right" ] || die 'baseline manifest capture B hash mismatch'
-	manifest_source=$(awk -F '\t' 'NR>1&&$1=="1"{print $6; n++} END{if(n!=444)exit 1}' "$baseline_manifest" | sort -u)
-	manifest_env=$(awk -F '\t' 'NR>1&&$1=="1"{print $7; n++} END{if(n!=444)exit 1}' "$baseline_manifest" | sort -u)
-	[ "$(printf '%s\n' "$manifest_source" | wc -l | tr -d ' ')" = 1 ] || die 'baseline manifest source mismatch'
-	[ "$(printf '%s\n' "$manifest_env" | wc -l | tr -d ' ')" = 1 ] || die 'baseline manifest environment mismatch'
 	manifest_check_dir=$(mktemp -d "${TMPDIR:-/tmp}/runtime-ratio-manifest.XXXXXX")
 	manifest_expected=$manifest_check_dir/expected.tsv
 	"$0" --derive --baseline-a "$manifest_dir_a" --baseline-b "$manifest_dir_b" --output "$manifest_expected" >/dev/null || die 'cannot reconstruct baseline manifest'
 	tail -n +2 "$baseline_manifest" | LC_ALL=C sort >"$manifest_check_dir/actual.rows"
 	tail -n +2 "$manifest_expected" | LC_ALL=C sort >"$manifest_check_dir/expected.rows"
-	cmp -s "$manifest_check_dir/actual.rows" "$manifest_check_dir/expected.rows" || { rm -rf "$manifest_check_dir"; die 'baseline manifest rows do not match bound captures'; }
+	cmp -s "$manifest_check_dir/actual.rows" "$manifest_check_dir/expected.rows" || {
+		rm -rf "$manifest_check_dir"
+		die 'baseline manifest rows do not match bound captures'
+	}
 	rm -rf "$manifest_check_dir"
 fi
-tmp=
-[ "$mode" = derive ] && { tmp=$output.tmp.$$; trap 'rm -f "$tmp"' EXIT HUP INT TERM; }
 
-awk -v left="$left" -v right="$right" -v left_hash="$left_hash" -v right_hash="$right_hash" -v expected_env_a="$left_environment_hash" -v expected_env_b="$right_environment_hash" -v mode="$mode" -v out="$tmp" -v report_only="$report_only" -v median_max="$median_max" -v p90_max="$p90_max" -v case_list="$case_list" '
+temporary=
+if [ "$mode" = derive ]; then
+	temporary=$output.tmp.$$
+	trap 'rm -f "$temporary"' EXIT HUP INT TERM
+fi
+
+awk -v left="$left" -v right="$right" -v left_hash="$left_hash" -v right_hash="$right_hash" \
+	-v expected_env_a="$left_environment_hash" -v expected_env_b="$right_environment_hash" \
+	-v mode="$mode" -v out="$temporary" -v report_only="$report_only" \
+	-v median_max="$median_max" -v p90_max="$p90_max" -v case_list="$case_list" '
 BEGIN {
-	FS=OFS="\t"; split(case_list,ids," "); case_count=length(ids)
-	for(i=1;i<=case_count;i++){split(ids[i],z,"/"); corpus[i]=z[1]; name[i]=z[2]; wanted[ids[i]]=1}
-	raw_header="schema_version\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\tengine\trepeat\tacquisition_order\tn_calls\telapsed_ns\tresult_sha256\tcallable_scope\tenvironment_sha256\tcontaminated"
-	slope_header="schema_version\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\tengine\trepeat\tslope_ns_per_call\tintercept_ns\tresult_sha256\tcallable_scope\tenvironment_sha256"
-	num="^[+-]?[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$"; hex="^[0-9a-fA-F]+$"
-	if(median_max!~num||median_max<=0||p90_max!~num||p90_max<=0)bad("invalid threshold")
-	if(mode=="derive") print "schema_version\tcapture_role\tcapture_pair\tcapture_sha256\tcapture_id\tsource_commit\tenvironment_sha256\tcorpus\tname\tengine\trepeat\tslope_ns_per_call" > out
+	FS = OFS = "\t"
+	split(case_list, ids, " ")
+	case_count = length(ids)
+	for (case_index = 1; case_index <= case_count; case_index++) {
+		split(ids[case_index], parts, "/")
+		corpus[case_index] = parts[1]
+		name[case_index] = parts[2]
+		wanted[ids[case_index]] = 1
+	}
+	raw_header = "schema_version\tcapture_phase\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\texecution_mode\tengine\trepeat\tacquisition_order\tn_guest_calls\truntime_seed\telapsed_ns\tresult_integer\tworkload_sha256\tprogram_sha256\tenvironment_sha256\tcontaminated"
+	slope_header = "schema_version\tcapture_phase\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\texecution_mode\tengine\trepeat\tslope_ns_per_guest_call\tintercept_ns\tresult_set_sha256\tworkload_sha256\tprogram_sha256\tenvironment_sha256"
+	number = "^[+-]?[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$"
+	integer = "^-?[0-9]+$"
+	hex = "^[0-9a-f]+$"
+	if (median_max !~ number || median_max <= 0 || p90_max !~ number || p90_max <= 0) bad("invalid threshold")
+	if (mode == "derive") {
+		print "schema_version","capture_phase","capture_role","capture_pair","capture_sha256","capture_id","source_commit","environment_sha256","corpus","name","execution_mode","engine","repeat","slope_ns_per_guest_call","workload_sha256","program_sha256" > out
+	}
 }
-function bad(s){printf "runtime-ratio-gate: invalid capture: %s\n",s > "/dev/stderr"; invalid=1}
-function abs(v){return v<0?-v:v}
-function close_enough(a,b,scale){scale=abs(b);if(scale<1)scale=1;return abs(a-b)<=scale*1e-9}
-function hex64(s){return length(s)==64&&s~hex}
-function commit(s){return (length(s)==40||length(s)==64)&&s~hex}
-function check_meta(t,q,environment,scope){if(!(t in role)){role[t]=q[2];pair[t]=q[3];cid[t]=q[4];src[t]=q[5];env[t]=environment;sc[t]=scope}if(role[t]!=q[2]||pair[t]!=q[3]||cid[t]!=q[4]||src[t]!=q[5]||env[t]!=environment||sc[t]!=scope)bad("inconsistent capture metadata")}
-function check_result(t,id,value){k=t SUBSEP id;if(!(k in result_hash))result_hash[k]=value;else if(result_hash[k]!=value)bad("result hash mismatch for "id)}
-function read_capture(path,t,    f,l,n,q,i,id,k){
-	f=path"/raw.tsv";n=0
-	while((getline l<f)>0){n++;if(n==1){if(l!=raw_header)bad(path": raw.tsv header mismatch");continue}if(l=="")continue;split(l,q,"\t");if(length(q)!=17){bad(path": raw.tsv field count");continue}for(i=1;i<=17;i++)if(q[i]=="")bad(path": raw.tsv empty field")
-		if(q[1]!="1"||(q[2]!="frozen-current"&&q[2]!="candidate")||(q[3]!="a"&&q[3]!="b")||q[8]!="warm_call"||(q[9]!="ember"&&q[9]!="luau")||q[10]!~"^[123]$"||q[11]!~"^[0-9]+$"||q[11]<1||q[11]>24||(q[12]!="1"&&q[12]!="10"&&q[12]!="100"&&q[12]!="1000")||q[13]!~num||q[13]<=0||!hex64(q[14])||q[15]!="warmed_callable_v1"||!hex64(q[16])||q[17]!="0"||!commit(q[5]))bad(path": invalid raw field")
-		id=q[6]"/"q[7];if(!(id in wanted))bad(path": unknown/non-canonical case "id);if(q[4]=="")bad(path": invalid capture identity");check_meta(t,q,q[16],q[15]);check_result(t,id,q[14]);k=id SUBSEP q[9] SUBSEP q[10] SUBSEP q[12];if((t SUBSEP k) in raw)bad(path": duplicate raw sample "k);if((t SUBSEP id SUBSEP q[11]) in order)bad(path": duplicate acquisition order "q[11]);order[t SUBSEP id SUBSEP q[11]]=1;raw[t SUBSEP k]=q[13]+0;raw_rows[t]++
-	}close(f);if(n==0)bad(path": empty raw.tsv")
-	f=path"/slopes.tsv";n=0
-	while((getline l<f)>0){n++;if(n==1){if(l!=slope_header)bad(path": slopes.tsv header mismatch");continue}if(l=="")continue;split(l,q,"\t");if(length(q)!=15){bad(path": slopes.tsv field count");continue}for(i=1;i<=15;i++)if(q[i]=="")bad(path": slopes.tsv empty field")
-		if(q[1]!="1"||(q[2]!="frozen-current"&&q[2]!="candidate")||(q[3]!="a"&&q[3]!="b")||q[8]!="warm_call"||(q[9]!="ember"&&q[9]!="luau")||q[10]!~"^[123]$"||q[11]!~num||q[11]<=0||q[12]!~num||!hex64(q[13])||q[14]!="warmed_callable_v1"||!hex64(q[15])||!commit(q[5]))bad(path": invalid slope field")
-		id=q[6]"/"q[7];if(!(id in wanted))bad(path": unknown/non-canonical slope case "id);if(q[4]=="")bad(path": invalid slope identity");check_meta(t,q,q[15],q[14]);check_result(t,id,q[13]);k=id SUBSEP q[9] SUBSEP q[10];if((t SUBSEP k) in slope)bad(path": duplicate slope "k);slope[t SUBSEP k]=q[11]+0;inter[t SUBSEP k]=q[12]+0;slopes[t]++
-	}close(f);if(n==0)bad(path": empty slopes.tsv")
+function bad(message) {
+	printf "runtime-ratio-gate: invalid capture: %s\n", message > "/dev/stderr"
+	invalid = 1
 }
-function check_fit(t,id,eng,r,    n,x,y,meanx,meany,numr,den,calc_slope,calc_inter,k){meanx=(1+10+100+1000)/4;meany=0;for(n=1;n<=4;n++){x=(n==1?1:n==2?10:n==3?100:1000);k=t SUBSEP id SUBSEP eng SUBSEP r SUBSEP x;meany+=raw[k]}meany/=4;numr=0;den=0;for(n=1;n<=4;n++){x=(n==1?1:n==2?10:n==3?100:1000);y=raw[t SUBSEP id SUBSEP eng SUBSEP r SUBSEP x];numr+=(x-meanx)*(y-meany);den+=(x-meanx)*(x-meanx)}calc_slope=numr/den;calc_inter=meany-calc_slope*meanx;k=t SUBSEP id SUBSEP eng SUBSEP r;if(calc_slope<=0||!close_enough(calc_slope,slope[k])||!close_enough(calc_inter,inter[k]))bad("slope does not match raw OLS for "id"/"eng" repeat "r)}
+function absolute(value) { return value < 0 ? -value : value }
+function close_enough(left_value, right_value, scale) {
+	scale = absolute(right_value)
+	if (scale < 1) scale = 1
+	return absolute(left_value - right_value) <= scale * 1e-9
+}
+function hex64(value) { return length(value) == 64 && value ~ hex }
+function commit(value) { return (length(value) == 40 || length(value) == 64) && value ~ hex }
+function valid_phase(value) {
+	return value == "full" || value == "speed2x" || value == "prepared-parity1x" ||
+		value == "dispatch" || value == "calls" || value == "data" || value == "canaries"
+}
+function expected_mode(phase, role) {
+	if (phase == "prepared-parity1x") return role == "candidate" ? "prepared" : ""
+	if (role == "frozen-current") return "vm"
+	if (role == "candidate") return "machine"
+	return ""
+}
+function check_meta(tag, fields, environment) {
+	if (!(tag in role)) {
+		phase[tag] = fields[2]
+		role[tag] = fields[3]
+		pair[tag] = fields[4]
+		capture_id[tag] = fields[5]
+		source[tag] = fields[6]
+		execution[tag] = fields[10]
+		env[tag] = environment
+	}
+	if (phase[tag] != fields[2] || role[tag] != fields[3] || pair[tag] != fields[4] ||
+		capture_id[tag] != fields[5] || source[tag] != fields[6] ||
+		execution[tag] != fields[10] || env[tag] != environment) {
+		bad("inconsistent capture metadata")
+	}
+}
+function check_case_hash(tag, id, workload, program) {
+	key = tag SUBSEP id
+	if (!(key in workload_hash)) {
+		workload_hash[key] = workload
+		program_hash[key] = program
+	} else if (workload_hash[key] != workload || program_hash[key] != program) {
+		bad("workload/program hash mismatch for " id)
+	}
+}
+function read_capture(path, tag,    file,line,line_number,fields,field_index,id,key) {
+	file = path "/raw.tsv"
+	line_number = 0
+	while ((getline line < file) > 0) {
+		line_number++
+		if (line_number == 1) {
+			if (line != raw_header) bad(path ": raw.tsv header mismatch")
+			continue
+		}
+		if (line == "") continue
+		split(line, fields, "\t")
+		if (length(fields) != 21) {
+			bad(path ": raw.tsv field count")
+			continue
+		}
+		for (field_index = 1; field_index <= 21; field_index++) if (fields[field_index] == "") bad(path ": raw.tsv empty field")
+		if (fields[1] != "2" || !valid_phase(fields[2]) ||
+			(fields[3] != "frozen-current" && fields[3] != "candidate") ||
+			(fields[4] != "a" && fields[4] != "b") || fields[5] == "" ||
+			!commit(fields[6]) || fields[9] != "guest_batch" ||
+			fields[10] != expected_mode(fields[2], fields[3]) ||
+			(fields[11] != "ember" && fields[11] != "luau") ||
+			fields[12] !~ "^[123]$" || fields[13] !~ "^[0-9]+$" ||
+			fields[13] < 1 || fields[13] > 24 ||
+			(fields[14] != "1" && fields[14] != "10" && fields[14] != "100" && fields[14] != "1000") ||
+			fields[15] !~ "^[0-9]+$" || fields[15] <= 0 || fields[15] >= 9007199254740992 ||
+			fields[16] !~ number || fields[16] <= 0 ||
+			fields[17] !~ integer || absolute(fields[17] + 0) >= 9007199254740992 ||
+			!hex64(fields[18]) || !hex64(fields[19]) || !hex64(fields[20]) ||
+			fields[21] != "0") {
+			bad(path ": invalid raw field")
+		}
+		id = fields[7] "/" fields[8]
+		if (!(id in wanted)) bad(path ": unknown/non-canonical case " id)
+		check_meta(tag, fields, fields[20])
+		check_case_hash(tag, id, fields[18], fields[19])
+		key = id SUBSEP fields[11] SUBSEP fields[12] SUBSEP fields[14]
+		if ((tag SUBSEP key) in raw) bad(path ": duplicate raw sample " key)
+		if ((tag SUBSEP id SUBSEP fields[13]) in order) bad(path ": duplicate acquisition order " fields[13])
+		order[tag SUBSEP id SUBSEP fields[13]] = 1
+		raw[tag SUBSEP key] = fields[16] + 0
+		result_key = tag SUBSEP id SUBSEP fields[14]
+		if (!(result_key in result)) result[result_key] = fields[17]
+		else if (result[result_key] != fields[17]) bad(path ": result mismatch for " id " N=" fields[14])
+		seed_key = tag SUBSEP id
+		if (!(seed_key in seed)) seed[seed_key] = fields[15]
+		else if (seed[seed_key] != fields[15]) bad(path ": runtime seed changed for " id)
+		raw_rows[tag]++
+	}
+	close(file)
+	if (line_number == 0) bad(path ": empty raw.tsv")
+
+	file = path "/slopes.tsv"
+	line_number = 0
+	while ((getline line < file) > 0) {
+		line_number++
+		if (line_number == 1) {
+			if (line != slope_header) bad(path ": slopes.tsv header mismatch")
+			continue
+		}
+		if (line == "") continue
+		split(line, fields, "\t")
+		if (length(fields) != 18) {
+			bad(path ": slopes.tsv field count")
+			continue
+		}
+		for (field_index = 1; field_index <= 18; field_index++) if (fields[field_index] == "") bad(path ": slopes.tsv empty field")
+		if (fields[1] != "2" || !valid_phase(fields[2]) ||
+			(fields[3] != "frozen-current" && fields[3] != "candidate") ||
+			(fields[4] != "a" && fields[4] != "b") || fields[5] == "" ||
+			!commit(fields[6]) || fields[9] != "guest_batch" ||
+			fields[10] != expected_mode(fields[2], fields[3]) ||
+			(fields[11] != "ember" && fields[11] != "luau") ||
+			fields[12] !~ "^[123]$" || fields[13] !~ number || fields[13] <= 0 ||
+			fields[14] !~ number || !hex64(fields[15]) || !hex64(fields[16]) ||
+			!hex64(fields[17]) || !hex64(fields[18])) {
+			bad(path ": invalid slope field")
+		}
+		id = fields[7] "/" fields[8]
+		if (!(id in wanted)) bad(path ": unknown/non-canonical slope case " id)
+		check_meta(tag, fields, fields[18])
+		check_case_hash(tag, id, fields[16], fields[17])
+		key = id SUBSEP fields[11] SUBSEP fields[12]
+		if ((tag SUBSEP key) in slope) bad(path ": duplicate slope " key)
+		slope[tag SUBSEP key] = fields[13] + 0
+		intercept[tag SUBSEP key] = fields[14] + 0
+		slopes[tag]++
+	}
+	close(file)
+	if (line_number == 0) bad(path ": empty slopes.tsv")
+}
+function check_fit(tag, id, engine, repeat,    point,n,value,mean_n,mean_t,numerator,denominator,calculated_slope,calculated_intercept,key) {
+	mean_n = (1 + 10 + 100 + 1000) / 4
+	mean_t = 0
+	for (point = 1; point <= 4; point++) {
+		n = point == 1 ? 1 : point == 2 ? 10 : point == 3 ? 100 : 1000
+		mean_t += raw[tag SUBSEP id SUBSEP engine SUBSEP repeat SUBSEP n]
+	}
+	mean_t /= 4
+	numerator = 0
+	denominator = 0
+	for (point = 1; point <= 4; point++) {
+		n = point == 1 ? 1 : point == 2 ? 10 : point == 3 ? 100 : 1000
+		value = raw[tag SUBSEP id SUBSEP engine SUBSEP repeat SUBSEP n]
+		numerator += (n - mean_n) * (value - mean_t)
+		denominator += (n - mean_n) * (n - mean_n)
+	}
+	calculated_slope = numerator / denominator
+	calculated_intercept = mean_t - calculated_slope * mean_n
+	key = tag SUBSEP id SUBSEP engine SUBSEP repeat
+	if (calculated_slope <= 0 || !close_enough(calculated_slope, slope[key]) ||
+		!close_enough(calculated_intercept, intercept[key])) {
+		bad("slope does not match raw OLS for " id "/" engine " repeat " repeat)
+	}
+}
 END {
-	read_capture(left,"a");read_capture(right,"b")
-	if(env["a"]!=expected_env_a||env["b"]!=expected_env_b)bad("environment.tsv hash mismatch")
-	for(t in role){if(raw_rows[t]!=case_count*24)bad("missing or extra raw rows");if(slopes[t]!=case_count*6)bad("missing or extra slopes");if(pair[t]!=(t=="a"?"a":"b"))bad("capture pair mismatch");if(mode=="derive"&&(role[t]!="frozen-current"))bad("derive capture role mismatch");if(mode=="gate"&&((role[t]=="candidate") != (role["a"]=="candidate")))bad("capture roles must agree");for(i=1;i<=case_count;i++){id=ids[i];for(o=1;o<=24;o++)if(!((t SUBSEP id SUBSEP o) in order))bad("missing acquisition order "id"/"o);for(e=1;e<=2;e++){eng=(e==1?"ember":"luau");for(r=1;r<=3;r++){sk=id SUBSEP eng SUBSEP r;if(!((t SUBSEP sk) in slope))bad("missing slope "sk)}}for(r=1;r<=3;r++)for(j=1;j<=4;j++){n=(j==1?1:j==2?10:j==3?100:1000);for(e=1;e<=2;e++){eng=(e==1?"ember":"luau");rk=id SUBSEP eng SUBSEP r SUBSEP n;if(!((t SUBSEP rk) in raw))bad("missing raw sample "rk)}}for(e=1;e<=2;e++){eng=(e==1?"ember":"luau");for(r=1;r<=3;r++){check_fit(t,id,eng,r);if(mode=="derive"){sk=id SUBSEP eng SUBSEP r;printf "1\tfrozen-current\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%.17g\n",pair[t],(t=="a"?left_hash:right_hash),cid[t],src[t],env[t],corpus[i],name[i],eng,r,slope[t SUBSEP sk] >> out}}}}}
-	if(cid["a"]==cid["b"])bad("capture IDs must differ")
-	if(src["a"]!=src["b"]||env["a"]!=env["b"])bad("source/environment mismatch between captures")
-	for(i=1;i<=case_count;i++)if(result_hash["a" SUBSEP ids[i]]!=result_hash["b" SUBSEP ids[i]])bad("result hash mismatch between capture pairs for "ids[i])
-	if(invalid)exit 2
-	if(mode=="derive")exit 0
-	for(t in role)for(i=1;i<=case_count;i++){id=ids[i];k=0;for(e1=1;e1<=3;e1++)for(e2=1;e2<=3;e2++)ratio[++k]=slope[t SUBSEP id SUBSEP "ember" SUBSEP e1]/slope[t SUBSEP id SUBSEP "luau" SUBSEP e2];for(x=2;x<=9;x++){v=ratio[x];y=x-1;while(y>=1&&ratio[y]>v){ratio[y+1]=ratio[y];y--}ratio[y+1]=v}med=ratio[5];p=ratio[9];st=(med<=median_max&&p<=p90_max?"PASS":"FAIL");if(st=="FAIL")failed++;printf "%s\t%s\tmedian=%.6g\tp90=%.6g\t%s\n",t,id,med,p,st}
-	if(!report_only&&failed)exit 1
+	read_capture(left, "a")
+	read_capture(right, "b")
+	if (env["a"] != expected_env_a || env["b"] != expected_env_b) bad("environment.tsv hash mismatch")
+	for (tag in role) {
+		if (raw_rows[tag] != case_count * 24) bad("missing or extra raw rows")
+		if (slopes[tag] != case_count * 6) bad("missing or extra slopes")
+		if (pair[tag] != (tag == "a" ? "a" : "b")) bad("capture pair mismatch")
+		if (mode == "derive" && role[tag] != "frozen-current") bad("derive capture role mismatch")
+		if (mode == "derive" && execution[tag] != "vm") bad("derive capture execution mismatch")
+		for (case_index = 1; case_index <= case_count; case_index++) {
+			id = ids[case_index]
+			for (order_index = 1; order_index <= 24; order_index++) {
+				if (!((tag SUBSEP id SUBSEP order_index) in order)) bad("missing acquisition order " id "/" order_index)
+			}
+			for (engine_index = 1; engine_index <= 2; engine_index++) {
+				engine = engine_index == 1 ? "ember" : "luau"
+				for (repeat = 1; repeat <= 3; repeat++) {
+					key = id SUBSEP engine SUBSEP repeat
+					if (!((tag SUBSEP key) in slope)) bad("missing slope " key)
+					check_fit(tag, id, engine, repeat)
+					if (mode == "derive") {
+						print 2,phase[tag],"frozen-current",pair[tag],(tag == "a" ? left_hash : right_hash),capture_id[tag],source[tag],env[tag],corpus[case_index],name[case_index],execution[tag],engine,repeat,slope[tag SUBSEP key],workload_hash[tag SUBSEP id],program_hash[tag SUBSEP id] >> out
+					}
+				}
+			}
+		}
+	}
+	if (capture_id["a"] == capture_id["b"]) bad("capture IDs must differ")
+	if (source["a"] != source["b"] || env["a"] != env["b"] || phase["a"] != phase["b"] ||
+		role["a"] != role["b"] || execution["a"] != execution["b"]) {
+		bad("capture metadata mismatch between pairs")
+	}
+	for (case_index = 1; case_index <= case_count; case_index++) {
+		id = ids[case_index]
+		if (workload_hash["a" SUBSEP id] != workload_hash["b" SUBSEP id] ||
+			program_hash["a" SUBSEP id] != program_hash["b" SUBSEP id]) {
+			bad("workload/program mismatch between pairs for " id)
+		}
+		for (point = 1; point <= 4; point++) {
+			n = point == 1 ? 1 : point == 2 ? 10 : point == 3 ? 100 : 1000
+			if (result["a" SUBSEP id SUBSEP n] != result["b" SUBSEP id SUBSEP n]) {
+				bad("result mismatch between capture pairs for " id " N=" n)
+			}
+		}
+	}
+	if (invalid) exit 2
+	if (mode == "derive") exit 0
+	for (tag in role) {
+		for (case_index = 1; case_index <= case_count; case_index++) {
+			id = ids[case_index]
+			count = 0
+			delete ratios
+			for (ember_repeat = 1; ember_repeat <= 3; ember_repeat++) {
+				for (luau_repeat = 1; luau_repeat <= 3; luau_repeat++) {
+					ratios[++count] = slope[tag SUBSEP id SUBSEP "ember" SUBSEP ember_repeat] / slope[tag SUBSEP id SUBSEP "luau" SUBSEP luau_repeat]
+				}
+			}
+			for (ratio_index = 2; ratio_index <= count; ratio_index++) {
+				value = ratios[ratio_index]
+				previous = ratio_index - 1
+				while (previous >= 1 && ratios[previous] > value) {
+					ratios[previous + 1] = ratios[previous]
+					previous--
+				}
+				ratios[previous + 1] = value
+			}
+			median = ratios[5]
+			p90 = ratios[9]
+			status = median <= median_max && p90 <= p90_max ? "PASS" : "FAIL"
+			if (status == "FAIL") failed++
+			printf "%s\t%s\tmedian=%.6g\tp90=%.6g\t%s\n", tag, id, median, p90, status
+		}
+	}
+	if (!report_only && failed) exit 1
 }
 ' /dev/null
 
 if [ "$mode" = gate ] && [ -n "$baseline_a$baseline_b" ]; then
-	[ -n "$baseline_a" ] && [ -n "$baseline_b" ] || die 'paired baselines require both --baseline-a and --baseline-b'
+	[ -n "$baseline_a" ] && [ -n "$baseline_b" ] || die 'paired baselines require both paths'
 	[ -n "$baseline_manifest" ] || die 'paired baselines require --baseline-manifest'
 	"$0" --capture-a "$baseline_a" --capture-b "$baseline_b" --report-only >/dev/null || die 'invalid paired current baseline capture'
-	candidate_role=$(awk -F '\t' 'NR==2{print $2;exit}' "$left/slopes.tsv")
-	baseline_role=$(awk -F '\t' 'NR==2{print $2;exit}' "$baseline_a/slopes.tsv")
+	candidate_role=$(awk -F '\t' 'NR==2{print $3;exit}' "$left/slopes.tsv")
+	baseline_role=$(awk -F '\t' 'NR==2{print $3;exit}' "$baseline_a/slopes.tsv")
 	[ "$candidate_role" = candidate ] || die 'paired comparison requires candidate captures'
 	[ "$baseline_role" = frozen-current ] || die 'paired comparison requires frozen-current baselines'
-	candidate_env=$(awk -F '\t' 'NR==2{print $15;exit}' "$left/slopes.tsv")
-	baseline_env=$(awk -F '\t' 'NR==2{print $15;exit}' "$baseline_a/slopes.tsv")
-	[ "$candidate_env" = "$baseline_env" ] || die 'candidate and baseline environment mismatch'
-	awk -v ca="$left" -v cb="$right" -v ba="$baseline_a" -v bb="$baseline_b" -v report_only="$report_only" -v current_median_max="$current_median_max" -v case_list="$case_list" '
-	BEGIN{FS="\t";split(case_list,ids," ");if(current_median_max!~"^[0-9]+([.][0-9]+)?$"||current_median_max<=0)exit 2}
-	function load(path,tag,    l,n,q,id){while((getline l < (path "/slopes.tsv"))>0){n++;if(n==1)continue;split(l,q,"\t");id=q[6] "/" q[7];if(q[9]=="ember")v[tag SUBSEP id SUBSEP q[10]]=q[11]+0}close(path "/slopes.tsv")}
-	function sort9(a,    i,j,w){for(i=2;i<=9;i++){w=a[i];j=i-1;while(j>0&&a[j]>w){a[j+1]=a[j];j--}a[j+1]=w}}
-	END{
-		load(ca,"ca");load(cb,"cb");load(ba,"ba");load(bb,"bb")
-		for(pair_index=1;pair_index<=2;pair_index++){
-			candidate=(pair_index==1?"ca":"cb");baseline=(pair_index==1?"ba":"bb");pair=(pair_index==1?"a":"b")
-			for(case_index=1;case_index<=length(ids);case_index++){
-				id=ids[case_index];delete ratios;k=0
-				for(candidate_repeat=1;candidate_repeat<=3;candidate_repeat++)for(baseline_repeat=1;baseline_repeat<=3;baseline_repeat++)ratios[++k]=v[candidate SUBSEP id SUBSEP candidate_repeat]/v[baseline SUBSEP id SUBSEP baseline_repeat]
-				sort9(ratios);median=ratios[5];status=(median<=current_median_max?"PASS":"FAIL")
-				printf "current/%s\t%s\tmedian=%.6g\t%s\n",pair,id,median,status
-				if(status=="FAIL")bad=1
+	candidate_environment=$(awk -F '\t' 'NR==2{print $18;exit}' "$left/slopes.tsv")
+	baseline_environment=$(awk -F '\t' 'NR==2{print $18;exit}' "$baseline_a/slopes.tsv")
+	[ "$candidate_environment" = "$baseline_environment" ] || die 'candidate and baseline environment mismatch'
+	awk -v ca="$left" -v cb="$right" -v ba="$baseline_a" -v bb="$baseline_b" \
+		-v report_only="$report_only" -v current_median_max="$current_median_max" -v case_list="$case_list" '
+	BEGIN {
+		FS = "\t"
+		split(case_list, ids, " ")
+		if (current_median_max !~ "^[0-9]+([.][0-9]+)?$" || current_median_max <= 0) exit 2
+	}
+	function load(path, tag,    line,count,fields,id) {
+		while ((getline line < (path "/slopes.tsv")) > 0) {
+			count++
+			if (count == 1) continue
+			split(line, fields, "\t")
+			id = fields[7] "/" fields[8]
+			if (fields[11] == "ember") values[tag SUBSEP id SUBSEP fields[12]] = fields[13] + 0
+		}
+		close(path "/slopes.tsv")
+	}
+	function sort9(values,    ratio_index,previous,value) {
+		for (ratio_index = 2; ratio_index <= 9; ratio_index++) {
+			value = values[ratio_index]
+			previous = ratio_index - 1
+			while (previous > 0 && values[previous] > value) {
+				values[previous + 1] = values[previous]
+				previous--
+			}
+			values[previous + 1] = value
+		}
+	}
+	END {
+		load(ca, "ca")
+		load(cb, "cb")
+		load(ba, "ba")
+		load(bb, "bb")
+		for (pair_index = 1; pair_index <= 2; pair_index++) {
+			candidate = pair_index == 1 ? "ca" : "cb"
+			baseline = pair_index == 1 ? "ba" : "bb"
+			pair = pair_index == 1 ? "a" : "b"
+			for (case_index = 1; case_index <= length(ids); case_index++) {
+				id = ids[case_index]
+				delete ratios
+				count = 0
+				for (candidate_repeat = 1; candidate_repeat <= 3; candidate_repeat++) {
+					for (baseline_repeat = 1; baseline_repeat <= 3; baseline_repeat++) {
+						ratios[++count] = values[candidate SUBSEP id SUBSEP candidate_repeat] / values[baseline SUBSEP id SUBSEP baseline_repeat]
+					}
+				}
+				sort9(ratios)
+				median = ratios[5]
+				status = median <= current_median_max ? "PASS" : "FAIL"
+				printf "current/%s\t%s\tmedian=%.6g\t%s\n", pair, id, median, status
+				if (status == "FAIL") failed = 1
 			}
 		}
-		if(bad&&!report_only)exit 1
+		if (failed && !report_only) exit 1
 	}
 	' /dev/null
 fi
 
 if [ "$mode" = derive ]; then
-	mv "$tmp" "$output"; trap - EXIT HUP INT TERM
+	mv "$temporary" "$output"
+	trap - EXIT HUP INT TERM
 	printf 'runtime-ratio-gate: wrote immutable baseline manifest %s\n' "$output"
 fi
