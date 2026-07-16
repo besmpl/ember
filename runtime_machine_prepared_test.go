@@ -213,6 +213,84 @@ func TestMachinePreparedExactNonEntryReplayMatchesGeneric(t *testing.T) {
 	}
 }
 
+func TestMachinePreparedDirectCallRunsWithoutClosureAndReplaysCalleeGuard(t *testing.T) {
+	image := machinePreparedTestImageForSource(t, backendNumericCallProofSource)
+	calls := 0
+	var observed machinePreparedExit
+	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
+		calls++
+		observed = backendGeneratedNumericCallPreparedFixture(context)
+		return observed
+	})
+	prepared, err := newMachineOwnerWithPrepared(image, program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generic, err := newMachineOwner(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := prepared.close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := generic.close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	preparedArg, err := prepared.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericArg, err := generic.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runMachinePreparedTestProto(t, prepared, 1, []slot{preparedArg}, nil)
+	runMachinePreparedTestProto(t, generic, 1, []slot{genericArg}, nil)
+	assertMachineOwnerNumberResult(t, prepared, 93)
+	assertMachineOwnerNumberResult(t, generic, 93)
+	if calls != 1 || observed.kind != machinePreparedExitReturnOneNumber {
+		t.Fatalf("prepared direct-call success = calls %d exit %#v", calls, observed)
+	}
+
+	preparedNaN, err := prepared.importValueStopped(NumberValue(math.NaN()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericNaN, err := generic.importValueStopped(NumberValue(math.NaN()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedErr := runMachinePreparedTestProtoError(t, prepared, 1, []slot{preparedNaN}, nil)
+	genericErr := runMachinePreparedTestProtoError(t, generic, 1, []slot{genericNaN}, nil)
+	if calls != 2 || observed.kind != machinePreparedExitReplayEntry {
+		t.Fatalf("prepared direct-call guard = calls %d exit %#v", calls, observed)
+	}
+	if preparedErr == nil || genericErr == nil || preparedErr.Error() != genericErr.Error() {
+		t.Fatalf("prepared/generic direct-call replay errors = %v / %v", preparedErr, genericErr)
+	}
+
+	if !checkptrInstrumentedTest() {
+		lease, err := prepared.beginRun()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var runErr error
+		allocations := testing.AllocsPerRun(1000, func() {
+			runErr = prepared.executeStopped(0, 1, machineClosureHandle{}, []slot{preparedArg}, nil, machineRunEffects{})
+		})
+		lease.end()
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if allocations != 0 {
+			t.Fatalf("prepared direct-call owner allocations = %v, want 0", allocations)
+		}
+	}
+}
+
 func TestMachinePreparedRejectsMalformedReplayBeforeCanonicalMutation(t *testing.T) {
 	image := machinePreparedTestImageForSource(t, backendNumericExitProofSource)
 	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
@@ -340,6 +418,17 @@ func BenchmarkMachinePreparedNumericOwner(b *testing.B) {
 
 func BenchmarkMachineGenericNumericOwner(b *testing.B) {
 	image := machinePreparedBenchmarkImage(b, backendNumericProofSource)
+	benchmarkMachineNumericOwner(b, image, nil)
+}
+
+func BenchmarkMachinePreparedNumericDirectCallOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendNumericCallProofSource)
+	program := machinePreparedBenchmarkProgram(b, image, backendGeneratedNumericCallPreparedFixture)
+	benchmarkMachineNumericOwner(b, image, program)
+}
+
+func BenchmarkMachineGenericNumericDirectCallOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendNumericCallProofSource)
 	benchmarkMachineNumericOwner(b, image, nil)
 }
 

@@ -2,7 +2,9 @@
 
 # Luau Parity Without CGO: SSA AOT-to-Go Implementation Plan
 
-Status: ready for `simple-loop:loop-run`; no production AOT surface exists yet
+Status: active implementation; the parity observer, verified backend IR,
+private generated-Go proof, owner binding, and first exact-exit/direct-call
+slices are retained. No public prepared surface has been earned.
 
 Architecture decision:
 [ADR 0008](docs/adr/0008-ssa-aot-for-luau-parity.md)
@@ -170,6 +172,36 @@ allocations, binary/source hashes, clean-runner facts, and exact Git revision.
   that should inform the Machine shape contract.
 - `runtime_machine_*`: complete effects, calls, closures/upvalues, modules,
   callbacks, coroutines, limits, errors, and owner lifecycle.
+
+### Current implementation checkpoint
+
+The retained path has moved beyond the original starting state:
+
+- `9cc08155` replaced the parity observer with `guest_batch_v1`, and
+  `dda2b8f0` recorded corrected Machine captures.
+- `a4240224` and `bb960881` added deterministic verified control-flow/SSA IR,
+  semantic facts, effects, liveness, spills, call classifications, program
+  inventory, and binding hashes.
+- `2067c99d`, `aa4c1068`, and `351ed300` added a deterministic private
+  numeric Go lowerer, generated fixtures, and explicit owner-bound prepared
+  functions.
+- `284a5624` added typed exact non-entry spill exits and Machine replay,
+  including malformed-exit rejection before canonical mutation.
+- The current direct-call slice scalar-replaces a proven nonescaping local
+  closure, calls its fixed leaf Proto as ordinary Go, propagates a callee guard
+  through replay-safe caller-entry fallback, and preserves generic Machine
+  errors. The generated owner path performs 64 guest calls in roughly
+  245-292 ns on the Apple M1 checkpoint machine, versus roughly
+  14.8-15.4 microseconds through generic Machine, with zero prepared
+  allocations. Linked ARM64 inspection shows the Go compiler inlines the leaf
+  callee into the prepared body with no `CALL` instruction and no opcode or
+  descriptor dispatch.
+
+This is proof of the selected architecture and one required call shape, not
+proof of P2 coverage, the representative private gate, a public API, or final
+all-37 parity. Stable fields, tables, iteration, strings, closures/upvalues,
+varargs/results, recursion, metatables, host/effect exits, modules, and
+coroutines remain on the active path.
 
 ## Active execution path
 

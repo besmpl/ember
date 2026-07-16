@@ -11,11 +11,21 @@ type backendGoNumericOptions struct {
 	packageName          string
 	functionName         string
 	preparedFunctionName string
+	directTargets        []backendGoNumericTarget
+}
+
+type backendGoNumericTarget struct {
+	ir           *backendProtoIR
+	functionName string
 }
 
 type backendGoNumericPlan struct {
 	tags []backendTagMask
 	used []bool
+	// scalarReplacedValues have no canonical Machine value in prepared code.
+	scalarReplacedValues []bool
+	// replayEntry marks exits whose exact spill would require one of those values.
+	replayEntry []bool
 }
 
 type backendGoNumericEmitter struct {
@@ -24,6 +34,7 @@ type backendGoNumericEmitter struct {
 	body      strings.Builder
 	needsMath bool
 	prepared  bool
+	options   backendGoNumericOptions
 }
 
 func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptions) ([]byte, error) {
@@ -40,15 +51,18 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		(!token.IsIdentifier(options.preparedFunctionName) || token.Lookup(options.preparedFunctionName).IsKeyword()) {
 		return nil, fmt.Errorf("emit backend Go numeric proof: invalid prepared function name %q", options.preparedFunctionName)
 	}
-	plan, err := buildBackendGoNumericPlan(ir)
+	if err := verifyBackendGoNumericTargets(options.directTargets); err != nil {
+		return nil, err
+	}
+	plan, err := buildBackendGoNumericPlan(ir, options)
 	if err != nil {
 		return nil, err
 	}
-	directEmitter := backendGoNumericEmitter{ir: ir, plan: plan}
+	directEmitter := backendGoNumericEmitter{ir: ir, plan: plan, options: options}
 	if err := directEmitter.emitBody(); err != nil {
 		return nil, err
 	}
-	preparedEmitter := backendGoNumericEmitter{ir: ir, plan: plan, prepared: true}
+	preparedEmitter := backendGoNumericEmitter{ir: ir, plan: plan, prepared: true, options: options}
 	if options.preparedFunctionName != "" {
 		if err := preparedEmitter.emitBody(); err != nil {
 			return nil, err
@@ -82,6 +96,12 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		}
 		fmt.Fprintf(&source, "\tvar v%d %s\n", valueIndex+1, goType)
 	}
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if !backendGoNumericOperationDead(plan, operation) && operation.op == opCallLocalOne {
+			fmt.Fprintf(&source, "\tvar ok%d bool\n", operation.pc)
+		}
+	}
 	for parameter := 0; parameter < ir.params; parameter++ {
 		id := ir.initial[parameter]
 		if plan.used[id-1] {
@@ -106,6 +126,12 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 				return nil, fmt.Errorf("emit backend Go numeric proof: SSA value %d has unsupported tags %x", valueIndex+1, plan.tags[valueIndex])
 			}
 			fmt.Fprintf(&source, "\tvar v%d %s\n", valueIndex+1, goType)
+		}
+		for pc := range ir.ops {
+			operation := &ir.ops[pc]
+			if !backendGoNumericOperationDead(plan, operation) && operation.op == opCallLocalOne {
+				fmt.Fprintf(&source, "\tvar ok%d bool\n", operation.pc)
+			}
 		}
 		for parameter := 0; parameter < ir.params; parameter++ {
 			id := ir.initial[parameter]
@@ -136,10 +162,32 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	return formatted, nil
 }
 
-func buildBackendGoNumericPlan(ir *backendProtoIR) (backendGoNumericPlan, error) {
+func verifyBackendGoNumericTargets(targets []backendGoNumericTarget) error {
+	for protoID, target := range targets {
+		if target.ir == nil && target.functionName == "" {
+			continue
+		}
+		if target.ir == nil ||
+			!token.IsIdentifier(target.functionName) ||
+			token.Lookup(target.functionName).IsKeyword() {
+			return fmt.Errorf("emit backend Go numeric proof: invalid direct target Proto %d", protoID)
+		}
+		if err := verifyBackendProtoIR(target.ir); err != nil {
+			return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d: %w", protoID, err)
+		}
+		if _, err := buildBackendGoNumericPlan(target.ir, backendGoNumericOptions{}); err != nil {
+			return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d is not a numeric leaf: %w", protoID, err)
+		}
+	}
+	return nil
+}
+
+func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptions) (backendGoNumericPlan, error) {
 	plan := backendGoNumericPlan{
-		tags: make([]backendTagMask, len(ir.values)),
-		used: make([]bool, len(ir.values)),
+		tags:                 make([]backendTagMask, len(ir.values)),
+		used:                 make([]bool, len(ir.values)),
+		scalarReplacedValues: make([]bool, len(ir.values)),
+		replayEntry:          make([]bool, len(ir.ops)),
 	}
 	for register, id := range ir.initial {
 		if register < ir.params {
@@ -186,6 +234,12 @@ func buildBackendGoNumericPlan(ir *backendProtoIR) (backendGoNumericPlan, error)
 					tags = backendTagNumber
 				case opEqual, opNotEqual, opLess, opLessEqual, opGreater, opGreaterEqual:
 					tags = backendTagBool
+				case opClosure:
+					tags = backendTagFunction
+				case opCallLocalOne:
+					if _, ok := backendGoNumericDirectTarget(options, operation); ok {
+						tags = backendTagNumber
+					}
 				default:
 					return backendGoNumericPlan{}, fmt.Errorf("emit backend Go numeric proof: PC %d writes through unsupported opcode %s", value.pc, opcodeName(operation.op))
 				}
@@ -198,6 +252,34 @@ func buildBackendGoNumericPlan(ir *backendProtoIR) (backendGoNumericPlan, error)
 		}
 		if !changed {
 			break
+		}
+	}
+	var markScalarReplaced func(backendValueID)
+	markScalarReplaced = func(id backendValueID) {
+		if !ir.validBackendValue(id) || plan.scalarReplacedValues[id-1] {
+			return
+		}
+		plan.scalarReplacedValues[id-1] = true
+		for _, origin := range ir.values[id-1].origins {
+			markScalarReplaced(origin)
+		}
+	}
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if backendGoNumericScalarReplacedCall(ir, options, operation) {
+			markScalarReplaced(backendOperationUse(operation, operation.b))
+			plan.replayEntry[pc] = true
+		}
+	}
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		for _, spill := range operation.spillValues {
+			if plan.scalarReplacedValues[spill.value-1] {
+				// The numeric lowerer is effect-free, so replaying the whole
+				// function is exact when a scalar-replaced closure is live.
+				plan.replayEntry[pc] = true
+				break
+			}
 		}
 	}
 	work := make([]backendValueID, 0, len(ir.values))
@@ -215,13 +297,19 @@ func buildBackendGoNumericPlan(ir *backendProtoIR) (backendGoNumericPlan, error)
 		}
 		for pc := block.first; pc < block.last; pc++ {
 			operation := &ir.ops[pc]
-			for _, spill := range operation.spillValues {
-				markUsed(spill.value)
+			if !plan.replayEntry[pc] {
+				for _, spill := range operation.spillValues {
+					markUsed(spill.value)
+				}
 			}
 			if backendGoNumericPureProducer(operation.op) {
 				continue
 			}
 			for _, use := range operation.uses {
+				if operation.op == opCallLocalOne && use.register == operation.b &&
+					backendGoNumericScalarReplacedCall(ir, options, operation) {
+					continue
+				}
 				markUsed(use.value)
 			}
 			for _, definition := range operation.defs {
@@ -243,7 +331,13 @@ func buildBackendGoNumericPlan(ir *backendProtoIR) (backendGoNumericPlan, error)
 				}
 			}
 		case backendValueOperation:
-			for _, use := range ir.ops[value.pc].uses {
+			operation := &ir.ops[value.pc]
+			for _, use := range operation.uses {
+				if operation.op == opCallLocalOne &&
+					use.register == operation.b &&
+					backendGoNumericScalarReplacedCall(ir, options, operation) {
+					continue
+				}
 				markUsed(use.value)
 			}
 		}
@@ -258,7 +352,7 @@ func buildBackendGoNumericPlan(ir *backendProtoIR) (backendGoNumericPlan, error)
 			if backendGoNumericOperationDead(plan, operation) {
 				continue
 			}
-			if err := verifyBackendGoNumericOperation(ir, plan, operation); err != nil {
+			if err := verifyBackendGoNumericOperation(ir, plan, options, operation); err != nil {
 				return backendGoNumericPlan{}, err
 			}
 		}
@@ -277,11 +371,47 @@ func buildBackendGoNumericPlan(ir *backendProtoIR) (backendGoNumericPlan, error)
 	return plan, nil
 }
 
+func backendGoNumericDirectTarget(options backendGoNumericOptions, operation *backendOperationIR) (backendGoNumericTarget, bool) {
+	if operation == nil ||
+		operation.call.kind != backendCallDirectProto ||
+		operation.call.targetProto < 0 ||
+		int(operation.call.targetProto) >= len(options.directTargets) {
+		return backendGoNumericTarget{}, false
+	}
+	target := options.directTargets[operation.call.targetProto]
+	return target, target.ir != nil && target.functionName != ""
+}
+
+func backendGoNumericScalarReplacedCall(
+	ir *backendProtoIR,
+	options backendGoNumericOptions,
+	operation *backendOperationIR,
+) bool {
+	if ir == nil || operation == nil || operation.op != opCallLocalOne {
+		return false
+	}
+	target, ok := backendGoNumericDirectTarget(options, operation)
+	if !ok || target.ir.variadic || len(target.ir.upvalues) != 0 {
+		return false
+	}
+	valueID := backendOperationUse(operation, operation.b)
+	if !ir.validBackendValue(valueID) {
+		return false
+	}
+	value := &ir.values[valueID-1]
+	return value.object == backendObjectClosure &&
+		!value.escapes &&
+		!value.targetUnknown &&
+		len(value.targetProtos) == 1 &&
+		value.targetProtos[0] == operation.call.targetProto
+}
+
 func backendGoNumericPureProducer(op opcode) bool {
 	switch op {
 	case opLoadConst, opMove,
 		opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow, opNeg,
-		opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
+		opAddK, opSubK, opMulK, opDivK, opModK, opIDivK,
+		opClosure:
 		return true
 	default:
 		return false
@@ -300,7 +430,12 @@ func backendGoNumericOperationDead(plan backendGoNumericPlan, operation *backend
 	return true
 }
 
-func verifyBackendGoNumericOperation(ir *backendProtoIR, plan backendGoNumericPlan, operation *backendOperationIR) error {
+func verifyBackendGoNumericOperation(
+	ir *backendProtoIR,
+	plan backendGoNumericPlan,
+	options backendGoNumericOptions,
+	operation *backendOperationIR,
+) error {
 	require := func(register int32, want backendTagMask) error {
 		id := backendOperationUse(operation, register)
 		if id == invalidBackendValueID {
@@ -323,6 +458,13 @@ func verifyBackendGoNumericOperation(ir *backendProtoIR, plan backendGoNumericPl
 			return fmt.Errorf("emit backend Go numeric proof: PC %d loads unsupported %s constant", operation.pc, ir.constants[operation.b].kind)
 		}
 	case opMove:
+		return nil
+	case opClosure:
+		for _, definition := range operation.defs {
+			if plan.used[definition.value-1] {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d closure escapes scalar replacement", operation.pc)
+			}
+		}
 		return nil
 	case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow:
 		if err := require(operation.b, backendTagNumber); err != nil {
@@ -381,6 +523,23 @@ func verifyBackendGoNumericOperation(ir *backendProtoIR, plan backendGoNumericPl
 		}
 		return nil
 	case opJump:
+		return nil
+	case opCallLocalOne:
+		target, ok := backendGoNumericDirectTarget(options, operation)
+		if !ok || !backendGoNumericScalarReplacedCall(ir, options, operation) {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no direct numeric target", operation.pc)
+		}
+		if target.ir.variadic ||
+			len(target.ir.upvalues) != 0 ||
+			operation.callArgCount != int32(target.ir.params) ||
+			operation.callArgCount < 0 {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported direct call shape", operation.pc)
+		}
+		for register := operation.callArgStart; register < operation.callArgStart+operation.callArgCount; register++ {
+			if err := require(register, backendTagNumber); err != nil {
+				return err
+			}
+		}
 		return nil
 	case opReturnOne:
 		return require(operation.a, backendTagNumber)
@@ -559,6 +718,34 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 	case opJump:
 		emitter.emitGoto(int32(block.id), emitter.ir.pcToBlock[operation.targetPC], 1)
 		return true, nil
+	case opCallLocalOne:
+		target, ok := backendGoNumericDirectTarget(emitter.options, operation)
+		if !ok || !backendGoNumericScalarReplacedCall(emitter.ir, emitter.options, operation) {
+			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar-replaced direct target", operation.pc)
+		}
+		destination, err := definition(operation.a)
+		if err != nil {
+			return false, err
+		}
+		fmt.Fprintf(&emitter.body, "\tv%d, ok%d = %s(", destination, operation.pc, target.functionName)
+		for argument := int32(0); argument < operation.callArgCount; argument++ {
+			if argument != 0 {
+				emitter.body.WriteString(", ")
+			}
+			value, err := use(operation.callArgStart + argument)
+			if err != nil {
+				return false, err
+			}
+			fmt.Fprintf(&emitter.body, "v%d", value)
+		}
+		emitter.body.WriteString(")\n")
+		fmt.Fprintf(&emitter.body, "\tif !ok%d {\n", operation.pc)
+		if emitter.prepared {
+			emitter.body.WriteString("\t\treturn machinePreparedReplayEntry()\n")
+		} else {
+			emitter.body.WriteString("\t\treturn 0, false\n")
+		}
+		emitter.body.WriteString("\t}\n")
 	case opReturnOne, opReturn:
 		result, _ := use(operation.a)
 		if emitter.prepared {
@@ -616,6 +803,10 @@ func (emitter *backendGoNumericEmitter) emitNaNGuard(operation *backendOperation
 
 func (emitter *backendGoNumericEmitter) emitReplayBeforeOperation(operation *backendOperationIR, indent int) {
 	prefix := strings.Repeat("\t", indent)
+	if emitter.plan.replayEntry[operation.pc] {
+		fmt.Fprintf(&emitter.body, "%sreturn machinePreparedReplayEntry()\n", prefix)
+		return
+	}
 	fmt.Fprintf(&emitter.body, "%sexit := context.replayBeforeOperation(%d, %d)\n", prefix, operation.pc, len(operation.spillValues))
 	for spillIndex, spill := range operation.spillValues {
 		switch emitter.plan.tags[spill.value-1] {
