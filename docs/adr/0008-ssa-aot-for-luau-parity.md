@@ -29,6 +29,22 @@ callback costs roughly 325 ns and 168 B/4 allocations, which already exceeds
 some complete Luau rows. That contract remains useful for public lifecycle
 latency, but it is not an equivalent guest-throughput comparison.
 
+The corrected schema-v2 observer was later frozen and recaptured from exact
+commit `a424022484e6afc1d976722a6fa2f6acaf8ef65e`. Its one-program,
+runtime-N, fixed-runtime-seed `guest_batch_v1` artifacts contain 889 raw lines
+and 223 fitted-slope lines per capture. The clean directory hashes are:
+
+- A: `39299ed38ce690abc0fc00fa521d1722143176a3bf83bda3f63ceb1af1337905`;
+- B: `ba129677c4458debfb709338cbe0df1ed088334f36cbadf0c8910342119aad70`.
+
+The new observer reproduces the architectural rejection without public-call
+mass: all 74 capture/case rows miss the dynamic threshold, medians span about
+`3.00x-23.42x`, and the worst p90 is about `24.64x`. `while_branching` remains
+the best row, recursive Fibonacci is about `5.38x`, arithmetic about `5.78x`,
+and array operations remain the worst row. This supersedes the old observer
+for guest-throughput decisions while retaining the old evidence as lifecycle
+history.
+
 The architecture decision therefore evaluated a bounded no-CGO candidate
 population under a corrected `guest_batch_v1` contract:
 
