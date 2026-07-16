@@ -5,16 +5,13 @@ median_max=${RUNTIME_MEDIAN_MAX:-1.85}
 p90_max=${RUNTIME_P90_MAX:-2.00}
 current_median_max=${RUNTIME_CURRENT_MEDIAN_MAX:-1.05}
 capture_a= capture_b= baseline_a= baseline_b= baseline_manifest= output=
-derive=0 report_only=0 self_test=0 phase=all
+derive=0 report_only=0 self_test=0
 
 usage() {
 	cat <<'EOF'
 usage: scripts/runtime-ratio-gate --capture-a DIR --capture-b DIR [options]
        scripts/runtime-ratio-gate --derive --baseline-a DIR --baseline-b DIR --output FILE
        scripts/runtime-ratio-gate --self-test
-
-options:
-       --phase dispatch    gate only top10/arithmetic_for
 EOF
 }
 die() { printf 'runtime-ratio-gate: %s\n' "$1" >&2; exit 2; }
@@ -40,25 +37,11 @@ while [ "$#" -gt 0 ]; do
 		--median-max) [ "$#" -ge 2 ] || die 'missing --median-max value'; median_max=$2; shift 2 ;;
 		--p90-max) [ "$#" -ge 2 ] || die 'missing --p90-max value'; p90_max=$2; shift 2 ;;
 		--current-median-max) [ "$#" -ge 2 ] || die 'missing --current-median-max value'; current_median_max=$2; shift 2 ;;
-		--phase) [ "$#" -ge 2 ] || die 'missing --phase value'; phase=$2; shift 2 ;;
 		--self-test) self_test=1; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) die "unknown option: $1" ;;
 	esac
 done
-
-case "$phase" in
-	all) active_case_list=$case_list ;;
-	dispatch) active_case_list='top10/arithmetic_for' ;;
-	*) die "unknown phase: $phase" ;;
-esac
-if [ "$phase" = dispatch ]; then
-	manifest_capture_rows=6
-	manifest_total_rows=12
-else
-	manifest_capture_rows=222
-	manifest_total_rows=444
-fi
 
 if [ "$self_test" -eq 1 ]; then
 	t=$(mktemp -d "${TMPDIR:-/tmp}/runtime-ratio-gate.XXXXXX")
@@ -90,26 +73,6 @@ if [ "$self_test" -eq 1 ]; then
 	make_fixture "$t/cb" 1.59 candidate b 0000000000000000000000000000000000000002 0000000000000000000000000000000000000000000000000000000000000001
 	make_fixture "$t/over-b" 2.1 candidate b 0000000000000000000000000000000000000002 0000000000000000000000000000000000000000000000000000000000000001
 	m="$t/manifest.tsv"; "$0" --derive --baseline-a "$t/a" --baseline-b "$t/b" --output "$m" >/dev/null
-	for source in a b ca cb; do
-		cp -R "$t/$source" "$t/dispatch-$source"
-		awk -F '\t' 'NR==1 || ($6=="top10" && $7=="arithmetic_for")' "$t/dispatch-$source/raw.tsv" >"$t/dispatch-$source/raw.tmp"; mv "$t/dispatch-$source/raw.tmp" "$t/dispatch-$source/raw.tsv"
-		awk -F '\t' 'NR==1 || ($6=="top10" && $7=="arithmetic_for")' "$t/dispatch-$source/slopes.tsv" >"$t/dispatch-$source/slopes.tmp"; mv "$t/dispatch-$source/slopes.tmp" "$t/dispatch-$source/slopes.tsv"
-	done
-	dm="$t/dispatch-manifest"; "$0" --phase dispatch --derive --baseline-a "$t/dispatch-a" --baseline-b "$t/dispatch-b" --output "$dm" >/dev/null
-	"$0" --phase dispatch --capture-a "$t/dispatch-a" --capture-b "$t/dispatch-b" --baseline-manifest "$dm" --report-only >/dev/null || die 'self-test dispatch gate'
-	if "$0" --phase dispatch --capture-a "$t/dispatch-a" --capture-b "$t/dispatch-b" --median-max 1.4 >/dev/null 2>&1; then die 'self-test dispatch median threshold'; fi
-	if "$0" --phase dispatch --capture-a "$t/dispatch-a" --capture-b "$t/dispatch-b" --p90-max 1.4 >/dev/null 2>&1; then die 'self-test dispatch p90 threshold'; fi
-	cp -R "$t/dispatch-a" "$t/dispatch-missing"; sed -i.bak '2d' "$t/dispatch-missing/raw.tsv"; rm -f "$t/dispatch-missing/raw.tsv.bak"
-	if "$0" --phase dispatch --capture-a "$t/dispatch-missing" --capture-b "$t/dispatch-b" >/dev/null 2>&1; then die 'self-test dispatch missing'; fi
-	cp -R "$t/dispatch-a" "$t/dispatch-duplicate"; tail -n 1 "$t/dispatch-a/raw.tsv" >> "$t/dispatch-duplicate/raw.tsv"
-	if "$0" --phase dispatch --capture-a "$t/dispatch-duplicate" --capture-b "$t/dispatch-b" >/dev/null 2>&1; then die 'self-test dispatch duplicate'; fi
-	cp -R "$t/dispatch-a" "$t/dispatch-extra"; sed -n '2p' "$t/dispatch-a/raw.tsv" | sed 's/\tarithmetic_for\t/\textra_case\t/' >>"$t/dispatch-extra/raw.tsv"
-	if "$0" --phase dispatch --capture-a "$t/dispatch-extra" --capture-b "$t/dispatch-b" >/dev/null 2>&1; then die 'self-test dispatch extra'; fi
-	cp -R "$t/dispatch-a" "$t/dispatch-contaminated"; sed -i.bak '2s/\t0$/\t1/' "$t/dispatch-contaminated/raw.tsv"; rm -f "$t/dispatch-contaminated/raw.tsv.bak"
-	if "$0" --phase dispatch --capture-a "$t/dispatch-contaminated" --capture-b "$t/dispatch-b" >/dev/null 2>&1; then die 'self-test dispatch contaminated'; fi
-	dispatch_pairs=$("$0" --phase dispatch --capture-a "$t/dispatch-ca" --capture-b "$t/dispatch-cb" --baseline-a "$t/dispatch-a" --baseline-b "$t/dispatch-b" --baseline-manifest "$dm" --report-only | awk -F '\t' '$1 ~ /^current\/[ab]\/[ab]$/ {n++} END{print n+0}')
-	[ "$dispatch_pairs" = 4 ] || die 'self-test dispatch Cartesian pairings'
-	if "$0" --phase dispatch --capture-a "$t/dispatch-ca" --capture-b "$t/dispatch-cb" --baseline-a "$t/dispatch-a" --baseline-b "$t/dispatch-b" --baseline-manifest "$dm" >/dev/null 2>&1; then die 'self-test dispatch current threshold'; fi
 	cp -R "$t/a" "$t/incomplete"; touch "$t/incomplete/INCOMPLETE"; if "$0" --capture-a "$t/incomplete" --capture-b "$t/b" >/dev/null 2>&1; then die 'self-test incomplete'; fi
 	cp -R "$t/b" "$t/reused-id"; sed -i.bak 's/id-frozen-current-b/id-frozen-current-a/g' "$t/reused-id/raw.tsv" "$t/reused-id/slopes.tsv"; rm -f "$t/reused-id/raw.tsv.bak" "$t/reused-id/slopes.tsv.bak"
 	if "$0" --capture-a "$t/a" --capture-b "$t/reused-id" >/dev/null 2>&1; then die 'self-test reused capture ID'; fi
@@ -161,8 +124,8 @@ if [ -n "$baseline_manifest" ]; then
 	expected_header='schema_version	capture_role	capture_pair	capture_sha256	capture_id	source_commit	environment_sha256	corpus	name	engine	repeat	slope_ns_per_call'
 	actual_header=$(sed -n '1p' "$baseline_manifest")
 	[ "$actual_header" = "$expected_header" ] || die 'baseline manifest header mismatch'
-	manifest_left=$(awk -F '\t' -v expected="$manifest_capture_rows" '$1=="1"&&$2=="frozen-current"&&$3=="a"{if(!h)h=$4; if($4!=h)bad=1;n++} END{if(n!=expected||bad)exit 1;print h}' "$baseline_manifest") || die 'baseline manifest A rows invalid'
-	manifest_right=$(awk -F '\t' -v expected="$manifest_capture_rows" '$1=="1"&&$2=="frozen-current"&&$3=="b"{if(!h)h=$4; if($4!=h)bad=1;n++} END{if(n!=expected||bad)exit 1;print h}' "$baseline_manifest") || die 'baseline manifest B rows invalid'
+	manifest_left=$(awk -F '\t' '$1=="1"&&$2=="frozen-current"&&$3=="a"{if(!h)h=$4; if($4!=h)bad=1;n++} END{if(n!=222||bad)exit 1;print h}' "$baseline_manifest") || die 'baseline manifest A rows invalid'
+	manifest_right=$(awk -F '\t' '$1=="1"&&$2=="frozen-current"&&$3=="b"{if(!h)h=$4; if($4!=h)bad=1;n++} END{if(n!=222||bad)exit 1;print h}' "$baseline_manifest") || die 'baseline manifest B rows invalid'
 	bind_left=$left_hash; bind_right=$right_hash
 	manifest_dir_a=$left; manifest_dir_b=$right
 	if [ -n "$baseline_a$baseline_b" ]; then
@@ -172,13 +135,13 @@ if [ -n "$baseline_manifest" ]; then
 	fi
 	[ "$manifest_left" = "$bind_left" ] || die 'baseline manifest capture A hash mismatch'
 	[ "$manifest_right" = "$bind_right" ] || die 'baseline manifest capture B hash mismatch'
-	manifest_source=$(awk -F '\t' -v expected="$manifest_total_rows" 'NR>1&&$1=="1"{print $6; n++} END{if(n!=expected)exit 1}' "$baseline_manifest" | sort -u)
-	manifest_env=$(awk -F '\t' -v expected="$manifest_total_rows" 'NR>1&&$1=="1"{print $7; n++} END{if(n!=expected)exit 1}' "$baseline_manifest" | sort -u)
+	manifest_source=$(awk -F '\t' 'NR>1&&$1=="1"{print $6; n++} END{if(n!=444)exit 1}' "$baseline_manifest" | sort -u)
+	manifest_env=$(awk -F '\t' 'NR>1&&$1=="1"{print $7; n++} END{if(n!=444)exit 1}' "$baseline_manifest" | sort -u)
 	[ "$(printf '%s\n' "$manifest_source" | wc -l | tr -d ' ')" = 1 ] || die 'baseline manifest source mismatch'
 	[ "$(printf '%s\n' "$manifest_env" | wc -l | tr -d ' ')" = 1 ] || die 'baseline manifest environment mismatch'
 	manifest_check_dir=$(mktemp -d "${TMPDIR:-/tmp}/runtime-ratio-manifest.XXXXXX")
 	manifest_expected=$manifest_check_dir/expected.tsv
-	"$0" --phase "$phase" --derive --baseline-a "$manifest_dir_a" --baseline-b "$manifest_dir_b" --output "$manifest_expected" >/dev/null || die 'cannot reconstruct baseline manifest'
+	"$0" --derive --baseline-a "$manifest_dir_a" --baseline-b "$manifest_dir_b" --output "$manifest_expected" >/dev/null || die 'cannot reconstruct baseline manifest'
 	tail -n +2 "$baseline_manifest" | LC_ALL=C sort >"$manifest_check_dir/actual.rows"
 	tail -n +2 "$manifest_expected" | LC_ALL=C sort >"$manifest_check_dir/expected.rows"
 	cmp -s "$manifest_check_dir/actual.rows" "$manifest_check_dir/expected.rows" || { rm -rf "$manifest_check_dir"; die 'baseline manifest rows do not match bound captures'; }
@@ -187,14 +150,13 @@ fi
 tmp=
 [ "$mode" = derive ] && { tmp=$output.tmp.$$; trap 'rm -f "$tmp"' EXIT HUP INT TERM; }
 
-awk -v left="$left" -v right="$right" -v left_hash="$left_hash" -v right_hash="$right_hash" -v expected_env_a="$left_environment_hash" -v expected_env_b="$right_environment_hash" -v mode="$mode" -v out="$tmp" -v report_only="$report_only" -v median_max="$median_max" -v p90_max="$p90_max" -v phase="$phase" -v case_list="$active_case_list" '
+awk -v left="$left" -v right="$right" -v left_hash="$left_hash" -v right_hash="$right_hash" -v expected_env_a="$left_environment_hash" -v expected_env_b="$right_environment_hash" -v mode="$mode" -v out="$tmp" -v report_only="$report_only" -v median_max="$median_max" -v p90_max="$p90_max" -v case_list="$case_list" '
 BEGIN {
 	FS=OFS="\t"; split(case_list,ids," "); case_count=length(ids)
 	for(i=1;i<=case_count;i++){split(ids[i],z,"/"); corpus[i]=z[1]; name[i]=z[2]; wanted[ids[i]]=1}
 	raw_header="schema_version\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\tengine\trepeat\tacquisition_order\tn_calls\telapsed_ns\tresult_sha256\tcallable_scope\tenvironment_sha256\tcontaminated"
 	slope_header="schema_version\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\tengine\trepeat\tslope_ns_per_call\tintercept_ns\tresult_sha256\tcallable_scope\tenvironment_sha256"
 	num="^[+-]?[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$"; hex="^[0-9a-fA-F]+$"
-	if(phase=="dispatch"&&(case_count!=1||ids[1]!="top10/arithmetic_for"))bad("dispatch case binding")
 	if(median_max!~num||median_max<=0||p90_max!~num||p90_max<=0)bad("invalid threshold")
 	if(mode=="derive") print "schema_version\tcapture_role\tcapture_pair\tcapture_sha256\tcapture_id\tsource_commit\tenvironment_sha256\tcorpus\tname\tengine\trepeat\tslope_ns_per_call" > out
 }
@@ -235,7 +197,7 @@ END {
 if [ "$mode" = gate ] && [ -n "$baseline_a$baseline_b" ]; then
 	[ -n "$baseline_a" ] && [ -n "$baseline_b" ] || die 'paired baselines require both --baseline-a and --baseline-b'
 	[ -n "$baseline_manifest" ] || die 'paired baselines require --baseline-manifest'
-	"$0" --phase "$phase" --capture-a "$baseline_a" --capture-b "$baseline_b" --report-only >/dev/null || die 'invalid paired current baseline capture'
+	"$0" --capture-a "$baseline_a" --capture-b "$baseline_b" --report-only >/dev/null || die 'invalid paired current baseline capture'
 	candidate_role=$(awk -F '\t' 'NR==2{print $2;exit}' "$left/slopes.tsv")
 	baseline_role=$(awk -F '\t' 'NR==2{print $2;exit}' "$baseline_a/slopes.tsv")
 	[ "$candidate_role" = candidate ] || die 'paired comparison requires candidate captures'
@@ -243,27 +205,19 @@ if [ "$mode" = gate ] && [ -n "$baseline_a$baseline_b" ]; then
 	candidate_env=$(awk -F '\t' 'NR==2{print $15;exit}' "$left/slopes.tsv")
 	baseline_env=$(awk -F '\t' 'NR==2{print $15;exit}' "$baseline_a/slopes.tsv")
 	[ "$candidate_env" = "$baseline_env" ] || die 'candidate and baseline environment mismatch'
-	awk -v ca="$left" -v cb="$right" -v ba="$baseline_a" -v bb="$baseline_b" -v report_only="$report_only" -v current_median_max="$current_median_max" -v phase="$phase" -v case_list="$active_case_list" '
+	awk -v ca="$left" -v cb="$right" -v ba="$baseline_a" -v bb="$baseline_b" -v report_only="$report_only" -v current_median_max="$current_median_max" -v case_list="$case_list" '
 	BEGIN{FS="\t";split(case_list,ids," ");if(current_median_max!~"^[0-9]+([.][0-9]+)?$"||current_median_max<=0)exit 2}
 	function load(path,tag,    l,n,q,id){while((getline l < (path "/slopes.tsv"))>0){n++;if(n==1)continue;split(l,q,"\t");id=q[6] "/" q[7];if(q[9]=="ember")v[tag SUBSEP id SUBSEP q[10]]=q[11]+0}close(path "/slopes.tsv")}
 	function sort9(a,    i,j,w){for(i=2;i<=9;i++){w=a[i];j=i-1;while(j>0&&a[j]>w){a[j+1]=a[j];j--}a[j+1]=w}}
 	END{
 		load(ca,"ca");load(cb,"cb");load(ba,"ba");load(bb,"bb")
-		pair_count=(phase=="dispatch"?4:2)
-		for(pair_index=1;pair_index<=pair_count;pair_index++){
-			if(phase=="dispatch"){
-				candidate_index=int((pair_index-1)/2)+1;baseline_index=((pair_index-1)%2)+1
-				candidate=(candidate_index==1?"ca":"cb");baseline=(baseline_index==1?"ba":"bb")
-				candidate_pair=(candidate_index==1?"a":"b");baseline_pair=(baseline_index==1?"a":"b");pair="current/" candidate_pair "/" baseline_pair
-			} else {
-				candidate=(pair_index==1?"ca":"cb");baseline=(pair_index==1?"ba":"bb");pair=(pair_index==1?"a":"b")
-			}
+		for(pair_index=1;pair_index<=2;pair_index++){
+			candidate=(pair_index==1?"ca":"cb");baseline=(pair_index==1?"ba":"bb");pair=(pair_index==1?"a":"b")
 			for(case_index=1;case_index<=length(ids);case_index++){
 				id=ids[case_index];delete ratios;k=0
 				for(candidate_repeat=1;candidate_repeat<=3;candidate_repeat++)for(baseline_repeat=1;baseline_repeat<=3;baseline_repeat++)ratios[++k]=v[candidate SUBSEP id SUBSEP candidate_repeat]/v[baseline SUBSEP id SUBSEP baseline_repeat]
 				sort9(ratios);median=ratios[5];status=(median<=current_median_max?"PASS":"FAIL")
-				if(phase=="dispatch")printf "%s\t%s\tmedian=%.6g\t%s\n",pair,id,median,status
-				else printf "current/%s\t%s\tmedian=%.6g\t%s\n",pair,id,median,status
+				printf "current/%s\t%s\tmedian=%.6g\t%s\n",pair,id,median,status
 				if(status=="FAIL")bad=1
 			}
 		}

@@ -38,9 +38,6 @@ type machineProto struct {
 	constants                []machineConstant
 	upvalues                 []machineUpvalue
 	blocks                   []machineBlock
-	burstRegions             []machineBurstRegion
-	burstOperations          []machineBurstOperation
-	burstGuards              []machineBurstGuard
 	registers                int
 	params                   int
 	variadic                 bool
@@ -450,7 +447,6 @@ func (builder *machineImageBuilder) prepare(proto *Proto, id int32) (machineProt
 		prepared.reject("prototype has no fixed return")
 	}
 	prepared.blocks = machineBlocks(code)
-	prepared.burstRegions, prepared.burstOperations, prepared.burstGuards = lowerMachineBurstRegions(code, prepared.operations, prepared.constants)
 	return prepared, nil
 }
 
