@@ -53,6 +53,16 @@ type backendGoNumericEmitter struct {
 	options     backendGoNumericOptions
 }
 
+func backendGoNumericMathMin(operation *backendOperationIR) bool {
+	return operation != nil &&
+		operation.op == opFastCall &&
+		nativeFuncID(operation.nativeID) == nativeFuncMathMin &&
+		operation.c == 2 &&
+		operation.d == 1 &&
+		len(operation.defs) == 1 &&
+		operation.defs[0].register == operation.a
+}
+
 func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptions) ([]byte, error) {
 	if err := verifyBackendProtoIR(ir); err != nil {
 		return nil, fmt.Errorf("emit backend Go numeric proof: %w", err)
@@ -389,7 +399,8 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			if operation.op != opFastCall {
 				continue
 			}
-			if _, structuralToString := plan.keys.tostring(operation); !structuralToString {
+			if _, structuralToString := plan.keys.tostring(operation); !structuralToString &&
+				!backendGoNumericMathMin(operation) {
 				if !plan.coroutines.createOperation(operation) &&
 					!plan.coroutines.statusOperation(operation) {
 					if _, resume := plan.coroutines.resume(operation); !resume {
@@ -434,7 +445,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 					target.ir,
 					target.fixedVarargCount,
 					operation,
-				) {
+				) && !backendGoNumericMathMin(operation) {
 					continue
 				}
 				fmt.Fprintf(
@@ -670,6 +681,8 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 				case opFastCall:
 					if _, ok := plan.keys.tostring(operation); ok {
 						tags = backendTagString
+					} else if backendGoNumericMathMin(operation) {
+						tags = backendTagNumber
 					} else if plan.coroutines.createOperation(operation) {
 						tags = 0
 					} else if _, ok := plan.coroutines.resume(operation); ok {
@@ -1310,6 +1323,20 @@ func verifyBackendGoNumericOperation(
 			}
 			if plan.tags[operation.defs[0].value-1] != backendTagString {
 				return fmt.Errorf("emit backend Go numeric proof: PC %d structural tostring result is not string", operation.pc)
+			}
+			return nil
+		}
+		if backendGoNumericMathMin(operation) {
+			if operation.c <= 0 || operation.d != 1 ||
+				len(operation.defs) != 1 ||
+				operation.defs[0].register != operation.a ||
+				plan.tags[operation.defs[0].value-1] != backendTagNumber {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d changes math.min shape", operation.pc)
+			}
+			for argument := int32(0); argument < operation.c; argument++ {
+				if err := require(operation.a+argument, backendTagNumber); err != nil {
+					return err
+				}
 			}
 			return nil
 		}
@@ -2043,6 +2070,26 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		return true, nil
 	case opFastCall:
 		if _, ok := emitter.plan.keys.tostring(operation); ok {
+			return false, nil
+		}
+		if backendGoNumericMathMin(operation) {
+			destination, err := definition(operation.a)
+			if err != nil {
+				return false, err
+			}
+			first, err := use(operation.a)
+			if err != nil {
+				return false, err
+			}
+			fmt.Fprintf(&emitter.body, "\tv%d = v%d\n", destination, first)
+			emitter.needsMath = true
+			for argument := int32(1); argument < operation.c; argument++ {
+				value, err := use(operation.a + argument)
+				if err != nil {
+					return false, err
+				}
+				fmt.Fprintf(&emitter.body, "\tv%d = math.Min(v%d, v%d)\n", destination, destination, value)
+			}
 			return false, nil
 		}
 		if emitter.plan.coroutines.createOperation(operation) {

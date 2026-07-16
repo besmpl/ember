@@ -284,6 +284,38 @@ end
 return kernel
 `
 
+const backendCombatTickProofSource = `
+local function kernel(seed)
+    local entities = {
+        {hp = 120 + seed % 3, shield = 12, regen = 2, damage = 13, alive = true},
+        {hp = 95, shield = 24, regen = 1, damage = 8, alive = true},
+        {hp = 160, shield = 5, regen = 3, damage = 17, alive = true},
+        {hp = 80, shield = 30, regen = 0, damage = 11, alive = true},
+    }
+    local score = 0
+    for tick = 1, 30 do
+        for _, entity in entities do
+            if entity.alive then
+                local incoming = entity.damage + tick % 5
+                if entity.shield > 0 then
+                    local absorbed = math.min(entity.shield, incoming)
+                    entity.shield = entity.shield - absorbed
+                    incoming = incoming - absorbed
+                end
+                entity.hp = entity.hp - incoming + entity.regen
+                if entity.hp <= 0 then
+                    entity.alive = false
+                else
+                    score = score + entity.hp + entity.shield
+                end
+            end
+        end
+    end
+    return score
+end
+return kernel
+`
+
 const backendArrayOpsProofSource = `
 local function kernel(seed)
     local values = {}
@@ -2116,6 +2148,132 @@ func TestBackendGoProjectileSweepIsIdentityBlindAndRejectsUnprovedShapes(t *test
 				functionName: "rejectUnprovedProjectileSweep",
 			}); err == nil {
 				t.Fatalf("record-array compiler accepted %s", name)
+			}
+		})
+	}
+}
+
+func TestBackendGoCombatTickMathMinFixtureIsFreshAndCorrect(t *testing.T) {
+	ir := backendRecordArrayProofIR(t, backendCombatTickProofSource)
+	generated, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedCombatTick",
+		preparedFunctionName: "backendGeneratedCombatTickPreparedFixture",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fixture = "runtime_backend_combat_tick_generated_test.go"
+	onDisk, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(generated, onDisk) {
+		t.Fatal("generated combat-tick fixture is stale")
+	}
+	if _, err := goparser.ParseFile(token.NewFileSet(), fixture, generated, goparser.AllErrors); err != nil {
+		t.Fatalf("parse generated combat-tick source: %v", err)
+	}
+	text := string(generated)
+	for _, required := range []string{
+		"var ra0_0 [4]float64",
+		"var ra0_4 [4]bool",
+		"math.Min(",
+		"context.intrinsicUnchanged(",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("generated combat-tick source lacks %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"map[", "make(", "machineTable", "machineString", "opcode", "descriptor",
+		"FAST_CALL", "MATH_MIN", "NEW_TABLE", "SET_FIELD", "GET_FIELD",
+		"PREPARE_ITER", "ARRAY_NEXT_JUMP2",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("generated combat-tick source contains runtime table/dispatch marker %q", forbidden)
+		}
+	}
+
+	root, err := Compile(backendCombatTickProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seed := range []float64{-29, -1, 0, 1, 7, 29, 1_000_005} {
+		got, ok := backendGeneratedCombatTick(seed)
+		if !ok {
+			t.Fatalf("generated combat-tick fixture exited for seed %v", seed)
+		}
+		oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+			args: []Value{NumberValue(seed)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(oracle) != 1 {
+			t.Fatalf("combat-tick oracle result count = %d, want 1", len(oracle))
+		}
+		oracleNumber, ok := oracle[0].Number()
+		if !ok || oracleNumber != got {
+			t.Fatalf("generated/oracle combat-tick seed %v = %v/%v (%t)", seed, got, oracleNumber, ok)
+		}
+	}
+	if !checkptrInstrumentedTest() {
+		if allocations := testing.AllocsPerRun(1000, func() {
+			_, _ = backendGeneratedCombatTick(29)
+		}); allocations != 0 {
+			t.Fatalf("generated combat-tick allocations = %v, want 0", allocations)
+		}
+	}
+}
+
+func TestBackendGoCombatTickMathMinIsIdentityBlindAndRejectsUnprovedCalls(t *testing.T) {
+	emit := func(source string) []byte {
+		generated, err := emitBackendGoNumericProof(
+			backendRecordArrayProofIR(t, source),
+			backendGoNumericOptions{
+				packageName:          "ember",
+				functionName:         "identityBlindCombatTick",
+				preparedFunctionName: "identityBlindCombatTickPrepared",
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return generated
+	}
+	renamed := strings.Replace(
+		backendCombatTickProofSource,
+		"local function kernel(seed)",
+		"local function opaque(seed)",
+		1,
+	)
+	if !bytes.Equal(emit(backendCombatTickProofSource), emit(renamed)) {
+		t.Fatal("combat-tick source depends on private function identity")
+	}
+
+	tests := map[string]string{
+		"no arguments": strings.Replace(
+			backendCombatTickProofSource,
+			"math.min(entity.shield, incoming)",
+			"math.min()",
+			1,
+		),
+		"boolean argument": strings.Replace(
+			backendCombatTickProofSource,
+			"math.min(entity.shield, incoming)",
+			"math.min(entity.shield, entity.alive)",
+			1,
+		),
+	}
+	for name, source := range tests {
+		t.Run(name, func(t *testing.T) {
+			ir := backendRecordArrayProofIR(t, source)
+			if _, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+				packageName:  "ember",
+				functionName: "rejectUnprovedCombatTick",
+			}); err == nil {
+				t.Fatalf("math.min compiler accepted %s", name)
 			}
 		})
 	}
@@ -3984,6 +4142,20 @@ func BenchmarkBackendGeneratedProjectileSweep(b *testing.B) {
 		value, ok := backendGeneratedProjectileSweep(float64(iteration & 31))
 		if !ok {
 			b.Fatal("generated projectile-sweep fixture exited")
+		}
+		result = value
+	}
+	backendGeneratedNumericSink = result
+}
+
+func BenchmarkBackendGeneratedCombatTick(b *testing.B) {
+	var result float64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		value, ok := backendGeneratedCombatTick(float64(iteration & 31))
+		if !ok {
+			b.Fatal("generated combat-tick fixture exited")
 		}
 		result = value
 	}

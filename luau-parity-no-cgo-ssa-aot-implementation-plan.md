@@ -458,6 +458,31 @@ The retained path has moved beyond the original starting state:
   for the direct kernel and 1,328 bytes for the prepared body; each has only
   cold bounds/stack-growth calls and no opcode, descriptor, Machine table,
   runtime string, interning, or VM dispatch.
+- The guarded numeric-intrinsic slice recognizes exactly the proved
+  two-number, one-result `math.min` shape and emits ordinary Go `math.Min`
+  over scalar SSA values. Prepared binding verifies the exact owner intrinsic
+  identity before entering the generated body, so rebound `math.min` replays
+  entry before any scalarized record mutation; wrong arity and nonnumeric
+  operands fail closed. A parameterized `combat_tick` holdout proves one
+  four-record array with mutable number and boolean fields plus the guarded
+  intrinsic. Generated code, prepared owner, generic Machine, and the
+  independent interpreter agree across negative, ordinary, and large seeds.
+  A host replacement for `math.min` produces the same noncanonical result
+  through prepared replay and generic Machine. Direct and prepared paths
+  allocate zero when warmed and materialize no owner tables or strings.
+  Private-function renaming produces byte-identical generated source. The
+  direct kernel has a five-sample median of about 251.5 ns
+  (243.5-262.2 ns observed), while the prepared owner path has a median of
+  about 363.5 ns (359.1-381.3 ns observed), versus about 61.82 microseconds
+  through generic Machine (61.77-61.92 microseconds observed). Live pinned
+  Luau `-O2 -g0` produced the same warmed result and checksum with a
+  five-sample median of about 3.518 microseconds per call
+  (3.469-3.569 microseconds observed), making prepared about `0.103x` Luau.
+  Deterministic generated source is 13,149 bytes. Linked ARM64 is 720 bytes
+  for the direct kernel and 800 bytes for the prepared body; each calls Go's
+  supported `math.archMin` helper and has only cold bounds/stack-growth
+  helpers otherwise, with no opcode, descriptor, Machine table, runtime
+  string, interning, or VM dispatch.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
