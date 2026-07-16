@@ -262,11 +262,27 @@ The retained path has moved beyond the original starting state:
   30.8 microseconds (30.0-31.1 microseconds observed). Linked ARM64 contains
   only the two intentional recursive calls plus Go's stack-growth slow path,
   with no opcode, descriptor, closure, or upvalue dispatch.
+- The current fixed-vararg slice scalar-replaces the local variadic closure and
+  a proven five-value vararg pack in a parameterized `top10/varargs_select`
+  shape. Variadic targets are specialized by verified call arity, capped at
+  32 values for bounded generated size; mismatched arity, open vararg results,
+  nonnumeric values, and unsupported operations fail closed. The guarded
+  `select("#", ...)` intrinsic becomes the fixed numeric count, while the
+  prepared entry checks the target Proto's actual global intrinsic before any
+  generated work and replays the canonical entry if it was rebound. The
+  prepared owner path has a five-sample median of about 267 ns on the
+  checkpoint machine (254-285 ns observed), versus about 20.64 microseconds
+  through generic Machine (20.31-21.93 microseconds observed), with zero
+  allocations and no materialized closure or vararg slice. The direct
+  generated kernel has a five-sample median of about 197 ns (196-203 ns
+  observed). Its 64-byte score helper is straight floating-point code; the
+  prepared body contains one direct helper call and no opcode, descriptor,
+  intrinsic, closure, or vararg dispatch.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
 all-37 parity. Non-dense iteration, general table mutation, strings,
-general closures/upvalues and dynamic call sets, varargs/results,
+general closures/upvalues and dynamic call sets, open varargs/multiple results,
 general recursion and logical-frame/error cases, metatables, host/effect exits,
 modules, and coroutines remain on the active path.
 

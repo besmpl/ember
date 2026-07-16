@@ -158,11 +158,36 @@ func (context machinePreparedContext) numberParameter(index int) (float64, bool)
 }
 
 func (context machinePreparedContext) intrinsicUnchanged(pc int32) bool {
-	if context.machine == nil || context.machine.persistentOwner == nil ||
-		context.target == nil || pc < 0 || int(pc) >= len(context.target.operations) {
+	return context.intrinsicUnchangedTarget(context.target, pc)
+}
+
+func (context machinePreparedContext) intrinsicUnchangedAt(protoID, pc int32) bool {
+	if context.machine == nil ||
+		context.machine.persistentOwner == nil ||
+		context.machine.persistentOwner.image == nil ||
+		protoID < 0 {
 		return false
 	}
-	operation := &context.target.operations[pc]
+	owner := context.machine.persistentOwner
+	if uint64(context.machine.activeModule) >= uint64(len(owner.image.modules)) {
+		return false
+	}
+	image := owner.image.modules[context.machine.activeModule].code
+	if image == nil || int(protoID) >= len(image.prototypes) {
+		return false
+	}
+	return context.intrinsicUnchangedTarget(&image.prototypes[protoID], pc)
+}
+
+func (context machinePreparedContext) intrinsicUnchangedTarget(target *machineProto, pc int32) bool {
+	if context.machine == nil ||
+		context.machine.persistentOwner == nil ||
+		target == nil ||
+		pc < 0 ||
+		int(pc) >= len(target.operations) {
+		return false
+	}
+	operation := &target.operations[pc]
 	if operation.op != opFastCall ||
 		operation.nativeID <= int32(nativeFuncUnknown) {
 		return false

@@ -128,6 +128,22 @@ end
 return kernel
 `
 
+const backendVarargProofSource = `
+local function kernel(seed)
+    local function score(...)
+        local count = select("#", ...)
+        local a, b, c, d, e = ...
+        return count + a * 2 + b * 3 + c * 5 + d * 7 + e * 11
+    end
+    local total = 0
+    for i = 1, 50 + seed % 2 do
+        total = total + score(i, i + 1, i + 2, i + 3, i + 4)
+    end
+    return total
+end
+return kernel
+`
+
 func TestBackendGoNumericProofEmitsDeterministicDirectSource(t *testing.T) {
 	ir := backendNumericProofIR(t)
 	options := backendGoNumericOptions{
@@ -404,6 +420,34 @@ func TestBackendGoRecursiveCallIgnoresSourceIdentity(t *testing.T) {
 	}
 	if !bytes.Equal(emit(base), emit(renamed)) {
 		t.Fatal("source or entrypoint identity selected recursive code")
+	}
+}
+
+func TestBackendGoFixedVarargsIgnoreSourceIdentity(t *testing.T) {
+	base := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "source/main", Text: backendVarargProofSource},
+	}, []Entrypoint{{Name: "main", Module: LogicalModule("main")}})
+	renamed := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "opaque/renamed/source", Text: backendVarargProofSource},
+	}, []Entrypoint{{Name: "renamed-entrypoint", Module: LogicalModule("main")}})
+	if base.programHash == renamed.programHash {
+		t.Fatal("identity-mutated vararg Programs unexpectedly share a binding hash")
+	}
+	emit := func(program *backendProgramIR) []byte {
+		t.Helper()
+		targets := backendVarargProofTargets(program.modules[0].protos)
+		source, err := emitBackendGoNumericProof(program.modules[0].protos[1], backendGoNumericOptions{
+			packageName:   "ember",
+			functionName:  "identityBlindVarargKernel",
+			directTargets: targets,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return source
+	}
+	if !bytes.Equal(emit(base), emit(renamed)) {
+		t.Fatal("source or entrypoint identity selected fixed-vararg code")
 	}
 }
 
@@ -1334,6 +1378,199 @@ func TestBackendGoRecursiveCallerRejectsDifferentCapturedClosure(t *testing.T) {
 	}
 }
 
+func TestBackendGoFixedVarargFixturesAreFreshAndCorrect(t *testing.T) {
+	irs := backendVarargProofIRs(t)
+	generatedTarget, err := emitBackendGoNumericProof(irs[2], backendGoNumericOptions{
+		packageName:      "ember",
+		functionName:     "backendGeneratedVarargScore",
+		fixedVarargCount: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := backendVarargProofTargets(irs)
+	generatedCaller, err := emitBackendGoNumericProof(irs[1], backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedVarargKernel",
+		preparedFunctionName: "backendGeneratedVarargPreparedFixture",
+		directTargets:        targets,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range []struct {
+		path      string
+		generated []byte
+	}{
+		{path: "runtime_backend_vararg_score_generated_test.go", generated: generatedTarget},
+		{path: "runtime_backend_vararg_kernel_generated_test.go", generated: generatedCaller},
+	} {
+		onDisk, err := os.ReadFile(fixture.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(fixture.generated, onDisk) {
+			t.Fatalf("generated fixed-vararg fixture %s is stale", fixture.path)
+		}
+		if _, err := goparser.ParseFile(token.NewFileSet(), fixture.path, fixture.generated, goparser.AllErrors); err != nil {
+			t.Fatalf("parse %s: %v", fixture.path, err)
+		}
+	}
+	targetText := string(generatedTarget)
+	callerText := string(generatedCaller)
+	for _, required := range []string{
+		"backendGeneratedVarargScore(p0 float64, p1 float64, p2 float64, p3 float64, p4 float64)",
+		"v9 = 5",
+		"v10 = p0",
+		"v14 = p4",
+	} {
+		if !strings.Contains(targetText, required) {
+			t.Fatalf("generated fixed-vararg target lacks %q:\n%s", required, targetText)
+		}
+	}
+	for _, required := range []string{
+		"backendGeneratedVarargScore(v36, v38, v40, v42, v44)",
+		"context.intrinsicUnchangedAt(2, 0)",
+	} {
+		if !strings.Contains(callerText, required) {
+			t.Fatalf("generated fixed-vararg caller lacks %q:\n%s", required, callerText)
+		}
+	}
+	for _, forbidden := range []string{
+		"[]float64", "...", "VARARG", "FAST_CALL",
+		"switch", "opcode", "descriptor", "machineClosure",
+	} {
+		if strings.Contains(targetText, forbidden) || strings.Contains(callerText, forbidden) {
+			t.Fatalf("generated fixed-vararg source contains materialization/dispatch marker %q", forbidden)
+		}
+	}
+
+	root, err := Compile(backendVarargProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seed := range []float64{-29, -1, 0, 1, 7, 29, 1_000_000_000_005} {
+		got, ok := backendGeneratedVarargKernel(seed)
+		want := backendVarargExpected(seed)
+		if !ok || got != want {
+			t.Fatalf("generated fixed-vararg fixture(%v) = (%v, %t), want (%v, true)", seed, got, ok, want)
+		}
+		oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+			args: []Value{NumberValue(seed)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(oracle) != 1 {
+			t.Fatalf("fixed-vararg oracle result count = %d, want 1", len(oracle))
+		}
+		oracleNumber, ok := oracle[0].Number()
+		if !ok || oracleNumber != got {
+			t.Fatalf("generated/oracle fixed varargs seed %v = %v/%v (%t)", seed, got, oracleNumber, ok)
+		}
+	}
+	if !checkptrInstrumentedTest() {
+		if allocations := testing.AllocsPerRun(1000, func() {
+			_, _ = backendGeneratedVarargKernel(29)
+		}); allocations != 0 {
+			t.Fatalf("generated fixed-vararg allocations = %v, want 0", allocations)
+		}
+	}
+}
+
+func TestBackendGoFixedVarargTargetRejectsMismatchedArity(t *testing.T) {
+	irs := backendVarargProofIRs(t)
+	targets := backendVarargProofTargets(irs)
+	targets[2].fixedVarargCount = 4
+	if _, err := emitBackendGoNumericProof(irs[1], backendGoNumericOptions{
+		packageName:   "ember",
+		functionName:  "rejectMismatchedVarargArity",
+		directTargets: targets,
+	}); err == nil {
+		t.Fatal("emitted a fixed-vararg call with mismatched arity")
+	}
+	if _, err := emitBackendGoNumericProof(irs[2], backendGoNumericOptions{
+		packageName:      "ember",
+		functionName:     "rejectUnboundedVarargArity",
+		fixedVarargCount: backendGoMaxFixedVarargCount + 1,
+	}); err == nil {
+		t.Fatal("emitted a fixed-vararg target above the code-size bound")
+	}
+}
+
+func TestBackendGoFixedVarargTargetRejectsOpenResults(t *testing.T) {
+	const source = `
+local function kernel()
+    local function passthrough(...)
+        return ...
+    end
+    return passthrough(1, 2, 3)
+end
+return kernel
+`
+	proto, err := Compile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ir, err := buildBackendProtoIR(&image.prototypes[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+		packageName:      "ember",
+		functionName:     "rejectOpenVarargResults",
+		fixedVarargCount: 3,
+	}); err == nil {
+		t.Fatal("emitted open fixed-vararg results")
+	}
+}
+
+func TestBackendGoFixedVarargTargetKeepsNamedParameterPrefix(t *testing.T) {
+	const source = `
+local function score(base, ...)
+    local count = select("#", ...)
+    local a, b = ...
+    return base + count + a + b
+end
+return score
+`
+	proto, err := Compile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ir, err := buildBackendProtoIR(&image.prototypes[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+		packageName:      "ember",
+		functionName:     "fixedVarargsAfterNamedParameter",
+		fixedVarargCount: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(generated)
+	for _, required := range []string{
+		"fixedVarargsAfterNamedParameter(p0 float64, p1 float64, p2 float64)",
+		"= p0",
+		"= p1",
+		"= p2",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("generated named-prefix fixed varargs lack %q:\n%s", required, text)
+		}
+	}
+}
+
 func backendRecursiveExpected(seed float64) float64 {
 	n := 20 + seed - math.Floor(seed/2)*2
 	var fib func(float64) float64
@@ -1344,6 +1581,20 @@ func backendRecursiveExpected(seed float64) float64 {
 		return fib(value-1) + fib(value-2)
 	}
 	return fib(n)
+}
+
+func backendVarargExpected(seed float64) float64 {
+	limit := 50 + seed - math.Floor(seed/2)*2
+	total := 0.0
+	for index := 1.0; index <= limit; index++ {
+		total += 5 +
+			index*2 +
+			(index+1)*3 +
+			(index+2)*5 +
+			(index+3)*7 +
+			(index+4)*11
+	}
+	return total
 }
 
 func backendClosureExpected(seed float64) float64 {
@@ -1558,6 +1809,39 @@ func backendRecursiveProofTargets(irs []*backendProtoIR) []backendGoNumericTarge
 	return targets
 }
 
+func backendVarargProofIRs(t *testing.T) []*backendProtoIR {
+	t.Helper()
+	proto, err := Compile(backendVarargProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(image.prototypes) != 3 {
+		t.Fatalf("vararg proof Proto count = %d, want 3", len(image.prototypes))
+	}
+	irs := make([]*backendProtoIR, len(image.prototypes))
+	for protoID := range image.prototypes {
+		irs[protoID], err = buildBackendProtoIR(&image.prototypes[protoID])
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return irs
+}
+
+func backendVarargProofTargets(irs []*backendProtoIR) []backendGoNumericTarget {
+	targets := make([]backendGoNumericTarget, len(irs))
+	targets[2] = backendGoNumericTarget{
+		ir:               irs[2],
+		functionName:     "backendGeneratedVarargScore",
+		fixedVarargCount: 5,
+	}
+	return targets
+}
+
 func BenchmarkBackendGeneratedNumericFixture(b *testing.B) {
 	var result float64
 	b.ReportAllocs()
@@ -1628,6 +1912,20 @@ func BenchmarkBackendGeneratedRecursiveKernel(b *testing.B) {
 	backendGeneratedNumericSink = result
 }
 
+func BenchmarkBackendGeneratedVarargKernel(b *testing.B) {
+	var result float64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		value, ok := backendGeneratedVarargKernel(float64(iteration & 31))
+		if !ok {
+			b.Fatal("generated fixed-vararg fixture exited")
+		}
+		result = value
+	}
+	backendGeneratedNumericSink = result
+}
+
 var backendGeneratedNumericSink float64
 
 func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
@@ -1639,6 +1937,7 @@ func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
 		backendArrayOpsProofSource,
 		backendClosureProofSource,
 		backendRecursiveProofSource,
+		backendVarargProofSource,
 		"local function add(value) return value + 1 end return add",
 		"return { field = 1 }",
 	} {

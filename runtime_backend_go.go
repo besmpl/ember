@@ -13,12 +13,14 @@ type backendGoNumericOptions struct {
 	preparedFunctionName string
 	directTargets        []backendGoNumericTarget
 	selfRecursive        bool
+	fixedVarargCount     int
 }
 
 type backendGoNumericTarget struct {
-	ir            *backendProtoIR
-	functionName  string
-	selfRecursive bool
+	ir               *backendProtoIR
+	functionName     string
+	selfRecursive    bool
+	fixedVarargCount int
 }
 
 type backendGoNumericPlan struct {
@@ -57,6 +59,13 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	}
 	if options.preparedFunctionName != "" && len(ir.upvalues) != 0 {
 		return nil, fmt.Errorf("emit backend Go numeric proof: prepared entry has %d upvalues", len(ir.upvalues))
+	}
+	if options.preparedFunctionName != "" && ir.variadic {
+		return nil, fmt.Errorf("emit backend Go numeric proof: prepared entry is variadic")
+	}
+	parameterCount, ok := backendGoNumericArgumentCount(ir, options.fixedVarargCount)
+	if !ok {
+		return nil, fmt.Errorf("emit backend Go numeric proof: invalid fixed vararg count %d", options.fixedVarargCount)
 	}
 	if options.selfRecursive && !backendGoNumericSelfRecursiveTarget(ir) {
 		return nil, fmt.Errorf("emit backend Go numeric proof: function is not a bounded self-recursive target")
@@ -109,7 +118,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			}
 			fmt.Fprintf(&source, "u%d *float64", upvalue)
 		}
-		for parameter := 0; parameter < ir.params; parameter++ {
+		for parameter := 0; parameter < parameterCount; parameter++ {
 			if pointerUpvalues != 0 || parameter != 0 {
 				source.WriteString(", ")
 			}
@@ -267,6 +276,28 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			fmt.Fprintf(&source, "\tif !context.intrinsicUnchanged(%d) {\n", operation.pc)
 			source.WriteString("\t\treturn machinePreparedReplayEntry()\n\t}\n")
 		}
+		for protoID, target := range options.directTargets {
+			if target.ir == nil {
+				continue
+			}
+			for pc := range target.ir.ops {
+				operation := &target.ir.ops[pc]
+				if !backendGoNumericFixedVarargSelect(
+					target.ir,
+					target.fixedVarargCount,
+					operation,
+				) {
+					continue
+				}
+				fmt.Fprintf(
+					&source,
+					"\tif !context.intrinsicUnchangedAt(%d, %d) {\n",
+					protoID,
+					operation.pc,
+				)
+				source.WriteString("\t\treturn machinePreparedReplayEntry()\n\t}\n")
+			}
+		}
 		source.WriteString("\treturn ")
 		source.WriteString(bodyName)
 		source.WriteString("(context")
@@ -295,9 +326,13 @@ func verifyBackendGoNumericTargets(targets []backendGoNumericTarget) error {
 		if err := verifyBackendProtoIR(target.ir); err != nil {
 			return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d: %w", protoID, err)
 		}
+		if _, ok := backendGoNumericArgumentCount(target.ir, target.fixedVarargCount); !ok {
+			return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d has invalid fixed vararg count", protoID)
+		}
 		targetOptions := backendGoNumericOptions{
-			functionName:  target.functionName,
-			selfRecursive: target.selfRecursive,
+			functionName:     target.functionName,
+			selfRecursive:    target.selfRecursive,
+			fixedVarargCount: target.fixedVarargCount,
 		}
 		if target.selfRecursive && !backendGoNumericSelfRecursiveTarget(target.ir) {
 			return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d is not bounded self recursion", protoID)
@@ -405,8 +440,9 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						}
 					}
 				case opFastCall:
-					_, array, _, ok := plan.tables.arrayOperation(ir, operation)
-					if ok {
+					if backendGoNumericFixedVarargSelect(ir, options.fixedVarargCount, operation) {
+						tags = backendTagNumber
+					} else if _, array, _, ok := plan.tables.arrayOperation(ir, operation); ok {
 						switch nativeFuncID(operation.nativeID) {
 						case nativeFuncTableInsert:
 							tags = backendTagNil
@@ -415,6 +451,15 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						case nativeFuncRawLen:
 							tags = backendTagNumber
 						}
+					}
+				case opVararg:
+					if _, ok := backendGoNumericVarargIndex(
+						ir,
+						options.fixedVarargCount,
+						operation,
+						value.register,
+					); ok {
+						tags = backendTagNumber
 					}
 				case opCallLocalOne:
 					if _, _, ok := plan.closures.factory(operation); ok {
@@ -606,7 +651,11 @@ func backendGoNumericScalarReplacedCall(
 		return false
 	}
 	target, ok := backendGoNumericDirectTarget(options, operation)
-	if !ok || target.ir.variadic {
+	if !ok {
+		return false
+	}
+	argumentCount, ok := backendGoNumericArgumentCount(target.ir, target.fixedVarargCount)
+	if !ok || operation.callArgCount != int32(argumentCount) {
 		return false
 	}
 	valueID := backendOperationUse(operation, operation.b)
@@ -632,7 +681,7 @@ func backendGoNumericPureProducer(op opcode) bool {
 	case opLoadConst, opMove,
 		opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow, opNeg,
 		opAddK, opSubK, opMulK, opDivK, opModK, opIDivK,
-		opClosure, opNewTable, opGetStringField, opGetUpvalue:
+		opClosure, opNewTable, opGetStringField, opGetUpvalue, opVararg:
 		return true
 	default:
 		return false
@@ -766,6 +815,14 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opFastCall:
+		if backendGoNumericFixedVarargSelect(ir, options.fixedVarargCount, operation) {
+			if len(operation.defs) != 1 ||
+				operation.defs[0].register != operation.a ||
+				plan.tags[operation.defs[0].value-1] != backendTagNumber {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d changes fixed select result", operation.pc)
+			}
+			return nil
+		}
 		_, array, _, ok := plan.tables.arrayOperation(ir, operation)
 		if !ok {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar array intrinsic", operation.pc)
@@ -808,6 +865,21 @@ func verifyBackendGoNumericOperation(
 		default:
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported scalar array intrinsic", operation.pc)
 		}
+	case opVararg:
+		if operation.b < 0 || len(operation.defs) != int(operation.b) {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported open vararg shape", operation.pc)
+		}
+		for _, definition := range operation.defs {
+			if _, ok := backendGoNumericVarargIndex(
+				ir,
+				options.fixedVarargCount,
+				operation,
+				definition.register,
+			); !ok || plan.tags[definition.value-1] != backendTagNumber {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported fixed vararg result", operation.pc)
+			}
+		}
+		return nil
 	case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow:
 		if err := require(operation.b, backendTagNumber); err != nil {
 			return err
@@ -907,9 +979,10 @@ func verifyBackendGoNumericOperation(
 		if !ok || !backendGoNumericScalarReplacedCall(ir, options, operation) {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no direct numeric target", operation.pc)
 		}
-		if target.ir.variadic ||
+		argumentCount, ok := backendGoNumericArgumentCount(target.ir, target.fixedVarargCount)
+		if !ok ||
 			!target.selfRecursive && len(target.ir.upvalues) != 0 ||
-			operation.callArgCount != int32(target.ir.params) ||
+			operation.callArgCount != int32(argumentCount) ||
 			operation.callArgCount < 0 {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported direct call shape", operation.pc)
 		}
@@ -1098,6 +1171,14 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		emitter.emitGoto(int32(block.id), nextBlock, 1)
 		return true, nil
 	case opFastCall:
+		if backendGoNumericFixedVarargSelect(emitter.ir, emitter.options.fixedVarargCount, operation) {
+			destination, err := definition(operation.a)
+			if err != nil {
+				return false, err
+			}
+			fmt.Fprintf(&emitter.body, "\tv%d = %d\n", destination, emitter.options.fixedVarargCount)
+			return false, nil
+		}
 		arrayIndex, _, _, ok := emitter.plan.tables.arrayOperation(emitter.ir, operation)
 		if !ok {
 			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar array intrinsic", operation.pc)
@@ -1150,6 +1231,19 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			fmt.Fprintf(&emitter.body, "\tv%d = float64(n%d)\n", destination, arrayIndex)
 		default:
 			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported scalar array intrinsic", operation.pc)
+		}
+	case opVararg:
+		for _, result := range operation.defs {
+			parameter, ok := backendGoNumericVarargIndex(
+				emitter.ir,
+				emitter.options.fixedVarargCount,
+				operation,
+				result.register,
+			)
+			if !ok {
+				return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no fixed vararg parameter", operation.pc)
+			}
+			fmt.Fprintf(&emitter.body, "\tv%d = p%d\n", result.value, parameter)
 		}
 	case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow:
 		destination, _ := definition(operation.a)
