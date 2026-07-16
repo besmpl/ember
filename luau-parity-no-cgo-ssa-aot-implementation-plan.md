@@ -214,12 +214,28 @@ The retained path has moved beyond the original starting state:
   The direct generated body takes roughly 10.6-11.1 ns. Its linked ARM64 body
   is 192 bytes, contains no calls, and lowers the loop to indexed loads plus a
   fused multiply-add with no opcode, descriptor, iterator, or table dispatch.
+- The current bounded mutable-array slice scalar-replaces the exact
+  `top10/array_ops` architecture-proof shape into a fixed-capacity typed Go
+  ring. The compiler derives the capacity only from verified constant numeric
+  loop bounds and accepts only append-form `table.insert`, front-position
+  `table.remove`, and `rawlen` on one nonescaping empty local array. Unbounded
+  growth, positional insertion, non-front removal, mixed fields, mutation plus
+  iteration, unsupported element unions, and capacity above the fixed proof
+  limit fail closed to Machine. The prepared wrapper verifies the three
+  intrinsic identities before any scalar mutation, and execution-policy runs
+  remain on canonical Machine. The prepared owner path takes roughly
+  257-270 ns on the checkpoint machine, versus roughly 65-71 microseconds
+  through generic Machine, with zero prepared allocations and no materialized
+  local Machine table. The direct generated body takes roughly 122-133 ns.
+  Its linked ARM64 body is 528 bytes; explicit head/tail bounds remove every
+  linked bounds-panic/helper call, leaving only Go's entry stack-growth slow
+  path and no opcode, descriptor, intrinsic, or table dispatch in hot code.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
-all-37 parity. Array growth/removal and non-dense iteration, general table
-mutation, strings, closures/upvalues, varargs/results, recursion, metatables,
-host/effect exits, modules, and coroutines remain on the active path.
+all-37 parity. Non-dense iteration, general table mutation, strings,
+closures/upvalues, varargs/results, recursion, metatables, host/effect exits,
+modules, and coroutines remain on the active path.
 
 ## Active execution path
 

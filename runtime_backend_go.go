@@ -110,8 +110,16 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		if !ok {
 			return nil, fmt.Errorf("emit backend Go numeric proof: scalar array %d has unsupported tags %x", arrayIndex, array.tags)
 		}
-		fmt.Fprintf(&source, "\tvar a%d [%d]%s\n", arrayIndex, array.length, goType)
+		fmt.Fprintf(&source, "\tvar a%d [%d]%s\n", arrayIndex, array.capacity, goType)
 		fmt.Fprintf(&source, "\t_ = a%d\n", arrayIndex)
+		if array.mutable {
+			fmt.Fprintf(&source, "\tvar h%d int\n", arrayIndex)
+			fmt.Fprintf(&source, "\t_ = h%d\n", arrayIndex)
+			fmt.Fprintf(&source, "\tvar n%d = %d\n", arrayIndex, array.length)
+			fmt.Fprintf(&source, "\t_ = n%d\n", arrayIndex)
+			fmt.Fprintf(&source, "\tvar t%d int\n", arrayIndex)
+			fmt.Fprintf(&source, "\t_ = t%d\n", arrayIndex)
+		}
 		fmt.Fprintf(&source, "\tvar i%d int\n", arrayIndex)
 		fmt.Fprintf(&source, "\t_ = i%d\n", arrayIndex)
 	}
@@ -159,8 +167,16 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			if !ok {
 				return nil, fmt.Errorf("emit backend Go numeric proof: scalar array %d has unsupported tags %x", arrayIndex, array.tags)
 			}
-			fmt.Fprintf(&source, "\tvar a%d [%d]%s\n", arrayIndex, array.length, goType)
+			fmt.Fprintf(&source, "\tvar a%d [%d]%s\n", arrayIndex, array.capacity, goType)
 			fmt.Fprintf(&source, "\t_ = a%d\n", arrayIndex)
+			if array.mutable {
+				fmt.Fprintf(&source, "\tvar h%d int\n", arrayIndex)
+				fmt.Fprintf(&source, "\t_ = h%d\n", arrayIndex)
+				fmt.Fprintf(&source, "\tvar n%d = %d\n", arrayIndex, array.length)
+				fmt.Fprintf(&source, "\t_ = n%d\n", arrayIndex)
+				fmt.Fprintf(&source, "\tvar t%d int\n", arrayIndex)
+				fmt.Fprintf(&source, "\t_ = t%d\n", arrayIndex)
+			}
 			fmt.Fprintf(&source, "\tvar i%d int\n", arrayIndex)
 			fmt.Fprintf(&source, "\t_ = i%d\n", arrayIndex)
 		}
@@ -183,6 +199,17 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		for parameter := 0; parameter < ir.params; parameter++ {
 			fmt.Fprintf(&source, "\tp%d, ok := context.numberParameter(%d)\n", parameter, parameter)
 			source.WriteString("\tif !ok {\n\t\treturn machinePreparedReplayEntry()\n\t}\n")
+		}
+		for pc := range ir.ops {
+			operation := &ir.ops[pc]
+			if operation.op != opFastCall {
+				continue
+			}
+			if _, _, _, ok := plan.tables.arrayOperation(ir, operation); !ok {
+				continue
+			}
+			fmt.Fprintf(&source, "\tif !context.intrinsicUnchanged(%d) {\n", operation.pc)
+			source.WriteString("\t\treturn machinePreparedReplayEntry()\n\t}\n")
 		}
 		source.WriteString("\treturn ")
 		source.WriteString(bodyName)
@@ -305,6 +332,18 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 							tags = backendTagNumber
 						case operation.a + 1:
 							tags = array.tags
+						}
+					}
+				case opFastCall:
+					_, array, _, ok := plan.tables.arrayOperation(ir, operation)
+					if ok {
+						switch nativeFuncID(operation.nativeID) {
+						case nativeFuncTableInsert:
+							tags = backendTagNil
+						case nativeFuncTableRemove:
+							tags = array.tags
+						case nativeFuncRawLen:
+							tags = backendTagNumber
 						}
 					}
 				case opCallLocalOne:
@@ -625,6 +664,49 @@ func verifyBackendGoNumericOperation(
 			}
 		}
 		return nil
+	case opFastCall:
+		_, array, _, ok := plan.tables.arrayOperation(ir, operation)
+		if !ok {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar array intrinsic", operation.pc)
+		}
+		switch nativeFuncID(operation.nativeID) {
+		case nativeFuncTableInsert:
+			if operation.c != 2 || operation.d != 1 {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported table.insert shape", operation.pc)
+			}
+			if err := require(operation.a+1, array.tags); err != nil {
+				return err
+			}
+			for _, definition := range operation.defs {
+				if plan.tags[definition.value-1] != backendTagNil {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d table.insert result is not nil", operation.pc)
+				}
+			}
+			return nil
+		case nativeFuncTableRemove:
+			if operation.c != 2 || operation.d != 1 ||
+				!backendGoStaticNumberEquals(ir, backendOperationUse(operation, operation.a+1), 1) {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported table.remove shape", operation.pc)
+			}
+			for _, definition := range operation.defs {
+				if plan.tags[definition.value-1] != array.tags {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d changes table.remove result tags", operation.pc)
+				}
+			}
+			return nil
+		case nativeFuncRawLen:
+			if operation.c != 1 || operation.d != 1 {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported rawlen shape", operation.pc)
+			}
+			for _, definition := range operation.defs {
+				if plan.tags[definition.value-1] != backendTagNumber {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d changes rawlen result tags", operation.pc)
+				}
+			}
+			return nil
+		default:
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported scalar array intrinsic", operation.pc)
+		}
 	case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow:
 		if err := require(operation.b, backendTagNumber); err != nil {
 			return err
@@ -870,6 +952,60 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		}
 		emitter.emitGoto(int32(block.id), nextBlock, 1)
 		return true, nil
+	case opFastCall:
+		arrayIndex, _, _, ok := emitter.plan.tables.arrayOperation(emitter.ir, operation)
+		if !ok {
+			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar array intrinsic", operation.pc)
+		}
+		switch nativeFuncID(operation.nativeID) {
+		case nativeFuncTableInsert:
+			source, err := use(operation.a + 1)
+			if err != nil {
+				return false, err
+			}
+			fmt.Fprintf(&emitter.body, "\tif n%d >= len(a%d) {\n", arrayIndex, arrayIndex)
+			emitter.emitReplayEntry(2)
+			emitter.body.WriteString("\t}\n")
+			fmt.Fprintf(&emitter.body, "\tt%d = h%d + n%d\n", arrayIndex, arrayIndex, arrayIndex)
+			fmt.Fprintf(&emitter.body, "\tif t%d >= len(a%d) {\n", arrayIndex, arrayIndex)
+			fmt.Fprintf(&emitter.body, "\t\tt%d -= len(a%d)\n", arrayIndex, arrayIndex)
+			emitter.body.WriteString("\t}\n")
+			fmt.Fprintf(&emitter.body, "\tif uint(t%d) >= uint(len(a%d)) {\n", arrayIndex, arrayIndex)
+			emitter.emitReplayEntry(2)
+			emitter.body.WriteString("\t}\n")
+			fmt.Fprintf(&emitter.body, "\ta%d[t%d] = v%d\n", arrayIndex, arrayIndex, source)
+			fmt.Fprintf(&emitter.body, "\tn%d++\n", arrayIndex)
+		case nativeFuncTableRemove:
+			destination, err := definition(operation.a)
+			if err != nil {
+				return false, err
+			}
+			position, err := use(operation.a + 1)
+			if err != nil {
+				return false, err
+			}
+			fmt.Fprintf(&emitter.body, "\t_ = v%d\n", position)
+			fmt.Fprintf(&emitter.body, "\tif n%d == 0 {\n", arrayIndex)
+			emitter.emitReplayEntry(2)
+			emitter.body.WriteString("\t}\n")
+			fmt.Fprintf(&emitter.body, "\tif uint(h%d) >= uint(len(a%d)) {\n", arrayIndex, arrayIndex)
+			emitter.emitReplayEntry(2)
+			emitter.body.WriteString("\t}\n")
+			fmt.Fprintf(&emitter.body, "\tv%d = a%d[h%d]\n", destination, arrayIndex, arrayIndex)
+			fmt.Fprintf(&emitter.body, "\th%d++\n", arrayIndex)
+			fmt.Fprintf(&emitter.body, "\tif h%d == len(a%d) {\n", arrayIndex, arrayIndex)
+			fmt.Fprintf(&emitter.body, "\t\th%d = 0\n", arrayIndex)
+			emitter.body.WriteString("\t}\n")
+			fmt.Fprintf(&emitter.body, "\tn%d--\n", arrayIndex)
+		case nativeFuncRawLen:
+			destination, err := definition(operation.a)
+			if err != nil {
+				return false, err
+			}
+			fmt.Fprintf(&emitter.body, "\tv%d = float64(n%d)\n", destination, arrayIndex)
+		default:
+			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported scalar array intrinsic", operation.pc)
+		}
 	case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow:
 		destination, _ := definition(operation.a)
 		left, _ := use(operation.b)
@@ -1046,6 +1182,15 @@ func (emitter *backendGoNumericEmitter) emitReplayBeforeOperation(operation *bac
 		}
 	}
 	fmt.Fprintf(&emitter.body, "%sreturn exit\n", prefix)
+}
+
+func (emitter *backendGoNumericEmitter) emitReplayEntry(indent int) {
+	prefix := strings.Repeat("\t", indent)
+	if emitter.prepared {
+		fmt.Fprintf(&emitter.body, "%sreturn machinePreparedReplayEntry()\n", prefix)
+		return
+	}
+	fmt.Fprintf(&emitter.body, "%sreturn 0, false\n", prefix)
 }
 
 func (emitter *backendGoNumericEmitter) emitBranch(from int32, targetPC int32, condition string, indent int) {

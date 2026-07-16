@@ -17,10 +17,13 @@ type backendGoScalarField struct {
 }
 
 type backendGoScalarArray struct {
-	table   backendValueID
-	tags    backendTagMask
-	length  uint32
-	present map[uint32]bool
+	table       backendValueID
+	tags        backendTagMask
+	length      uint32
+	capacity    uint32
+	appendBound uint32
+	mutable     bool
+	present     map[uint32]bool
 }
 
 type backendGoScalarTablePlan struct {
@@ -78,6 +81,18 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 			return true, true
 		}
 		return false, current == root
+	}
+	ensureArray := func(table backendValueID) (int, *backendGoScalarArray) {
+		arrayIndex, exists := plan.arrayIndex[table]
+		if !exists {
+			arrayIndex = len(plan.arrays)
+			plan.arrayIndex[table] = arrayIndex
+			plan.arrays = append(plan.arrays, backendGoScalarArray{
+				table:   table,
+				present: make(map[uint32]bool),
+			})
+		}
+		return arrayIndex, &plan.arrays[arrayIndex]
 	}
 
 	for iteration := 0; iteration <= len(ir.values)+len(ir.ops); iteration++ {
@@ -149,16 +164,7 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 				if tags == 0 || tags&^(backendTagNumber|backendTagBool) != 0 {
 					return backendGoScalarTablePlan{}, nil
 				}
-				arrayIndex, exists := plan.arrayIndex[table]
-				if !exists {
-					arrayIndex = len(plan.arrays)
-					plan.arrayIndex[table] = arrayIndex
-					plan.arrays = append(plan.arrays, backendGoScalarArray{
-						table:   table,
-						present: make(map[uint32]bool),
-					})
-				}
-				array := &plan.arrays[arrayIndex]
+				_, array := ensureArray(table)
 				array.tags |= tags
 				array.present[index] = true
 				if index > array.length {
@@ -239,17 +245,78 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 			return backendGoScalarTablePlan{}, fmt.Errorf("emit backend Go numeric proof: scalar table analysis did not converge")
 		}
 	}
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op != opFastCall {
+			continue
+		}
+		table := plan.root(backendOperationUse(operation, operation.a))
+		if table == invalidBackendValueID {
+			continue
+		}
+		_, array := ensureArray(table)
+		switch nativeFuncID(operation.nativeID) {
+		case nativeFuncTableInsert:
+			if operation.c != 2 || operation.d != 1 {
+				return backendGoScalarTablePlan{}, nil
+			}
+			source := backendOperationUse(operation, operation.a+1)
+			if !ir.validBackendValue(source) ||
+				plan.root(source) != invalidBackendValueID {
+				return backendGoScalarTablePlan{}, nil
+			}
+			tags := ir.values[source-1].tags
+			if tags == 0 || tags&^(backendTagNumber|backendTagBool) != 0 {
+				return backendGoScalarTablePlan{}, nil
+			}
+			executions, ok := backendGoOperationExecutionBound(ir, operation)
+			if !ok || executions == 0 ||
+				uint64(array.appendBound)+uint64(executions) > uint64(backendGoMaxScalarArrayCapacity) {
+				return backendGoScalarTablePlan{}, nil
+			}
+			array.tags |= tags
+			array.appendBound += executions
+			array.mutable = true
+		case nativeFuncTableRemove:
+			if operation.c != 2 || operation.d != 1 ||
+				!backendGoStaticNumberEquals(ir, backendOperationUse(operation, operation.a+1), 1) {
+				return backendGoScalarTablePlan{}, nil
+			}
+			array.mutable = true
+		case nativeFuncRawLen:
+			if operation.c != 1 || operation.d != 1 {
+				return backendGoScalarTablePlan{}, nil
+			}
+		default:
+			return backendGoScalarTablePlan{}, nil
+		}
+	}
 	if len(plan.fields) == 0 && len(plan.arrays) == 0 {
 		return backendGoScalarTablePlan{}, nil
 	}
 	for arrayIndex := range plan.arrays {
 		array := &plan.arrays[arrayIndex]
-		if array.length == 0 || array.tags == 0 || array.tags&(array.tags-1) != 0 {
+		if array.tags == 0 || array.tags&(array.tags-1) != 0 {
 			return backendGoScalarTablePlan{}, nil
 		}
 		for index := uint32(1); index <= array.length; index++ {
 			if !array.present[index] {
 				return backendGoScalarTablePlan{}, nil
+			}
+		}
+		capacity := uint64(array.length) + uint64(array.appendBound)
+		if capacity == 0 || capacity > uint64(backendGoMaxScalarArrayCapacity) {
+			return backendGoScalarTablePlan{}, nil
+		}
+		array.capacity = uint32(capacity)
+		if array.mutable {
+			if array.length != 0 {
+				return backendGoScalarTablePlan{}, nil
+			}
+			for _, field := range plan.fields {
+				if field.key.table == array.table {
+					return backendGoScalarTablePlan{}, nil
+				}
 			}
 		}
 	}
@@ -291,6 +358,13 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 			case opArrayNextJump2:
 				if use.register != operation.b &&
 					!plan.iteratorValue(use.value) {
+					return backendGoScalarTablePlan{}, nil
+				}
+			case opFastCall:
+				if use.register != operation.a {
+					return backendGoScalarTablePlan{}, nil
+				}
+				if _, _, _, ok := plan.arrayOperation(ir, operation); !ok {
 					return backendGoScalarTablePlan{}, nil
 				}
 			default:
@@ -356,6 +430,180 @@ func backendGoArrayIndexConstant(ir *backendProtoIR, constant int32) (uint32, bo
 	return uint32(number), true
 }
 
+const backendGoMaxScalarArrayCapacity = 4096
+
+func backendGoOperationExecutionBound(ir *backendProtoIR, operation *backendOperationIR) (uint32, bool) {
+	if ir == nil || operation == nil ||
+		operation.block < 0 || int(operation.block) >= len(ir.blocks) {
+		return 0, false
+	}
+	bound := uint64(1)
+	for headerIndex := range ir.blocks {
+		header := &ir.blocks[headerIndex]
+		if !header.loopHeader {
+			continue
+		}
+		members := backendGoNaturalLoopMembers(ir, int32(headerIndex))
+		if !members[operation.block] {
+			continue
+		}
+		count, ok := backendGoStaticNumericLoopCount(ir, int32(headerIndex), members)
+		if !ok || count == 0 ||
+			bound*uint64(count) > uint64(backendGoMaxScalarArrayCapacity) {
+			return 0, false
+		}
+		bound *= uint64(count)
+	}
+	return uint32(bound), true
+}
+
+func backendGoNaturalLoopMembers(ir *backendProtoIR, header int32) map[int32]bool {
+	members := map[int32]bool{header: true}
+	if ir == nil || header < 0 || int(header) >= len(ir.blocks) {
+		return members
+	}
+	stack := make([]int32, 0)
+	for _, predecessor := range ir.blocks[header].predecessors {
+		if backendBlockDominates(&ir.blocks[predecessor], header) {
+			members[predecessor] = true
+			stack = append(stack, predecessor)
+		}
+	}
+	for len(stack) != 0 {
+		block := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for _, predecessor := range ir.blocks[block].predecessors {
+			if members[predecessor] {
+				continue
+			}
+			members[predecessor] = true
+			if predecessor != header {
+				stack = append(stack, predecessor)
+			}
+		}
+	}
+	return members
+}
+
+func backendGoStaticNumericLoopCount(
+	ir *backendProtoIR,
+	header int32,
+	members map[int32]bool,
+) (uint32, bool) {
+	if ir == nil || header < 0 || int(header) >= len(ir.blocks) {
+		return 0, false
+	}
+	var check *backendOperationIR
+	block := &ir.blocks[header]
+	for pc := block.first; pc < block.last; pc++ {
+		operation := &ir.ops[pc]
+		if operation.op != opNumericForCheck {
+			continue
+		}
+		if check != nil {
+			return 0, false
+		}
+		check = operation
+	}
+	if check == nil {
+		return 0, false
+	}
+	start, startOK := backendGoLoopInitialNumber(ir, header, members, backendOperationUse(check, check.a))
+	limit, limitOK := backendGoLoopInitialNumber(ir, header, members, backendOperationUse(check, check.b))
+	step, stepOK := backendGoLoopInitialNumber(ir, header, members, backendOperationUse(check, check.c))
+	if !startOK || !limitOK || !stepOK ||
+		math.IsNaN(start) || math.IsNaN(limit) || math.IsNaN(step) ||
+		math.IsInf(start, 0) || math.IsInf(limit, 0) || math.IsInf(step, 0) ||
+		step == 0 {
+		return 0, false
+	}
+	current := start
+	for count := uint32(0); ; count++ {
+		if (step > 0 && current > limit) || (step < 0 && current < limit) {
+			return count, true
+		}
+		if count == backendGoMaxScalarArrayCapacity {
+			return 0, false
+		}
+		next := current + step
+		if next == current || math.IsInf(next, 0) {
+			return 0, false
+		}
+		current = next
+	}
+}
+
+func backendGoLoopInitialNumber(
+	ir *backendProtoIR,
+	header int32,
+	members map[int32]bool,
+	id backendValueID,
+) (float64, bool) {
+	if !ir.validBackendValue(id) {
+		return 0, false
+	}
+	value := &ir.values[id-1]
+	if value.kind != backendValuePhi || value.block != header {
+		return backendGoStaticNumber(ir, id, nil)
+	}
+	block := &ir.blocks[header]
+	phi := block.phis[value.register]
+	var number float64
+	found := false
+	for inputIndex, input := range phi.inputs {
+		if members[block.predecessors[inputIndex]] {
+			continue
+		}
+		candidate, ok := backendGoStaticNumber(ir, input, nil)
+		if !ok || found && candidate != number {
+			return 0, false
+		}
+		number = candidate
+		found = true
+	}
+	return number, found
+}
+
+func backendGoStaticNumberEquals(ir *backendProtoIR, id backendValueID, want float64) bool {
+	number, ok := backendGoStaticNumber(ir, id, nil)
+	return ok && number == want
+}
+
+func backendGoStaticNumber(
+	ir *backendProtoIR,
+	id backendValueID,
+	seen map[backendValueID]bool,
+) (float64, bool) {
+	if !ir.validBackendValue(id) {
+		return 0, false
+	}
+	if seen == nil {
+		seen = make(map[backendValueID]bool)
+	}
+	if seen[id] {
+		return 0, false
+	}
+	seen[id] = true
+	value := &ir.values[id-1]
+	if value.kind != backendValueOperation ||
+		value.pc < 0 || int(value.pc) >= len(ir.ops) {
+		return 0, false
+	}
+	operation := &ir.ops[value.pc]
+	switch operation.op {
+	case opLoadConst:
+		if operation.b < 0 || int(operation.b) >= len(ir.constants) ||
+			ir.constants[operation.b].kind != NumberKind {
+			return 0, false
+		}
+		return math.Float64frombits(ir.constants[operation.b].bits), true
+	case opMove:
+		return backendGoStaticNumber(ir, backendOperationUse(operation, operation.b), seen)
+	default:
+		return 0, false
+	}
+}
+
 func (plan *backendGoScalarTablePlan) analyzeIterators(ir *backendProtoIR) bool {
 	if plan == nil || ir == nil {
 		return false
@@ -370,6 +618,9 @@ func (plan *backendGoScalarTablePlan) analyzeIterators(ir *backendProtoIR) bool 
 		arrayIndex, ok := plan.arrayIndex[table]
 		if !ok {
 			continue
+		}
+		if plan.arrays[arrayIndex].mutable {
+			return false
 		}
 		if _, exists := plan.iteratorByPC[operation.pc]; exists {
 			return false
@@ -514,6 +765,18 @@ func (plan backendGoScalarTablePlan) arrayOperation(
 			return 0, backendGoScalarArray{}, 0, false
 		}
 		return arrayIndex, plan.arrays[arrayIndex], 0, true
+	case opFastCall:
+		table := plan.root(backendOperationUse(operation, operation.a))
+		arrayIndex, ok := plan.arrayIndex[table]
+		if !ok || arrayIndex < 0 || arrayIndex >= len(plan.arrays) {
+			return 0, backendGoScalarArray{}, 0, false
+		}
+		switch nativeFuncID(operation.nativeID) {
+		case nativeFuncTableInsert, nativeFuncTableRemove, nativeFuncRawLen:
+			return arrayIndex, plan.arrays[arrayIndex], 0, true
+		default:
+			return 0, backendGoScalarArray{}, 0, false
+		}
 	default:
 		return 0, backendGoScalarArray{}, 0, false
 	}

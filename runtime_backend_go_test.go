@@ -80,6 +80,21 @@ end
 return kernel
 `
 
+const backendArrayOpsProofSource = `
+local function kernel(seed)
+    local values = {}
+    for i = 1, 80 do
+        table.insert(values, i % 9 + seed % 3)
+    end
+    local removed = 0
+    for i = 1, 20 do
+        removed = removed + table.remove(values, 1)
+    end
+    return removed + rawlen(values)
+end
+return kernel
+`
+
 func TestBackendGoNumericProofEmitsDeterministicDirectSource(t *testing.T) {
 	ir := backendNumericProofIR(t)
 	options := backendGoNumericOptions{
@@ -276,6 +291,30 @@ func TestBackendGoScalarArrayIterationIgnoresSourceIdentity(t *testing.T) {
 	}
 	if !bytes.Equal(baseSource, renamedSource) {
 		t.Fatal("source or entrypoint identity selected scalar array-iteration code")
+	}
+}
+
+func TestBackendGoScalarArrayOpsIgnoreSourceIdentity(t *testing.T) {
+	base := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "source/main", Text: backendArrayOpsProofSource},
+	}, []Entrypoint{{Name: "main", Module: LogicalModule("main")}})
+	renamed := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "opaque/renamed/source", Text: backendArrayOpsProofSource},
+	}, []Entrypoint{{Name: "renamed-entrypoint", Module: LogicalModule("main")}})
+	if base.programHash == renamed.programHash {
+		t.Fatal("identity-mutated array-ops Programs unexpectedly share a binding hash")
+	}
+	options := backendGoNumericOptions{packageName: "ember", functionName: "identityBlindArrayOps"}
+	baseSource, err := emitBackendGoNumericProof(base.modules[0].protos[1], options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamedSource, err := emitBackendGoNumericProof(renamed.modules[0].protos[1], options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(baseSource, renamedSource) {
+		t.Fatal("source or entrypoint identity selected scalar array-ops code")
 	}
 }
 
@@ -654,6 +693,158 @@ return kernel
 	}
 }
 
+func TestBackendGoScalarArrayOpsFixtureIsFreshAndCorrect(t *testing.T) {
+	generated, err := emitBackendGoNumericProof(backendArrayOpsProofIR(t), backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedArrayOpsFixture",
+		preparedFunctionName: "backendGeneratedArrayOpsPreparedFixture",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk, err := os.ReadFile("runtime_backend_array_ops_generated_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(generated, onDisk) {
+		t.Fatal("generated scalar array-ops fixture is stale")
+	}
+	if _, err := goparser.ParseFile(token.NewFileSet(), "runtime_backend_array_ops_generated_test.go", generated, goparser.AllErrors); err != nil {
+		t.Fatalf("parse generated scalar array-ops source: %v", err)
+	}
+	text := string(generated)
+	for _, required := range []string{
+		"var a0 [80]float64",
+		"t0 = h0 + n0",
+		"a0[t0] = v",
+		"v70 = a0[h0]",
+		"v75 = float64(n0)",
+		"context.intrinsicUnchanged(14)",
+		"context.intrinsicUnchanged(23)",
+		"context.intrinsicUnchanged(28)",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("generated scalar array-ops source lacks %q:\n%s", required, text)
+		}
+	}
+	for _, forbidden := range []string{
+		"switch", "opcode", "descriptor", "machineTable",
+		"FAST_CALL", "tableInsert", "tableRemove", "rawLen",
+		"append(", "copy(",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("generated scalar array-ops source contains runtime mutation/dispatch marker %q", forbidden)
+		}
+	}
+
+	root, err := Compile(backendArrayOpsProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(root.prototypes) != 1 {
+		t.Fatalf("array-ops source child count = %d, want 1", len(root.prototypes))
+	}
+	for _, seed := range []float64{0, 1, 7, 29, 1_000_000_000_005} {
+		got, ok := backendGeneratedArrayOpsFixture(seed)
+		want := backendArrayOpsExpected(seed)
+		if !ok || got != want {
+			t.Fatalf("generated scalar array-ops fixture(%v) = (%v, %t), want (%v, true)", seed, got, ok, want)
+		}
+		oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+			args: []Value{NumberValue(seed)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(oracle) != 1 {
+			t.Fatalf("array-ops oracle result count = %d, want 1", len(oracle))
+		}
+		oracleNumber, ok := oracle[0].Number()
+		if !ok || oracleNumber != got {
+			t.Fatalf("generated/oracle array-ops seed %v = %v/%v (%t)", seed, got, oracleNumber, ok)
+		}
+	}
+	if !checkptrInstrumentedTest() {
+		if allocations := testing.AllocsPerRun(1000, func() {
+			_, _ = backendGeneratedArrayOpsFixture(29)
+		}); allocations != 0 {
+			t.Fatalf("generated scalar array-ops allocations = %v, want 0", allocations)
+		}
+	}
+}
+
+func TestBackendGoScalarArrayOpsRejectUnprovedMutationShapes(t *testing.T) {
+	tests := map[string]string{
+		"position insert": `
+local function kernel(seed)
+    local values = {1}
+    table.insert(values, 1, seed)
+    return rawlen(values)
+end
+return kernel
+`,
+		"non-front remove": `
+local function kernel(seed)
+    local values = {seed, 2}
+    return table.remove(values, 2)
+end
+return kernel
+`,
+		"unbounded append": `
+local function kernel(seed)
+    local values = {}
+    while seed > 0 do
+        table.insert(values, seed)
+        seed = seed - 1
+    end
+    return rawlen(values)
+end
+return kernel
+`,
+		"nonprogressing numeric loop": `
+local function kernel(seed)
+    local values = {}
+    for i = 9007199254740992, 9007199254740994 do
+        table.insert(values, seed)
+    end
+    return rawlen(values)
+end
+return kernel
+`,
+	}
+	for name, source := range tests {
+		t.Run(name, func(t *testing.T) {
+			proto, err := Compile(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			image, err := proto.preparedCodeImage()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ir, err := buildBackendProtoIR(&image.prototypes[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+				packageName:  "ember",
+				functionName: "rejectUnprovedArrayMutation",
+			}); err == nil {
+				t.Fatal("emitted scalar array operations for an unproved mutation shape")
+			}
+		})
+	}
+}
+
+func backendArrayOpsExpected(seed float64) float64 {
+	seedMod := seed - math.Floor(seed/3)*3
+	removed := 0.0
+	for index := 1.0; index <= 20; index++ {
+		removed += index - math.Floor(index/9)*9 + seedMod
+	}
+	return removed + 60
+}
+
 func backendNumericProofIR(t *testing.T) *backendProtoIR {
 	t.Helper()
 	proto, err := Compile(backendNumericProofSource)
@@ -758,6 +949,26 @@ func backendArrayIterationProofIR(t *testing.T) *backendProtoIR {
 	return ir
 }
 
+func backendArrayOpsProofIR(t *testing.T) *backendProtoIR {
+	t.Helper()
+	proto, err := Compile(backendArrayOpsProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(image.prototypes) != 2 {
+		t.Fatalf("array-ops proof Proto count = %d, want 2", len(image.prototypes))
+	}
+	ir, err := buildBackendProtoIR(&image.prototypes[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ir
+}
+
 func BenchmarkBackendGeneratedNumericFixture(b *testing.B) {
 	var result float64
 	b.ReportAllocs()
@@ -786,6 +997,20 @@ func BenchmarkBackendGeneratedArrayIterationFixture(b *testing.B) {
 	backendGeneratedNumericSink = result
 }
 
+func BenchmarkBackendGeneratedArrayOpsFixture(b *testing.B) {
+	var result float64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		value, ok := backendGeneratedArrayOpsFixture(float64(iteration & 31))
+		if !ok {
+			b.Fatal("generated scalar array-ops fixture exited")
+		}
+		result = value
+	}
+	backendGeneratedNumericSink = result
+}
+
 var backendGeneratedNumericSink float64
 
 func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
@@ -794,6 +1019,7 @@ func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
 		backendNumericExitProofSource,
 		backendTableFieldProofSource,
 		backendArrayIterationProofSource,
+		backendArrayOpsProofSource,
 		"local function add(value) return value + 1 end return add",
 		"return { field = 1 }",
 	} {

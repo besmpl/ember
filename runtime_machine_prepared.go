@@ -157,6 +157,43 @@ func (context machinePreparedContext) numberParameter(index int) (float64, bool)
 	return number, err == nil
 }
 
+func (context machinePreparedContext) intrinsicUnchanged(pc int32) bool {
+	if context.machine == nil || context.machine.persistentOwner == nil ||
+		context.target == nil || pc < 0 || int(pc) >= len(context.target.operations) {
+		return false
+	}
+	operation := &context.target.operations[pc]
+	if operation.op != opFastCall ||
+		operation.nativeID <= int32(nativeFuncUnknown) {
+		return false
+	}
+	owner := context.machine.persistentOwner
+	dense, err := owner.globalIndexStopped(context.machine.activeModule, operation.globalIndex)
+	if err != nil {
+		return false
+	}
+	callee, present, err := owner.globals.getAt(dense)
+	if err != nil || !present {
+		return false
+	}
+	if operation.guardField != invalidMachineStringID {
+		globalTable, err := context.machine.tableID(callee)
+		if err != nil {
+			return false
+		}
+		field, err := owner.translateImageStringIDStopped(context.machine.activeModule, operation.guardField)
+		if err != nil {
+			return false
+		}
+		callee, err = context.machine.tables.rawGet(globalTable, machineTableStringKey(field))
+		if err != nil {
+			return false
+		}
+	}
+	actual, err := slotNativeIDValue(callee)
+	return err == nil && actual == nativeFuncID(operation.nativeID)
+}
+
 func machinePreparedReplayEntry() machinePreparedExit {
 	return machinePreparedExit{kind: machinePreparedExitReplayEntry}
 }
