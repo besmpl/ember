@@ -51,8 +51,9 @@ type machineBaseTableSnapshot struct {
 type machineOwner struct {
 	mu sync.Mutex
 
-	image *programImage
-	state machineOwnerState
+	image    *programImage
+	prepared *machinePreparedBinding
+	state    machineOwnerState
 
 	activeRuns uint32
 
@@ -82,10 +83,18 @@ type machineRunLease struct {
 }
 
 func newMachineOwner(image *programImage) (*machineOwner, error) {
+	return newMachineOwnerWithPrepared(image, nil)
+}
+
+func newMachineOwnerWithPrepared(image *programImage, prepared *machinePreparedProgram) (*machineOwner, error) {
+	binding, err := bindMachinePreparedProgram(image, prepared)
+	if err != nil {
+		return nil, err
+	}
 	if err := validateMachineOwnerImage(image); err != nil {
 		return nil, err
 	}
-	owner := &machineOwner{image: image}
+	owner := &machineOwner{image: image, prepared: binding}
 	owner.scalarMachine.persistentOwner = owner
 	owner.scalarMachine.bound = true
 	if err := owner.modules.bindStopped(len(image.modules)); err != nil {
@@ -451,7 +460,15 @@ func (owner *machineOwner) executeStopped(moduleID programModuleID, protoID int3
 		}
 		defer controller.leaveCall()
 	}
-	errorPC, err := runGeneratedScalarMachineLoop(machine)
+	handled := false
+	errorPC := 0
+	var err error
+	if controller == nil {
+		handled, errorPC, err = owner.executePreparedStopped(moduleID, protoID, target)
+	}
+	if !handled && err == nil {
+		errorPC, err = runGeneratedScalarMachineLoop(machine)
+	}
 	if err != nil {
 		for range machine.continuations {
 			if controller != nil {
@@ -819,6 +836,7 @@ func (owner *machineOwner) close() error {
 	}
 	owner.state = machineOwnerClosed
 	owner.image = nil
+	owner.prepared = nil
 	owner.stringRanges = nil
 	owner.stringTranslations = nil
 	owner.globalRanges = nil
@@ -834,6 +852,7 @@ func (owner *machineOwner) close() error {
 
 func (owner *machineOwner) closeStopped() {
 	owner.scalarMachine.image = nil
+	owner.prepared = nil
 	owner.registers = nil
 	owner.results = nil
 	owner.continuations = nil
