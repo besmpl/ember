@@ -1,0 +1,60 @@
+#!/bin/sh
+set -eu
+
+cd "$(dirname "$0")/.."
+
+backend=go-aot-ceiling
+pair=a
+output=
+allow_busy=0
+
+die() {
+	printf 'check-architecture-proof: %s\n' "$1" >&2
+	exit 2
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--backend) [ "$#" -ge 2 ] || die '--backend needs a value'; backend=$2; shift 2 ;;
+		--capture-pair) [ "$#" -ge 2 ] || die '--capture-pair needs a value'; pair=$2; shift 2 ;;
+		--output) [ "$#" -ge 2 ] || die '--output needs a value'; output=$2; shift 2 ;;
+		--allow-busy) allow_busy=1; shift ;;
+		-h|--help)
+			printf '%s\n' 'usage: scripts/check-architecture-proof --backend go-aot-ceiling|go-aot-sensitivity --capture-pair a|b --output DIR [--allow-busy]'
+			exit 0
+			;;
+		*) die "unknown argument: $1" ;;
+	esac
+done
+
+[ "$backend" = go-aot-ceiling ] || [ "$backend" = go-aot-sensitivity ] || die 'invalid backend'
+[ "$pair" = a ] || [ "$pair" = b ] || die 'capture pair must be a or b'
+[ -n "$output" ] || die '--output is required'
+[ ! -e "$output" ] || die "output already exists: $output"
+[ -n "${LUAU_BIN:-}" ] || die 'LUAU_BIN is required'
+[ -z "$(git status --porcelain --untracked-files=all)" ] || die 'capture requires a clean worktree'
+revision=$(git rev-parse HEAD)
+
+artifact_dir=$(mktemp -d "${TMPDIR:-/tmp}/ember-architecture-proof.XXXXXX")
+trap 'rm -rf "$artifact_dir"' EXIT HUP INT TERM
+binary=$artifact_dir/architecture-proof.test
+
+CGO_ENABLED=0 go test -c -o "$binary" ./internal/architectureproof
+
+command="CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=$LUAU_BIN scripts/check-architecture-proof --backend $backend --capture-pair $pair --output $output"
+if [ "$allow_busy" -eq 1 ]; then
+	command="$command --allow-busy"
+fi
+
+EMBER_ARCHITECTURE_PROOF_CAPTURE=1 \
+EMBER_ARCHITECTURE_PROOF_BACKEND=$backend \
+EMBER_ARCHITECTURE_PROOF_PAIR=$pair \
+EMBER_ARCHITECTURE_PROOF_OUTPUT=$output \
+EMBER_ARCHITECTURE_PROOF_SEED=76198126637574 \
+EMBER_ARCHITECTURE_PROOF_ALLOW_BUSY=$([ "$allow_busy" -eq 1 ] && printf true || printf false) \
+EMBER_ARCHITECTURE_PROOF_VCS_REVISION=$revision \
+EMBER_ARCHITECTURE_PROOF_VCS_MODIFIED=false \
+CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=$LUAU_BIN \
+"$binary" -test.run '^TestArchitectureCapture$' -test.v
+printf '%s\n' "$command" >"$output/command.txt"
+printf 'check-architecture-proof: captured %s/%s in %s\n' "$backend" "$pair" "$output"
