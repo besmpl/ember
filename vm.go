@@ -4807,7 +4807,7 @@ func directFrameApplySingleCallIslandResult(frame *vmFrame, registers []Value, s
 }
 
 func (thread *vmThread) runDirectFastCall(frame *vmFrame, nativeID nativeFuncID, start int, argCount int, resultCount int, counts *directFramePICCounts) directFrameSideExit {
-	if nativeID == nativeFuncCoroutineResume {
+	if machineCoroutineNativeID(nativeID) {
 		return directFrameEnterGenericFrameFor(directFrameSideExitReasonYield)
 	}
 	registers := frame.registers
@@ -4973,8 +4973,14 @@ func fastCallNativeUnchanged(globals *globalEnv, nativeID nativeFuncID) bool {
 		return baseFieldIntrinsicUnchangedWithValues(globals, "table", "insert", nativeID)
 	case nativeFuncTableRemove:
 		return baseFieldIntrinsicUnchangedWithValues(globals, "table", "remove", nativeID)
+	case nativeFuncCoroutineCreate:
+		return baseFieldIntrinsicUnchangedWithValues(globals, "coroutine", "create", nativeID)
+	case nativeFuncCoroutineStatus:
+		return baseFieldIntrinsicUnchangedWithValues(globals, "coroutine", "status", nativeID)
 	case nativeFuncCoroutineResume:
 		return baseFieldIntrinsicUnchangedWithValues(globals, "coroutine", "resume", nativeID)
+	case nativeFuncCoroutineYield:
+		return baseFieldIntrinsicUnchangedWithValues(globals, "coroutine", "yield", nativeID)
 	case nativeFuncMathMin:
 		return baseFieldIntrinsicUnchangedWithValues(globals, "math", "min", nativeID)
 	case nativeFuncRawLen:
@@ -4996,8 +5002,14 @@ func fastCallCallee(globals *globalEnv, nativeID nativeFuncID) (Value, bool, err
 		return tableIntrinsicCallee(globals, "insert")
 	case nativeFuncTableRemove:
 		return tableIntrinsicCallee(globals, "remove")
+	case nativeFuncCoroutineCreate:
+		return coroutineIntrinsicCallee(globals, "create")
+	case nativeFuncCoroutineStatus:
+		return coroutineIntrinsicCallee(globals, "status")
 	case nativeFuncCoroutineResume:
 		return coroutineIntrinsicCallee(globals, "resume")
+	case nativeFuncCoroutineYield:
+		return coroutineIntrinsicCallee(globals, "yield")
 	case nativeFuncMathMin:
 		return mathIntrinsicCallee(globals, "min")
 	case nativeFuncRawLen:

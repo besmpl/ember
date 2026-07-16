@@ -106,3 +106,40 @@ func TestMachineCoroutineNativeIDsAreStableAndMapped(t *testing.T) {
 		}
 	}
 }
+
+func TestCompilerPromotesEveryCoreCoroutineMemberToFastCall(t *testing.T) {
+	proto, err := Compile(backendCoroutineProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !image.eligible {
+		t.Fatalf("core coroutine proof image is ineligible: %s", image.rejectReason)
+	}
+	seen := make(map[nativeFuncID]bool)
+	for protoID := range image.prototypes {
+		prepared := &image.prototypes[protoID]
+		if !prepared.eligible {
+			t.Fatalf("core coroutine proof Proto %d is ineligible: %s", protoID, prepared.rejectReason)
+		}
+		for pc := range prepared.operations {
+			operation := &prepared.operations[pc]
+			if operation.op == opFastCall {
+				seen[nativeFuncID(operation.nativeID)] = true
+			}
+		}
+	}
+	for _, nativeID := range []nativeFuncID{
+		nativeFuncCoroutineCreate,
+		nativeFuncCoroutineResume,
+		nativeFuncCoroutineStatus,
+		nativeFuncCoroutineYield,
+	} {
+		if !seen[nativeID] {
+			t.Fatalf("core coroutine native %s was not promoted to FAST_CALL", nativeFuncName(nativeID))
+		}
+	}
+}

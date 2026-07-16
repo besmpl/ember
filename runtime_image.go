@@ -462,7 +462,8 @@ func machineFastCallSupported(nativeID nativeFuncID) bool {
 	case nativeFuncMathMin, nativeFuncRawLen, nativeFuncSelect,
 		nativeFuncTableInsert, nativeFuncTableRemove,
 		nativeFuncSetMetatable, nativeFuncGetMetatable,
-		nativeFuncCoroutineResume:
+		nativeFuncCoroutineCreate, nativeFuncCoroutineStatus,
+		nativeFuncCoroutineResume, nativeFuncCoroutineYield:
 		return true
 	default:
 		return false

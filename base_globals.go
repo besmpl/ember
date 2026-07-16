@@ -61,12 +61,14 @@ func baseFieldIntrinsics() []baseFieldIntrinsicDefinition {
 		baseFieldIntrinsicsCache = []baseFieldIntrinsicDefinition{
 			{globalName: "table", field: "insert", op: opFastCall, nativeID: nativeFuncTableInsert, nativeName: "TABLE_INSERT"},
 			{globalName: "table", field: "remove", op: opFastCall, nativeID: nativeFuncTableRemove, nativeName: "TABLE_REMOVE"},
+			{globalName: "coroutine", field: "create", op: opFastCall, nativeID: nativeFuncCoroutineCreate, nativeName: "COROUTINE_CREATE"},
 			{globalName: "coroutine", field: "resume", op: opFastCall, nativeID: nativeFuncCoroutineResume, nativeName: "COROUTINE_RESUME"},
+			{globalName: "coroutine", field: "status", op: opFastCall, nativeID: nativeFuncCoroutineStatus, nativeName: "COROUTINE_STATUS"},
+			{globalName: "coroutine", field: "yield", op: opFastCall, nativeID: nativeFuncCoroutineYield, nativeName: "COROUTINE_YIELD"},
 			{globalName: "math", field: "min", op: opFastCall, nativeID: nativeFuncMathMin, nativeName: "MATH_MIN"},
 		}
 		nativeFuncDefinitionsCache = []nativeFuncDefinition{
 			{id: nativeFuncSelect, name: "SELECT"},
-			{id: nativeFuncCoroutineStatus, name: "COROUTINE_STATUS"},
 			{id: nativeFuncRawLen, name: "RAW_LEN"},
 			{id: nativeFuncToString, name: "TOSTRING"},
 			{id: nativeFuncNext, name: "NEXT"},
@@ -74,8 +76,6 @@ func baseFieldIntrinsics() []baseFieldIntrinsicDefinition {
 			{id: nativeFuncTableNext, name: "TABLE_NEXT"},
 			{id: nativeFuncSetMetatable, name: "SET_METATABLE"},
 			{id: nativeFuncGetMetatable, name: "GET_METATABLE"},
-			{id: nativeFuncCoroutineCreate, name: "COROUTINE_CREATE"},
-			{id: nativeFuncCoroutineYield, name: "COROUTINE_YIELD"},
 		}
 		for _, intrinsic := range baseFieldIntrinsicsCache {
 			nativeFuncDefinitionsCache = append(nativeFuncDefinitionsCache, nativeFuncDefinition{

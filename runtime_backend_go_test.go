@@ -188,6 +188,29 @@ end
 return kernel
 `
 
+const backendCoroutineProofSource = `
+local function kernel(seed)
+    local co = coroutine.create(function(limit)
+        local total = 0
+        for i = 1, limit do
+            total = total + i
+            if i % 10 == 0 then
+                coroutine.yield(total)
+            end
+        end
+        return total
+    end)
+    local total = 0
+    local ok, value = coroutine.resume(co, 45 + seed % 2)
+    while coroutine.status(co) ~= "dead" do
+        total = total + value
+        ok, value = coroutine.resume(co)
+    end
+    return total + value
+end
+return kernel
+`
+
 func TestBackendGoNumericProofEmitsDeterministicDirectSource(t *testing.T) {
 	ir := backendNumericProofIR(t)
 	options := backendGoNumericOptions{
@@ -2173,6 +2196,222 @@ func TestBackendGoFixedTupleRejectsUnboundedOrMismatchedResults(t *testing.T) {
 	}
 }
 
+func TestBackendGoScalarCoroutineFixtureIsFreshDirectAndCorrect(t *testing.T) {
+	irs, deadString := backendCoroutineProofIRs(t, backendCoroutineProofSource)
+	targets := backendCoroutineProofTargets(irs)
+	generated, err := emitBackendGoNumericProof(irs[1], backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedCoroutineKernel",
+		preparedFunctionName: "backendGeneratedCoroutinePreparedFixture",
+		directTargets:        targets,
+		coroutineDeadString:  deadString,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk, err := os.ReadFile("runtime_backend_coroutine_generated_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(generated, onDisk) {
+		t.Fatal("generated scalar coroutine fixture is stale")
+	}
+	if _, err := goparser.ParseFile(token.NewFileSet(), "runtime_backend_coroutine_generated_test.go", generated, goparser.AllErrors); err != nil {
+		t.Fatalf("parse generated scalar coroutine fixture: %v", err)
+	}
+	text := string(generated)
+	for _, required := range []string{
+		"type backendGeneratedCoroutineBodyState struct",
+		"switch state.state",
+		"state.state = 1",
+		"return v30, false, true",
+		"backendGeneratedCoroutineBody(&q0, v36, true)",
+		"backendGeneratedCoroutineBody(&q0, 0, false)",
+		"context.intrinsicUnchangedAt(2, 11)",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("generated scalar coroutine source lacks %q:\n%s", required, text)
+		}
+	}
+	for _, forbidden := range []string{
+		"opcode", "descriptor", "machineCoroutine", "machineClosure",
+		"FAST_CALL", "COROUTINE_", "LOAD_GLOBAL", "GET_STRING_FIELD",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("generated scalar coroutine source contains materialization/dispatch marker %q", forbidden)
+		}
+	}
+
+	root, err := Compile(backendCoroutineProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seed := range []float64{-29, -1, 0, 1, 7, 29, 1_000_000_000_005} {
+		got, ok := backendGeneratedCoroutineKernel(seed)
+		want := backendCoroutineExpected(seed)
+		if !ok || got != want {
+			t.Fatalf("generated scalar coroutine fixture(%v) = (%v, %t), want (%v, true)", seed, got, ok, want)
+		}
+		oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+			args: []Value{NumberValue(seed)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(oracle) != 1 {
+			t.Fatalf("scalar coroutine oracle result count = %d, want 1", len(oracle))
+		}
+		oracleNumber, ok := oracle[0].Number()
+		if !ok || oracleNumber != got {
+			t.Fatalf("generated/oracle scalar coroutine seed %v = %v/%v (%t)", seed, got, oracleNumber, ok)
+		}
+	}
+	if _, ok := backendGeneratedCoroutineKernel(math.NaN()); ok {
+		t.Fatal("generated scalar coroutine accepted a NaN loop limit")
+	}
+	if _, _, ok := backendGeneratedCoroutineBody(nil, 45, true); ok {
+		t.Fatal("generated scalar coroutine body accepted a nil state")
+	}
+	if !checkptrInstrumentedTest() {
+		if allocations := testing.AllocsPerRun(1000, func() {
+			_, _ = backendGeneratedCoroutineKernel(29)
+		}); allocations != 0 {
+			t.Fatalf("generated scalar coroutine allocations = %v, want 0", allocations)
+		}
+	}
+}
+
+func TestBackendGoScalarCoroutineIgnoresSourceIdentity(t *testing.T) {
+	base := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "source/main", Text: backendCoroutineProofSource},
+	}, []Entrypoint{{Name: "main", Module: LogicalModule("main")}})
+	renamed := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "opaque/renamed/source", Text: backendCoroutineProofSource},
+	}, []Entrypoint{{Name: "renamed-entrypoint", Module: LogicalModule("main")}})
+	if base.programHash == renamed.programHash {
+		t.Fatal("identity-mutated coroutine Programs unexpectedly share a binding hash")
+	}
+	options := func(module backendModuleIR) backendGoNumericOptions {
+		targets := make([]backendGoNumericTarget, len(module.protos))
+		targets[2] = backendGoNumericTarget{
+			ir:           module.protos[2],
+			functionName: "identityBlindCoroutineBody",
+		}
+		return backendGoNumericOptions{
+			packageName:         "ember",
+			functionName:        "identityBlindCoroutineKernel",
+			directTargets:       targets,
+			coroutineDeadString: backendCoroutineDeadStringID(t, module.code),
+		}
+	}
+	baseSource, err := emitBackendGoNumericProof(base.modules[0].protos[1], options(base.modules[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamedSource, err := emitBackendGoNumericProof(renamed.modules[0].protos[1], options(renamed.modules[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(baseSource, renamedSource) {
+		t.Fatal("source or entrypoint identity selected scalar coroutine code")
+	}
+}
+
+func TestBackendGoScalarCoroutineRejectsUnprovedShapes(t *testing.T) {
+	tests := map[string]string{
+		"captured body": `
+local function kernel(seed)
+    local bonus = seed
+    local co = coroutine.create(function(limit)
+        coroutine.yield(limit + bonus)
+        return limit
+    end)
+    local ok, value = coroutine.resume(co, 1)
+    while coroutine.status(co) ~= "dead" do
+        ok, value = coroutine.resume(co)
+    end
+    return value
+end
+return kernel
+`,
+		"escaping coroutine": `
+local function kernel(seed)
+    local co = coroutine.create(function(limit)
+        coroutine.yield(limit)
+        return limit
+    end)
+    return co
+end
+return kernel
+`,
+		"multiple coroutines": `
+local function kernel(seed)
+    local first = coroutine.create(function(limit) coroutine.yield(limit) return limit end)
+    local second = coroutine.create(function(limit) coroutine.yield(limit) return limit end)
+    local ok, value = coroutine.resume(first, seed)
+    return value
+end
+return kernel
+`,
+		"resume arguments after first": `
+local function kernel(seed)
+    local co = coroutine.create(function(limit)
+        coroutine.yield(limit)
+        return limit
+    end)
+    local ok, value = coroutine.resume(co, seed)
+    while coroutine.status(co) ~= "dead" do
+        ok, value = coroutine.resume(co, seed)
+    end
+    return value
+end
+return kernel
+`,
+		"consumed resumed value": `
+local function kernel(seed)
+    local co = coroutine.create(function(limit)
+        local resumed = coroutine.yield(limit)
+        return limit + resumed
+    end)
+    local ok, value = coroutine.resume(co, seed)
+    while coroutine.status(co) ~= "dead" do
+        ok, value = coroutine.resume(co, 1)
+    end
+    return value
+end
+return kernel
+`,
+		"non-dead status comparison": `
+local function kernel(seed)
+    local co = coroutine.create(function(limit)
+        coroutine.yield(limit)
+        return limit
+    end)
+    local ok, value = coroutine.resume(co, seed)
+    while coroutine.status(co) == "suspended" do
+        ok, value = coroutine.resume(co)
+    end
+    return value
+end
+return kernel
+`,
+	}
+	for name, source := range tests {
+		t.Run(name, func(t *testing.T) {
+			irs, deadString := backendCoroutineProofIRs(t, source)
+			targets := backendCoroutineProofTargets(irs)
+			if _, err := emitBackendGoNumericProof(irs[1], backendGoNumericOptions{
+				packageName:         "ember",
+				functionName:        "rejectUnprovedCoroutine",
+				directTargets:       targets,
+				coroutineDeadString: deadString,
+			}); err == nil {
+				t.Fatal("emitted an unproved scalar coroutine shape")
+			}
+		})
+	}
+}
+
 func backendRecursiveExpected(seed float64) float64 {
 	n := 20 + seed - math.Floor(seed/2)*2
 	var fib func(float64) float64
@@ -2183,6 +2422,11 @@ func backendRecursiveExpected(seed float64) float64 {
 		return fib(value-1) + fib(value-2)
 	}
 	return fib(n)
+}
+
+func backendCoroutineExpected(seed float64) float64 {
+	mod := seed - math.Floor(seed/2)*2
+	return 2585 + 46*mod
 }
 
 func backendVarargExpected(seed float64) float64 {
@@ -2538,6 +2782,61 @@ func backendTupleProofTargets(irs []*backendProtoIR) []backendGoNumericTarget {
 	return targets
 }
 
+func backendCoroutineProofIRs(
+	t *testing.T,
+	source string,
+) ([]*backendProtoIR, machineStringID) {
+	t.Helper()
+	proto, err := Compile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(image.prototypes) < 3 {
+		t.Fatalf("coroutine proof Proto count = %d, want at least 3", len(image.prototypes))
+	}
+	irs := make([]*backendProtoIR, len(image.prototypes))
+	for protoID := range image.prototypes {
+		irs[protoID], err = buildBackendProtoIR(&image.prototypes[protoID])
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return irs, backendCoroutineDeadStringID(t, image)
+}
+
+func backendCoroutineProofTargets(irs []*backendProtoIR) []backendGoNumericTarget {
+	targets := make([]backendGoNumericTarget, len(irs))
+	if len(irs) > 2 {
+		targets[2] = backendGoNumericTarget{
+			ir:           irs[2],
+			functionName: "backendGeneratedCoroutineBody",
+		}
+	}
+	return targets
+}
+
+func backendCoroutineDeadStringID(t *testing.T, image *codeImage) machineStringID {
+	t.Helper()
+	if image == nil {
+		return invalidMachineStringID
+	}
+	for index, record := range image.stringRecords {
+		start := uint64(record.offset)
+		end := start + uint64(record.length)
+		if end > uint64(len(image.stringData)) {
+			t.Fatalf("coroutine proof string %d has an invalid span", index+1)
+		}
+		if string(image.stringData[int(start):int(end)]) == "dead" {
+			return machineStringID(index + 1)
+		}
+	}
+	return invalidMachineStringID
+}
+
 func BenchmarkBackendGeneratedNumericFixture(b *testing.B) {
 	var result float64
 	b.ReportAllocs()
@@ -2650,6 +2949,20 @@ func BenchmarkBackendGeneratedTupleKernel(b *testing.B) {
 	backendGeneratedNumericSink = result
 }
 
+func BenchmarkBackendGeneratedCoroutineKernel(b *testing.B) {
+	var result float64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		value, ok := backendGeneratedCoroutineKernel(float64(iteration & 31))
+		if !ok {
+			b.Fatal("generated scalar coroutine fixture exited")
+		}
+		result = value
+	}
+	backendGeneratedNumericSink = result
+}
+
 func BenchmarkBackendGeneratedMetatableIndexKernel(b *testing.B) {
 	var result float64
 	b.ReportAllocs()
@@ -2678,6 +2991,7 @@ func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
 		backendRecursiveProofSource,
 		backendVarargProofSource,
 		backendTupleProofSource,
+		backendCoroutineProofSource,
 		"local function add(value) return value + 1 end return add",
 		"return { field = 1 }",
 	} {
@@ -2711,6 +3025,16 @@ func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
 			targets := make([]backendGoNumericTarget, len(irs))
 			for operationIndex := range ir.ops {
 				operation := &ir.ops[operationIndex]
+				if operation.op == opClosure &&
+					operation.targetProto >= 0 &&
+					int(operation.targetProto) < len(irs) &&
+					irs[operation.targetProto] != nil &&
+					backendGoNumericHasCoroutineYield(irs[operation.targetProto]) {
+					targets[operation.targetProto] = backendGoNumericTarget{
+						ir:           irs[operation.targetProto],
+						functionName: fmt.Sprintf("Target%d", operation.targetProto),
+					}
+				}
 				if operation.call.kind != backendCallDirectProto ||
 					operation.call.targetProto < 0 ||
 					int(operation.call.targetProto) >= len(irs) ||
@@ -2727,6 +3051,7 @@ func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
 				functionName:         "Run",
 				preparedFunctionName: "RunPrepared",
 				directTargets:        targets,
+				coroutineDeadString:  backendCoroutineDeadStringID(t, image),
 			}
 			first, firstErr := emitBackendGoNumericProof(ir, options)
 			second, secondErr := emitBackendGoNumericProof(ir, options)

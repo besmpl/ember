@@ -7,6 +7,16 @@ import (
 	"sync"
 )
 
+func machineCoroutineNativeID(nativeID nativeFuncID) bool {
+	switch nativeID {
+	case nativeFuncCoroutineCreate, nativeFuncCoroutineStatus,
+		nativeFuncCoroutineResume, nativeFuncCoroutineYield:
+		return true
+	default:
+		return false
+	}
+}
+
 type machineCoroutineActionKind uint8
 
 const (

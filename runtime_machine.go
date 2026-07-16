@@ -1470,7 +1470,7 @@ func (machine *scalarMachine) fastCall(operation machineOperation, returnPC int)
 		return fmt.Errorf("compact Machine FAST_CALL argument window is out of range")
 	}
 	nativeID := nativeFuncID(operation.nativeID)
-	if nativeID == nativeFuncCoroutineResume && slotTagOf(callee) == slotTagNativeID {
+	if machineCoroutineNativeID(nativeID) && slotTagOf(callee) == slotTagNativeID {
 		actual, nativeErr := slotNativeIDValue(callee)
 		if nativeErr != nil {
 			return nativeErr

@@ -335,6 +335,29 @@ The retained path has moved beyond the original starting state:
   warmed to about 5.2 microseconds per run. Go inlines the method helper into a
   128-byte linked ARM64 kernel containing no call instruction, stack frame,
   opcode/descriptor dispatch, closure lookup, method lookup, or table lookup.
+- The current scalar-coroutine slice completes the ten-family Top10
+  architecture proof. The compiler promotes immutable
+  `coroutine.create`/`resume`/`status`/`yield` members to guarded Machine
+  `FAST_CALL` operations, then scalar-replaces one proven nonescaping,
+  capture-free coroutine whose body has one numeric parameter, numeric yields,
+  one numeric return, and no consumed resumed values. Generated Go uses one
+  explicit state record and a resumable CFG step function; no Go stack remains
+  suspended between guest yields. Prepared entry guards all four caller/target
+  intrinsic identities before work and replays canonical Machine on any
+  mismatch. Captured, escaping, multiple, conditionally ordered,
+  resume-argument-changing, resumed-value-consuming, nonnumeric, non-`dead`
+  status, or otherwise unsupported shapes fail closed. Source, module, and
+  entrypoint identity mutation produces identical executable source. The
+  prepared owner path has a five-sample median of about 401 ns on the
+  checkpoint machine (393-448 ns observed), versus about 7.78 microseconds
+  through generic Machine (7.39-7.87 microseconds observed), with zero
+  allocations and no materialized Machine coroutine or closure. The direct
+  generated kernel has a five-sample median of about 144 ns (143.9-144.5 ns
+  observed), while live pinned Luau `-O2 -g0` has a warmed median of about
+  992 ns on the same parameterized source. Linked ARM64 is 256 bytes for the
+  caller, 480 bytes for the step function, and 304 bytes for the prepared
+  body; caller code contains two direct step calls and no opcode, descriptor,
+  intrinsic, closure, or coroutine-runtime dispatch.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
@@ -343,6 +366,7 @@ general closures/upvalues and dynamic call sets, open varargs/results,
 heterogeneous or dynamically shaped multiple results,
 general recursion and logical-frame/error cases, dynamic/callable metatables,
 general captured or polymorphic methods, host/effect exits, modules, and
+escaping, polymorphic, resumed-value-consuming, or otherwise general
 coroutines remain on the active path.
 
 ## Active execution path
