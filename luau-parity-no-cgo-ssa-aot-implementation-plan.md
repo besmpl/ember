@@ -203,12 +203,23 @@ The retained path has moved beyond the original starting state:
   Machine, with zero prepared allocations and no materialized Machine table.
   Linked ARM64 inspection contains no calls, opcode dispatch, descriptor
   dispatch, or table lookup.
+- The current dense-array slice scalar-replaces the exact
+  `top10/generic_iteration` architecture-proof shape into one fixed typed Go
+  array and a direct index loop. It accepts only a fully initialized local
+  dense array, one iterator, an unused guest key, one concrete scalar element
+  type, no hash fields, and no writes after iteration begins; other shapes fail
+  closed to Machine. The prepared owner path takes roughly 112-114 ns on the
+  checkpoint machine, versus roughly 4.7-5.3 microseconds through generic
+  Machine, with zero prepared allocations and no materialized Machine table.
+  The direct generated body takes roughly 10.6-11.1 ns. Its linked ARM64 body
+  is 192 bytes, contains no calls, and lowers the loop to indexed loads plus a
+  fused multiply-add with no opcode, descriptor, iterator, or table dispatch.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
-all-37 parity. Arrays, general table mutation/iteration, strings,
-closures/upvalues, varargs/results, recursion, metatables, host/effect exits,
-modules, and coroutines remain on the active path.
+all-37 parity. Array growth/removal and non-dense iteration, general table
+mutation, strings, closures/upvalues, varargs/results, recursion, metatables,
+host/effect exits, modules, and coroutines remain on the active path.
 
 ## Active execution path
 

@@ -1,6 +1,9 @@
 package ember
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 type backendGoScalarFieldKey struct {
 	table backendValueID
@@ -13,10 +16,21 @@ type backendGoScalarField struct {
 	child backendValueID
 }
 
+type backendGoScalarArray struct {
+	table   backendValueID
+	tags    backendTagMask
+	length  uint32
+	present map[uint32]bool
+}
+
 type backendGoScalarTablePlan struct {
-	roots  []backendValueID
-	fields []backendGoScalarField
-	index  map[backendGoScalarFieldKey]int
+	roots          []backendValueID
+	fields         []backendGoScalarField
+	index          map[backendGoScalarFieldKey]int
+	arrays         []backendGoScalarArray
+	arrayIndex     map[backendValueID]int
+	iteratorValues []bool
+	iteratorByPC   map[int32]int
 }
 
 func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan, error) {
@@ -24,8 +38,10 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 		return backendGoScalarTablePlan{}, nil
 	}
 	plan := backendGoScalarTablePlan{
-		roots: make([]backendValueID, len(ir.values)),
-		index: make(map[backendGoScalarFieldKey]int),
+		roots:        make([]backendValueID, len(ir.values)),
+		index:        make(map[backendGoScalarFieldKey]int),
+		arrayIndex:   make(map[backendValueID]int),
+		iteratorByPC: make(map[int32]int),
 	}
 	for valueIndex := range ir.values {
 		value := &ir.values[valueIndex]
@@ -38,12 +54,116 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 		}
 		plan.roots[valueIndex] = root
 	}
+	arrayGenerators := make([]bool, len(ir.values))
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op != opArrayNextJump2 {
+			continue
+		}
+		generator := backendOperationUse(operation, operation.b)
+		if ir.validBackendValue(generator) {
+			arrayGenerators[generator-1] = true
+		}
+	}
+	setRoot := func(id, root backendValueID) (bool, bool) {
+		if !ir.validBackendValue(id) {
+			return false, false
+		}
+		if root == invalidBackendValueID {
+			return false, true
+		}
+		current := plan.roots[id-1]
+		if current == invalidBackendValueID {
+			plan.roots[id-1] = root
+			return true, true
+		}
+		return false, current == root
+	}
 
 	for iteration := 0; iteration <= len(ir.values)+len(ir.ops); iteration++ {
 		changed := false
+		for valueIndex := range ir.values {
+			value := &ir.values[valueIndex]
+			if value.kind != backendValuePhi || !arrayGenerators[valueIndex] {
+				continue
+			}
+			block := &ir.blocks[value.block]
+			phi := block.phis[value.register]
+			root := invalidBackendValueID
+			ready := true
+			for inputIndex, input := range phi.inputs {
+				if !ir.blocks[block.predecessors[inputIndex]].reachable {
+					continue
+				}
+				if input == value.id {
+					continue
+				}
+				candidate := plan.root(input)
+				if candidate == invalidBackendValueID {
+					ready = false
+					break
+				}
+				if root != invalidBackendValueID && root != candidate {
+					return backendGoScalarTablePlan{}, nil
+				}
+				root = candidate
+			}
+			if !ready {
+				continue
+			}
+			if updated, ok := setRoot(value.id, root); !ok {
+				return backendGoScalarTablePlan{}, nil
+			} else if updated {
+				changed = true
+			}
+		}
 		for pc := range ir.ops {
 			operation := &ir.ops[pc]
 			switch operation.op {
+			case opPrepareIter:
+				root := plan.root(backendOperationUse(operation, operation.a))
+				if root == invalidBackendValueID {
+					continue
+				}
+				for _, definition := range operation.defs {
+					if definition.register != operation.a {
+						continue
+					}
+					if updated, ok := setRoot(definition.value, root); !ok {
+						return backendGoScalarTablePlan{}, nil
+					} else if updated {
+						changed = true
+					}
+				}
+			case opSetField:
+				table := plan.root(backendOperationUse(operation, operation.a))
+				index, ok := backendGoArrayIndexConstant(ir, operation.access.constant)
+				source := backendOperationUse(operation, operation.c)
+				if table == invalidBackendValueID || !ok || !ir.validBackendValue(source) {
+					continue
+				}
+				if plan.root(source) != invalidBackendValueID {
+					return backendGoScalarTablePlan{}, nil
+				}
+				tags := ir.values[source-1].tags
+				if tags == 0 || tags&^(backendTagNumber|backendTagBool) != 0 {
+					return backendGoScalarTablePlan{}, nil
+				}
+				arrayIndex, exists := plan.arrayIndex[table]
+				if !exists {
+					arrayIndex = len(plan.arrays)
+					plan.arrayIndex[table] = arrayIndex
+					plan.arrays = append(plan.arrays, backendGoScalarArray{
+						table:   table,
+						present: make(map[uint32]bool),
+					})
+				}
+				array := &plan.arrays[arrayIndex]
+				array.tags |= tags
+				array.present[index] = true
+				if index > array.length {
+					array.length = index
+				}
 			case opSetStringField:
 				table := plan.root(backendOperationUse(operation, operation.a))
 				if table == invalidBackendValueID {
@@ -119,7 +239,21 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 			return backendGoScalarTablePlan{}, fmt.Errorf("emit backend Go numeric proof: scalar table analysis did not converge")
 		}
 	}
-	if len(plan.fields) == 0 {
+	if len(plan.fields) == 0 && len(plan.arrays) == 0 {
+		return backendGoScalarTablePlan{}, nil
+	}
+	for arrayIndex := range plan.arrays {
+		array := &plan.arrays[arrayIndex]
+		if array.length == 0 || array.tags == 0 || array.tags&(array.tags-1) != 0 {
+			return backendGoScalarTablePlan{}, nil
+		}
+		for index := uint32(1); index <= array.length; index++ {
+			if !array.present[index] {
+				return backendGoScalarTablePlan{}, nil
+			}
+		}
+	}
+	if !plan.analyzeIterators(ir) {
 		return backendGoScalarTablePlan{}, nil
 	}
 	for pc := range ir.ops {
@@ -144,6 +278,19 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR) (backendGoScalarTablePlan,
 				}
 			case opGetStringField:
 				if use.register != operation.b {
+					return backendGoScalarTablePlan{}, nil
+				}
+			case opSetField:
+				if use.register != operation.a && use.register != operation.c {
+					return backendGoScalarTablePlan{}, nil
+				}
+			case opPrepareIter:
+				if use.register != operation.a {
+					return backendGoScalarTablePlan{}, nil
+				}
+			case opArrayNextJump2:
+				if use.register != operation.b &&
+					!plan.iteratorValue(use.value) {
 					return backendGoScalarTablePlan{}, nil
 				}
 			default:
@@ -194,11 +341,182 @@ func backendGoStringFieldName(ir *backendProtoIR, constant int32) (machineString
 	return machineStringID(value.bits), true
 }
 
+func backendGoArrayIndexConstant(ir *backendProtoIR, constant int32) (uint32, bool) {
+	if ir == nil || constant < 0 || int(constant) >= len(ir.constants) {
+		return 0, false
+	}
+	value := ir.constants[constant]
+	if value.kind != NumberKind {
+		return 0, false
+	}
+	number := math.Float64frombits(value.bits)
+	if number < 1 || number > float64(^uint32(0)) || number != math.Trunc(number) {
+		return 0, false
+	}
+	return uint32(number), true
+}
+
+func (plan *backendGoScalarTablePlan) analyzeIterators(ir *backendProtoIR) bool {
+	if plan == nil || ir == nil {
+		return false
+	}
+	plan.iteratorValues = make([]bool, len(ir.values))
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op != opPrepareIter {
+			continue
+		}
+		table := plan.root(backendOperationUse(operation, operation.a))
+		arrayIndex, ok := plan.arrayIndex[table]
+		if !ok {
+			continue
+		}
+		if _, exists := plan.iteratorByPC[operation.pc]; exists {
+			return false
+		}
+		for _, existing := range plan.iteratorByPC {
+			if existing == arrayIndex {
+				return false
+			}
+		}
+		for _, field := range plan.fields {
+			if field.key.table == table {
+				return false
+			}
+		}
+		for candidatePC := range ir.ops {
+			candidate := &ir.ops[candidatePC]
+			if candidate.op != opSetField ||
+				plan.root(backendOperationUse(candidate, candidate.a)) != table {
+				continue
+			}
+			if candidate.pc >= operation.pc {
+				return false
+			}
+		}
+		plan.iteratorByPC[operation.pc] = arrayIndex
+		for _, definition := range operation.defs {
+			if definition.register == operation.b || definition.register == operation.c {
+				plan.iteratorValues[definition.value-1] = true
+			}
+		}
+	}
+	for {
+		changed := false
+		for valueIndex := range ir.values {
+			value := &ir.values[valueIndex]
+			if value.kind != backendValuePhi || plan.iteratorValues[valueIndex] {
+				continue
+			}
+			block := &ir.blocks[value.block]
+			phi := block.phis[value.register]
+			known := false
+			valid := true
+			for inputIndex, input := range phi.inputs {
+				if !ir.blocks[block.predecessors[inputIndex]].reachable {
+					continue
+				}
+				if plan.iteratorValue(input) {
+					known = true
+					continue
+				}
+				if input != value.id {
+					valid = false
+					break
+				}
+			}
+			if known && valid {
+				plan.iteratorValues[valueIndex] = true
+				changed = true
+			}
+		}
+		for pc := range ir.ops {
+			operation := &ir.ops[pc]
+			if operation.op != opArrayNextJump2 {
+				continue
+			}
+			table := plan.root(backendOperationUse(operation, operation.b))
+			arrayIndex, ok := plan.arrayIndex[table]
+			if !ok ||
+				!plan.iteratorValue(backendOperationUse(operation, operation.c)) {
+				continue
+			}
+			plan.iteratorByPC[operation.pc] = arrayIndex
+			for _, definition := range operation.defs {
+				if definition.register == operation.a && !plan.iteratorValues[definition.value-1] {
+					plan.iteratorValues[definition.value-1] = true
+					changed = true
+				}
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	for valueIndex, token := range plan.iteratorValues {
+		if !token {
+			continue
+		}
+		id := backendValueID(valueIndex + 1)
+		for pc := range ir.ops {
+			operation := &ir.ops[pc]
+			for _, use := range operation.uses {
+				if use.value == id && operation.op != opArrayNextJump2 {
+					return false
+				}
+			}
+		}
+	}
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op != opArrayNextJump2 {
+			continue
+		}
+		if _, ok := plan.iteratorByPC[operation.pc]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func (plan backendGoScalarTablePlan) root(id backendValueID) backendValueID {
 	if id == invalidBackendValueID || int(id) > len(plan.roots) {
 		return invalidBackendValueID
 	}
 	return plan.roots[id-1]
+}
+
+func (plan backendGoScalarTablePlan) iteratorValue(id backendValueID) bool {
+	return id != invalidBackendValueID &&
+		int(id) <= len(plan.iteratorValues) &&
+		plan.iteratorValues[id-1]
+}
+
+func (plan backendGoScalarTablePlan) arrayOperation(
+	ir *backendProtoIR,
+	operation *backendOperationIR,
+) (int, backendGoScalarArray, uint32, bool) {
+	if ir == nil || operation == nil {
+		return 0, backendGoScalarArray{}, 0, false
+	}
+	switch operation.op {
+	case opSetField:
+		table := plan.root(backendOperationUse(operation, operation.a))
+		arrayIndex, ok := plan.arrayIndex[table]
+		element, elementOK := backendGoArrayIndexConstant(ir, operation.access.constant)
+		if !ok || !elementOK {
+			return 0, backendGoScalarArray{}, 0, false
+		}
+		return arrayIndex, plan.arrays[arrayIndex], element, true
+	case opPrepareIter, opArrayNextJump2:
+		arrayIndex, ok := plan.iteratorByPC[operation.pc]
+		if !ok || arrayIndex < 0 || arrayIndex >= len(plan.arrays) {
+			return 0, backendGoScalarArray{}, 0, false
+		}
+		return arrayIndex, plan.arrays[arrayIndex], 0, true
+	default:
+		return 0, backendGoScalarArray{}, 0, false
+	}
 }
 
 func (plan backendGoScalarTablePlan) field(key backendGoScalarFieldKey) (backendGoScalarField, bool) {

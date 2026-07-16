@@ -68,6 +68,18 @@ end
 return kernel
 `
 
+const backendArrayIterationProofSource = `
+local function kernel(seed)
+    local values = {1 + seed % 5, 2, 3, 4, 5, 6, 7, 8}
+    local total = 0
+    for _, value in values do
+        total = total + value * value
+    end
+    return total
+end
+return kernel
+`
+
 func TestBackendGoNumericProofEmitsDeterministicDirectSource(t *testing.T) {
 	ir := backendNumericProofIR(t)
 	options := backendGoNumericOptions{
@@ -240,6 +252,30 @@ func TestBackendGoScalarTableFieldsIgnoreSourceIdentity(t *testing.T) {
 	}
 	if !bytes.Equal(baseSource, renamedSource) {
 		t.Fatal("source or entrypoint identity selected scalar table-field code")
+	}
+}
+
+func TestBackendGoScalarArrayIterationIgnoresSourceIdentity(t *testing.T) {
+	base := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "source/main", Text: backendArrayIterationProofSource},
+	}, []Entrypoint{{Name: "main", Module: LogicalModule("main")}})
+	renamed := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "opaque/renamed/source", Text: backendArrayIterationProofSource},
+	}, []Entrypoint{{Name: "renamed-entrypoint", Module: LogicalModule("main")}})
+	if base.programHash == renamed.programHash {
+		t.Fatal("identity-mutated array-iteration Programs unexpectedly share a binding hash")
+	}
+	options := backendGoNumericOptions{packageName: "ember", functionName: "identityBlindArrayIteration"}
+	baseSource, err := emitBackendGoNumericProof(base.modules[0].protos[1], options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamedSource, err := emitBackendGoNumericProof(renamed.modules[0].protos[1], options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(baseSource, renamedSource) {
+		t.Fatal("source or entrypoint identity selected scalar array-iteration code")
 	}
 }
 
@@ -496,6 +532,128 @@ func TestBackendGoScalarTableFieldFixtureIsFreshAndCorrect(t *testing.T) {
 	}
 }
 
+func TestBackendGoScalarArrayIterationFixtureIsFreshAndCorrect(t *testing.T) {
+	generated, err := emitBackendGoNumericProof(backendArrayIterationProofIR(t), backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedArrayIterationFixture",
+		preparedFunctionName: "backendGeneratedArrayIterationPreparedFixture",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk, err := os.ReadFile("runtime_backend_array_iteration_generated_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(generated, onDisk) {
+		t.Fatal("generated scalar array-iteration fixture is stale")
+	}
+	if _, err := goparser.ParseFile(token.NewFileSet(), "runtime_backend_array_iteration_generated_test.go", generated, goparser.AllErrors); err != nil {
+		t.Fatalf("parse generated scalar array-iteration source: %v", err)
+	}
+	text := string(generated)
+	if !strings.Contains(text, "var a0 [8]float64") ||
+		!strings.Contains(text, "v39 = a0[i0]") ||
+		!strings.Contains(text, "i0++") {
+		t.Fatalf("generated scalar array-iteration source lacks a direct typed loop:\n%s", text)
+	}
+	for _, forbidden := range []string{
+		"switch", "opcode", "descriptor", "machineTable",
+		"NEW_TABLE", "SET_FIELD", "PREPARE_ITER", "ARRAY_NEXT_JUMP2",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("generated scalar array-iteration source contains runtime table/dispatch marker %q", forbidden)
+		}
+	}
+
+	root, err := Compile(backendArrayIterationProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(root.prototypes) != 1 {
+		t.Fatalf("array-iteration source child count = %d, want 1", len(root.prototypes))
+	}
+	for _, seed := range []float64{-29, -1, 0, 1, 7, 29, 1_000_000_000_005} {
+		got, ok := backendGeneratedArrayIterationFixture(seed)
+		first := 1 + seed - math.Floor(seed/5)*5
+		want := 203 + first*first
+		if !ok || got != want {
+			t.Fatalf("generated scalar array-iteration fixture(%v) = (%v, %t), want (%v, true)", seed, got, ok, want)
+		}
+		oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+			args: []Value{NumberValue(seed)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(oracle) != 1 {
+			t.Fatalf("array-iteration oracle result count = %d, want 1", len(oracle))
+		}
+		oracleNumber, ok := oracle[0].Number()
+		if !ok || oracleNumber != got {
+			t.Fatalf("generated/oracle array-iteration seed %v = %v/%v (%t)", seed, got, oracleNumber, ok)
+		}
+	}
+	if !checkptrInstrumentedTest() {
+		if allocations := testing.AllocsPerRun(1000, func() {
+			_, _ = backendGeneratedArrayIterationFixture(29)
+		}); allocations != 0 {
+			t.Fatalf("generated scalar array-iteration allocations = %v, want 0", allocations)
+		}
+	}
+}
+
+func TestBackendGoScalarArrayIterationRejectsUnprovedShapes(t *testing.T) {
+	tests := map[string]string{
+		"write after iteration": `
+local function kernel(seed)
+    local values = {seed, 2}
+    local total = 0
+    for _, value in values do
+        total = total + value
+    end
+    values[3] = 3
+    return total
+end
+return kernel
+`,
+		"mixed array and hash fields": `
+local function kernel(seed)
+    local values = {seed, 2}
+    values.extra = 3
+    local total = 0
+    for _, value in values do
+        total = total + value
+    end
+    return total
+end
+return kernel
+`,
+	}
+	for name, source := range tests {
+		t.Run(name, func(t *testing.T) {
+			proto, err := Compile(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			image, err := proto.preparedCodeImage()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ir, err := buildBackendProtoIR(&image.prototypes[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+				packageName:  "ember",
+				functionName: "rejectUnprovedArrayShape",
+			}); err == nil {
+				t.Fatal("emitted scalar array iteration for an unproved shape")
+			}
+		})
+	}
+}
+
 func backendNumericProofIR(t *testing.T) *backendProtoIR {
 	t.Helper()
 	proto, err := Compile(backendNumericProofSource)
@@ -580,6 +738,26 @@ func backendTableFieldProofIR(t *testing.T) *backendProtoIR {
 	return ir
 }
 
+func backendArrayIterationProofIR(t *testing.T) *backendProtoIR {
+	t.Helper()
+	proto, err := Compile(backendArrayIterationProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(image.prototypes) != 2 {
+		t.Fatalf("array-iteration proof Proto count = %d, want 2", len(image.prototypes))
+	}
+	ir, err := buildBackendProtoIR(&image.prototypes[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ir
+}
+
 func BenchmarkBackendGeneratedNumericFixture(b *testing.B) {
 	var result float64
 	b.ReportAllocs()
@@ -594,6 +772,20 @@ func BenchmarkBackendGeneratedNumericFixture(b *testing.B) {
 	backendGeneratedNumericSink = result
 }
 
+func BenchmarkBackendGeneratedArrayIterationFixture(b *testing.B) {
+	var result float64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		value, ok := backendGeneratedArrayIterationFixture(float64(iteration & 31))
+		if !ok {
+			b.Fatal("generated scalar array-iteration fixture exited")
+		}
+		result = value
+	}
+	backendGeneratedNumericSink = result
+}
+
 var backendGeneratedNumericSink float64
 
 func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
@@ -601,6 +793,7 @@ func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
 		backendNumericProofSource,
 		backendNumericExitProofSource,
 		backendTableFieldProofSource,
+		backendArrayIterationProofSource,
 		"local function add(value) return value + 1 end return add",
 		"return { field = 1 }",
 	} {

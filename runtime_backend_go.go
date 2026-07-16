@@ -105,6 +105,16 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		fmt.Fprintf(&source, "\tvar f%d %s\n", fieldIndex, goType)
 		fmt.Fprintf(&source, "\t_ = f%d\n", fieldIndex)
 	}
+	for arrayIndex, array := range plan.tables.arrays {
+		goType, ok := backendGoNumericType(array.tags)
+		if !ok {
+			return nil, fmt.Errorf("emit backend Go numeric proof: scalar array %d has unsupported tags %x", arrayIndex, array.tags)
+		}
+		fmt.Fprintf(&source, "\tvar a%d [%d]%s\n", arrayIndex, array.length, goType)
+		fmt.Fprintf(&source, "\t_ = a%d\n", arrayIndex)
+		fmt.Fprintf(&source, "\tvar i%d int\n", arrayIndex)
+		fmt.Fprintf(&source, "\t_ = i%d\n", arrayIndex)
+	}
 	for pc := range ir.ops {
 		operation := &ir.ops[pc]
 		if !backendGoNumericOperationDead(plan, operation) && operation.op == opCallLocalOne {
@@ -143,6 +153,16 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			}
 			fmt.Fprintf(&source, "\tvar f%d %s\n", fieldIndex, goType)
 			fmt.Fprintf(&source, "\t_ = f%d\n", fieldIndex)
+		}
+		for arrayIndex, array := range plan.tables.arrays {
+			goType, ok := backendGoNumericType(array.tags)
+			if !ok {
+				return nil, fmt.Errorf("emit backend Go numeric proof: scalar array %d has unsupported tags %x", arrayIndex, array.tags)
+			}
+			fmt.Fprintf(&source, "\tvar a%d [%d]%s\n", arrayIndex, array.length, goType)
+			fmt.Fprintf(&source, "\t_ = a%d\n", arrayIndex)
+			fmt.Fprintf(&source, "\tvar i%d int\n", arrayIndex)
+			fmt.Fprintf(&source, "\t_ = i%d\n", arrayIndex)
 		}
 		for pc := range ir.ops {
 			operation := &ir.ops[pc]
@@ -271,6 +291,22 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 							tags = field.tags
 						}
 					}
+				case opPrepareIter:
+					if value.register == operation.a {
+						if _, _, _, ok := plan.tables.arrayOperation(ir, operation); ok {
+							tags = backendTagTable
+						}
+					}
+				case opArrayNextJump2:
+					_, array, _, ok := plan.tables.arrayOperation(ir, operation)
+					if ok {
+						switch value.register {
+						case operation.a:
+							tags = backendTagNumber
+						case operation.a + 1:
+							tags = array.tags
+						}
+					}
 				case opCallLocalOne:
 					if _, ok := backendGoNumericDirectTarget(options, operation); ok {
 						tags = backendTagNumber
@@ -308,6 +344,11 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 	}
 	for valueIndex, root := range plan.tables.roots {
 		if root != invalidBackendValueID {
+			markScalarReplaced(backendValueID(valueIndex + 1))
+		}
+	}
+	for valueIndex, token := range plan.tables.iteratorValues {
+		if token {
 			markScalarReplaced(backendValueID(valueIndex + 1))
 		}
 	}
@@ -526,6 +567,12 @@ func verifyBackendGoNumericOperation(
 			return nil
 		}
 		return require(operation.c, field.tags)
+	case opSetField:
+		_, array, _, ok := plan.tables.arrayOperation(ir, operation)
+		if !ok {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar array element", operation.pc)
+		}
+		return require(operation.c, array.tags)
 	case opGetStringField:
 		_, field, ok := plan.tables.operationField(ir, operation)
 		if !ok {
@@ -535,6 +582,45 @@ func verifyBackendGoNumericOperation(
 			for _, definition := range operation.defs {
 				if plan.tables.root(definition.value) != field.child {
 					return fmt.Errorf("emit backend Go numeric proof: PC %d loses scalar table identity", operation.pc)
+				}
+			}
+		}
+		return nil
+	case opPrepareIter:
+		_, _, _, ok := plan.tables.arrayOperation(ir, operation)
+		if !ok {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar array iterator", operation.pc)
+		}
+		for _, definition := range operation.defs {
+			if definition.register == operation.a {
+				if plan.tables.root(definition.value) == invalidBackendValueID {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d loses scalar array identity", operation.pc)
+				}
+				continue
+			}
+			if !plan.tables.iteratorValue(definition.value) {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d has materialized iterator state", operation.pc)
+			}
+		}
+		return nil
+	case opArrayNextJump2:
+		_, array, _, ok := plan.tables.arrayOperation(ir, operation)
+		if !ok {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar array iterator", operation.pc)
+		}
+		if !plan.tables.iteratorValue(backendOperationUse(operation, operation.c)) ||
+			!plan.tables.iteratorValue(backendOperationUse(operation, operation.a)) {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has materialized iterator control", operation.pc)
+		}
+		for _, definition := range operation.defs {
+			switch definition.register {
+			case operation.a:
+				if !plan.tables.iteratorValue(definition.value) {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d materializes iterator key", operation.pc)
+				}
+			case operation.a + 1:
+				if plan.tags[definition.value-1] != array.tags {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d changes scalar array element tags", operation.pc)
 				}
 			}
 		}
@@ -734,6 +820,16 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			return false, err
 		}
 		fmt.Fprintf(&emitter.body, "\tf%d = v%d\n", fieldIndex, source)
+	case opSetField:
+		arrayIndex, _, element, ok := emitter.plan.tables.arrayOperation(emitter.ir, operation)
+		if !ok {
+			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar array element", operation.pc)
+		}
+		source, err := use(operation.c)
+		if err != nil {
+			return false, err
+		}
+		fmt.Fprintf(&emitter.body, "\ta%d[%d] = v%d\n", arrayIndex, element-1, source)
 	case opGetStringField:
 		fieldIndex, field, ok := emitter.plan.tables.operationField(emitter.ir, operation)
 		if !ok {
@@ -747,6 +843,33 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			return false, err
 		}
 		fmt.Fprintf(&emitter.body, "\tv%d = f%d\n", destination, fieldIndex)
+	case opPrepareIter:
+		arrayIndex, _, _, ok := emitter.plan.tables.arrayOperation(emitter.ir, operation)
+		if !ok {
+			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar array iterator", operation.pc)
+		}
+		fmt.Fprintf(&emitter.body, "\ti%d = 0\n", arrayIndex)
+	case opArrayNextJump2:
+		arrayIndex, _, _, ok := emitter.plan.tables.arrayOperation(emitter.ir, operation)
+		if !ok {
+			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar array iterator", operation.pc)
+		}
+		value, err := definition(operation.a + 1)
+		if err != nil {
+			return false, err
+		}
+		target := emitter.ir.pcToBlock[operation.targetPC]
+		fmt.Fprintf(&emitter.body, "\tif i%d >= len(a%d) {\n", arrayIndex, arrayIndex)
+		emitter.emitGoto(int32(block.id), target, 2)
+		emitter.body.WriteString("\t}\n")
+		fmt.Fprintf(&emitter.body, "\tv%d = a%d[i%d]\n", value, arrayIndex, arrayIndex)
+		fmt.Fprintf(&emitter.body, "\ti%d++\n", arrayIndex)
+		nextBlock := int32(-1)
+		if int(block.last) < len(emitter.ir.ops) {
+			nextBlock = emitter.ir.pcToBlock[block.last]
+		}
+		emitter.emitGoto(int32(block.id), nextBlock, 1)
+		return true, nil
 	case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow:
 		destination, _ := definition(operation.a)
 		left, _ := use(operation.b)
