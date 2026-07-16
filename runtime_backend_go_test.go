@@ -175,6 +175,22 @@ end
 return kernel
 `
 
+const backendStructuralStringKeyProofSource = `
+local function kernel(seed)
+    local function cellKey(x, y)
+        return tostring(x) .. ":" .. tostring(y)
+    end
+    local x = seed % 5
+    local first = cellKey(x, 2)
+    local second = cellKey(x, 2)
+    if first == second then
+        return seed + 1
+    end
+    return seed - 1
+end
+return kernel
+`
+
 const backendArrayOpsProofSource = `
 local function kernel(seed)
     local values = {}
@@ -1391,6 +1407,255 @@ func TestBackendGoScalarArrayIterationFixtureIsFreshAndCorrect(t *testing.T) {
 		}); allocations != 0 {
 			t.Fatalf("generated scalar array-iteration allocations = %v, want 0", allocations)
 		}
+	}
+}
+
+func TestBackendGoStructuralStringKeyFixturesAreFreshAndCorrect(t *testing.T) {
+	irs := backendStructuralStringKeyProofIRs(t, backendStructuralStringKeyProofSource)
+	targets := backendStructuralStringKeyProofTargets(irs)
+	generatedTarget, err := emitBackendGoNumericProof(irs[2], backendGoNumericOptions{
+		packageName:  "ember",
+		functionName: "backendGeneratedStructuralStringKey",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generatedCaller, err := emitBackendGoNumericProof(irs[1], backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedStructuralStringKeyKernel",
+		preparedFunctionName: "backendGeneratedStructuralStringKeyPreparedFixture",
+		directTargets:        targets,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range []struct {
+		path      string
+		generated []byte
+	}{
+		{path: "runtime_backend_structural_string_key_generated_test.go", generated: generatedTarget},
+		{path: "runtime_backend_structural_string_key_kernel_generated_test.go", generated: generatedCaller},
+	} {
+		onDisk, err := os.ReadFile(fixture.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(fixture.generated, onDisk) {
+			t.Fatalf("generated structural string-key fixture %s is stale", fixture.path)
+		}
+		if _, err := goparser.ParseFile(token.NewFileSet(), fixture.path, fixture.generated, goparser.AllErrors); err != nil {
+			t.Fatalf("parse %s: %v", fixture.path, err)
+		}
+	}
+	targetText := string(generatedTarget)
+	for _, required := range []string{
+		"backendPreparedStringKey",
+		"math.Trunc",
+		"math.Signbit",
+		"first: int32(",
+		"second: int32(",
+	} {
+		if !strings.Contains(targetText, required) {
+			t.Fatalf("generated structural string-key target lacks %q:\n%s", required, targetText)
+		}
+	}
+	for _, forbidden := range []string{"tostring", "CONCAT", "machineString", "appendLuauNumber"} {
+		if strings.Contains(targetText, forbidden) {
+			t.Fatalf("generated structural string-key target contains runtime string marker %q", forbidden)
+		}
+	}
+	callerText := string(generatedCaller)
+	if got := strings.Count(callerText, "context.intrinsicUnchangedAt(2, "); got != 2 {
+		t.Fatalf("generated structural string-key caller has %d tostring guards, want 2:\n%s", got, callerText)
+	}
+
+	root, err := Compile(backendStructuralStringKeyProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seed := range []float64{-29, -1, 0, 1, 7, 29, 1_000_000_000_005} {
+		got, ok := backendGeneratedStructuralStringKeyKernel(seed)
+		if !ok || got != seed+1 {
+			t.Fatalf("generated structural string-key kernel(%v) = (%v, %t), want (%v, true)", seed, got, ok, seed+1)
+		}
+		oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+			args: []Value{NumberValue(seed)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		oracleNumber, ok := oracle[0].Number()
+		if !ok || oracleNumber != got {
+			t.Fatalf("generated/oracle structural string-key seed %v = %v/%v (%t)", seed, got, oracleNumber, ok)
+		}
+	}
+	for _, invalid := range []float64{math.NaN(), math.Inf(1), math.Copysign(0, -1)} {
+		if _, ok := backendGeneratedStructuralStringKey(invalid, 2); ok {
+			t.Fatalf("generated structural string-key target accepted %v", invalid)
+		}
+	}
+	if !checkptrInstrumentedTest() {
+		if allocations := testing.AllocsPerRun(1000, func() {
+			_, _ = backendGeneratedStructuralStringKeyKernel(29)
+		}); allocations != 0 {
+			t.Fatalf("generated structural string-key allocations = %v, want 0", allocations)
+		}
+	}
+}
+
+func TestBackendGoStructuralStringKeyIsIdentityBlindAndRejectsMixedDomains(t *testing.T) {
+	base := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "source/main", Text: backendStructuralStringKeyProofSource},
+	}, []Entrypoint{{Name: "main", Module: LogicalModule("main")}})
+	holdoutSource := strings.Replace(backendStructuralStringKeyProofSource, `":"`, `"|"`, 1)
+	holdout := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "opaque/renamed/source", Text: holdoutSource},
+	}, []Entrypoint{{Name: "renamed", Module: LogicalModule("main")}})
+	emit := func(program *backendProgramIR) ([]byte, []byte) {
+		targets := backendStructuralStringKeyProofTargets(program.modules[0].protos)
+		target, err := emitBackendGoNumericProof(program.modules[0].protos[2], backendGoNumericOptions{
+			packageName:  "ember",
+			functionName: "identityBlindStructuralStringKey",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		caller, err := emitBackendGoNumericProof(program.modules[0].protos[1], backendGoNumericOptions{
+			packageName:          "ember",
+			functionName:         "identityBlindStructuralStringKeyKernel",
+			preparedFunctionName: "identityBlindStructuralStringKeyPrepared",
+			directTargets:        targets,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return target, caller
+	}
+	baseTarget, baseCaller := emit(base)
+	holdoutTarget, holdoutCaller := emit(holdout)
+	if !bytes.Equal(baseTarget, holdoutTarget) || !bytes.Equal(baseCaller, holdoutCaller) {
+		t.Fatal("structural string-key source depends on source/module/entrypoint or separator text identity")
+	}
+
+	irs := backendStructuralStringKeyProofIRs(t, backendStructuralStringKeyProofSource)
+	options := backendGoNumericOptions{
+		packageName:   "ember",
+		functionName:  "mixedStructuralStringKeyKernel",
+		directTargets: backendStructuralStringKeyProofTargets(irs),
+	}
+	plan, err := buildBackendGoNumericPlan(irs[1], options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for pc := range irs[1].ops {
+		operation := &irs[1].ops[pc]
+		if operation.op != opEqual {
+			continue
+		}
+		right := backendOperationUse(operation, operation.c)
+		key, ok := plan.keys.keys[right]
+		if !ok {
+			t.Fatal("structural string-key equality has no right key domain")
+		}
+		key.domain++
+		plan.keys.keys[right] = key
+		err := verifyBackendGoNumericOperation(irs[1], plan, options, operation)
+		if err == nil || !strings.Contains(err.Error(), "incompatible string domains") {
+			t.Fatalf("mixed structural string domains error = %v", err)
+		}
+		return
+	}
+	t.Fatal("structural string-key proof has no equality")
+}
+
+func TestBackendGoStructuralStringKeyRejectsAmbiguousSeparators(t *testing.T) {
+	for _, separator := range []string{`""`, `"1"`, `"-"`, `"12-3"`} {
+		source := strings.Replace(backendStructuralStringKeyProofSource, `":"`, separator, 1)
+		irs := backendStructuralStringKeyProofIRs(t, source)
+		_, err := emitBackendGoNumericProof(irs[2], backendGoNumericOptions{
+			packageName:  "ember",
+			functionName: "rejectAmbiguousStructuralStringKey",
+		})
+		if err == nil {
+			t.Fatalf("structural string-key compiler accepted ambiguous separator %s", separator)
+		}
+	}
+}
+
+func TestBackendGoStructuralStringKeyRejectsDifferentConstructors(t *testing.T) {
+	const source = `
+local function kernel(seed)
+    local first = tostring(seed) .. ":" .. tostring(2)
+    local second = tostring(seed) .. "|" .. tostring(2)
+    if first == second then
+        return seed + 1
+    end
+    return seed - 1
+end
+return kernel
+`
+	proto, err := Compile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ir, err := buildBackendProtoIRWithStrings(
+		&image.prototypes[1],
+		image.stringRecords,
+		image.stringData,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = emitBackendGoNumericProof(ir, backendGoNumericOptions{
+		packageName:  "ember",
+		functionName: "rejectDifferentStructuralStringConstructors",
+	})
+	if err == nil || !strings.Contains(err.Error(), "incompatible string domains") {
+		t.Fatalf("different structural string constructors error = %v", err)
+	}
+}
+
+func TestBackendGoStructuralStringKeyGuardsInlineToString(t *testing.T) {
+	const source = `
+local function kernel(seed)
+    local key = tostring(seed) .. ":" .. tostring(2)
+    if key == key then
+        return seed + 1
+    end
+    return seed - 1
+end
+return kernel
+`
+	proto, err := Compile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ir, err := buildBackendProtoIRWithStrings(
+		&image.prototypes[1],
+		image.stringRecords,
+		image.stringData,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "inlineStructuralStringKey",
+		preparedFunctionName: "inlineStructuralStringKeyPrepared",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(generated), "context.intrinsicUnchanged("); got != 2 {
+		t.Fatalf("inline structural tostring guard count = %d, want 2:\n%s", got, generated)
 	}
 }
 
@@ -2908,6 +3173,44 @@ func backendFiniteStringStateProofIR(t *testing.T) *backendProtoIR {
 	return ir
 }
 
+func backendStructuralStringKeyProofIRs(t *testing.T, source string) []*backendProtoIR {
+	t.Helper()
+	proto, err := Compile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(image.prototypes) < 3 {
+		t.Fatalf("structural string-key proof Proto count = %d, want at least 3", len(image.prototypes))
+	}
+	irs := make([]*backendProtoIR, len(image.prototypes))
+	for protoID := range image.prototypes {
+		irs[protoID], err = buildBackendProtoIRWithStrings(
+			&image.prototypes[protoID],
+			image.stringRecords,
+			image.stringData,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return irs
+}
+
+func backendStructuralStringKeyProofTargets(irs []*backendProtoIR) []backendGoNumericTarget {
+	targets := make([]backendGoNumericTarget, len(irs))
+	if len(irs) > 2 {
+		targets[2] = backendGoNumericTarget{
+			ir:           irs[2],
+			functionName: "backendGeneratedStructuralStringKey",
+		}
+	}
+	return targets
+}
+
 func backendArrayOpsProofIR(t *testing.T) *backendProtoIR {
 	t.Helper()
 	proto, err := Compile(backendArrayOpsProofSource)
@@ -3153,6 +3456,20 @@ func BenchmarkBackendGeneratedFiniteStringStateFixture(b *testing.B) {
 		value, ok := backendGeneratedFiniteStringStateFixture(float64(iteration & 31))
 		if !ok {
 			b.Fatal("generated finite-string state fixture exited")
+		}
+		result = value
+	}
+	backendGeneratedNumericSink = result
+}
+
+func BenchmarkBackendGeneratedStructuralStringKeyKernel(b *testing.B) {
+	var result float64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		value, ok := backendGeneratedStructuralStringKeyKernel(float64(iteration & 31))
+		if !ok {
+			b.Fatal("generated structural string-key fixture exited")
 		}
 		result = value
 	}

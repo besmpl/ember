@@ -35,6 +35,7 @@ type backendGoNumericPlan struct {
 	// replayEntry marks exits whose exact spill would require one of those values.
 	replayEntry []bool
 	tables      backendGoScalarTablePlan
+	keys        backendGoStructuralKeyPlan
 	closures    backendGoScalarClosurePlan
 	methods     backendGoScalarMethodPlan
 	coroutines  backendGoScalarCoroutinePlan
@@ -47,6 +48,7 @@ type backendGoNumericEmitter struct {
 	needsMath   bool
 	prepared    bool
 	resultCount int
+	resultTypes []string
 	options     backendGoNumericOptions
 }
 
@@ -98,14 +100,26 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	if err != nil {
 		return nil, err
 	}
-	directEmitter := backendGoNumericEmitter{ir: ir, plan: plan, resultCount: resultCount, options: options}
+	resultTypes, err := backendGoNumericResultTypes(ir, plan)
+	if err != nil {
+		return nil, err
+	}
+	if options.preparedFunctionName != "" &&
+		(len(resultTypes) != 1 || resultTypes[0] != "float64") {
+		return nil, fmt.Errorf("emit backend Go numeric proof: prepared entry result is not numeric")
+	}
+	directEmitter := backendGoNumericEmitter{
+		ir: ir, plan: plan, resultCount: resultCount, resultTypes: resultTypes, options: options,
+	}
 	if err := directEmitter.emitBody(); err != nil {
 		return nil, err
 	}
 	if options.selfRecursive {
 		directEmitter.needsMath = true
 	}
-	preparedEmitter := backendGoNumericEmitter{ir: ir, plan: plan, prepared: true, resultCount: resultCount, options: options}
+	preparedEmitter := backendGoNumericEmitter{
+		ir: ir, plan: plan, prepared: true, resultCount: resultCount, resultTypes: resultTypes, options: options,
+	}
 	if options.preparedFunctionName != "" {
 		if err := preparedEmitter.emitBody(); err != nil {
 			return nil, err
@@ -181,17 +195,17 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			wroteParameter = true
 		}
 		source.WriteString(") (")
-		writeBackendGoNumericResultTypes(&source, resultCount)
+		writeBackendGoNumericResultTypes(&source, resultTypes)
 		source.WriteString(") {\n")
 		for upvalue := 0; upvalue < pointerUpvalues; upvalue++ {
-			fmt.Fprintf(&source, "\tif u%d == nil {\n\t\t%s\n\t}\n", upvalue, backendGoNumericFailureReturn(resultCount))
+			fmt.Fprintf(&source, "\tif u%d == nil {\n\t\t%s\n\t}\n", upvalue, backendGoNumericFailureReturn(resultTypes))
 		}
 		if options.receiverTable {
 			for fieldIndex, field := range plan.tables.fields {
 				if field.key.table != plan.tables.externalRoot || field.tags == 0 {
 					continue
 				}
-				fmt.Fprintf(&source, "\tif r%d == nil {\n\t\t%s\n\t}\n", fieldIndex, backendGoNumericFailureReturn(resultCount))
+				fmt.Fprintf(&source, "\tif r%d == nil {\n\t\t%s\n\t}\n", fieldIndex, backendGoNumericFailureReturn(resultTypes))
 			}
 		}
 	}
@@ -202,7 +216,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		if plan.tags[valueIndex] == backendTagNil {
 			continue
 		}
-		goType, ok := backendGoNumericType(plan.tags[valueIndex])
+		goType, ok := backendGoNumericTypeForValue(plan, backendValueID(valueIndex+1))
 		if !ok {
 			return nil, fmt.Errorf("emit backend Go numeric proof: SSA value %d has unsupported tags %x", valueIndex+1, plan.tags[valueIndex])
 		}
@@ -287,7 +301,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			if !plan.used[valueIndex] || plan.tags[valueIndex] == backendTagNil {
 				continue
 			}
-			goType, ok := backendGoNumericType(plan.tags[valueIndex])
+			goType, ok := backendGoNumericTypeForValue(plan, backendValueID(valueIndex+1))
 			if !ok {
 				return nil, fmt.Errorf("emit backend Go numeric proof: SSA value %d has unsupported tags %x", valueIndex+1, plan.tags[valueIndex])
 			}
@@ -372,12 +386,14 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			if operation.op != opFastCall {
 				continue
 			}
-			if !plan.coroutines.createOperation(operation) &&
-				!plan.coroutines.statusOperation(operation) {
-				if _, resume := plan.coroutines.resume(operation); !resume {
-					if _, _, _, ok := plan.tables.arrayOperation(ir, operation); !ok {
-						if _, ok := plan.tables.metatableOperation(operation); !ok {
-							continue
+			if _, structuralToString := plan.keys.tostring(operation); !structuralToString {
+				if !plan.coroutines.createOperation(operation) &&
+					!plan.coroutines.statusOperation(operation) {
+					if _, resume := plan.coroutines.resume(operation); !resume {
+						if _, _, _, ok := plan.tables.arrayOperation(ir, operation); !ok {
+							if _, ok := plan.tables.metatableOperation(operation); !ok {
+								continue
+							}
 						}
 					}
 				}
@@ -407,9 +423,11 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			if target.ir == nil {
 				continue
 			}
+			targetKeys := analyzeBackendGoStructuralKeys(target.ir, backendGoNumericOptions{})
 			for pc := range target.ir.ops {
 				operation := &target.ir.ops[pc]
-				if !backendGoNumericFixedVarargSelect(
+				_, structuralToString := targetKeys.tostring(operation)
+				if !structuralToString && !backendGoNumericFixedVarargSelect(
 					target.ir,
 					target.fixedVarargCount,
 					operation,
@@ -440,29 +458,38 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	return formatted, nil
 }
 
-func writeBackendGoNumericResultTypes(source *strings.Builder, resultCount int) {
-	for result := 0; result < resultCount; result++ {
+func writeBackendGoNumericResultTypes(source *strings.Builder, resultTypes []string) {
+	for result, resultType := range resultTypes {
 		if result != 0 {
 			source.WriteString(", ")
 		}
-		source.WriteString("float64")
+		source.WriteString(resultType)
 	}
-	if resultCount != 0 {
+	if len(resultTypes) != 0 {
 		source.WriteString(", ")
 	}
 	source.WriteString("bool")
 }
 
-func backendGoNumericFailureReturn(resultCount int) string {
+func backendGoNumericFailureReturn(resultTypes []string) string {
 	var result strings.Builder
 	result.WriteString("return ")
-	for index := 0; index < resultCount; index++ {
+	for index, resultType := range resultTypes {
 		if index != 0 {
 			result.WriteString(", ")
 		}
-		result.WriteString("0")
+		switch resultType {
+		case "backendPreparedStringKey":
+			result.WriteString("backendPreparedStringKey{}")
+		case "bool":
+			result.WriteString("false")
+		case "float64", "uint32":
+			result.WriteString("0")
+		default:
+			panic("unsupported backend Go result type " + resultType)
+		}
 	}
-	if resultCount != 0 {
+	if len(resultTypes) != 0 {
 		result.WriteString(", ")
 	}
 	result.WriteString("false")
@@ -510,6 +537,7 @@ func verifyBackendGoNumericTargets(targets []backendGoNumericTarget) error {
 }
 
 func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptions) (backendGoNumericPlan, error) {
+	keys := analyzeBackendGoStructuralKeys(ir, options)
 	tables, err := analyzeBackendGoScalarTables(ir, options.receiverTable)
 	if err != nil {
 		return backendGoNumericPlan{}, err
@@ -532,6 +560,7 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		scalarReplacedValues: make([]bool, len(ir.values)),
 		replayEntry:          make([]bool, len(ir.ops)),
 		tables:               tables,
+		keys:                 keys,
 		closures:             closures,
 		methods:              methods,
 		coroutines:           coroutines,
@@ -619,7 +648,9 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						}
 					}
 				case opFastCall:
-					if plan.coroutines.createOperation(operation) {
+					if _, ok := plan.keys.tostring(operation); ok {
+						tags = backendTagString
+					} else if plan.coroutines.createOperation(operation) {
 						tags = 0
 					} else if _, ok := plan.coroutines.resume(operation); ok {
 						if value.register == operation.a {
@@ -648,6 +679,10 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 							tags = backendTagNumber
 						}
 					}
+				case opConcatChain:
+					if _, ok := plan.keys.concat(operation); ok {
+						tags = backendTagString
+					}
 				case opVararg:
 					if _, ok := backendGoNumericVarargIndex(
 						ir,
@@ -661,7 +696,11 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 					if backendGoNumericScalarReplacedCall(ir, options, operation) &&
 						value.register >= operation.a &&
 						value.register < operation.a+operation.callResults {
-						tags = backendTagNumber
+						tags = backendGoDirectTargetResultTag(
+							options,
+							operation,
+							int(value.register-operation.a),
+						)
 					}
 				case opCallLocalOne:
 					if _, _, ok := plan.closures.factory(operation); ok {
@@ -669,7 +708,7 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 					} else if _, ok := plan.closures.call(operation); ok {
 						tags = backendTagNumber
 					} else if _, ok := backendGoNumericDirectTarget(options, operation); ok {
-						tags = backendTagNumber
+						tags = backendGoDirectTargetResultTag(options, operation, 0)
 					}
 				case opCallUpvalueOne:
 					if options.selfRecursive && operation.b == 0 {
@@ -745,6 +784,11 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		}
 	}
 	for valueIndex, scalar := range plan.coroutines.coroutineValue {
+		if scalar {
+			markScalarReplaced(backendValueID(valueIndex + 1))
+		}
+	}
+	for valueIndex, scalar := range plan.keys.scalarReplaced {
 		if scalar {
 			markScalarReplaced(backendValueID(valueIndex + 1))
 		}
@@ -839,6 +883,14 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 					markUsed(spill.value)
 				}
 			}
+			if _, ok := plan.keys.tostring(operation); ok {
+				continue
+			}
+			if key, ok := plan.keys.concat(operation); ok {
+				markUsed(key.first)
+				markUsed(key.second)
+				continue
+			}
 			if backendGoNumericPureProducer(operation.op) {
 				continue
 			}
@@ -886,6 +938,11 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 			}
 		case backendValueOperation:
 			operation := &ir.ops[value.pc]
+			if key, ok := plan.keys.concat(operation); ok {
+				markUsed(key.first)
+				markUsed(key.second)
+				continue
+			}
 			for _, use := range operation.uses {
 				if (operation.op == opCall || operation.op == opCallLocalOne) &&
 					use.register == operation.b &&
@@ -922,7 +979,7 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 			continue
 		}
 		if plan.tags[valueIndex] != backendTagNil {
-			if _, ok := backendGoNumericType(plan.tags[valueIndex]); ok {
+			if _, ok := backendGoNumericTypeForValue(plan, backendValueID(valueIndex+1)); ok {
 				continue
 			}
 			return backendGoNumericPlan{}, fmt.Errorf("emit backend Go numeric proof: SSA value %d has nonnumeric union %x", valueIndex+1, plan.tags[valueIndex])
@@ -1005,8 +1062,13 @@ func backendGoNumericPureProducer(op opcode) bool {
 }
 
 func backendGoNumericOperationDead(plan backendGoNumericPlan, operation *backendOperationIR) bool {
-	if operation == nil || !backendGoNumericPureProducer(operation.op) {
+	if operation == nil {
 		return false
+	}
+	if _, ok := plan.keys.tostring(operation); !ok {
+		if _, ok := plan.keys.concat(operation); !ok && !backendGoNumericPureProducer(operation.op) {
+			return false
+		}
 	}
 	for _, definition := range operation.defs {
 		if plan.used[definition.value-1] {
@@ -1148,6 +1210,18 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opFastCall:
+		if _, ok := plan.keys.tostring(operation); ok {
+			if operation.c != 1 || operation.d != 1 || len(operation.defs) != 1 {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d changes structural tostring shape", operation.pc)
+			}
+			if err := require(operation.a, backendTagNumber); err != nil {
+				return err
+			}
+			if plan.tags[operation.defs[0].value-1] != backendTagString {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d structural tostring result is not string", operation.pc)
+			}
+			return nil
+		}
 		if plan.coroutines.createOperation(operation) {
 			if operation.c != 1 || operation.d != 1 {
 				return fmt.Errorf("emit backend Go numeric proof: PC %d changes scalar coroutine.create shape", operation.pc)
@@ -1270,6 +1344,17 @@ func verifyBackendGoNumericOperation(
 		default:
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported scalar array intrinsic", operation.pc)
 		}
+	case opConcatChain:
+		key, ok := plan.keys.concat(operation)
+		if !ok || operation.c != 3 || len(operation.defs) != 1 {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no structural concat key", operation.pc)
+		}
+		if plan.tags[key.first-1] != backendTagNumber ||
+			plan.tags[key.second-1] != backendTagNumber ||
+			plan.tags[operation.defs[0].value-1] != backendTagString {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d changes structural concat inputs", operation.pc)
+		}
+		return nil
 	case opVararg:
 		if operation.b < 0 || len(operation.defs) != int(operation.b) {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported open vararg shape", operation.pc)
@@ -1306,6 +1391,13 @@ func verifyBackendGoNumericOperation(
 				plan.tags[left-1] != backendTagBool &&
 				plan.tags[left-1] != backendTagString) {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported equality operands", operation.pc)
+		}
+		if plan.tags[left-1] == backendTagString {
+			leftKey, leftOK := plan.keys.key(left)
+			rightKey, rightOK := plan.keys.key(right)
+			if leftOK != rightOK || leftOK && leftKey.domain != rightKey.domain {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d compares incompatible string domains", operation.pc)
+			}
 		}
 		return nil
 	case opLess, opLessEqual, opGreater, opGreaterEqual:
@@ -1390,8 +1482,15 @@ func verifyBackendGoNumericOperation(
 					continue
 				}
 				found = true
-				if plan.tags[definition.value-1] != backendTagNumber {
-					return fmt.Errorf("emit backend Go numeric proof: PC %d result register %d is not numeric", operation.pc, register)
+				want := backendGoDirectTargetResultTag(options, operation, int(register-operation.a))
+				if want == 0 || plan.tags[definition.value-1] != want {
+					return fmt.Errorf(
+						"emit backend Go numeric proof: PC %d result register %d has tags %x, want %x",
+						operation.pc,
+						register,
+						plan.tags[definition.value-1],
+						want,
+					)
 				}
 				break
 			}
@@ -1447,6 +1546,20 @@ func verifyBackendGoNumericOperation(
 				return err
 			}
 		}
+		want := backendGoDirectTargetResultTag(options, operation, 0)
+		if want == 0 {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d direct target has no scalar result", operation.pc)
+		}
+		for _, definition := range operation.defs {
+			if definition.register == operation.a && plan.tags[definition.value-1] != want {
+				return fmt.Errorf(
+					"emit backend Go numeric proof: PC %d result has tags %x, want %x",
+					operation.pc,
+					plan.tags[definition.value-1],
+					want,
+				)
+			}
+		}
 		return nil
 	case opCallUpvalueOne:
 		if !options.selfRecursive ||
@@ -1492,15 +1605,26 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opReturnOne:
-		return require(operation.a, backendTagNumber)
+		id := backendOperationUse(operation, operation.a)
+		if id == invalidBackendValueID {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no return value", operation.pc)
+		}
+		if _, structural := plan.keys.key(id); !structural && plan.tags[id-1] != backendTagNumber {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d returns unsupported tags %x", operation.pc, plan.tags[id-1])
+		}
+		return nil
 	case opReturn:
 		resultCount, ok := backendGoNumericFixedResultCount(ir)
 		if !ok || operation.returnCount != int32(resultCount) {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has inconsistent fixed result count %d", operation.pc, operation.returnCount)
 		}
 		for register := operation.a; register < operation.a+operation.returnCount; register++ {
-			if err := require(register, backendTagNumber); err != nil {
-				return err
+			id := backendOperationUse(operation, register)
+			if id == invalidBackendValueID {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d has no return register %d", operation.pc, register)
+			}
+			if _, structural := plan.keys.key(id); !structural && plan.tags[id-1] != backendTagNumber {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d returns unsupported tags %x", operation.pc, plan.tags[id-1])
 			}
 		}
 		return nil
@@ -1548,6 +1672,96 @@ func backendGoNumericType(tags backendTagMask) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func backendGoNumericTypeForValue(plan backendGoNumericPlan, id backendValueID) (string, bool) {
+	if _, ok := plan.keys.key(id); ok {
+		return "backendPreparedStringKey", true
+	}
+	if id == invalidBackendValueID || int(id) > len(plan.tags) {
+		return "", false
+	}
+	return backendGoNumericType(plan.tags[id-1])
+}
+
+func backendGoNumericResultTypes(ir *backendProtoIR, plan backendGoNumericPlan) ([]string, error) {
+	resultCount, ok := backendGoNumericFixedResultCount(ir)
+	if !ok {
+		return nil, fmt.Errorf("emit backend Go numeric proof: function has no fixed result types")
+	}
+	resultTypes := make([]string, resultCount)
+	resultDomains := make([]int32, resultCount)
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op != opReturnOne && operation.op != opReturn {
+			continue
+		}
+		count := int(operation.returnCount)
+		if operation.op == opReturnOne {
+			count = 1
+		}
+		if count != resultCount {
+			return nil, fmt.Errorf("emit backend Go numeric proof: PC %d changes fixed result count", operation.pc)
+		}
+		for result := 0; result < resultCount; result++ {
+			id := backendOperationUse(operation, operation.a+int32(result))
+			resultType := "float64"
+			domain := int32(0)
+			if key, ok := plan.keys.key(id); ok {
+				resultType = "backendPreparedStringKey"
+				domain = key.domain
+			}
+			if resultTypes[result] == "" {
+				resultTypes[result] = resultType
+				resultDomains[result] = domain
+				continue
+			}
+			if resultTypes[result] != resultType || resultDomains[result] != domain {
+				return nil, fmt.Errorf("emit backend Go numeric proof: PC %d changes result %d type", operation.pc, result)
+			}
+		}
+	}
+	for result, resultType := range resultTypes {
+		if resultType == "" {
+			return nil, fmt.Errorf("emit backend Go numeric proof: result %d has no reachable type", result)
+		}
+	}
+	return resultTypes, nil
+}
+
+func backendGoDirectTargetResultTag(
+	options backendGoNumericOptions,
+	operation *backendOperationIR,
+	result int,
+) backendTagMask {
+	target, ok := backendGoNumericDirectTarget(options, operation)
+	if !ok || target.ir == nil || result < 0 {
+		return 0
+	}
+	if backendGoStructuralKeyTarget(target.ir) {
+		if result == 0 {
+			return backendTagString
+		}
+		return 0
+	}
+	for pc := range target.ir.ops {
+		returnOperation := &target.ir.ops[pc]
+		if returnOperation.op != opReturnOne && returnOperation.op != opReturn {
+			continue
+		}
+		count := int(returnOperation.returnCount)
+		if returnOperation.op == opReturnOne {
+			count = 1
+		}
+		if result >= count {
+			return 0
+		}
+		id := backendOperationUse(returnOperation, returnOperation.a+int32(result))
+		if !target.ir.validBackendValue(id) {
+			return 0
+		}
+	}
+	return backendTagNumber
 }
 
 func (emitter *backendGoNumericEmitter) emitBody() error {
@@ -1700,6 +1914,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		emitter.emitGoto(int32(block.id), nextBlock, 1)
 		return true, nil
 	case opFastCall:
+		if _, ok := emitter.plan.keys.tostring(operation); ok {
+			return false, nil
+		}
 		if emitter.plan.coroutines.createOperation(operation) {
 			return false, nil
 		}
@@ -1814,6 +2031,51 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		default:
 			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported scalar array intrinsic", operation.pc)
 		}
+	case opConcatChain:
+		key, ok := emitter.plan.keys.concat(operation)
+		if !ok {
+			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no structural concat key", operation.pc)
+		}
+		destination, err := definition(operation.a)
+		if err != nil {
+			return false, err
+		}
+		emitter.needsMath = true
+		fmt.Fprintf(
+			&emitter.body,
+			"\tif math.IsNaN(v%d) || math.IsInf(v%d, 0) || v%d != math.Trunc(v%d) || v%d < -2147483648 || v%d > 2147483647 || v%d == 0 && math.Signbit(v%d) {\n",
+			key.first,
+			key.first,
+			key.first,
+			key.first,
+			key.first,
+			key.first,
+			key.first,
+			key.first,
+		)
+		fmt.Fprintf(&emitter.body, "\t\t%s\n", emitter.failureReturn())
+		emitter.body.WriteString("\t}\n")
+		fmt.Fprintf(
+			&emitter.body,
+			"\tif math.IsNaN(v%d) || math.IsInf(v%d, 0) || v%d != math.Trunc(v%d) || v%d < -2147483648 || v%d > 2147483647 || v%d == 0 && math.Signbit(v%d) {\n",
+			key.second,
+			key.second,
+			key.second,
+			key.second,
+			key.second,
+			key.second,
+			key.second,
+			key.second,
+		)
+		fmt.Fprintf(&emitter.body, "\t\t%s\n", emitter.failureReturn())
+		emitter.body.WriteString("\t}\n")
+		fmt.Fprintf(
+			&emitter.body,
+			"\tv%d = backendPreparedStringKey{first: int32(v%d), second: int32(v%d)}\n",
+			destination,
+			key.first,
+			key.second,
+		)
 	case opVararg:
 		for _, result := range operation.defs {
 			parameter, ok := backendGoNumericVarargIndex(
@@ -2241,7 +2503,7 @@ func (emitter *backendGoNumericEmitter) failureReturn() string {
 	if emitter.options.coroutineTarget {
 		return "return 0, false, false"
 	}
-	return backendGoNumericFailureReturn(emitter.resultCount)
+	return backendGoNumericFailureReturn(emitter.resultTypes)
 }
 
 func backendGoComparisonOperator(op opcode) string {

@@ -390,11 +390,32 @@ The retained path has moved beyond the original starting state:
   an ordinary call. Prepared code can now guard the exact `tostring` identity
   before specializing numeric string construction without weakening canonical
   fallback behavior.
+- The first structural generated-key slice recognizes the exact
+  `tostring(int32) .. safe-literal .. tostring(int32)` shape and represents it
+  as a pointer-free pair of `int32` values. The separator must contain a byte
+  outside the decimal integer alphabet, so distinct numeric pairs cannot
+  collapse; empty, digit-only, and sign/digit separators fail closed. Local
+  construction sites and direct target Protos receive distinct equality
+  domains, and mixed domains are rejected. NaN, infinity, fractional values,
+  values outside `int32`, negative zero, escaping results, and changed
+  `tostring` identities replay or reject rather than fabricating a string.
+  Source/module/entrypoint renaming and a safe separator-text holdout produce
+  byte-identical generated source. The direct kernel has a five-sample median
+  of about 7.96 ns (7.93-8.58 ns observed), while the prepared owner path has
+  a median of about 71.6 ns (71.6-74.3 ns observed), versus about 842.6 ns
+  through generic Machine (837.6-871.9 ns observed). Direct and prepared
+  report zero allocations and materialize no owner strings. Live pinned Luau
+  `-O2 -g0` has a warmed median of about 137.1 ns per call
+  (134.6-140.4 ns observed), making prepared about `0.52x` Luau. Generated
+  source totals 3,728 bytes. Linked ARM64 is 224 bytes for the key helper,
+  240 bytes for the direct kernel, and 304 bytes for the prepared body; the
+  caller has two direct helper calls but no opcode, descriptor, string,
+  interning, or Machine dispatch.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
-all-37 parity. Non-dense iteration, general table mutation, generated strings,
-dynamic string-key maps, nil/string unions, escaping strings,
+all-37 parity. Non-dense iteration, general table mutation, general generated
+strings, dynamic string-key maps, nil/string unions, escaping strings,
 general closures/upvalues and dynamic call sets, open varargs/results,
 heterogeneous or dynamically shaped multiple results,
 general recursion and logical-frame/error cases, dynamic/callable metatables,

@@ -60,7 +60,11 @@ func buildBackendProgramIR(image *programImage) (*backendProgramIR, error) {
 		module.code = source.code
 		module.protos = make([]*backendProtoIR, len(source.code.prototypes))
 		for protoIndex := range source.code.prototypes {
-			protoIR, err := buildBackendProtoIR(&source.code.prototypes[protoIndex])
+			protoIR, err := buildBackendProtoIRWithStrings(
+				&source.code.prototypes[protoIndex],
+				source.code.stringRecords,
+				source.code.stringData,
+			)
 			if err != nil {
 				return nil, fmt.Errorf("build backend program IR: module %d Proto %d: %w", moduleIndex, protoIndex, err)
 			}

@@ -293,6 +293,8 @@ type backendProtoIR struct {
 	values                   []backendValueIR
 	initial                  []backendValueID
 	constants                []machineConstant
+	stringRecords            []machineStringRecord
+	stringData               []byte
 	upvalues                 []machineUpvalue
 	edges                    []backendEdgeIR
 }

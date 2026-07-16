@@ -880,6 +880,100 @@ func TestMachinePreparedFiniteStringStateAvoidsRuntimeStringsAndReplaysEntry(t *
 	}
 }
 
+func TestMachinePreparedStructuralStringKeysAvoidRuntimeStringsAndGuardToString(t *testing.T) {
+	image := machinePreparedTestImageForSource(t, backendStructuralStringKeyProofSource)
+	calls := 0
+	var observed machinePreparedExit
+	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
+		calls++
+		observed = backendGeneratedStructuralStringKeyPreparedFixture(context)
+		return observed
+	})
+	prepared, err := newMachineOwnerWithPrepared(image, program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generic, err := newMachineOwner(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := prepared.close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := generic.close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	preparedArg, err := prepared.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericArg, err := generic.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stringCount := len(prepared.strings.records)
+	runMachinePreparedTestProto(t, prepared, 1, []slot{preparedArg}, nil)
+	runMachinePreparedTestProto(t, generic, 1, []slot{genericArg}, nil)
+	assertMachineOwnerNumberResult(t, prepared, 30)
+	assertMachineOwnerNumberResult(t, generic, 30)
+	if calls != 1 || observed.kind != machinePreparedExitReturnOneNumber {
+		t.Fatalf("prepared structural string-key success = calls %d exit %#v", calls, observed)
+	}
+	if len(prepared.strings.records) != stringCount {
+		t.Fatalf(
+			"prepared structural string-key path changed owner string count from %d to %d",
+			stringCount,
+			len(prepared.strings.records),
+		)
+	}
+
+	override := map[string]Value{
+		"tostring": HostFuncValue(func([]Value) ([]Value, error) {
+			return nil, errors.New("rebound tostring")
+		}),
+	}
+	if err := prepared.importGlobalsStopped(override); err != nil {
+		t.Fatal(err)
+	}
+	if err := generic.importGlobalsStopped(override); err != nil {
+		t.Fatal(err)
+	}
+	preparedErr := runMachinePreparedTestProtoError(t, prepared, 1, []slot{preparedArg}, nil)
+	genericErr := runMachinePreparedTestProtoError(t, generic, 1, []slot{genericArg}, nil)
+	if calls != 2 || observed.kind != machinePreparedExitReplayEntry {
+		t.Fatalf("prepared structural string-key guard fallback = calls %d exit %#v", calls, observed)
+	}
+	if preparedErr == nil || genericErr == nil ||
+		preparedErr.Error() != genericErr.Error() ||
+		!strings.Contains(preparedErr.Error(), "rebound tostring") {
+		t.Fatalf("prepared/generic structural string-key override errors = %v / %v", preparedErr, genericErr)
+	}
+	if err := prepared.importGlobalsStopped(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if !checkptrInstrumentedTest() {
+		lease, err := prepared.beginRun()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var runErr error
+		allocations := testing.AllocsPerRun(1000, func() {
+			runErr = prepared.executeStopped(0, 1, machineClosureHandle{}, []slot{preparedArg}, nil, machineRunEffects{})
+		})
+		lease.end()
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if allocations != 0 {
+			t.Fatalf("prepared structural string-key owner allocations = %v, want 0", allocations)
+		}
+	}
+}
+
 func TestMachinePreparedScalarArrayOpsAvoidLocalTablesAndGuardIntrinsics(t *testing.T) {
 	image := machinePreparedTestImageForSource(t, backendArrayOpsProofSource)
 	calls := 0
@@ -1884,6 +1978,17 @@ func BenchmarkMachinePreparedFiniteStringStateOwner(b *testing.B) {
 
 func BenchmarkMachineGenericFiniteStringStateOwner(b *testing.B) {
 	image := machinePreparedBenchmarkImage(b, backendFiniteStringStateProofSource)
+	benchmarkMachineNumericOwner(b, image, nil)
+}
+
+func BenchmarkMachinePreparedStructuralStringKeyOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendStructuralStringKeyProofSource)
+	program := machinePreparedBenchmarkProgram(b, image, backendGeneratedStructuralStringKeyPreparedFixture)
+	benchmarkMachineNumericOwner(b, image, program)
+}
+
+func BenchmarkMachineGenericStructuralStringKeyOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendStructuralStringKeyProofSource)
 	benchmarkMachineNumericOwner(b, image, nil)
 }
 

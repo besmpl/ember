@@ -6,6 +6,14 @@ import (
 )
 
 func buildBackendProtoIR(proto *machineProto) (*backendProtoIR, error) {
+	return buildBackendProtoIRWithStrings(proto, nil, nil)
+}
+
+func buildBackendProtoIRWithStrings(
+	proto *machineProto,
+	stringRecords []machineStringRecord,
+	stringData []byte,
+) (*backendProtoIR, error) {
 	if proto == nil {
 		return nil, fmt.Errorf("build backend IR: nil Machine prototype")
 	}
@@ -30,7 +38,12 @@ func buildBackendProtoIR(proto *machineProto) (*backendProtoIR, error) {
 		ops:                      make([]backendOperationIR, len(proto.operations)),
 		pcToBlock:                make([]int32, len(proto.operations)),
 		constants:                append([]machineConstant(nil), proto.constants...),
-		upvalues:                 append([]machineUpvalue(nil), proto.upvalues...),
+		// String storage belongs to the immutable CodeImage and is shared by
+		// every Proto IR in the module. Keep one borrowed read-only view rather
+		// than copying the complete module string table once per Proto.
+		stringRecords: stringRecords,
+		stringData:    stringData,
+		upvalues:      append([]machineUpvalue(nil), proto.upvalues...),
 	}
 	for blockIndex, source := range proto.blocks {
 		block := &ir.blocks[blockIndex]
