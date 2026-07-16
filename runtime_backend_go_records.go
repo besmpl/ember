@@ -65,12 +65,13 @@ type backendGoRecordArrayOperation struct {
 }
 
 type backendGoRecordArray struct {
-	root       backendValueID
-	fieldNames []machineStringID
-	fieldIndex map[machineStringID]int
-	fieldTags  []backendTagMask
-	records    []int
-	length     uint32
+	root         backendValueID
+	fieldNames   []machineStringID
+	fieldIndex   map[machineStringID]int
+	fieldTags    []backendTagMask
+	fieldPresent [][]bool
+	records      []int
+	length       uint32
 }
 
 type backendGoRecordArrayFamily struct {
@@ -110,6 +111,12 @@ type backendGoRecordFusedGet struct {
 type backendGoRecordFusedSet struct {
 	family int
 	ref    backendValueID
+	key    backendValueID
+	source backendValueID
+}
+
+type backendGoRecordDynamicField struct {
+	record int
 	key    backendValueID
 	source backendValueID
 }
@@ -172,6 +179,8 @@ type backendGoRecordTablePlan struct {
 	childRecordSet map[int32]backendGoRecordChildRecord
 	fusedGetByPC   map[int32]backendGoRecordFusedGet
 	fusedSetByPC   map[int32]backendGoRecordFusedSet
+	dynamicGetByPC map[int32]backendGoRecordDynamicField
+	dynamicSetByPC map[int32]backendGoRecordDynamicField
 	fieldsByPC     map[int32]backendGoRecordFieldOperation
 	refs           map[backendValueID]backendGoRecordRef
 	iteratorValues []bool
@@ -209,6 +218,8 @@ func analyzeBackendGoRecordTables(
 		childRecordSet: make(map[int32]backendGoRecordChildRecord),
 		fusedGetByPC:   make(map[int32]backendGoRecordFusedGet),
 		fusedSetByPC:   make(map[int32]backendGoRecordFusedSet),
+		dynamicGetByPC: make(map[int32]backendGoRecordDynamicField),
+		dynamicSetByPC: make(map[int32]backendGoRecordDynamicField),
 		fieldsByPC:     make(map[int32]backendGoRecordFieldOperation),
 		refs:           make(map[backendValueID]backendGoRecordRef),
 		iteratorValues: make([]bool, len(ir.values)),
@@ -412,6 +423,12 @@ func analyzeBackendGoRecordTables(
 	if !plan.classifyFields(ir) {
 		if plan.rejectReason == "" {
 			plan.rejectReason = "field classification"
+		}
+		return plan
+	}
+	if !plan.classifyDynamicFields(ir) {
+		if plan.rejectReason == "" {
+			plan.rejectReason = "dynamic field classification"
 		}
 		return plan
 	}
@@ -1106,7 +1123,7 @@ func (plan *backendGoRecordTablePlan) finishShapesAndKeys(
 				return false
 			}
 		}
-		if !plan.setShapeFromRecords(&current.fieldNames, &current.fieldIndex, recordIndexes) {
+		if !plan.setArrayShapeFromRecords(current, recordIndexes) {
 			return false
 		}
 		current.records = append([]int(nil), recordIndexes...)
@@ -1353,6 +1370,56 @@ func (plan *backendGoRecordTablePlan) classifyFusedSets(ir *backendProtoIR) bool
 	return true
 }
 
+func (plan *backendGoRecordTablePlan) classifyDynamicFields(ir *backendProtoIR) bool {
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		var base, key, source backendValueID
+		switch operation.op {
+		case opGetIndex:
+			if len(operation.defs) != 1 {
+				continue
+			}
+			base = backendOperationUse(operation, operation.b)
+			key = backendOperationUse(operation, operation.c)
+		case opSetIndex:
+			base = backendOperationUse(operation, operation.a)
+			key = backendOperationUse(operation, operation.b)
+			source = backendOperationUse(operation, operation.c)
+		default:
+			continue
+		}
+		record, ok := plan.recordByRoot[plan.root(base)]
+		if !ok {
+			continue
+		}
+		if key == invalidBackendValueID || operation.op == opSetIndex && source == invalidBackendValueID {
+			plan.rejectReason = "invalid dynamic record field at PC " + strconv.Itoa(int(operation.pc))
+			return false
+		}
+		field := backendGoRecordDynamicField{record: record, key: key, source: source}
+		if operation.op == opGetIndex {
+			plan.dynamicGetByPC[operation.pc] = field
+		} else {
+			plan.dynamicSetByPC[operation.pc] = field
+		}
+	}
+	return true
+}
+
+func (plan *backendGoRecordTablePlan) dynamicFieldTags(
+	tags []backendTagMask,
+	field backendGoRecordDynamicField,
+) backendTagMask {
+	if field.record < 0 || field.record >= len(plan.records) {
+		return 0
+	}
+	var result backendTagMask
+	for recordField := range plan.records[field.record].fieldNames {
+		result |= plan.scratchFieldTags(tags, field.record, recordField)
+	}
+	return result
+}
+
 func (plan *backendGoRecordTablePlan) fieldTagsFor(
 	tags []backendTagMask,
 	field backendGoRecordFieldOperation,
@@ -1552,7 +1619,10 @@ func (plan *backendGoRecordTablePlan) containerFieldTags(
 		}
 		record := &plan.records[recordIndex]
 		recordField, ok := record.fieldIndex[name]
-		if !ok || recordField < 0 || recordField >= len(record.fieldValues) {
+		if !ok {
+			continue
+		}
+		if recordField < 0 || recordField >= len(record.fieldValues) {
 			return 0
 		}
 		result |= backendGoRecordValueTags(tags, record.fieldValues[recordField])
@@ -1741,6 +1811,28 @@ func (plan *backendGoRecordTablePlan) finalizeFieldTags(
 			return false
 		}
 	}
+	for pc, dynamic := range plan.dynamicGetByPC {
+		if backendGoRecordValueTags(tags, dynamic.key) != backendTagString {
+			plan.rejectReason = "dynamic record field key is not a string at PC " + strconv.Itoa(int(pc))
+			return false
+		}
+		if _, ok := backendGoNumericType(plan.dynamicFieldTags(tags, dynamic)); !ok {
+			plan.rejectReason = "dynamic record fields have mixed scalar tags at PC " + strconv.Itoa(int(pc))
+			return false
+		}
+	}
+	for pc, dynamic := range plan.dynamicSetByPC {
+		if backendGoRecordValueTags(tags, dynamic.key) != backendTagString {
+			plan.rejectReason = "dynamic record field key is not a string at PC " + strconv.Itoa(int(pc))
+			return false
+		}
+		fieldTags := plan.dynamicFieldTags(tags, dynamic)
+		if _, ok := backendGoNumericType(fieldTags); !ok ||
+			backendGoRecordValueTags(tags, dynamic.source) != fieldTags {
+			plan.rejectReason = "dynamic record mutation changes scalar tags at PC " + strconv.Itoa(int(pc))
+			return false
+		}
+	}
 	for pc, field := range plan.fieldsByPC {
 		operation := &ir.ops[pc]
 		if operation.op != opSetStringField {
@@ -1818,10 +1910,16 @@ func (plan *backendGoRecordTablePlan) validateUses(ir *backendProtoIR) bool {
 					}
 				case opSetIndex:
 					if _, ok := plan.mapSetByPC[operation.pc]; !ok {
+						if _, dynamic := plan.dynamicSetByPC[operation.pc]; dynamic {
+							break
+						}
 						plan.rejectReason = "unclassified map set at PC " + strconv.Itoa(int(operation.pc))
 						return false
 					}
 				case opGetIndex:
+					if _, dynamic := plan.dynamicGetByPC[operation.pc]; dynamic {
+						break
+					}
 					if _, mapGet := plan.mapGetByPC[operation.pc]; !mapGet {
 						if _, arrayGet := plan.arrayGetByPC[operation.pc]; arrayGet {
 							break
@@ -1951,7 +2049,8 @@ func (plan *backendGoRecordTablePlan) discoverChildArrayFamilies(ir *backendProt
 				record := &plan.records[recordIndex]
 				recordField, ok := record.fieldIndex[name]
 				if !ok {
-					return false
+					allChildren = false
+					break
 				}
 				root := plan.root(record.fieldValues[recordField])
 				child, ok := plan.arrayByRoot[root]
@@ -2060,7 +2159,8 @@ func (plan *backendGoRecordTablePlan) discoverChildRecordFamilies() bool {
 				record := &plan.records[recordIndex]
 				recordField, ok := record.fieldIndex[name]
 				if !ok {
-					return false
+					allChildren = false
+					break
 				}
 				root := plan.root(record.fieldValues[recordField])
 				child, ok := plan.recordByRoot[root]
@@ -2169,6 +2269,39 @@ func (plan *backendGoRecordTablePlan) setShapeFromRecords(
 		}
 	}
 	return true
+}
+
+func (plan *backendGoRecordTablePlan) setArrayShapeFromRecords(
+	array *backendGoRecordArray,
+	records []int,
+) bool {
+	if array == nil || len(records) == 0 {
+		return false
+	}
+	array.fieldNames = nil
+	array.fieldIndex = make(map[machineStringID]int)
+	for _, recordIndex := range records {
+		if recordIndex < 0 || recordIndex >= len(plan.records) {
+			return false
+		}
+		for _, name := range plan.records[recordIndex].fieldNames {
+			if _, exists := array.fieldIndex[name]; exists {
+				continue
+			}
+			array.fieldIndex[name] = len(array.fieldNames)
+			array.fieldNames = append(array.fieldNames, name)
+		}
+	}
+	array.fieldPresent = make([][]bool, len(array.fieldNames))
+	for field := range array.fieldPresent {
+		array.fieldPresent[field] = make([]bool, len(records))
+	}
+	for member, recordIndex := range records {
+		for name := range plan.records[recordIndex].fieldIndex {
+			array.fieldPresent[array.fieldIndex[name]][member] = true
+		}
+	}
+	return len(array.fieldNames) != 0
 }
 
 func (plan *backendGoRecordTablePlan) setMapDomain(
@@ -2376,6 +2509,9 @@ func (emitter *backendGoNumericEmitter) emitRecordSetStringField(
 		if err := emitter.emitRecordRefGuard(field.ref, int(length)); err != nil {
 			return true, err
 		}
+		if err := emitter.emitRecordArrayFieldGuard(field.index, field.field, field.ref, -1); err != nil {
+			return true, err
+		}
 		fmt.Fprintf(&emitter.body, "\tra%d_%d[int(v%d)-1] = v%d\n", field.index, field.field, field.ref, source)
 	case backendGoRecordFieldArrayFamily:
 		if err := emitter.emitRecordFamilyField(field, source, true); err != nil {
@@ -2414,6 +2550,9 @@ func (emitter *backendGoNumericEmitter) emitRecordGetStringField(
 	case backendGoRecordFieldArray:
 		length := emitter.plan.records.arrays[field.index].length
 		if err := emitter.emitRecordRefGuard(field.ref, int(length)); err != nil {
+			return true, err
+		}
+		if err := emitter.emitRecordArrayFieldGuard(field.index, field.field, field.ref, -1); err != nil {
 			return true, err
 		}
 		fmt.Fprintf(&emitter.body, "\tv%d = ra%d_%d[int(v%d)-1]\n", destination, field.index, field.field, field.ref)
@@ -2569,6 +2708,9 @@ func (emitter *backendGoNumericEmitter) emitRecordFamilyField(
 		fmt.Fprintf(&emitter.body, "\t\t\tif rr%d%%32 >= %d {\n", field.ref, array.length)
 		fmt.Fprintf(&emitter.body, "\t\t\t\t%s\n", emitter.failureReturn())
 		emitter.body.WriteString("\t\t\t}\n")
+		if err := emitter.emitRecordArrayFieldGuard(arrayIndex, arrayField, field.ref, 3); err != nil {
+			return err
+		}
 		if set {
 			fmt.Fprintf(
 				&emitter.body,
@@ -2648,6 +2790,58 @@ func (emitter *backendGoNumericEmitter) emitRecordRefGuard(
 	return nil
 }
 
+func (emitter *backendGoNumericEmitter) emitRecordArrayFieldGuard(
+	arrayIndex int,
+	field int,
+	ref backendValueID,
+	indent int,
+) error {
+	if arrayIndex < 0 || arrayIndex >= len(emitter.plan.records.arrays) ||
+		field < 0 || field >= len(emitter.plan.records.arrays[arrayIndex].fieldPresent) {
+		return fmt.Errorf("emit backend Go numeric proof: invalid record-array field presence")
+	}
+	present := emitter.plan.records.arrays[arrayIndex].fieldPresent[field]
+	if len(present) != len(emitter.plan.records.arrays[arrayIndex].records) {
+		return fmt.Errorf("emit backend Go numeric proof: invalid record-array field presence inventory")
+	}
+	presentCount := 0
+	for _, ok := range present {
+		if ok {
+			presentCount++
+		}
+	}
+	if presentCount == len(present) {
+		return nil
+	}
+	if presentCount == 0 {
+		return fmt.Errorf("emit backend Go numeric proof: record-array field is absent from every member")
+	}
+	prefix := "\t"
+	selector := fmt.Sprintf("int(v%d)-1", ref)
+	if indent >= 0 {
+		prefix = strings.Repeat("\t", indent)
+		selector = fmt.Sprintf("rr%d%%32", ref)
+	}
+	fmt.Fprintf(&emitter.body, "%sswitch %s {\n", prefix, selector)
+	emitter.body.WriteString(prefix + "case ")
+	wrote := false
+	for member, ok := range present {
+		if !ok {
+			continue
+		}
+		if wrote {
+			emitter.body.WriteString(", ")
+		}
+		fmt.Fprintf(&emitter.body, "%d", member)
+		wrote = true
+	}
+	emitter.body.WriteString(":\n")
+	emitter.body.WriteString(prefix + "default:\n")
+	fmt.Fprintf(&emitter.body, "%s\t%s\n", prefix, emitter.failureReturn())
+	emitter.body.WriteString(prefix + "}\n")
+	return nil
+}
+
 func (emitter *backendGoNumericEmitter) emitRecordArraySet(
 	operation *backendOperationIR,
 ) (bool, error) {
@@ -2660,7 +2854,7 @@ func (emitter *backendGoNumericEmitter) emitRecordArraySet(
 	for field, name := range array.fieldNames {
 		recordField, ok := record.fieldIndex[name]
 		if !ok {
-			return true, fmt.Errorf("emit backend Go numeric proof: PC %d changes record-array shape", operation.pc)
+			continue
 		}
 		fmt.Fprintf(
 			&emitter.body,
@@ -2789,6 +2983,60 @@ func (emitter *backendGoNumericEmitter) emitRecordArrayNext(
 	}
 	emitter.emitGoto(int32(block.id), nextBlock, 1)
 	return true, true, nil
+}
+
+func (emitter *backendGoNumericEmitter) emitRecordDynamicGet(
+	operation *backendOperationIR,
+	definition func(int32) (backendValueID, error),
+) (bool, error) {
+	dynamic, ok := emitter.plan.records.dynamicGetByPC[operation.pc]
+	if !ok {
+		return false, nil
+	}
+	if dynamic.record < 0 || dynamic.record >= len(emitter.plan.records.records) {
+		return true, fmt.Errorf("emit backend Go numeric proof: PC %d has invalid dynamic record", operation.pc)
+	}
+	destination, err := definition(operation.a)
+	if err != nil {
+		return true, err
+	}
+	record := emitter.plan.records.records[dynamic.record]
+	fmt.Fprintf(&emitter.body, "\tswitch v%d {\n", dynamic.key)
+	for field, name := range record.fieldNames {
+		fmt.Fprintf(&emitter.body, "\tcase uint32(%d):\n", name)
+		fmt.Fprintf(&emitter.body, "\t\tv%d = r%d_%d\n", destination, dynamic.record, field)
+	}
+	emitter.body.WriteString("\tdefault:\n")
+	fmt.Fprintf(&emitter.body, "\t\t%s\n", emitter.failureReturn())
+	emitter.body.WriteString("\t}\n")
+	return true, nil
+}
+
+func (emitter *backendGoNumericEmitter) emitRecordDynamicSet(
+	operation *backendOperationIR,
+	use func(int32) (backendValueID, error),
+) (bool, error) {
+	dynamic, ok := emitter.plan.records.dynamicSetByPC[operation.pc]
+	if !ok {
+		return false, nil
+	}
+	if dynamic.record < 0 || dynamic.record >= len(emitter.plan.records.records) {
+		return true, fmt.Errorf("emit backend Go numeric proof: PC %d has invalid dynamic record", operation.pc)
+	}
+	source, err := use(operation.c)
+	if err != nil {
+		return true, err
+	}
+	record := emitter.plan.records.records[dynamic.record]
+	fmt.Fprintf(&emitter.body, "\tswitch v%d {\n", dynamic.key)
+	for field, name := range record.fieldNames {
+		fmt.Fprintf(&emitter.body, "\tcase uint32(%d):\n", name)
+		fmt.Fprintf(&emitter.body, "\t\tr%d_%d = v%d\n", dynamic.record, field, source)
+	}
+	emitter.body.WriteString("\tdefault:\n")
+	fmt.Fprintf(&emitter.body, "\t\t%s\n", emitter.failureReturn())
+	emitter.body.WriteString("\t}\n")
+	return true, nil
 }
 
 func (emitter *backendGoNumericEmitter) emitRecordMapSet(

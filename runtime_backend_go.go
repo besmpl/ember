@@ -678,7 +678,9 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						tags = plan.records.childRecordFieldTags(plan.tags, fused.family)
 					}
 				case opGetIndex:
-					if _, ok := plan.records.mapGetByPC[operation.pc]; ok {
+					if dynamic, ok := plan.records.dynamicGetByPC[operation.pc]; ok {
+						tags = plan.records.dynamicFieldTags(plan.tags, dynamic)
+					} else if _, ok := plan.records.mapGetByPC[operation.pc]; ok {
 						tags = backendTagNumber
 					} else if _, ok := plan.records.arrayGetByPC[operation.pc]; ok {
 						tags = backendTagNumber
@@ -1256,11 +1258,29 @@ func verifyBackendGoNumericOperation(
 		}
 		return require(operation.c, array.tags)
 	case opSetIndex:
+		if dynamic, ok := plan.records.dynamicSetByPC[operation.pc]; ok {
+			if err := require(operation.b, backendTagString); err != nil {
+				return err
+			}
+			return require(operation.c, plan.records.dynamicFieldTags(plan.tags, dynamic))
+		}
 		if _, ok := plan.records.mapSetByPC[operation.pc]; !ok {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record-map store", operation.pc)
 		}
 		return nil
 	case opGetIndex:
+		if dynamic, ok := plan.records.dynamicGetByPC[operation.pc]; ok {
+			if err := require(operation.c, backendTagString); err != nil {
+				return err
+			}
+			fieldTags := plan.records.dynamicFieldTags(plan.tags, dynamic)
+			for _, definition := range operation.defs {
+				if plan.tags[definition.value-1] != fieldTags {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d dynamic record lookup changes scalar tags", operation.pc)
+				}
+			}
+			return nil
+		}
 		_, mapGet := plan.records.mapGetByPC[operation.pc]
 		_, arrayGet := plan.records.arrayGetByPC[operation.pc]
 		if !mapGet && !arrayGet {
@@ -2148,11 +2168,17 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		}
 		fmt.Fprintf(&emitter.body, "\ta%d[%d] = v%d\n", arrayIndex, element-1, source)
 	case opSetIndex:
+		if handled, err := emitter.emitRecordDynamicSet(operation, use); handled {
+			return false, err
+		}
 		if handled, err := emitter.emitRecordMapSet(operation); handled {
 			return false, err
 		}
 		return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record-map store", operation.pc)
 	case opGetIndex:
+		if handled, err := emitter.emitRecordDynamicGet(operation, definition); handled {
+			return false, err
+		}
 		if handled, err := emitter.emitRecordMapGet(operation, definition); handled {
 			return false, err
 		}

@@ -2261,10 +2261,10 @@ func TestBackendGoProjectileSweepIsIdentityBlindAndRejectsUnprovedShapes(t *test
 			"damage = 9, live = 1",
 			1,
 		),
-		"record shape mismatch": strings.Replace(
+		"mixed numeric and string field": strings.Replace(
 			backendProjectileSweepProofSource,
 			"x = 38, y = 16, radius = 4, hp = 70",
-			"x = 38, y = 16, reach = 4, hp = 70",
+			"x = 38, y = 16, radius = \"wide\", hp = 70",
 			1,
 		),
 		"escaping record array": strings.Replace(
@@ -2281,7 +2281,7 @@ func TestBackendGoProjectileSweepIsIdentityBlindAndRejectsUnprovedShapes(t *test
 				ir,
 				analyzeBackendGoStructuralKeys(ir, backendGoNumericOptions{}),
 			)
-			if name != "mixed boolean and number field" && records.enabled {
+			if name == "escaping record array" && records.enabled {
 				t.Fatalf("record-array analyzer accepted %s", name)
 			}
 			if _, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
@@ -2745,10 +2745,10 @@ func TestBackendGoAIUtilityScoringIsIdentityBlindAndRejectsUnprovedRecords(t *te
 			"self.energy = true",
 			1,
 		),
-		"record shape mismatch": strings.Replace(
+		"mixed record-array field tags": strings.Replace(
 			backendAIUtilityScoringProofSource,
 			"{hp = 110, distance = 12, threat = 15, armor = 9}",
-			"{hp = 110, distance = 12, threat = 15, defense = 9}",
+			"{hp = 110, distance = 12, threat = 15, armor = \"high\"}",
 			1,
 		),
 	}

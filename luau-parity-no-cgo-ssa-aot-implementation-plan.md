@@ -663,6 +663,37 @@ The retained path has moved beyond the original starting state:
   descriptor, Machine table, runtime string, interning, or VM dispatch.
   Thirteen of the 25 Scenario kernels now emit through the single-Proto proof
   route.
+- The guarded union-record slice lets a fixed record array contain a finite
+  set of heterogeneous shapes. Each union field carries a deterministic
+  per-member presence mask; generated reads and same-kind writes guard the
+  selected member before touching typed storage, so an absent field replays
+  canonical Machine rather than fabricating zero or changing shape. Uniform
+  finite-string indexing over one standalone scalarized record now lowers to
+  a direct switch over verified image string IDs; unknown keys replay entry.
+  A parameterized `behavior_tree_tick` holdout proves five condition/action
+  records with seven union fields, computed record selection, four guarded
+  condition-only fields, two guarded action-only fields, and dynamic
+  `blackboard[node.key]` lookup across five numeric fields. Generated Go,
+  prepared owner, generic Machine, and the independent interpreter agree
+  across negative, ordinary, and large seeds. A deliberate variant mismatch
+  reaches the generated guard and the independent interpreter's canonical
+  missing-field error. Mixed union-field kinds, mixed dynamic-field kinds,
+  record-array escape, unknown keys, and shape-changing member access fail
+  closed. Private-function renaming produces byte-identical executable
+  source; controlled execution remains generic; invalid prepared arguments
+  replay entry; owner table/string counts remain unchanged; direct and
+  prepared paths allocate zero when warmed. The direct kernel has a
+  five-sample median of about 915.2 ns (914.2-920.3 ns observed), while the
+  prepared owner path has a median of about 967.0 ns (966.8-967.8 ns
+  observed), versus about 188.8 microseconds through generic Machine
+  (188.3-189.0 microseconds observed). Pinned Luau `-O2 -g0` produced the same
+  batch checksum with a warmed five-sample median of about 16.82 microseconds
+  per call (16.79-17.89 microseconds observed), making prepared about `0.058x`
+  Luau. Deterministic generated source is 20,962 bytes. Linked ARM64 is 1,328
+  bytes for the direct kernel and 1,472 bytes for the prepared body; each has
+  only cold bounds/stack-growth helpers and no opcode, descriptor, Machine
+  table, runtime string, interning, or VM dispatch. Fourteen of the 25
+  Scenario kernels now emit through the single-Proto proof route.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
