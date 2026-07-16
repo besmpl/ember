@@ -26,6 +26,7 @@ type backendGoNumericPlan struct {
 	scalarReplacedValues []bool
 	// replayEntry marks exits whose exact spill would require one of those values.
 	replayEntry []bool
+	tables      backendGoScalarTablePlan
 }
 
 type backendGoNumericEmitter struct {
@@ -96,6 +97,14 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		}
 		fmt.Fprintf(&source, "\tvar v%d %s\n", valueIndex+1, goType)
 	}
+	for fieldIndex, field := range plan.tables.fields {
+		goType, ok := backendGoNumericType(field.tags)
+		if !ok {
+			continue
+		}
+		fmt.Fprintf(&source, "\tvar f%d %s\n", fieldIndex, goType)
+		fmt.Fprintf(&source, "\t_ = f%d\n", fieldIndex)
+	}
 	for pc := range ir.ops {
 		operation := &ir.ops[pc]
 		if !backendGoNumericOperationDead(plan, operation) && operation.op == opCallLocalOne {
@@ -126,6 +135,14 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 				return nil, fmt.Errorf("emit backend Go numeric proof: SSA value %d has unsupported tags %x", valueIndex+1, plan.tags[valueIndex])
 			}
 			fmt.Fprintf(&source, "\tvar v%d %s\n", valueIndex+1, goType)
+		}
+		for fieldIndex, field := range plan.tables.fields {
+			goType, ok := backendGoNumericType(field.tags)
+			if !ok {
+				continue
+			}
+			fmt.Fprintf(&source, "\tvar f%d %s\n", fieldIndex, goType)
+			fmt.Fprintf(&source, "\t_ = f%d\n", fieldIndex)
 		}
 		for pc := range ir.ops {
 			operation := &ir.ops[pc]
@@ -183,11 +200,16 @@ func verifyBackendGoNumericTargets(targets []backendGoNumericTarget) error {
 }
 
 func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptions) (backendGoNumericPlan, error) {
+	tables, err := analyzeBackendGoScalarTables(ir)
+	if err != nil {
+		return backendGoNumericPlan{}, err
+	}
 	plan := backendGoNumericPlan{
 		tags:                 make([]backendTagMask, len(ir.values)),
 		used:                 make([]bool, len(ir.values)),
 		scalarReplacedValues: make([]bool, len(ir.values)),
 		replayEntry:          make([]bool, len(ir.ops)),
+		tables:               tables,
 	}
 	for register, id := range ir.initial {
 		if register < ir.params {
@@ -236,6 +258,19 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 					tags = backendTagBool
 				case opClosure:
 					tags = backendTagFunction
+				case opNewTable:
+					if plan.tables.root(value.id) != invalidBackendValueID {
+						tags = backendTagTable
+					}
+				case opGetStringField:
+					_, field, ok := plan.tables.operationField(ir, operation)
+					if ok {
+						if field.child != invalidBackendValueID {
+							tags = backendTagTable
+						} else {
+							tags = field.tags
+						}
+					}
 				case opCallLocalOne:
 					if _, ok := backendGoNumericDirectTarget(options, operation); ok {
 						tags = backendTagNumber
@@ -271,6 +306,11 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 			plan.replayEntry[pc] = true
 		}
 	}
+	for valueIndex, root := range plan.tables.roots {
+		if root != invalidBackendValueID {
+			markScalarReplaced(backendValueID(valueIndex + 1))
+		}
+	}
 	for pc := range ir.ops {
 		operation := &ir.ops[pc]
 		for _, spill := range operation.spillValues {
@@ -284,7 +324,7 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 	}
 	work := make([]backendValueID, 0, len(ir.values))
 	markUsed := func(id backendValueID) {
-		if id == invalidBackendValueID || plan.used[id-1] {
+		if id == invalidBackendValueID || plan.scalarReplacedValues[id-1] || plan.used[id-1] {
 			return
 		}
 		plan.used[id-1] = true
@@ -411,7 +451,7 @@ func backendGoNumericPureProducer(op opcode) bool {
 	case opLoadConst, opMove,
 		opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow, opNeg,
 		opAddK, opSubK, opMulK, opDivK, opModK, opIDivK,
-		opClosure:
+		opClosure, opNewTable, opGetStringField:
 		return true
 	default:
 		return false
@@ -463,6 +503,39 @@ func verifyBackendGoNumericOperation(
 		for _, definition := range operation.defs {
 			if plan.used[definition.value-1] {
 				return fmt.Errorf("emit backend Go numeric proof: PC %d closure escapes scalar replacement", operation.pc)
+			}
+		}
+		return nil
+	case opNewTable:
+		for _, definition := range operation.defs {
+			if plan.tables.root(definition.value) == invalidBackendValueID {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d table is not scalar replaceable", operation.pc)
+			}
+		}
+		return nil
+	case opSetStringField:
+		_, field, ok := plan.tables.operationField(ir, operation)
+		if !ok {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar field", operation.pc)
+		}
+		source := backendOperationUse(operation, operation.c)
+		if field.child != invalidBackendValueID {
+			if plan.tables.root(source) != field.child {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d changes scalar table identity", operation.pc)
+			}
+			return nil
+		}
+		return require(operation.c, field.tags)
+	case opGetStringField:
+		_, field, ok := plan.tables.operationField(ir, operation)
+		if !ok {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar field", operation.pc)
+		}
+		if field.child != invalidBackendValueID {
+			for _, definition := range operation.defs {
+				if plan.tables.root(definition.value) != field.child {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d loses scalar table identity", operation.pc)
+				}
 			}
 		}
 		return nil
@@ -646,6 +719,34 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			return false, err
 		}
 		fmt.Fprintf(&emitter.body, "\tv%d = v%d\n", destination, source)
+	case opNewTable:
+		return false, nil
+	case opSetStringField:
+		fieldIndex, field, ok := emitter.plan.tables.operationField(emitter.ir, operation)
+		if !ok {
+			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar field", operation.pc)
+		}
+		if field.child != invalidBackendValueID {
+			return false, nil
+		}
+		source, err := use(operation.c)
+		if err != nil {
+			return false, err
+		}
+		fmt.Fprintf(&emitter.body, "\tf%d = v%d\n", fieldIndex, source)
+	case opGetStringField:
+		fieldIndex, field, ok := emitter.plan.tables.operationField(emitter.ir, operation)
+		if !ok {
+			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar field", operation.pc)
+		}
+		if field.child != invalidBackendValueID {
+			return false, nil
+		}
+		destination, err := definition(operation.a)
+		if err != nil {
+			return false, err
+		}
+		fmt.Fprintf(&emitter.body, "\tv%d = f%d\n", destination, fieldIndex)
 	case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow:
 		destination, _ := definition(operation.a)
 		left, _ := use(operation.b)

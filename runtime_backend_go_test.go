@@ -55,6 +55,19 @@ end
 return kernel
 `
 
+const backendTableFieldProofSource = `
+local function kernel(seed)
+    local player = {stats = {hp = 100 + seed % 7, shield = 25}, inventory = {coins = 3}}
+    local i = 0
+    while i < 80 do
+        i = i + 1
+        player.stats.hp = player.stats.hp + player.stats.shield - player.inventory.coins
+    end
+    return player.stats.hp
+end
+return kernel
+`
+
 func TestBackendGoNumericProofEmitsDeterministicDirectSource(t *testing.T) {
 	ir := backendNumericProofIR(t)
 	options := backendGoNumericOptions{
@@ -91,8 +104,8 @@ func TestBackendGoNumericProofEmitsDeterministicDirectSource(t *testing.T) {
 	}
 }
 
-func TestBackendGoNumericProofRejectsObjectProgram(t *testing.T) {
-	proto, err := Compile("local value = { field = 1 }\nreturn value.field")
+func TestBackendGoNumericProofRejectsEscapingObjectProgram(t *testing.T) {
+	proto, err := Compile("local value = { field = 1 }\nreturn value")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +121,7 @@ func TestBackendGoNumericProofRejectsObjectProgram(t *testing.T) {
 		packageName:  "ember",
 		functionName: "rejected",
 	})
-	if err == nil || !strings.Contains(err.Error(), "unsupported opcode") {
+	if err == nil || !strings.Contains(err.Error(), "not scalar replaceable") {
 		t.Fatalf("emit object program = %v", err)
 	}
 }
@@ -203,6 +216,30 @@ func TestBackendGoNumericDirectCallIgnoresSourceIdentity(t *testing.T) {
 	}
 	if !bytes.Equal(emit(base), emit(renamed)) {
 		t.Fatal("source or entrypoint identity selected generated direct-call code")
+	}
+}
+
+func TestBackendGoScalarTableFieldsIgnoreSourceIdentity(t *testing.T) {
+	base := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "source/main", Text: backendTableFieldProofSource},
+	}, []Entrypoint{{Name: "main", Module: LogicalModule("main")}})
+	renamed := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "opaque/renamed/source", Text: backendTableFieldProofSource},
+	}, []Entrypoint{{Name: "renamed-entrypoint", Module: LogicalModule("main")}})
+	if base.programHash == renamed.programHash {
+		t.Fatal("identity-mutated table-field Programs unexpectedly share a binding hash")
+	}
+	options := backendGoNumericOptions{packageName: "ember", functionName: "identityBlindTableFields"}
+	baseSource, err := emitBackendGoNumericProof(base.modules[0].protos[1], options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamedSource, err := emitBackendGoNumericProof(renamed.modules[0].protos[1], options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(baseSource, renamedSource) {
+		t.Fatal("source or entrypoint identity selected scalar table-field code")
 	}
 }
 
@@ -394,6 +431,71 @@ func TestBackendGoNumericDirectCallFixturesAreFreshAndCorrect(t *testing.T) {
 	}
 }
 
+func TestBackendGoScalarTableFieldFixtureIsFreshAndCorrect(t *testing.T) {
+	generated, err := emitBackendGoNumericProof(backendTableFieldProofIR(t), backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedTableFieldFixture",
+		preparedFunctionName: "backendGeneratedTableFieldPreparedFixture",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk, err := os.ReadFile("runtime_backend_table_field_generated_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(generated, onDisk) {
+		t.Fatal("generated scalar table-field fixture is stale")
+	}
+	if _, err := goparser.ParseFile(token.NewFileSet(), "runtime_backend_table_field_generated_test.go", generated, goparser.AllErrors); err != nil {
+		t.Fatalf("parse generated scalar table-field source: %v", err)
+	}
+	text := string(generated)
+	if !strings.Contains(text, "var f0 float64") || !strings.Contains(text, "f0 = v") {
+		t.Fatalf("generated scalar table-field source lacks typed field locals:\n%s", text)
+	}
+	for _, forbidden := range []string{"switch", "opcode", "descriptor", "machineTable", "NEW_TABLE", "GET_STRING_FIELD"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("generated scalar table-field source contains runtime table/dispatch marker %q", forbidden)
+		}
+	}
+
+	root, err := Compile(backendTableFieldProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(root.prototypes) != 1 {
+		t.Fatalf("table-field source child count = %d, want 1", len(root.prototypes))
+	}
+	for _, seed := range []float64{0, 1, 7, 29, 1_000_000_000_005} {
+		got, ok := backendGeneratedTableFieldFixture(seed)
+		want := 1860 + seed - math.Floor(seed/7)*7
+		if !ok || got != want {
+			t.Fatalf("generated scalar table-field fixture(%v) = (%v, %t), want (%v, true)", seed, got, ok, want)
+		}
+		oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+			args: []Value{NumberValue(seed)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(oracle) != 1 {
+			t.Fatalf("table-field oracle result count = %d, want 1", len(oracle))
+		}
+		oracleNumber, ok := oracle[0].Number()
+		if !ok || oracleNumber != got {
+			t.Fatalf("generated/oracle table-field seed %v = %v/%v (%t)", seed, got, oracleNumber, ok)
+		}
+	}
+	if !checkptrInstrumentedTest() {
+		if allocations := testing.AllocsPerRun(1000, func() {
+			_, _ = backendGeneratedTableFieldFixture(29)
+		}); allocations != 0 {
+			t.Fatalf("generated scalar table-field allocations = %v, want 0", allocations)
+		}
+	}
+}
+
 func backendNumericProofIR(t *testing.T) *backendProtoIR {
 	t.Helper()
 	proto, err := Compile(backendNumericProofSource)
@@ -458,6 +560,26 @@ func backendNumericCallProofIRs(t *testing.T) (caller, callee *backendProtoIR) {
 	return caller, callee
 }
 
+func backendTableFieldProofIR(t *testing.T) *backendProtoIR {
+	t.Helper()
+	proto, err := Compile(backendTableFieldProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(image.prototypes) != 2 {
+		t.Fatalf("table-field proof Proto count = %d, want 2", len(image.prototypes))
+	}
+	ir, err := buildBackendProtoIR(&image.prototypes[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ir
+}
+
 func BenchmarkBackendGeneratedNumericFixture(b *testing.B) {
 	var result float64
 	b.ReportAllocs()
@@ -478,6 +600,7 @@ func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
 	for _, source := range []string{
 		backendNumericProofSource,
 		backendNumericExitProofSource,
+		backendTableFieldProofSource,
 		"local function add(value) return value + 1 end return add",
 		"return { field = 1 }",
 	} {

@@ -196,12 +196,19 @@ The retained path has moved beyond the original starting state:
   allocations. Linked ARM64 inspection shows the Go compiler inlines the leaf
   callee into the prepared body with no `CALL` instruction and no opcode or
   descriptor dispatch.
+- The current stable-field slice scalar-replaces the nested tables in the
+  exact `top10/table_fields` architecture-proof shape into three typed Go
+  field locals. The prepared owner path takes roughly 333-343 ns on the
+  checkpoint machine, versus roughly 102-105 microseconds through generic
+  Machine, with zero prepared allocations and no materialized Machine table.
+  Linked ARM64 inspection contains no calls, opcode dispatch, descriptor
+  dispatch, or table lookup.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
-all-37 parity. Stable fields, tables, iteration, strings, closures/upvalues,
-varargs/results, recursion, metatables, host/effect exits, modules, and
-coroutines remain on the active path.
+all-37 parity. Arrays, general table mutation/iteration, strings,
+closures/upvalues, varargs/results, recursion, metatables, host/effect exits,
+modules, and coroutines remain on the active path.
 
 ## Active execution path
 
