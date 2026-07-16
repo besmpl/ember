@@ -109,6 +109,72 @@ end
 return kernel
 `
 
+const backendFiniteStringStateProofSource = `
+local function kernel(seed)
+    local events = {"see", "near", "cooldown", "lost", "hit", "safe", "rest"}
+    local state = "idle"
+    local energy = 20
+    local total = 0
+    for pass = 1, 20 + seed % 2 do
+        for _, event in events do
+            if state == "idle" then
+                if event == "see" then
+                    state = "chase"
+                end
+            elseif state == "chase" then
+                if event == "near" then
+                    state = "attack"
+                elseif event == "lost" then
+                    state = "search"
+                elseif event == "hit" then
+                    state = "evade"
+                end
+            elseif state == "attack" then
+                if event == "cooldown" then
+                    state = "chase"
+                elseif event == "hit" then
+                    state = "evade"
+                end
+            elseif state == "evade" then
+                if event == "safe" then
+                    state = "search"
+                elseif event == "rest" then
+                    state = "idle"
+                end
+            elseif event == "see" then
+                state = "chase"
+            elseif event == "rest" then
+                state = "idle"
+            end
+            if state == "attack" then
+                energy = energy - 3
+                total = total + 15
+            elseif state == "evade" then
+                energy = energy - 1
+                total = total + 9
+            elseif state == "chase" then
+                energy = energy + 1
+                total = total + 8
+            elseif state == "search" then
+                energy = energy + 1
+                total = total + 5
+            else
+                energy = energy + 1
+                total = total + 2
+            end
+            if energy < 0 then
+                energy = 4
+            elseif energy > 35 then
+                energy = 20
+            end
+            total = total + energy
+        end
+    end
+    return total + energy
+end
+return kernel
+`
+
 const backendArrayOpsProofSource = `
 local function kernel(seed)
     local values = {}
@@ -459,6 +525,68 @@ func TestBackendGoScalarArrayIterationIgnoresSourceIdentity(t *testing.T) {
 	}
 	if !bytes.Equal(baseSource, renamedSource) {
 		t.Fatal("source or entrypoint identity selected scalar array-iteration code")
+	}
+}
+
+func TestBackendGoFiniteStringStateIgnoresSourceIdentity(t *testing.T) {
+	base := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "source/main", Text: backendFiniteStringStateProofSource},
+	}, []Entrypoint{{Name: "main", Module: LogicalModule("main")}})
+	renamed := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "opaque/renamed/source", Text: backendFiniteStringStateProofSource},
+	}, []Entrypoint{{Name: "renamed-entrypoint", Module: LogicalModule("main")}})
+	if base.programHash == renamed.programHash {
+		t.Fatal("identity-mutated finite-string Programs unexpectedly share a binding hash")
+	}
+	options := backendGoNumericOptions{packageName: "ember", functionName: "identityBlindFiniteStringState"}
+	baseSource, err := emitBackendGoNumericProof(base.modules[0].protos[1], options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamedSource, err := emitBackendGoNumericProof(renamed.modules[0].protos[1], options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(baseSource, renamedSource) {
+		t.Fatal("source or entrypoint identity selected finite-string code")
+	}
+}
+
+func TestBackendGoFiniteStringStateIgnoresLiteralTextIdentity(t *testing.T) {
+	transformed := strings.NewReplacer(
+		`"see"`, `"observe"`,
+		`"near"`, `"close"`,
+		`"cooldown"`, `"recover"`,
+		`"lost"`, `"missing"`,
+		`"hit"`, `"struck"`,
+		`"safe"`, `"secure"`,
+		`"rest"`, `"pause"`,
+		`"idle"`, `"waiting"`,
+		`"chase"`, `"pursuit"`,
+		`"attack"`, `"strike"`,
+		`"search"`, `"seek"`,
+		`"evade"`, `"dodge"`,
+	).Replace(backendFiniteStringStateProofSource)
+	base := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "source/main", Text: backendFiniteStringStateProofSource},
+	}, []Entrypoint{{Name: "main", Module: LogicalModule("main")}})
+	holdout := buildBackendProgramTest(t, backendProgramTestLoader{
+		"logical:main": {Name: "source/main", Text: transformed},
+	}, []Entrypoint{{Name: "main", Module: LogicalModule("main")}})
+	if base.programHash == holdout.programHash {
+		t.Fatal("literal-mutated finite-string Programs unexpectedly share a binding hash")
+	}
+	options := backendGoNumericOptions{packageName: "ember", functionName: "literalBlindFiniteStringState"}
+	baseSource, err := emitBackendGoNumericProof(base.modules[0].protos[1], options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holdoutSource, err := emitBackendGoNumericProof(holdout.modules[0].protos[1], options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(baseSource, holdoutSource) {
+		t.Fatal("literal text identity selected finite-string code")
 	}
 }
 
@@ -1263,6 +1391,138 @@ func TestBackendGoScalarArrayIterationFixtureIsFreshAndCorrect(t *testing.T) {
 		}); allocations != 0 {
 			t.Fatalf("generated scalar array-iteration allocations = %v, want 0", allocations)
 		}
+	}
+}
+
+func TestBackendGoFiniteStringStateFixtureIsFreshAndCorrect(t *testing.T) {
+	generated, err := emitBackendGoNumericProof(backendFiniteStringStateProofIR(t), backendGoNumericOptions{
+		packageName:          "ember",
+		functionName:         "backendGeneratedFiniteStringStateFixture",
+		preparedFunctionName: "backendGeneratedFiniteStringStatePreparedFixture",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fixture = "runtime_backend_finite_string_state_generated_test.go"
+	onDisk, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(generated, onDisk) {
+		t.Fatal("generated finite-string state fixture is stale")
+	}
+	if _, err := goparser.ParseFile(token.NewFileSet(), fixture, generated, goparser.AllErrors); err != nil {
+		t.Fatalf("parse generated finite-string state source: %v", err)
+	}
+	text := string(generated)
+	if !strings.Contains(text, "var a0 [7]uint32") ||
+		!strings.Contains(text, "= uint32(") ||
+		!strings.Contains(text, " == v") {
+		t.Fatalf("generated finite-string state source lacks typed string IDs and direct comparisons:\n%s", text)
+	}
+	for _, forbidden := range []string{
+		"switch", "opcode", "descriptor", "machineString", "intern",
+		"machineTable", "NEW_TABLE", "SET_FIELD", "PREPARE_ITER", "ARRAY_NEXT_JUMP2",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("generated finite-string state source contains runtime string/table/dispatch marker %q", forbidden)
+		}
+	}
+
+	root, err := Compile(backendFiniteStringStateProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(root.prototypes) != 1 {
+		t.Fatalf("finite-string state source child count = %d, want 1", len(root.prototypes))
+	}
+	for _, seed := range []float64{-29, -1, 0, 1, 7, 29, 1_000_000_000_005} {
+		got, ok := backendGeneratedFiniteStringStateFixture(seed)
+		if !ok {
+			t.Fatalf("generated finite-string state fixture exited for seed %v", seed)
+		}
+		oracle, err := executeProto(context.Background(), root.prototypes[0], nil, executeOptions{
+			args: []Value{NumberValue(seed)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(oracle) != 1 {
+			t.Fatalf("finite-string state oracle result count = %d, want 1", len(oracle))
+		}
+		oracleNumber, ok := oracle[0].Number()
+		if !ok || oracleNumber != got {
+			t.Fatalf("generated/oracle finite-string state seed %v = %v/%v (%t)", seed, got, oracleNumber, ok)
+		}
+	}
+	if _, ok := backendGeneratedFiniteStringStateFixture(math.NaN()); ok {
+		t.Fatal("generated finite-string state fixture accepted NaN loop input")
+	}
+	if !checkptrInstrumentedTest() {
+		if allocations := testing.AllocsPerRun(1000, func() {
+			_, _ = backendGeneratedFiniteStringStateFixture(29)
+		}); allocations != 0 {
+			t.Fatalf("generated finite-string state allocations = %v, want 0", allocations)
+		}
+	}
+}
+
+func TestBackendGoFiniteStringStateRejectsUnprovedShapes(t *testing.T) {
+	tests := map[string]string{
+		"generated concatenation": `
+local function kernel(seed)
+    local state = "idle"
+    for i = 1, 4 do
+        state = state .. tostring(seed + i)
+    end
+    return seed
+end
+return kernel
+`,
+		"escaping result": `
+local function kernel(seed)
+    if seed > 0 then
+        return "positive"
+    end
+    return "other"
+end
+return kernel
+`,
+		"mixed scalar state": `
+local function kernel(seed)
+    local state = "idle"
+    if seed > 0 then
+        state = 1
+    end
+    if state == "idle" then
+        return 1
+    end
+    return 2
+end
+return kernel
+`,
+	}
+	for name, source := range tests {
+		t.Run(name, func(t *testing.T) {
+			proto, err := Compile(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			image, err := proto.preparedCodeImage()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ir, err := buildBackendProtoIR(&image.prototypes[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
+				packageName:  "ember",
+				functionName: "rejectUnprovedFiniteStringState",
+			}); err == nil {
+				t.Fatal("emitted an unproved finite-string shape")
+			}
+		})
 	}
 }
 
@@ -2628,6 +2888,26 @@ func backendArrayIterationProofIR(t *testing.T) *backendProtoIR {
 	return ir
 }
 
+func backendFiniteStringStateProofIR(t *testing.T) *backendProtoIR {
+	t.Helper()
+	proto, err := Compile(backendFiniteStringStateProofSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := proto.preparedCodeImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(image.prototypes) != 2 {
+		t.Fatalf("finite-string state proof Proto count = %d, want 2", len(image.prototypes))
+	}
+	ir, err := buildBackendProtoIR(&image.prototypes[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ir
+}
+
 func backendArrayOpsProofIR(t *testing.T) *backendProtoIR {
 	t.Helper()
 	proto, err := Compile(backendArrayOpsProofSource)
@@ -2865,6 +3145,20 @@ func BenchmarkBackendGeneratedArrayIterationFixture(b *testing.B) {
 	backendGeneratedNumericSink = result
 }
 
+func BenchmarkBackendGeneratedFiniteStringStateFixture(b *testing.B) {
+	var result float64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		value, ok := backendGeneratedFiniteStringStateFixture(float64(iteration & 31))
+		if !ok {
+			b.Fatal("generated finite-string state fixture exited")
+		}
+		result = value
+	}
+	backendGeneratedNumericSink = result
+}
+
 func BenchmarkBackendGeneratedArrayOpsFixture(b *testing.B) {
 	var result float64
 	b.ReportAllocs()
@@ -2986,6 +3280,7 @@ func FuzzBackendGoNumericProofDeterministicAndNeverPanics(f *testing.F) {
 		backendTableFieldProofSource,
 		backendMetatableIndexProofSource,
 		backendArrayIterationProofSource,
+		backendFiniteStringStateProofSource,
 		backendArrayOpsProofSource,
 		backendClosureProofSource,
 		backendRecursiveProofSource,

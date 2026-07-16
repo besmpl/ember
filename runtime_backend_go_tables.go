@@ -146,6 +146,15 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR, receiverTable bool) (backe
 		for pc := range ir.ops {
 			operation := &ir.ops[pc]
 			switch operation.op {
+			case opMove:
+				root := plan.root(backendOperationUse(operation, operation.b))
+				for _, definition := range operation.defs {
+					if updated, ok := setRoot(definition.value, root); !ok {
+						return backendGoScalarTablePlan{}, nil
+					} else if updated {
+						changed = true
+					}
+				}
 			case opPrepareIter:
 				root := plan.root(backendOperationUse(operation, operation.a))
 				if root == invalidBackendValueID {
@@ -172,7 +181,7 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR, receiverTable bool) (backe
 					return backendGoScalarTablePlan{}, nil
 				}
 				tags := ir.values[source-1].tags
-				if tags == 0 || tags&^(backendTagNumber|backendTagBool) != 0 {
+				if tags == 0 || tags&^(backendTagNumber|backendTagBool|backendTagString) != 0 {
 					return backendGoScalarTablePlan{}, nil
 				}
 				_, array := ensureArray(table)
@@ -227,7 +236,7 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR, receiverTable bool) (backe
 				}
 				tags := ir.values[source-1].tags
 				if tags == 0 ||
-					tags&^(backendTagNumber|backendTagBool) != 0 ||
+					tags&^(backendTagNumber|backendTagBool|backendTagString) != 0 ||
 					field.child != invalidBackendValueID ||
 					field.methodProto >= 0 {
 					return backendGoScalarTablePlan{}, nil
@@ -360,7 +369,7 @@ func analyzeBackendGoScalarTables(ir *backendProtoIR, receiverTable bool) (backe
 				return backendGoScalarTablePlan{}, nil
 			}
 			tags := ir.values[source-1].tags
-			if tags == 0 || tags&^(backendTagNumber|backendTagBool) != 0 {
+			if tags == 0 || tags&^(backendTagNumber|backendTagBool|backendTagString) != 0 {
 				return backendGoScalarTablePlan{}, nil
 			}
 			executions, ok := backendGoOperationExecutionBound(ir, operation)
@@ -758,6 +767,11 @@ func (plan *backendGoScalarTablePlan) analyzeIterators(ir *backendProtoIR) bool 
 		return false
 	}
 	plan.iteratorValues = make([]bool, len(ir.values))
+	iteratorArray := make([]int, len(ir.values))
+	for valueIndex := range iteratorArray {
+		iteratorArray[valueIndex] = -1
+	}
+	prepareByArray := make(map[int]int32)
 	for pc := range ir.ops {
 		operation := &ir.ops[pc]
 		if operation.op != opPrepareIter {
@@ -779,6 +793,9 @@ func (plan *backendGoScalarTablePlan) analyzeIterators(ir *backendProtoIR) bool 
 				return false
 			}
 		}
+		if _, exists := prepareByArray[arrayIndex]; exists {
+			return false
+		}
 		for _, field := range plan.fields {
 			if field.key.table == table {
 				return false
@@ -795,62 +812,97 @@ func (plan *backendGoScalarTablePlan) analyzeIterators(ir *backendProtoIR) bool 
 			}
 		}
 		plan.iteratorByPC[operation.pc] = arrayIndex
+		prepareByArray[arrayIndex] = operation.pc
 		for _, definition := range operation.defs {
-			if definition.register == operation.b || definition.register == operation.c {
+			if definition.register == operation.a ||
+				definition.register == operation.b ||
+				definition.register == operation.c {
 				plan.iteratorValues[definition.value-1] = true
+				iteratorArray[definition.value-1] = arrayIndex
 			}
 		}
 	}
-	for {
-		changed := false
-		for valueIndex := range ir.values {
-			value := &ir.values[valueIndex]
-			if value.kind != backendValuePhi || plan.iteratorValues[valueIndex] {
-				continue
-			}
-			block := &ir.blocks[value.block]
-			phi := block.phis[value.register]
-			known := false
-			valid := true
-			for inputIndex, input := range phi.inputs {
-				if !ir.blocks[block.predecessors[inputIndex]].reachable {
-					continue
-				}
-				if plan.iteratorValue(input) {
-					known = true
-					continue
-				}
-				if input != value.id {
-					valid = false
-					break
-				}
-			}
-			if known && valid {
-				plan.iteratorValues[valueIndex] = true
-				changed = true
-			}
+	adjacent := make([][]backendValueID, len(ir.values))
+	for valueIndex := range ir.values {
+		value := &ir.values[valueIndex]
+		if value.kind != backendValuePhi {
+			continue
 		}
-		for pc := range ir.ops {
-			operation := &ir.ops[pc]
-			if operation.op != opArrayNextJump2 {
+		block := &ir.blocks[value.block]
+		phi := block.phis[value.register]
+		for inputIndex, input := range phi.inputs {
+			if !ir.blocks[block.predecessors[inputIndex]].reachable ||
+				!ir.validBackendValue(input) ||
+				ir.values[input-1].register != value.register {
 				continue
 			}
-			table := plan.root(backendOperationUse(operation, operation.b))
-			arrayIndex, ok := plan.arrayIndex[table]
-			if !ok ||
-				!plan.iteratorValue(backendOperationUse(operation, operation.c)) {
-				continue
-			}
-			plan.iteratorByPC[operation.pc] = arrayIndex
-			for _, definition := range operation.defs {
-				if definition.register == operation.a && !plan.iteratorValues[definition.value-1] {
-					plan.iteratorValues[definition.value-1] = true
-					changed = true
-				}
-			}
+			adjacent[valueIndex] = append(adjacent[valueIndex], input)
+			adjacent[input-1] = append(adjacent[input-1], value.id)
 		}
-		if !changed {
-			break
+	}
+	queue := make([]backendValueID, 0, len(ir.values))
+	for valueIndex, token := range plan.iteratorValues {
+		if token {
+			queue = append(queue, backendValueID(valueIndex+1))
+		}
+	}
+	for len(queue) != 0 {
+		id := queue[0]
+		queue = queue[1:]
+		for _, next := range adjacent[id-1] {
+			if plan.iteratorValues[next-1] {
+				if iteratorArray[next-1] != iteratorArray[id-1] {
+					return false
+				}
+				continue
+			}
+			plan.iteratorValues[next-1] = true
+			iteratorArray[next-1] = iteratorArray[id-1]
+			queue = append(queue, next)
+		}
+	}
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op != opArrayNextJump2 {
+			continue
+		}
+		table := backendOperationUse(operation, operation.b)
+		control := backendOperationUse(operation, operation.c)
+		if !plan.iteratorValue(table) ||
+			!plan.iteratorValue(control) ||
+			iteratorArray[table-1] < 0 ||
+			iteratorArray[table-1] != iteratorArray[control-1] {
+			continue
+		}
+		arrayIndex := iteratorArray[control-1]
+		preparePC, ok := prepareByArray[arrayIndex]
+		if !ok ||
+			!backendGoScalarTableOperationDominates(ir, &ir.ops[preparePC], operation) {
+			continue
+		}
+		plan.iteratorByPC[operation.pc] = arrayIndex
+	}
+	for valueIndex, token := range plan.iteratorValues {
+		if !token || iteratorArray[valueIndex] < 0 {
+			continue
+		}
+		value := &ir.values[valueIndex]
+		if value.kind != backendValueOperation {
+			continue
+		}
+		arrayIndex := iteratorArray[valueIndex]
+		preparePC, ok := prepareByArray[arrayIndex]
+		if !ok {
+			return false
+		}
+		definition := &ir.ops[value.pc]
+		if definition.pc == preparePC ||
+			definition.op == opArrayNextJump2 &&
+				plan.iteratorByPC[definition.pc] == arrayIndex {
+			continue
+		}
+		if backendGoScalarTableOperationDominates(ir, &ir.ops[preparePC], definition) {
+			return false
 		}
 	}
 	for valueIndex, token := range plan.iteratorValues {
@@ -877,6 +929,20 @@ func (plan *backendGoScalarTablePlan) analyzeIterators(ir *backendProtoIR) bool 
 		}
 	}
 	return true
+}
+
+func backendGoScalarTableOperationDominates(
+	ir *backendProtoIR,
+	dominator *backendOperationIR,
+	operation *backendOperationIR,
+) bool {
+	if ir == nil || dominator == nil || operation == nil ||
+		dominator.block < 0 || int(dominator.block) >= len(ir.blocks) ||
+		operation.block < 0 || int(operation.block) >= len(ir.blocks) ||
+		!backendBlockDominates(&ir.blocks[operation.block], dominator.block) {
+		return false
+	}
+	return dominator.block != operation.block || dominator.pc < operation.pc
 }
 
 func (plan backendGoScalarTablePlan) root(id backendValueID) backendValueID {

@@ -358,10 +358,35 @@ The retained path has moved beyond the original starting state:
   caller, 480 bytes for the step function, and 304 bytes for the prepared
   body; caller code contains two direct step calls and no opcode, descriptor,
   intrinsic, closure, or coroutine-runtime dispatch.
+- The first post-Top10 finite-string slice represents immutable image strings
+  as owner-neutral `uint32` scalar IDs. String constants, phis, equality,
+  scalar fields, and fixed scalar arrays now lower directly; nested scalar
+  array iterators propagate their table/control identity through the SSA phi
+  graph rather than requiring one direct loop-header phi. A parameterized
+  five-state/seven-event transition kernel compiles to ordinary Go with no
+  runtime string, table, opcode, descriptor, or interning operation in the hot
+  path. Source/module/entrypoint renaming and a one-to-one literal-text
+  holdout produce identical executable source, while generated concatenation,
+  escaping string results, mixed string/number state, and other unproved
+  shapes fail closed. An exit with a live image string replays entry rather
+  than fabricating an owner-local handle. The direct fixture has a five-sample
+  median of about 573 ns on the checkpoint machine (572.6-607.5 ns observed);
+  the prepared owner path has a median of about 635.5 ns (634.7-636.8 ns
+  observed), versus about 72.8 microseconds through generic Machine
+  (72.8-73.5 microseconds observed). All prepared/direct samples report zero
+  allocations, and the prepared path materializes no Machine table or new
+  owner string. Live pinned Luau `-O2 -g0` produced the same
+  `963500000` checksum and a warmed median of about 11.16 microseconds per
+  call (11.11-11.47 microseconds observed), so direct and prepared are about
+  `0.051x` and `0.057x` Luau respectively. Deterministic generated source is
+  17,235 bytes; linked ARM64 is 656 bytes for the direct kernel, 704 bytes for
+  the prepared body, and 128 bytes for the wrapper. The direct kernel has no
+  call instruction or runtime dispatch.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
-all-37 parity. Non-dense iteration, general table mutation, strings,
+all-37 parity. Non-dense iteration, general table mutation, generated strings,
+dynamic string-key maps, nil/string unions, escaping strings,
 general closures/upvalues and dynamic call sets, open varargs/results,
 heterogeneous or dynamically shaped multiple results,
 general recursion and logical-frame/error cases, dynamic/callable metatables,

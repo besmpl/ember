@@ -809,9 +809,11 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 	for pc := range ir.ops {
 		operation := &ir.ops[pc]
 		for _, spill := range operation.spillValues {
-			if plan.scalarReplacedValues[spill.value-1] {
+			if plan.scalarReplacedValues[spill.value-1] ||
+				plan.tags[spill.value-1] == backendTagString {
 				// The numeric lowerer is effect-free, so replaying the whole
-				// function is exact when a scalar-replaced closure is live.
+				// function is exact when a scalar-replaced object or an
+				// owner-neutral image string ID is live.
 				plan.replayEntry[pc] = true
 				break
 			}
@@ -1041,7 +1043,7 @@ func verifyBackendGoNumericOperation(
 			}
 		}
 		switch ir.constants[operation.b].kind {
-		case NumberKind, BoolKind:
+		case NumberKind, BoolKind, StringKind:
 			return nil
 		default:
 			return fmt.Errorf("emit backend Go numeric proof: PC %d loads unsupported %s constant", operation.pc, ir.constants[operation.b].kind)
@@ -1300,7 +1302,9 @@ func verifyBackendGoNumericOperation(
 		right := backendOperationUse(operation, operation.c)
 		if left == invalidBackendValueID || right == invalidBackendValueID ||
 			plan.tags[left-1] != plan.tags[right-1] ||
-			(plan.tags[left-1] != backendTagNumber && plan.tags[left-1] != backendTagBool) {
+			(plan.tags[left-1] != backendTagNumber &&
+				plan.tags[left-1] != backendTagBool &&
+				plan.tags[left-1] != backendTagString) {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported equality operands", operation.pc)
 		}
 		return nil
@@ -1342,7 +1346,13 @@ func verifyBackendGoNumericOperation(
 			return fmt.Errorf("emit backend Go numeric proof: PC %d writes invalid upvalue %d", operation.pc, operation.a)
 		}
 		return require(operation.b, backendTagNumber)
-	case opJumpIfNotEqualK, opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
+	case opJumpIfNotEqualK:
+		left := backendOperationUse(operation, operation.a)
+		if left == invalidBackendValueID {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no equality operand", operation.pc)
+		}
+		return verifyBackendGoComparableConstant(ir, operation, operation.b, plan.tags[left-1])
+	case opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
 		if err := require(operation.a, backendTagNumber); err != nil {
 			return err
 		}
@@ -1506,12 +1516,35 @@ func verifyBackendGoNumericConstant(ir *backendProtoIR, operation *backendOperat
 	return nil
 }
 
+func verifyBackendGoComparableConstant(
+	ir *backendProtoIR,
+	operation *backendOperationIR,
+	index int32,
+	tags backendTagMask,
+) error {
+	if index < 0 || int(index) >= len(ir.constants) {
+		return fmt.Errorf("emit backend Go numeric proof: PC %d has an invalid equality constant", operation.pc)
+	}
+	if backendTagForValueKind(ir.constants[index].kind) != tags ||
+		(tags != backendTagNumber && tags != backendTagBool && tags != backendTagString) {
+		return fmt.Errorf(
+			"emit backend Go numeric proof: PC %d equality constant has %s kind for tags %x",
+			operation.pc,
+			ir.constants[index].kind,
+			tags,
+		)
+	}
+	return nil
+}
+
 func backendGoNumericType(tags backendTagMask) (string, bool) {
 	switch tags {
 	case backendTagNumber:
 		return "float64", true
 	case backendTagBool:
 		return "bool", true
+	case backendTagString:
+		return "uint32", true
 	default:
 		return "", false
 	}
@@ -1585,6 +1618,8 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			fmt.Fprintf(&emitter.body, "\tv%d = math.Float64frombits(0x%016x)\n", destination, constant.bits)
 		case BoolKind:
 			fmt.Fprintf(&emitter.body, "\tv%d = %t\n", destination, constant.bits != 0)
+		case StringKind:
+			fmt.Fprintf(&emitter.body, "\tv%d = uint32(%d)\n", destination, constant.bits)
 		}
 	case opMove:
 		destination, err := definition(operation.a)
@@ -1843,7 +1878,12 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		return true, nil
 	case opJumpIfNotEqualK:
 		left, _ := use(operation.a)
-		emitter.emitBranch(int32(block.id), operation.targetPC, fmt.Sprintf("v%d != %s", left, emitter.numericConstant(operation.b)), 1)
+		emitter.emitBranch(
+			int32(block.id),
+			operation.targetPC,
+			fmt.Sprintf("v%d != %s", left, emitter.comparableConstant(operation.b)),
+			1,
+		)
 		return true, nil
 	case opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
 		left, _ := use(operation.a)
@@ -2095,6 +2135,20 @@ func (emitter *backendGoNumericEmitter) emitNumericBinary(destination, left back
 func (emitter *backendGoNumericEmitter) numericConstant(index int32) string {
 	emitter.needsMath = true
 	return fmt.Sprintf("math.Float64frombits(0x%016x)", emitter.ir.constants[index].bits)
+}
+
+func (emitter *backendGoNumericEmitter) comparableConstant(index int32) string {
+	constant := emitter.ir.constants[index]
+	switch constant.kind {
+	case NumberKind:
+		return emitter.numericConstant(index)
+	case BoolKind:
+		return fmt.Sprintf("%t", constant.bits != 0)
+	case StringKind:
+		return fmt.Sprintf("uint32(%d)", constant.bits)
+	default:
+		return "0"
+	}
 }
 
 func (emitter *backendGoNumericEmitter) emitNaNGuard(operation *backendOperationIR, indent int, values ...backendValueID) {
