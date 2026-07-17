@@ -693,7 +693,11 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						tags = plan.records.childRecordFieldTags(plan.tags, fused.family)
 					}
 				case opGetIndex:
-					if dynamic, ok := plan.records.dynamicGetByPC[operation.pc]; ok {
+					if _, ok := plan.records.dynamicChildSelectByPC[operation.pc]; ok {
+						tags = backendTagNumber
+					} else if dynamic, ok := plan.records.dynamicChildGetByPC[operation.pc]; ok {
+						tags = plan.records.childRecordFieldTags(plan.tags, dynamic.family)
+					} else if dynamic, ok := plan.records.dynamicGetByPC[operation.pc]; ok {
 						tags = plan.records.dynamicFieldTags(plan.tags, dynamic)
 					} else if _, ok := plan.records.mapGetByPC[operation.pc]; ok {
 						tags = backendTagNumber
@@ -1316,6 +1320,29 @@ func verifyBackendGoNumericOperation(
 	case opGetIndex:
 		if _, _, _, ok := plan.tables.arrayOperation(ir, operation); ok {
 			return requireOptional(operation.c, backendTagNumber)
+		}
+		if _, ok := plan.records.dynamicChildSelectByPC[operation.pc]; ok {
+			if err := requireOptional(operation.c, backendTagString); err != nil {
+				return err
+			}
+			for _, definition := range operation.defs {
+				if plan.tags[definition.value-1] != backendTagNumber {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d child-record selector is not scalar", operation.pc)
+				}
+			}
+			return nil
+		}
+		if dynamic, ok := plan.records.dynamicChildGetByPC[operation.pc]; ok {
+			if err := requireOptional(operation.c, backendTagString); err != nil {
+				return err
+			}
+			fieldTags := plan.records.childRecordFieldTags(plan.tags, dynamic.family)
+			for _, definition := range operation.defs {
+				if plan.tags[definition.value-1] != fieldTags {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d dynamic child-record lookup changes scalar tags", operation.pc)
+				}
+			}
+			return nil
 		}
 		if dynamic, ok := plan.records.dynamicGetByPC[operation.pc]; ok {
 			if err := requireOptional(operation.c, backendTagString); err != nil {
@@ -2331,6 +2358,12 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			emitter.body.WriteString("\t}\n")
 			fmt.Fprintf(&emitter.body, "\tv%d = a%d[int(v%d)-1]\n", destination, arrayIndex, key)
 			return false, nil
+		}
+		if handled, err := emitter.emitRecordDynamicChildSelector(operation, definition); handled {
+			return false, err
+		}
+		if handled, err := emitter.emitRecordDynamicChildGet(operation, definition); handled {
+			return false, err
 		}
 		if handled, err := emitter.emitRecordDynamicGet(operation, definition); handled {
 			return false, err

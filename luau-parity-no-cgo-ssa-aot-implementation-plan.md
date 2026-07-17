@@ -817,6 +817,35 @@ The retained path has moved beyond the original starting state:
   Machine table, runtime string, interning, or VM dispatch. Eighteen of the 25
   Scenario kernels now emit through the compiler proof route.
 
+- The finite string-table slice replaces the earlier flattened transition
+  proof with the real nested `state_machine_transitions` shape. A dynamically
+  selected key in one proved standalone record now yields a compact selector
+  into one five-member child-record family; the following dynamic key reads a
+  typed optional field from that selected member. Missing transition fields
+  propagate explicit nil presence, while unknown outer states, mixed payload
+  domains, mixed event arrays, selected-child escape, and graph escape fail
+  closed. The ordinary numeric weights record and the independent seven-string
+  event array compose with the same lowering without a map, allocation,
+  runtime string, or dispatch operation. Generated Go, prepared owner, generic
+  Machine, and the independent interpreter agree across negative, ordinary,
+  and large seeds. Private-function renaming is byte-identical; rebinding
+  `rawlen` replays canonical Machine before work; controlled execution remains
+  generic; invalid prepared arguments replay entry; owner table/string counts
+  remain unchanged; direct and prepared paths allocate zero when warmed. The
+  direct kernel has a five-sample median of about 763.0 ns (762.7-860.6 ns
+  observed), while the prepared owner has a median of about 889.2 ns
+  (880.6-902.6 ns observed), versus about 71.57 microseconds through generic
+  Machine. The corresponding pinned Luau `-O2 -g0` corpus batch has a
+  five-sample median of about 14.04 microseconds per call, including its cold
+  first process sample, making prepared about `0.063x` Luau; this is
+  exploratory evidence, not the required `guest_batch_v1` capture.
+  Deterministic generated source is 25,999 bytes. Linked ARM64 is 1,872 bytes
+  for the direct kernel, 2,000 bytes for the prepared body, and 192 bytes for
+  the wrapper; generated bodies contain no opcode, descriptor, Machine table,
+  runtime string, interning, or VM dispatch. This strengthens an already
+  counted Scenario route, so coverage remains eighteen of 25 rather than
+  double-counting the same state-machine case.
+
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
 all-37 parity. General non-dense iteration, general table mutation, general

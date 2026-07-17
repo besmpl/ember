@@ -133,6 +133,18 @@ type backendGoRecordDynamicField struct {
 	source backendValueID
 }
 
+type backendGoRecordDynamicChildSelector struct {
+	record int
+	family int
+	key    backendValueID
+}
+
+type backendGoRecordDynamicChildField struct {
+	family int
+	ref    backendValueID
+	key    backendValueID
+}
+
 type backendGoRecordParentField struct {
 	array int
 	field int
@@ -162,45 +174,47 @@ type backendGoRecordFieldOperation struct {
 }
 
 type backendGoRecordTablePlan struct {
-	enabled        bool
-	rejectReason   string
-	roots          []backendValueID
-	recordByRoot   map[backendValueID]int
-	records        []backendGoRecord
-	mapByRoot      map[backendValueID]int
-	maps           []backendGoRecordMap
-	mapSetByPC     map[int32]backendGoRecordMapOperation
-	mapGetByPC     map[int32]backendGoRecordMapOperation
-	arrayByRoot    map[backendValueID]int
-	arrays         []backendGoRecordArray
-	arraySetByPC   map[int32]backendGoRecordArrayOperation
-	arrayGetByPC   map[int32]int
-	arrayKeyValues map[backendValueID]int
-	arrayPreparePC map[int32]int
-	arrayNextPC    map[int32]int
-	families       []backendGoRecordArrayFamily
-	familyByParent map[backendGoRecordParentField]int
-	childByScratch map[backendGoRecordScratchField]backendGoRecordChildArray
-	childSetByPC   map[int32]backendGoRecordChildArray
-	familyValues   map[backendValueID]int
-	familyGetByPC  map[int32]backendGoRecordFusedArrayGet
-	familyRawLenPC map[int32]int
-	familyRemovePC map[int32]int
-	familyPrepare  map[int32]int
-	familyNext     map[int32]int
-	childRecords   []backendGoRecordChildRecords
-	childByParent  map[backendGoRecordParentField]int
-	childRecord    map[backendGoRecordScratchField]backendGoRecordChildRecord
-	childRecordSet map[int32]backendGoRecordChildRecord
-	fusedGetByPC   map[int32]backendGoRecordFusedGet
-	fusedSetByPC   map[int32]backendGoRecordFusedSet
-	dynamicGetByPC map[int32]backendGoRecordDynamicField
-	dynamicSetByPC map[int32]backendGoRecordDynamicField
-	fieldsByPC     map[int32]backendGoRecordFieldOperation
-	refs           map[backendValueID]backendGoRecordRef
-	iteratorValues []bool
-	iteratorArray  []int
-	scalarValues   []bool
+	enabled                bool
+	rejectReason           string
+	roots                  []backendValueID
+	recordByRoot           map[backendValueID]int
+	records                []backendGoRecord
+	mapByRoot              map[backendValueID]int
+	maps                   []backendGoRecordMap
+	mapSetByPC             map[int32]backendGoRecordMapOperation
+	mapGetByPC             map[int32]backendGoRecordMapOperation
+	arrayByRoot            map[backendValueID]int
+	arrays                 []backendGoRecordArray
+	arraySetByPC           map[int32]backendGoRecordArrayOperation
+	arrayGetByPC           map[int32]int
+	arrayKeyValues         map[backendValueID]int
+	arrayPreparePC         map[int32]int
+	arrayNextPC            map[int32]int
+	families               []backendGoRecordArrayFamily
+	familyByParent         map[backendGoRecordParentField]int
+	childByScratch         map[backendGoRecordScratchField]backendGoRecordChildArray
+	childSetByPC           map[int32]backendGoRecordChildArray
+	familyValues           map[backendValueID]int
+	familyGetByPC          map[int32]backendGoRecordFusedArrayGet
+	familyRawLenPC         map[int32]int
+	familyRemovePC         map[int32]int
+	familyPrepare          map[int32]int
+	familyNext             map[int32]int
+	childRecords           []backendGoRecordChildRecords
+	childByParent          map[backendGoRecordParentField]int
+	childRecord            map[backendGoRecordScratchField]backendGoRecordChildRecord
+	childRecordSet         map[int32]backendGoRecordChildRecord
+	fusedGetByPC           map[int32]backendGoRecordFusedGet
+	fusedSetByPC           map[int32]backendGoRecordFusedSet
+	dynamicGetByPC         map[int32]backendGoRecordDynamicField
+	dynamicSetByPC         map[int32]backendGoRecordDynamicField
+	dynamicChildSelectByPC map[int32]backendGoRecordDynamicChildSelector
+	dynamicChildGetByPC    map[int32]backendGoRecordDynamicChildField
+	fieldsByPC             map[int32]backendGoRecordFieldOperation
+	refs                   map[backendValueID]backendGoRecordRef
+	iteratorValues         []bool
+	iteratorArray          []int
+	scalarValues           []bool
 }
 
 func analyzeBackendGoRecordTables(
@@ -211,38 +225,40 @@ func analyzeBackendGoRecordTables(
 		return backendGoRecordTablePlan{}
 	}
 	plan := backendGoRecordTablePlan{
-		roots:          make([]backendValueID, len(ir.values)),
-		recordByRoot:   make(map[backendValueID]int),
-		mapByRoot:      make(map[backendValueID]int),
-		mapSetByPC:     make(map[int32]backendGoRecordMapOperation),
-		mapGetByPC:     make(map[int32]backendGoRecordMapOperation),
-		arrayByRoot:    make(map[backendValueID]int),
-		arraySetByPC:   make(map[int32]backendGoRecordArrayOperation),
-		arrayGetByPC:   make(map[int32]int),
-		arrayKeyValues: make(map[backendValueID]int),
-		arrayPreparePC: make(map[int32]int),
-		arrayNextPC:    make(map[int32]int),
-		familyByParent: make(map[backendGoRecordParentField]int),
-		childByScratch: make(map[backendGoRecordScratchField]backendGoRecordChildArray),
-		childSetByPC:   make(map[int32]backendGoRecordChildArray),
-		familyValues:   make(map[backendValueID]int),
-		familyGetByPC:  make(map[int32]backendGoRecordFusedArrayGet),
-		familyRawLenPC: make(map[int32]int),
-		familyRemovePC: make(map[int32]int),
-		familyPrepare:  make(map[int32]int),
-		familyNext:     make(map[int32]int),
-		childByParent:  make(map[backendGoRecordParentField]int),
-		childRecord:    make(map[backendGoRecordScratchField]backendGoRecordChildRecord),
-		childRecordSet: make(map[int32]backendGoRecordChildRecord),
-		fusedGetByPC:   make(map[int32]backendGoRecordFusedGet),
-		fusedSetByPC:   make(map[int32]backendGoRecordFusedSet),
-		dynamicGetByPC: make(map[int32]backendGoRecordDynamicField),
-		dynamicSetByPC: make(map[int32]backendGoRecordDynamicField),
-		fieldsByPC:     make(map[int32]backendGoRecordFieldOperation),
-		refs:           make(map[backendValueID]backendGoRecordRef),
-		iteratorValues: make([]bool, len(ir.values)),
-		iteratorArray:  make([]int, len(ir.values)),
-		scalarValues:   make([]bool, len(ir.values)),
+		roots:                  make([]backendValueID, len(ir.values)),
+		recordByRoot:           make(map[backendValueID]int),
+		mapByRoot:              make(map[backendValueID]int),
+		mapSetByPC:             make(map[int32]backendGoRecordMapOperation),
+		mapGetByPC:             make(map[int32]backendGoRecordMapOperation),
+		arrayByRoot:            make(map[backendValueID]int),
+		arraySetByPC:           make(map[int32]backendGoRecordArrayOperation),
+		arrayGetByPC:           make(map[int32]int),
+		arrayKeyValues:         make(map[backendValueID]int),
+		arrayPreparePC:         make(map[int32]int),
+		arrayNextPC:            make(map[int32]int),
+		familyByParent:         make(map[backendGoRecordParentField]int),
+		childByScratch:         make(map[backendGoRecordScratchField]backendGoRecordChildArray),
+		childSetByPC:           make(map[int32]backendGoRecordChildArray),
+		familyValues:           make(map[backendValueID]int),
+		familyGetByPC:          make(map[int32]backendGoRecordFusedArrayGet),
+		familyRawLenPC:         make(map[int32]int),
+		familyRemovePC:         make(map[int32]int),
+		familyPrepare:          make(map[int32]int),
+		familyNext:             make(map[int32]int),
+		childByParent:          make(map[backendGoRecordParentField]int),
+		childRecord:            make(map[backendGoRecordScratchField]backendGoRecordChildRecord),
+		childRecordSet:         make(map[int32]backendGoRecordChildRecord),
+		fusedGetByPC:           make(map[int32]backendGoRecordFusedGet),
+		fusedSetByPC:           make(map[int32]backendGoRecordFusedSet),
+		dynamicGetByPC:         make(map[int32]backendGoRecordDynamicField),
+		dynamicSetByPC:         make(map[int32]backendGoRecordDynamicField),
+		dynamicChildSelectByPC: make(map[int32]backendGoRecordDynamicChildSelector),
+		dynamicChildGetByPC:    make(map[int32]backendGoRecordDynamicChildField),
+		fieldsByPC:             make(map[int32]backendGoRecordFieldOperation),
+		refs:                   make(map[backendValueID]backendGoRecordRef),
+		iteratorValues:         make([]bool, len(ir.values)),
+		iteratorArray:          make([]int, len(ir.values)),
+		scalarValues:           make([]bool, len(ir.values)),
 	}
 	for valueIndex := range plan.iteratorArray {
 		plan.iteratorArray[valueIndex] = -1
@@ -349,7 +365,20 @@ func analyzeBackendGoRecordTables(
 		}
 	}
 	plan.discoverEmptyChildArrays(ir)
+	standaloneDynamic := false
 	if len(plan.maps) == 0 && len(plan.arrays) == 0 {
+		for pc := range ir.ops {
+			operation := &ir.ops[pc]
+			if operation.op != opGetIndex {
+				continue
+			}
+			if _, ok := plan.recordByRoot[plan.root(backendOperationUse(operation, operation.b))]; ok {
+				standaloneDynamic = true
+				break
+			}
+		}
+	}
+	if len(plan.maps) == 0 && len(plan.arrays) == 0 && !standaloneDynamic {
 		plan.rejectReason = "no record containers"
 		return plan
 	}
@@ -399,8 +428,12 @@ func analyzeBackendGoRecordTables(
 		plan.rejectReason = "child-array families"
 		return plan
 	}
-	if !plan.discoverChildRecordFamilies() {
+	if !plan.discoverChildRecordFamilies(ir) {
 		plan.rejectReason = "child-record families"
+		return plan
+	}
+	if !plan.classifyDynamicChildSelectors(ir) {
+		plan.rejectReason = "dynamic child-record selectors"
 		return plan
 	}
 	if !plan.analyzeIterators(ir) {
@@ -530,7 +563,7 @@ func (plan *backendGoRecordTablePlan) analyzeIterators(ir *backendProtoIR) bool 
 			}
 		}
 	}
-	return len(plan.arrayNextPC) != 0 || len(plan.arrayGetByPC) != 0
+	return len(plan.arrays) == 0 || len(plan.arrayNextPC) != 0 || len(plan.arrayGetByPC) != 0
 }
 
 func (plan *backendGoRecordTablePlan) propagateIteratorValues(ir *backendProtoIR) bool {
@@ -1790,8 +1823,23 @@ func (plan *backendGoRecordTablePlan) classifyDynamicFields(ir *backendProtoIR) 
 		default:
 			continue
 		}
+		if _, selector := plan.dynamicChildSelectByPC[operation.pc]; selector {
+			continue
+		}
 		record, ok := plan.recordByRoot[plan.root(base)]
 		if !ok {
+			ref, refOK := plan.refs[base]
+			if operation.op == opGetIndex && refOK && ref.kind == backendGoRecordRefChildRecord {
+				if key == invalidBackendValueID || ref.index < 0 || ref.index >= len(plan.childRecords) {
+					plan.rejectReason = "invalid dynamic child-record field at PC " + strconv.Itoa(int(operation.pc))
+					return false
+				}
+				plan.dynamicChildGetByPC[operation.pc] = backendGoRecordDynamicChildField{
+					family: ref.index,
+					ref:    base,
+					key:    key,
+				}
+			}
 			continue
 		}
 		if key == invalidBackendValueID || operation.op == opSetIndex && source == invalidBackendValueID {
@@ -2243,6 +2291,9 @@ func (plan *backendGoRecordTablePlan) finalizeFieldTags(
 	for _, fused := range plan.fusedSetByPC {
 		usedChildFamilies[fused.family] = true
 	}
+	for _, dynamic := range plan.dynamicChildGetByPC {
+		usedChildFamilies[dynamic.family] = true
+	}
 	for familyIndex := range usedChildFamilies {
 		if familyIndex < 0 || familyIndex >= len(plan.childRecords) {
 			plan.rejectReason = "invalid fused child-record family"
@@ -2260,6 +2311,26 @@ func (plan *backendGoRecordTablePlan) finalizeFieldTags(
 				plan.childRecords[fused.family].fieldTags,
 			) {
 			plan.rejectReason = "fused child-record mutation changes scalar tags"
+			return false
+		}
+	}
+	for pc, selector := range plan.dynamicChildSelectByPC {
+		if !backendGoRecordOptionalKeyTags(backendGoRecordValueTags(tags, selector.key)) {
+			plan.rejectReason = "dynamic child-record selector key is not a string at PC " + strconv.Itoa(int(pc))
+			return false
+		}
+	}
+	for pc, dynamic := range plan.dynamicChildGetByPC {
+		if !backendGoRecordOptionalKeyTags(backendGoRecordValueTags(tags, dynamic.key)) {
+			plan.rejectReason = "dynamic child-record field key is not a string at PC " + strconv.Itoa(int(pc))
+			return false
+		}
+		if dynamic.family < 0 || dynamic.family >= len(plan.childRecords) {
+			plan.rejectReason = "invalid dynamic child-record family at PC " + strconv.Itoa(int(pc))
+			return false
+		}
+		if _, ok := backendGoScalarPayloadType(plan.childRecords[dynamic.family].fieldTags); !ok {
+			plan.rejectReason = "dynamic child-record fields have mixed scalar tags at PC " + strconv.Itoa(int(pc))
 			return false
 		}
 	}
@@ -2404,6 +2475,9 @@ func (plan *backendGoRecordTablePlan) validateUses(ir *backendProtoIR) bool {
 						return false
 					}
 				case opGetIndex:
+					if _, selector := plan.dynamicChildSelectByPC[operation.pc]; selector {
+						break
+					}
 					if _, dynamic := plan.dynamicGetByPC[operation.pc]; dynamic {
 						break
 					}
@@ -2443,6 +2517,11 @@ func (plan *backendGoRecordTablePlan) validateUses(ir *backendProtoIR) bool {
 				switch operation.op {
 				case opMove, opGetStringField, opGetStringFieldIndex, opSetStringField, opSetStringFieldIndex, opEqual, opNotEqual,
 					opJumpIfFalse, opJumpIfTableHasMetatable:
+				case opGetIndex:
+					if _, ok := plan.dynamicChildGetByPC[operation.pc]; !ok {
+						plan.rejectReason = "unclassified dynamic child-record lookup at PC " + strconv.Itoa(int(operation.pc))
+						return false
+					}
 				default:
 					plan.rejectReason = "unsupported record reference use by " + opcodeName(operation.op) + " at PC " + strconv.Itoa(int(operation.pc))
 					return false
@@ -2644,7 +2723,7 @@ func (plan *backendGoRecordTablePlan) discoverChildArrayFamilies(ir *backendProt
 	return true
 }
 
-func (plan *backendGoRecordTablePlan) discoverChildRecordFamilies() bool {
+func (plan *backendGoRecordTablePlan) discoverChildRecordFamilies(ir *backendProtoIR) bool {
 	usedChildren := make(map[int]bool)
 	for parentIndex := range plan.arrays {
 		parent := &plan.arrays[parentIndex]
@@ -2714,6 +2793,62 @@ func (plan *backendGoRecordTablePlan) discoverChildRecordFamilies() bool {
 			continue
 		}
 		parent := &plan.records[parentIndex]
+		dynamic := false
+		for pc := range ir.ops {
+			operation := &ir.ops[pc]
+			if operation.op == opGetIndex &&
+				plan.root(backendOperationUse(operation, operation.b)) == parent.root {
+				dynamic = true
+				break
+			}
+		}
+		if !dynamic {
+			continue
+		}
+		children := make([]int, 0, len(parent.fieldNames))
+		parentFields := make([]int, 0, len(parent.fieldNames))
+		for parentField := range parent.fieldNames {
+			root := plan.root(parent.fieldValues[parentField])
+			child, ok := plan.recordByRoot[root]
+			if !ok || child == parentIndex || plan.records[child].storedAtPC >= 0 || usedChildren[child] {
+				continue
+			}
+			children = append(children, child)
+			parentFields = append(parentFields, parentField)
+		}
+		if len(children) < 2 || len(children) != len(parent.fieldNames) {
+			continue
+		}
+		familyIndex, ok := plan.addChildRecordFamily(children, -1, -1, usedChildren)
+		if !ok {
+			return false
+		}
+		for member, parentField := range parentFields {
+			childRef := backendGoRecordChildRecord{family: familyIndex, member: member}
+			key := backendGoRecordScratchField{record: parentIndex, field: parentField}
+			if current, exists := plan.childRecord[key]; exists && current != childRef {
+				return false
+			}
+			plan.childRecord[key] = childRef
+			foundSet := false
+			for pc, field := range parent.setByPC {
+				if field != parentField {
+					continue
+				}
+				plan.childRecordSet[pc] = childRef
+				foundSet = true
+				break
+			}
+			if !foundSet {
+				return false
+			}
+		}
+	}
+	for parentIndex := range plan.records {
+		if usedChildren[parentIndex] {
+			continue
+		}
+		parent := &plan.records[parentIndex]
 		for parentField := range parent.fieldNames {
 			root := plan.root(parent.fieldValues[parentField])
 			child, ok := plan.recordByRoot[root]
@@ -2747,6 +2882,53 @@ func (plan *backendGoRecordTablePlan) discoverChildRecordFamilies() bool {
 			if !foundSet {
 				return false
 			}
+		}
+	}
+	return true
+}
+
+func (plan *backendGoRecordTablePlan) classifyDynamicChildSelectors(ir *backendProtoIR) bool {
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op != opGetIndex || len(operation.defs) != 1 {
+			continue
+		}
+		recordIndex, ok := plan.recordByRoot[plan.root(backendOperationUse(operation, operation.b))]
+		if !ok || recordIndex < 0 || recordIndex >= len(plan.records) {
+			continue
+		}
+		record := &plan.records[recordIndex]
+		familyIndex := -1
+		for field := range record.fieldNames {
+			child, exists := plan.childRecord[backendGoRecordScratchField{
+				record: recordIndex,
+				field:  field,
+			}]
+			if !exists || child.family < 0 {
+				familyIndex = -1
+				break
+			}
+			if familyIndex >= 0 && child.family != familyIndex {
+				familyIndex = -1
+				break
+			}
+			familyIndex = child.family
+		}
+		if familyIndex < 0 {
+			continue
+		}
+		key := backendOperationUse(operation, operation.c)
+		if !ir.validBackendValue(key) {
+			return false
+		}
+		plan.dynamicChildSelectByPC[operation.pc] = backendGoRecordDynamicChildSelector{
+			record: recordIndex,
+			family: familyIndex,
+			key:    key,
+		}
+		plan.refs[operation.defs[0].value] = backendGoRecordRef{
+			kind:  backendGoRecordRefChildRecord,
+			index: familyIndex,
 		}
 	}
 	return true
@@ -3981,6 +4163,106 @@ func (emitter *backendGoNumericEmitter) emitRecordArrayNext(
 	}
 	emitter.emitGoto(int32(block.id), nextBlock, 1)
 	return true, true, nil
+}
+
+func (emitter *backendGoNumericEmitter) emitRecordDynamicChildSelector(
+	operation *backendOperationIR,
+	definition func(int32) (backendValueID, error),
+) (bool, error) {
+	selector, ok := emitter.plan.records.dynamicChildSelectByPC[operation.pc]
+	if !ok {
+		return false, nil
+	}
+	if selector.record < 0 || selector.record >= len(emitter.plan.records.records) ||
+		selector.family < 0 || selector.family >= len(emitter.plan.records.childRecords) {
+		return true, fmt.Errorf("emit backend Go numeric proof: PC %d has invalid dynamic child-record selector", operation.pc)
+	}
+	destination, err := definition(operation.a)
+	if err != nil {
+		return true, err
+	}
+	emitter.emitOptionalPresenceGuard(operation, 1, selector.key)
+	record := emitter.plan.records.records[selector.record]
+	fmt.Fprintf(&emitter.body, "\tswitch v%d {\n", selector.key)
+	for field, name := range record.fieldNames {
+		child, exists := emitter.plan.records.childRecord[backendGoRecordScratchField{
+			record: selector.record,
+			field:  field,
+		}]
+		if !exists || child.family != selector.family {
+			return true, fmt.Errorf("emit backend Go numeric proof: PC %d changes dynamic child-record family", operation.pc)
+		}
+		fmt.Fprintf(&emitter.body, "\tcase uint32(%d):\n\t\tv%d = %d\n", name, destination, child.member+1)
+	}
+	emitter.body.WriteString("\tdefault:\n")
+	fmt.Fprintf(&emitter.body, "\t\t%s\n", emitter.failureReturn())
+	emitter.body.WriteString("\t}\n")
+	return true, nil
+}
+
+func (emitter *backendGoNumericEmitter) emitRecordDynamicChildGet(
+	operation *backendOperationIR,
+	definition func(int32) (backendValueID, error),
+) (bool, error) {
+	dynamic, ok := emitter.plan.records.dynamicChildGetByPC[operation.pc]
+	if !ok {
+		return false, nil
+	}
+	if dynamic.family < 0 || dynamic.family >= len(emitter.plan.records.childRecords) {
+		return true, fmt.Errorf("emit backend Go numeric proof: PC %d has invalid dynamic child-record family", operation.pc)
+	}
+	destination, err := definition(operation.a)
+	if err != nil {
+		return true, err
+	}
+	family := emitter.plan.records.childRecords[dynamic.family]
+	emitter.emitOptionalPresenceGuard(operation, 1, dynamic.key)
+	fmt.Fprintf(
+		&emitter.body,
+		"\tif v%d < 1 || v%d > %d || v%d != float64(int(v%d)) {\n",
+		dynamic.ref,
+		dynamic.ref,
+		len(family.records),
+		dynamic.ref,
+		dynamic.ref,
+	)
+	fmt.Fprintf(&emitter.body, "\t\t%s\n", emitter.failureReturn())
+	emitter.body.WriteString("\t}\n")
+	_, destinationOptional := backendGoOptionalScalarTags(emitter.plan.tags[destination-1])
+	fmt.Fprintf(&emitter.body, "\tswitch int(v%d) - 1 {\n", dynamic.ref)
+	for member, recordIndex := range family.records {
+		if recordIndex < 0 || recordIndex >= len(emitter.plan.records.records) {
+			return true, fmt.Errorf("emit backend Go numeric proof: PC %d has invalid dynamic child record", operation.pc)
+		}
+		record := emitter.plan.records.records[recordIndex]
+		fmt.Fprintf(&emitter.body, "\tcase %d:\n\t\tswitch v%d {\n", member, dynamic.key)
+		for _, name := range family.fieldNames {
+			field, exists := record.fieldIndex[name]
+			if !exists {
+				return true, fmt.Errorf("emit backend Go numeric proof: PC %d changes dynamic child-record shape", operation.pc)
+			}
+			fmt.Fprintf(&emitter.body, "\t\tcase uint32(%d):\n", name)
+			fmt.Fprintf(&emitter.body, "\t\t\tv%d = r%d_%d\n", destination, recordIndex, field)
+			if destinationOptional {
+				if emitter.recordFieldOptional(recordIndex, field) {
+					fmt.Fprintf(&emitter.body, "\t\t\tvp%d = rp%d_%d\n", destination, recordIndex, field)
+				} else {
+					fmt.Fprintf(&emitter.body, "\t\t\tvp%d = true\n", destination)
+				}
+			}
+		}
+		emitter.body.WriteString("\t\tdefault:\n")
+		if destinationOptional {
+			fmt.Fprintf(&emitter.body, "\t\t\tvp%d = false\n", destination)
+		} else {
+			fmt.Fprintf(&emitter.body, "\t\t\t%s\n", emitter.failureReturn())
+		}
+		emitter.body.WriteString("\t\t}\n")
+	}
+	emitter.body.WriteString("\tdefault:\n")
+	fmt.Fprintf(&emitter.body, "\t\t%s\n", emitter.failureReturn())
+	emitter.body.WriteString("\t}\n")
+	return true, nil
 }
 
 func (emitter *backendGoNumericEmitter) emitRecordDynamicGet(
