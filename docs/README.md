@@ -30,6 +30,8 @@ and retire or delete it when the slice lands or is abandoned.
 - `public-surface.md`: initial import and API surface rules.
 - `embedding.md`: generic host invocation, dispatch, typed catalogs, and
   cooperative suspension; Hearth appears only as a first-host case study.
+- `prepared.md`: deterministic prepared-Go generation, the `emberc` manifest,
+  freshness checking, and explicit runtime binding.
 - `golang-rules.md`: Go coding rules for this repository.
 - `checks.md`: local verification commands.
 - `adr/0001-go-native-runtime-mapping.md`: public Go ownership decision; ADR 0007

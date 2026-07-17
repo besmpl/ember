@@ -93,6 +93,7 @@ Start with the small durable documentation set:
 - [docs/compatibility.md](docs/compatibility.md)
 - [docs/public-surface.md](docs/public-surface.md)
 - [docs/embedding.md](docs/embedding.md)
+- [docs/prepared.md](docs/prepared.md)
 - [docs/checks.md](docs/checks.md)
 
 The compatibility document is the maintained feature manifest: every claimed
