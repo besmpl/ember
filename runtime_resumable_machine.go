@@ -245,6 +245,10 @@ func (target *machineResumableTarget) close() {
 }
 
 func (target *machineCallbackTarget) callResumable(ctx context.Context, args []Value) (resumableOutcome, error) {
+	return target.callResumableRun(ctx, args, false)
+}
+
+func (target *machineCallbackTarget) callResumableRun(ctx context.Context, args []Value, stopped bool) (resumableOutcome, error) {
 	if target == nil || target.execution == nil || target.execution.owner == nil || target.runtime == nil || target.state == nil {
 		return resumableOutcome{}, fmt.Errorf("callback: not retained")
 	}
@@ -269,7 +273,7 @@ func (target *machineCallbackTarget) callResumable(ctx context.Context, args []V
 		return resumableOutcome{}, fmt.Errorf("callback: create resumable call: %w", err)
 	}
 	call := &moduleCallTarget{runtime: target.runtime, target: resumable}
-	outcome, err := call.resume(ctx, args, nil)
+	outcome, err := resumeResumableTarget(call, ctx, args, nil, stopped)
 	if err != nil {
 		call.close()
 		return resumableOutcome{}, fmt.Errorf("callback: call script function: %w", err)
@@ -354,13 +358,17 @@ func (target *machineEntrypointTarget) resumeRun(ctx context.Context, values []V
 	}
 	if target.moduleWait != nil {
 		initialization := target.moduleWait.initialization
-		if err := initialization.resumeHost(ctx, values, failure, stopped); err != nil {
-			target.close()
-			return resumableOutcome{}, target.wrapError(err)
-		}
-		if !initialization.done {
-			token, _ := target.moduleWait.visibleToken()
-			return resumableOutcome{target: target, token: token}, nil
+		if target.moduleWait.owner {
+			if err := initialization.resumeHost(ctx, values, failure, stopped); err != nil {
+				target.close()
+				return resumableOutcome{}, target.wrapError(err)
+			}
+			if !initialization.done {
+				token, _ := target.moduleWait.visibleToken()
+				return resumableOutcome{target: target, token: token}, nil
+			}
+		} else if !initialization.done {
+			return resumableOutcome{}, ErrSuspensionPending
 		}
 		target.moduleWait = nil
 		return target.continueAfterModuleWait(ctx, initialization, stopped)
@@ -469,6 +477,14 @@ func (target *machineEntrypointTarget) setModuleWait(wait *runtimeModuleWait) {
 	if wait != nil {
 		wait.bind(target.close)
 	}
+}
+
+func (target *machineEntrypointTarget) bindDependencyState(state *suspensionState, onCancel func()) {
+	if target == nil || target.moduleWait == nil {
+		return
+	}
+	target.moduleWait.bindState(state)
+	target.moduleWait.bind(onCancel)
 }
 
 func (target *machineEntrypointTarget) pump(ctx context.Context, stopped bool) (resumableOutcome, bool, error) {
@@ -612,7 +628,15 @@ type machineHookSuspensionTarget struct {
 	target resumableTarget
 }
 
+type machineHookDeferredTarget struct {
+	run *machineHookRun
+}
+
 func (execution *machineRuntimeExecution) runHookResumable(runtime *Runtime, ctx context.Context, hook string, args []Value) (resumableOutcome, error) {
+	return execution.runHookResumableRun(runtime, ctx, hook, args, false)
+}
+
+func (execution *machineRuntimeExecution) runHookResumableRun(runtime *Runtime, ctx context.Context, hook string, args []Value, stopped bool) (resumableOutcome, error) {
 	run := &machineHookRun{
 		execution: execution,
 		runtime:   runtime,
@@ -620,10 +644,14 @@ func (execution *machineRuntimeExecution) runHookResumable(runtime *Runtime, ctx
 		args:      append([]Value(nil), args...),
 		entries:   make([]machineHookEntry, len(execution.image.entrypoints)),
 	}
-	return run.start(ctx)
+	return run.startRun(ctx, stopped)
 }
 
 func (run *machineHookRun) start(ctx context.Context) (resumableOutcome, error) {
+	return run.startRun(ctx, false)
+}
+
+func (run *machineHookRun) startRun(ctx context.Context, stopped bool) (resumableOutcome, error) {
 	if run == nil || run.runtime == nil || run.execution == nil || run.closed {
 		return resumableOutcome{}, ErrSuspensionStale
 	}
@@ -644,7 +672,7 @@ func (run *machineHookRun) start(ctx context.Context) (resumableOutcome, error) 
 			call:       &entry.call,
 		}
 		entry.target = target
-		outcome, err := target.resume(ctx, run.args, nil)
+		outcome, err := resumeResumableTarget(target, ctx, run.args, nil, stopped)
 		if err != nil {
 			run.close()
 			return resumableOutcome{}, err
@@ -657,7 +685,7 @@ func (run *machineHookRun) start(ctx context.Context) (resumableOutcome, error) 
 		entry.target = nil
 		entry.terminal = true
 	}
-	if err := run.pump(ctx, false); err != nil {
+	if err := run.pump(ctx, stopped); err != nil {
 		run.close()
 		return resumableOutcome{}, err
 	}
@@ -686,6 +714,40 @@ func (target *machineHookSuspensionTarget) close() {
 	target.run.closeEntry(target.index, target.target)
 	target.run = nil
 	target.target = nil
+}
+
+func (target *machineHookDeferredTarget) resume(ctx context.Context, _ []Value, _ error) (resumableOutcome, error) {
+	return target.resumeRun(ctx, false)
+}
+
+func (target *machineHookDeferredTarget) resumeStopped(ctx context.Context, _ []Value, _ error) (resumableOutcome, error) {
+	return target.resumeRun(ctx, true)
+}
+
+func (target *machineHookDeferredTarget) resumeRun(ctx context.Context, stopped bool) (resumableOutcome, error) {
+	if target == nil || target.run == nil || target.run.closed {
+		return resumableOutcome{}, ErrSuspensionStale
+	}
+	if err := target.run.pump(ctx, stopped); err != nil {
+		target.run.close()
+		return resumableOutcome{}, err
+	}
+	return target.run.snapshot(), nil
+}
+
+func (target *machineHookDeferredTarget) close() {
+	if target == nil || target.run == nil {
+		return
+	}
+	target.run.close()
+	target.run = nil
+}
+
+func (target *machineHookDeferredTarget) bindSuspensionState(state *suspensionState) {
+	if target == nil || target.run == nil {
+		return
+	}
+	target.run.bindDeferredState(state)
 }
 
 func (run *machineHookRun) resumeEntry(
@@ -754,9 +816,24 @@ func (run *machineHookRun) pump(ctx context.Context, stopped bool) error {
 	}
 }
 
+func (run *machineHookRun) bindDeferredState(state *suspensionState) {
+	if run == nil || run.closed || state == nil {
+		return
+	}
+	for index := range run.entries {
+		entry := &run.entries[index]
+		target, ok := entry.target.(*machineEntrypointTarget)
+		if !ok || target.hostVisible() {
+			continue
+		}
+		target.bindDependencyState(state, run.close)
+	}
+}
+
 func (run *machineHookRun) snapshot() resumableOutcome {
 	report := HookReport{Hook: run.hook}
 	pending := make([]resumablePending, 0, len(run.entries))
+	hidden := false
 	for index := range run.entries {
 		entry := &run.entries[index]
 		if entry.terminal {
@@ -766,7 +843,13 @@ func (run *machineHookRun) snapshot() resumableOutcome {
 		if entry.target == nil {
 			continue
 		}
+		if target, ok := entry.target.(*machineEntrypointTarget); ok && target.closed {
+			entry.target = nil
+			entry.token = nil
+			continue
+		}
 		if target, ok := entry.target.(quiescentResumableTarget); ok && !target.hostVisible() {
+			hidden = true
 			continue
 		}
 		entryIndex := index
@@ -783,7 +866,16 @@ func (run *machineHookRun) snapshot() resumableOutcome {
 			},
 		})
 	}
-	if len(pending) == 0 {
+	if len(pending) == 0 && hidden {
+		deferred := &machineHookDeferredTarget{run: run}
+		pending = append(pending, resumablePending{
+			target:  deferred,
+			hook:    run.hook,
+			blocked: true,
+			bind:    deferred.bindSuspensionState,
+		})
+	}
+	if len(pending) == 0 && !hidden {
 		run.closed = true
 		run.runtime = nil
 		run.execution = nil

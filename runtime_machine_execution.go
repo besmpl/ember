@@ -35,7 +35,21 @@ func (execution *machineRuntimeExecution) runHook(runtime *Runtime, ctx context.
 	if !execution.usesResumableRequire() {
 		return execution.runMachineHook(runtime, ctx, hook, args, report)
 	}
-	outcome, err := execution.runHookResumable(runtime, ctx, hook, args)
+	lease, err := execution.owner.beginRun()
+	if errors.Is(err, errMachineOwnerClosed) {
+		return fmt.Errorf("runtime: closed")
+	}
+	if errors.Is(err, errMachineOwnerBusy) {
+		return fmt.Errorf("runtime: begin run: %w", ErrRuntimeBusy)
+	}
+	if err != nil {
+		return fmt.Errorf("runtime: begin run: %w", err)
+	}
+	defer lease.end()
+	if err := runtime.pendingModuleInitializationError("runtime: begin hook"); err != nil {
+		return err
+	}
+	outcome, err := execution.runHookResumableRun(runtime, ctx, hook, args, true)
 	if err != nil {
 		return err
 	}
@@ -111,6 +125,9 @@ func (execution *machineRuntimeExecution) runMachineHook(runtime *Runtime, ctx c
 		return fmt.Errorf("runtime: begin run: %w", err)
 	}
 	defer lease.end()
+	if err := runtime.pendingModuleInitializationError("runtime: begin hook"); err != nil {
+		return err
+	}
 
 	if hook == "" {
 		return fmt.Errorf("runtime: empty hook")

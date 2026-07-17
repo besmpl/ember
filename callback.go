@@ -122,6 +122,9 @@ func (target *vmCallbackTarget) call(ctx context.Context, args []Value) ([]Value
 		return nil, fmt.Errorf("callback: begin call: %w", err)
 	}
 	defer lease.end()
+	if err := target.scope.runtime.pendingModuleInitializationError("callback: begin call"); err != nil {
+		return nil, err
+	}
 	target.state.mu.Lock()
 	released := target.state.released
 	target.state.mu.Unlock()

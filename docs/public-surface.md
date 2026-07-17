@@ -161,28 +161,39 @@ testable seam.
 - `Runtime.RunHookResumable` and `Callback.CallResumable` run to a quiescent
   execution snapshot. `ExecutionResult.Suspensions` contains every
   host-visible wait still pending; hook waits are ordered by declared
-  entrypoint order. `ExecutionResult.Suspension` remains an alias for the first
-  pending wait for single-chain callers. Completed and skipped hook calls are
-  reported in declared order even when the host resumes waits in another
-  order.
-- `Suspension.Token` exposes only the host-owned token. `Entrypoint`, `Module`,
-  and `Hook` identify a hook wait; retained callback waits have empty
-  attribution. Single-use `Resume` supplies call results and `Fail` injects an
-  ordinary error at the original call site. `Cancel` is idempotent; after it,
-  `Resume` and `Fail` report `ErrSuspensionStale`. A resumed script may expose
-  zero, one, or several successor suspensions.
+  entrypoint order. If an independently started operation is blocked only on a
+  module initializer owned by another operation, its result contains one
+  tokenless dependency continuation instead of pretending the operation
+  completed or duplicating the initializer token. `ExecutionResult.Suspension`
+  remains an alias for the first pending handle. Completed and skipped hook
+  calls are reported in declared order even when the host resumes waits in
+  another order.
+- `Suspension.Token` exposes only a host-owned token and is nil for a dependency
+  continuation. `Suspension.Ready` is immediately true for host waits and turns
+  true for a dependency continuation when its initializer completes or fails.
+  An early `Resume` or `Fail` returns `ErrSuspensionPending` without consuming
+  the handle; once ready, resuming continues that operation with the shared
+  initializer result. `Entrypoint`, `Module`, and `Hook` identify hook waits;
+  retained callback waits have empty attribution. `Cancel` is idempotent; after
+  it, `Resume` and `Fail` report `ErrSuspensionStale`. A resumed script may
+  expose zero, one, or several successor suspensions.
 - Entrypoint top-level code and newly required module initializers participate
   in the same resumable operation as their hook or callback. Every module,
   including an entrypoint root, has at most one in-flight initializer and one
   cache result. Independent initializers may remain suspended together and
-  finish in host-selected order. Internal dependency waits are not exposed as
-  host tokens, ready dependents are pumped in declared entrypoint order, and
-  recursive require paths still report the complete active-loading cycle.
+  finish in host-selected order. Internal dependency waits are never exposed as
+  host tokens; dependency continuations represent whole independently started
+  operations, while ready dependents inside one hook operation are pumped in
+  declared entrypoint order. Recursive require paths still report the complete
+  active-loading cycle.
 - Every resumable step uses normal runtime serialization and receives a fresh
   context and execution budget. Context validation and VM/Machine run admission
   occur before the handle is consumed under the same serialization decision.
   A context already canceled or a runtime already busy therefore leaves the
-  exact handle retryable. Several idle suspended invocations may coexist.
+  exact handle retryable. Several idle suspended invocations may coexist. A
+  completion-only `RunHook` or `Callback.Call` returns `ErrRuntimeBusy` before
+  guest execution while module initialization is suspended because that call
+  cannot return a continuation.
   Canceling the public owner of a module initializer aborts that initializer
   and its private dependents without guest execution, while unrelated public
   waits remain valid and later initialization retries cleanly. `Runtime.Close`

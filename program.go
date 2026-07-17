@@ -321,6 +321,9 @@ func (r *Runtime) runVMHook(ctx context.Context, hook string, args []Value, repo
 		return fmt.Errorf("runtime: begin run: %w", err)
 	}
 	defer lease.end()
+	if err := r.pendingModuleInitializationError("runtime: begin hook"); err != nil {
+		return err
+	}
 	if hook == "" {
 		return fmt.Errorf("runtime: empty hook")
 	}

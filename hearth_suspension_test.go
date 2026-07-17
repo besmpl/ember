@@ -98,6 +98,223 @@ func TestResumableHooksSupportMultiplePendingInvocationsAndRepeatedWaits(t *test
 	}
 }
 
+func TestPendingModuleInitializerRetainsIndependentOperations(t *testing.T) {
+	for _, engine := range []string{"vm", "machine"} {
+		t.Run(engine, func(t *testing.T) {
+			t.Setenv("EMBER_RUNTIME_ENGINE", engine)
+			loader := &programTestLoader{sources: map[string]string{
+				"logical:game/init": `return {
+    prepare = function()
+        capture(function(id)
+            local shared = require("./shared")
+            observe("callback", id, shared)
+        end)
+    end,
+    update = function(id)
+        local shared = require("./shared")
+        observe("hook", id, shared)
+    end,
+}`,
+				"logical:game/shared": `local value = wait("module")
+initialized()
+return value`,
+			}}
+			program, _, err := ember.LoadProgram(context.Background(), loader, ember.ProgramOptions{
+				Entrypoints: []ember.Entrypoint{{Name: "main", Module: ember.LogicalModule("game/init")}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var callback ember.Callback
+			var initialized int
+			var observed []string
+			options := ember.RuntimeOptions{
+				Host: ember.RuntimeHostFunc(func(context.Context, ember.HostCall) (map[string]ember.Value, error) {
+					return map[string]ember.Value{
+						"capture": ember.ContextHostFuncValue(func(ctx context.Context, args []ember.Value) ([]ember.Value, error) {
+							captured, err := ember.CaptureCallback(ctx, args[0])
+							if err == nil {
+								callback = captured
+							}
+							return nil, err
+						}),
+						"wait": ember.ResumableHostFuncValue(func(context.Context, []ember.Value) ember.HostResult {
+							return ember.HostSuspend("module")
+						}),
+						"initialized": ember.HostFuncValue(func([]ember.Value) ([]ember.Value, error) {
+							initialized++
+							return nil, nil
+						}),
+						"observe": ember.HostFuncValue(func(args []ember.Value) ([]ember.Value, error) {
+							parts := make([]string, len(args))
+							for i, value := range args {
+								parts[i], _ = value.String()
+							}
+							observed = append(observed, strings.Join(parts, ":"))
+							return nil, nil
+						}),
+					}, nil
+				}),
+			}
+			runtime, err := program.NewRuntime(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close()
+
+			if _, err := runtime.RunHook(context.Background(), "prepare"); err != nil {
+				t.Fatal(err)
+			}
+			defer callback.Close()
+			first, err := runtime.RunHookResumable(context.Background(), "update", ember.StringValue("A"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertSuspensionToken(t, first, "module")
+
+			second, err := runtime.RunHookResumable(context.Background(), "update", ember.StringValue("B"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if second.Hook == nil || len(second.Hook.Calls) != 0 || len(second.Suspensions) != 1 {
+				t.Fatalf("deferred hook = %#v", second)
+			}
+			secondWait := second.Suspension
+			if secondWait.Token() != nil || secondWait.Ready() {
+				t.Fatalf("deferred hook token = %#v ready = %v", secondWait.Token(), secondWait.Ready())
+			}
+			callbackStep, err := callback.CallResumable(context.Background(), ember.StringValue("C"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(callbackStep.Suspensions) != 1 {
+				t.Fatalf("deferred callback = %#v", callbackStep)
+			}
+			callbackWait := callbackStep.Suspension
+			if callbackWait.Token() != nil || callbackWait.Ready() {
+				t.Fatalf("deferred callback token = %#v ready = %v", callbackWait.Token(), callbackWait.Ready())
+			}
+			discarded, err := runtime.RunHookResumable(context.Background(), "update", ember.StringValue("discarded"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := discarded.Suspension.Cancel(); err != nil {
+				t.Fatal(err)
+			}
+			if err := discarded.Suspension.Cancel(); err != nil {
+				t.Fatalf("repeat dependent cancel: %v", err)
+			}
+			if _, err := discarded.Suspension.Resume(context.Background()); !errors.Is(err, ember.ErrSuspensionStale) {
+				t.Fatalf("canceled dependent resume error = %v, want ErrSuspensionStale", err)
+			}
+			if _, err := secondWait.Resume(context.Background()); !errors.Is(err, ember.ErrSuspensionPending) {
+				t.Fatalf("early deferred resume error = %v, want ErrSuspensionPending", err)
+			}
+			if _, err := runtime.RunHook(context.Background(), "update", ember.StringValue("D")); !errors.Is(err, ember.ErrRuntimeBusy) {
+				t.Fatalf("overlapping hook error = %v, want ErrRuntimeBusy", err)
+			}
+			if _, err := callback.Call(context.Background(), ember.StringValue("E")); !errors.Is(err, ember.ErrRuntimeBusy) {
+				t.Fatalf("overlapping callback error = %v, want ErrRuntimeBusy", err)
+			}
+			if initialized != 0 || len(observed) != 0 {
+				t.Fatalf("rejected operations ran guest code: initialized = %d observed = %v", initialized, observed)
+			}
+
+			done, err := first.Suspension.Resume(context.Background(), ember.StringValue("ready"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if done.Hook == nil || done.Suspension != nil {
+				t.Fatalf("owner completion = %#v", done)
+			}
+			if !secondWait.Ready() || !callbackWait.Ready() {
+				t.Fatalf("dependents not ready: hook = %v callback = %v", secondWait.Ready(), callbackWait.Ready())
+			}
+			secondDone, err := secondWait.Resume(context.Background())
+			if err != nil {
+				t.Fatalf("continue deferred hook: %v", err)
+			}
+			if secondDone.Hook == nil || secondDone.Suspension != nil {
+				t.Fatalf("deferred hook completion = %#v", secondDone)
+			}
+			callbackDone, err := callbackWait.Resume(context.Background())
+			if err != nil {
+				t.Fatalf("continue deferred callback: %v", err)
+			}
+			if callbackDone.Suspension != nil {
+				t.Fatalf("callback retry remained suspended: %#v", callbackDone)
+			}
+			if initialized != 1 || strings.Join(observed, ",") != "hook:A:ready,hook:B:ready,callback:C:ready" {
+				t.Fatalf("initialized = %d observed = %v", initialized, observed)
+			}
+
+			cancelRuntime, err := program.NewRuntime(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cancelRuntime.Close()
+			cancelOwner, err := cancelRuntime.RunHookResumable(context.Background(), "update", ember.StringValue("cancel-owner"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cancelDependent, err := cancelRuntime.RunHookResumable(context.Background(), "update", ember.StringValue("cancel-dependent"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cancelOwner.Suspension.Cancel(); err != nil {
+				t.Fatal(err)
+			}
+			if cancelDependent.Suspension.Ready() {
+				t.Fatal("canceled dependent remained ready")
+			}
+			if _, err := cancelDependent.Suspension.Resume(context.Background()); !errors.Is(err, ember.ErrSuspensionStale) {
+				t.Fatalf("canceled dependent error = %v, want ErrSuspensionStale", err)
+			}
+			retry, err := cancelRuntime.RunHookResumable(context.Background(), "update", ember.StringValue("retry"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			retryDone, err := retry.Suspension.Resume(context.Background(), ember.StringValue("again"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if retryDone.Hook == nil || retryDone.Suspension != nil {
+				t.Fatalf("retry completion = %#v", retryDone)
+			}
+
+			closeRuntime, err := program.NewRuntime(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			closeOwner, err := closeRuntime.RunHookResumable(context.Background(), "update", ember.StringValue("close-owner"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			closeDependent, err := closeRuntime.RunHookResumable(context.Background(), "update", ember.StringValue("close-dependent"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := closeRuntime.Close(); err != nil {
+				t.Fatal(err)
+			}
+			for name, suspension := range map[string]*ember.Suspension{
+				"owner":     closeOwner.Suspension,
+				"dependent": closeDependent.Suspension,
+			} {
+				if suspension.Ready() {
+					t.Fatalf("closed %s suspension remained ready", name)
+				}
+				if _, err := suspension.Resume(context.Background()); !errors.Is(err, ember.ErrSuspensionStale) {
+					t.Fatalf("closed %s suspension error = %v, want ErrSuspensionStale", name, err)
+				}
+			}
+			if initialized != 2 || strings.Join(observed, ",") != "hook:A:ready,hook:B:ready,callback:C:ready,hook:retry:again" {
+				t.Fatalf("lifecycle initialized = %d observed = %v", initialized, observed)
+			}
+		})
+	}
+}
+
 func TestCapturedCallbackCanSuspendAndResumeOnBothEngines(t *testing.T) {
 	for _, engine := range []string{"vm", "machine"} {
 		t.Run(engine, func(t *testing.T) {

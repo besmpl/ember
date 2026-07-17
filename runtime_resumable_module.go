@@ -27,6 +27,7 @@ type runtimeModuleWait struct {
 	initialization *runtimeModuleInitialization
 	owner          bool
 	onCancel       func()
+	state          *suspensionState
 }
 
 func (initialization *runtimeModuleInitialization) newWait(owner bool) *runtimeModuleWait {
@@ -47,6 +48,16 @@ func (wait *runtimeModuleWait) bind(onCancel func()) {
 	wait.onCancel = onCancel
 }
 
+func (wait *runtimeModuleWait) bindState(state *suspensionState) {
+	if wait == nil || wait.initialization == nil || state == nil {
+		return
+	}
+	wait.state = state
+	if wait.initialization.done {
+		state.markReady()
+	}
+}
+
 func (wait *runtimeModuleWait) close() {
 	if wait == nil || wait.initialization == nil {
 		return
@@ -58,6 +69,7 @@ func (wait *runtimeModuleWait) close() {
 	}
 	delete(initialization.waiters, wait)
 	wait.onCancel = nil
+	wait.state = nil
 }
 
 func (wait *runtimeModuleWait) visibleToken() (any, bool) {
@@ -95,13 +107,17 @@ func (target *moduleCallTarget) resumeRun(ctx context.Context, values []Value, f
 	}
 	if target.wait != nil {
 		initialization := target.wait.initialization
-		if err := initialization.resumeHost(ctx, values, failure, stopped); err != nil {
-			target.close()
-			return resumableOutcome{}, err
-		}
-		if !initialization.done {
-			token, _ := target.wait.visibleToken()
-			return resumableOutcome{target: target, token: token}, nil
+		if target.wait.owner {
+			if err := initialization.resumeHost(ctx, values, failure, stopped); err != nil {
+				target.close()
+				return resumableOutcome{}, err
+			}
+			if !initialization.done {
+				token, _ := target.wait.visibleToken()
+				return resumableOutcome{target: target, token: token}, nil
+			}
+		} else if !initialization.done {
+			return resumableOutcome{}, ErrSuspensionPending
 		}
 		target.wait = nil
 		values = []Value{initialization.export}
@@ -129,8 +145,8 @@ func (target *moduleCallTarget) accept(ctx context.Context, outcome resumableOut
 			outcome, err = resumeResumableTarget(target.target, ctx, nil, err, stopped)
 		} else if wait != nil {
 			target.setWait(wait)
-			token, _ := wait.visibleToken()
-			return resumableOutcome{target: target, token: token}, nil
+			token, visible := wait.visibleToken()
+			return resumableOutcome{target: target, token: token, blocked: !visible}, nil
 		} else {
 			outcome, err = resumeResumableTarget(target.target, ctx, []Value{export}, nil, stopped)
 		}
@@ -142,10 +158,17 @@ func (target *moduleCallTarget) accept(ctx context.Context, outcome resumableOut
 	}
 	if wait, ok := outcome.token.(*runtimeModuleWait); ok {
 		target.setWait(wait)
-		token, _ := wait.visibleToken()
-		return resumableOutcome{target: target, token: token}, nil
+		token, visible := wait.visibleToken()
+		return resumableOutcome{target: target, token: token, blocked: !visible}, nil
 	}
 	return resumableOutcome{target: target, token: outcome.token}, nil
+}
+
+func (target *moduleCallTarget) bindSuspensionState(state *suspensionState) {
+	if target == nil || target.wait == nil {
+		return
+	}
+	target.wait.bindState(state)
 }
 
 func (target *moduleCallTarget) setWait(wait *runtimeModuleWait) {
@@ -507,9 +530,16 @@ func (initialization *runtimeModuleInitialization) cancel(origin *runtimeModuleW
 	}
 	for wait := range waiters {
 		onCancel := wait.onCancel
+		state := wait.state
 		wait.onCancel = nil
+		wait.state = nil
 		if wait != origin && onCancel != nil {
+			if state != nil {
+				state.invalidate()
+			}
 			onCancel()
+		} else if wait != origin && state != nil {
+			state.invalidate()
 		}
 	}
 }
@@ -519,6 +549,9 @@ func (initialization *runtimeModuleInitialization) releaseWaiters() {
 		return
 	}
 	for wait := range initialization.waiters {
+		if wait.state != nil {
+			wait.state.markReady()
+		}
 		wait.onCancel = nil
 	}
 	initialization.waiters = nil

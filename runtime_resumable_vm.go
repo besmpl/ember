@@ -229,13 +229,17 @@ func (target *vmEntrypointTarget) resumeRun(ctx context.Context, values []Value,
 	}
 	if target.moduleWait != nil {
 		initialization := target.moduleWait.initialization
-		if err := initialization.resumeHost(ctx, values, failure, stopped); err != nil {
-			target.close()
-			return resumableOutcome{}, target.wrapError(err)
-		}
-		if !initialization.done {
-			token, _ := target.moduleWait.visibleToken()
-			return resumableOutcome{target: target, token: token}, nil
+		if target.moduleWait.owner {
+			if err := initialization.resumeHost(ctx, values, failure, stopped); err != nil {
+				target.close()
+				return resumableOutcome{}, target.wrapError(err)
+			}
+			if !initialization.done {
+				token, _ := target.moduleWait.visibleToken()
+				return resumableOutcome{target: target, token: token}, nil
+			}
+		} else if !initialization.done {
+			return resumableOutcome{}, ErrSuspensionPending
 		}
 		target.moduleWait = nil
 		return target.continueAfterModuleWait(ctx, initialization, stopped)
@@ -345,6 +349,14 @@ func (target *vmEntrypointTarget) setModuleWait(wait *runtimeModuleWait) {
 	if wait != nil {
 		wait.bind(target.close)
 	}
+}
+
+func (target *vmEntrypointTarget) bindDependencyState(state *suspensionState, onCancel func()) {
+	if target == nil || target.moduleWait == nil {
+		return
+	}
+	target.moduleWait.bindState(state)
+	target.moduleWait.bind(onCancel)
 }
 
 func (target *vmEntrypointTarget) pump(ctx context.Context, stopped bool) (resumableOutcome, bool, error) {
@@ -495,6 +507,10 @@ type vmHookSuspensionTarget struct {
 	target resumableTarget
 }
 
+type vmHookDeferredTarget struct {
+	run *vmHookRun
+}
+
 func (vmRuntimeExecution) runHookResumable(runtime *Runtime, ctx context.Context, hook string, args []Value) (resumableOutcome, error) {
 	run := &vmHookRun{
 		runtime: runtime,
@@ -568,6 +584,40 @@ func (target *vmHookSuspensionTarget) close() {
 	target.target = nil
 }
 
+func (target *vmHookDeferredTarget) resume(ctx context.Context, _ []Value, _ error) (resumableOutcome, error) {
+	return target.resumeRun(ctx, false)
+}
+
+func (target *vmHookDeferredTarget) resumeStopped(ctx context.Context, _ []Value, _ error) (resumableOutcome, error) {
+	return target.resumeRun(ctx, true)
+}
+
+func (target *vmHookDeferredTarget) resumeRun(ctx context.Context, stopped bool) (resumableOutcome, error) {
+	if target == nil || target.run == nil || target.run.closed {
+		return resumableOutcome{}, ErrSuspensionStale
+	}
+	if err := target.run.pump(ctx, stopped); err != nil {
+		target.run.close()
+		return resumableOutcome{}, err
+	}
+	return target.run.snapshot(), nil
+}
+
+func (target *vmHookDeferredTarget) close() {
+	if target == nil || target.run == nil {
+		return
+	}
+	target.run.close()
+	target.run = nil
+}
+
+func (target *vmHookDeferredTarget) bindSuspensionState(state *suspensionState) {
+	if target == nil || target.run == nil {
+		return
+	}
+	target.run.bindDeferredState(state)
+}
+
 func (run *vmHookRun) resumeEntry(
 	ctx context.Context,
 	index int,
@@ -634,9 +684,24 @@ func (run *vmHookRun) pump(ctx context.Context, stopped bool) error {
 	}
 }
 
+func (run *vmHookRun) bindDeferredState(state *suspensionState) {
+	if run == nil || run.closed || state == nil {
+		return
+	}
+	for index := range run.entries {
+		entry := &run.entries[index]
+		target, ok := entry.target.(*vmEntrypointTarget)
+		if !ok || target.hostVisible() {
+			continue
+		}
+		target.bindDependencyState(state, run.close)
+	}
+}
+
 func (run *vmHookRun) snapshot() resumableOutcome {
 	report := HookReport{Hook: run.hook}
 	pending := make([]resumablePending, 0, len(run.entries))
+	hidden := false
 	for index := range run.entries {
 		entry := &run.entries[index]
 		if entry.terminal {
@@ -646,7 +711,13 @@ func (run *vmHookRun) snapshot() resumableOutcome {
 		if entry.target == nil {
 			continue
 		}
+		if target, ok := entry.target.(*vmEntrypointTarget); ok && target.closed {
+			entry.target = nil
+			entry.token = nil
+			continue
+		}
 		if target, ok := entry.target.(quiescentResumableTarget); ok && !target.hostVisible() {
+			hidden = true
 			continue
 		}
 		entryIndex := index
@@ -663,7 +734,16 @@ func (run *vmHookRun) snapshot() resumableOutcome {
 			},
 		})
 	}
-	if len(pending) == 0 {
+	if len(pending) == 0 && hidden {
+		deferred := &vmHookDeferredTarget{run: run}
+		pending = append(pending, resumablePending{
+			target:  deferred,
+			hook:    run.hook,
+			blocked: true,
+			bind:    deferred.bindSuspensionState,
+		})
+	}
+	if len(pending) == 0 && !hidden {
 		run.closed = true
 		run.runtime = nil
 		run.args = nil

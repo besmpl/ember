@@ -84,7 +84,21 @@ func (target *machineCallbackTarget) call(ctx context.Context, args []Value) ([]
 	if !target.execution.usesResumableRequire() {
 		return target.callCompletionStopped(ctx, args)
 	}
-	outcome, err := target.callResumable(ctx, args)
+	lease, err := target.execution.owner.beginRun()
+	if errors.Is(err, errMachineOwnerClosed) {
+		return nil, fmt.Errorf("callback: runtime is closed")
+	}
+	if errors.Is(err, errMachineOwnerBusy) {
+		return nil, fmt.Errorf("callback: begin call: %w", ErrRuntimeBusy)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("callback: begin call: %w", err)
+	}
+	defer lease.end()
+	if err := target.runtime.pendingModuleInitializationError("callback: begin call"); err != nil {
+		return nil, err
+	}
+	outcome, err := target.callResumableRun(ctx, args, true)
 	if err != nil {
 		return nil, err
 	}
@@ -114,6 +128,9 @@ func (target *machineCallbackTarget) callCompletionStopped(ctx context.Context, 
 		return nil, fmt.Errorf("callback: begin call: %w", err)
 	}
 	defer lease.end()
+	if err := target.runtime.pendingModuleInitializationError("callback: begin call"); err != nil {
+		return nil, err
+	}
 
 	target.state.mu.Lock()
 	released := target.state.released
