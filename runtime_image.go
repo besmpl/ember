@@ -307,7 +307,6 @@ func (builder *machineImageBuilder) prepare(proto *Proto, id int32) (machineProt
 		}
 	}
 	prepared.operations = make([]machineOperation, len(code))
-	hasReturn := false
 	closureRegisters := make(map[int]bool)
 	tableRegisters := make(map[int]bool)
 	hasClosureTable := false
@@ -405,13 +404,11 @@ func (builder *machineImageBuilder) prepare(proto *Proto, id int32) (machineProt
 				operation.guardField = fieldID
 			}
 		case opReturnOne:
-			hasReturn = true
 			operation.returnCount = 1
 			if prepared.maxResults < 1 {
 				prepared.maxResults = 1
 			}
 		case opReturn:
-			hasReturn = true
 			count := ins.b
 			operation.returnCount = int32(count)
 			if count > prepared.maxResults {
@@ -456,9 +453,10 @@ func (builder *machineImageBuilder) prepare(proto *Proto, id int32) (machineProt
 			}
 		}
 	}
-	if !hasReturn {
-		prepared.reject("prototype has no fixed return")
-	}
+	// The compiler can omit RETURN from a function whose reachable control flow
+	// never terminates, such as a coroutine loop that yields forever. The
+	// Machine can execute that shape; an invalid fallthrough still fails at the
+	// loop boundary with errCompactMachineFellOffEnd.
 	prepared.blocks = machineBlocks(code)
 	return prepared, nil
 }

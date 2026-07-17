@@ -458,6 +458,64 @@ return {
 	}
 }
 
+func TestMachineRuntimeAllowsNonReturningCoroutinePrototype(t *testing.T) {
+	entry := LogicalModule("machine/non-returning-coroutine")
+	loader := machineRuntimeTestLoader{
+		entry.String(): `
+local co = nil
+return {
+    startup = function()
+        co = coroutine.create(function()
+            while true do
+                coroutine.yield(1)
+            end
+        end)
+        return coroutine.resume(co)
+    end,
+    update = function()
+        local ok, value = coroutine.resume(co)
+        return ok, value, coroutine.status(co)
+    end,
+}
+`,
+	}
+
+	for _, engine := range []string{"vm", "machine"} {
+		t.Run(engine, func(t *testing.T) {
+			t.Setenv(runtimeEngineEnvironment, engine)
+			program, _, err := LoadProgram(context.Background(), loader, ProgramOptions{
+				Entrypoints: []Entrypoint{{Name: "main", Module: entry}},
+				Parallelism: 1,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime, err := program.NewRuntime(RuntimeOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close()
+
+			startup, err := runtime.Invoke(context.Background(), Invocation{Module: entry, Export: "startup"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := valuesDiagnostic(startup), `[bool(true), number(1)]`; got != want {
+				t.Fatalf("startup results = %s, want %s", got, want)
+			}
+			for index := 0; index < 2; index++ {
+				values, err := runtime.Invoke(context.Background(), Invocation{Module: entry, Export: "update"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, want := valuesDiagnostic(values), `[bool(true), number(1), string("suspended")]`; got != want {
+					t.Fatalf("update %d results = %s, want %s", index, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestMachineCoroutineLimitsReleaseAndNestedDepthBalances(t *testing.T) {
 	t.Run("completed coroutine releases live limit", func(t *testing.T) {
 		owner, err := newMachineOwner(machineOwnerProgramImage(t, []string{`
