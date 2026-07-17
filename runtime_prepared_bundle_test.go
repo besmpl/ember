@@ -3,6 +3,7 @@ package ember
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -82,19 +83,62 @@ func TestRuntimeOptionsPreparedMismatchIsTypedAndPrecedesOwnerMutation(t *testin
 	}
 	badHash := ir.programHash
 	badHash[0] ^= 0xff
-	bundle := NewPreparedBundle(ir.abiVersion, ir.semanticVersion, badHash, functions)
+	extraModules := make([][]PreparedFunction, len(functions)+1)
+	copy(extraModules, functions)
+	badFunctions := make([][]PreparedFunction, len(functions))
+	copy(badFunctions, functions)
+	badFunctions[0] = append([]PreparedFunction(nil), functions[0]...)
+	badFunctions[0] = append(badFunctions[0], nil)
 
-	before := machineClosureOwnerSequence.Load()
-	runtime, err := program.NewRuntime(RuntimeOptions{Prepared: bundle})
-	if runtime != nil || err == nil {
-		t.Fatalf("NewRuntime mismatch = (%v, %v), want nil typed error", runtime, err)
+	tests := []struct {
+		name       string
+		bundle     *PreparedBundle
+		wantReason string
+	}{
+		{
+			name:       "ABI version",
+			bundle:     NewPreparedBundle(ir.abiVersion+1, ir.semanticVersion, ir.programHash, functions),
+			wantReason: "ABI version",
+		},
+		{
+			name:       "semantic version",
+			bundle:     NewPreparedBundle(ir.abiVersion, ir.semanticVersion+1, ir.programHash, functions),
+			wantReason: "semantic version",
+		},
+		{
+			name:       "Program hash",
+			bundle:     NewPreparedBundle(ir.abiVersion, ir.semanticVersion, badHash, functions),
+			wantReason: "Program hash mismatch",
+		},
+		{
+			name:       "module inventory",
+			bundle:     NewPreparedBundle(ir.abiVersion, ir.semanticVersion, ir.programHash, extraModules),
+			wantReason: "module inventory",
+		},
+		{
+			name:       "function inventory",
+			bundle:     NewPreparedBundle(ir.abiVersion, ir.semanticVersion, ir.programHash, badFunctions),
+			wantReason: "function inventory",
+		},
 	}
-	var mismatch *PreparedBundleError
-	if !errors.As(err, &mismatch) {
-		t.Fatalf("NewRuntime error = %T %v, want *PreparedBundleError", err, err)
-	}
-	if after := machineClosureOwnerSequence.Load(); after != before {
-		t.Fatalf("mismatched bundle advanced owner sequence from %d to %d", before, after)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			before := machineClosureOwnerSequence.Load()
+			runtime, err := program.NewRuntime(RuntimeOptions{Prepared: test.bundle})
+			if runtime != nil || err == nil {
+				t.Fatalf("NewRuntime mismatch = (%v, %v), want nil typed error", runtime, err)
+			}
+			var mismatch *PreparedBundleError
+			if !errors.As(err, &mismatch) {
+				t.Fatalf("NewRuntime error = %T %v, want *PreparedBundleError", err, err)
+			}
+			if !strings.Contains(err.Error(), test.wantReason) {
+				t.Fatalf("NewRuntime error = %q, want reason containing %q", err, test.wantReason)
+			}
+			if after := machineClosureOwnerSequence.Load(); after != before {
+				t.Fatalf("mismatched bundle advanced owner sequence from %d to %d", before, after)
+			}
+		})
 	}
 }
 
