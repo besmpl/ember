@@ -620,8 +620,9 @@ func (loader paritySourceLoader) LoadModule(ctx context.Context, id ember.Module
 }
 
 type parityPreparedCallable struct {
-	owner    *ember.Runtime
-	callback ember.Callback
+	owner     *ember.Runtime
+	callback  ember.Callback
+	closeFunc func() error
 }
 
 func prepareParityEmberRuntime(source string) (*parityPreparedCallable, error) {
@@ -669,7 +670,18 @@ func prepareParityEmberRuntimeIdentity(source, moduleName, sourceName, entrypoin
 }
 
 func (callable *parityPreparedCallable) close() error {
+	if callable.closeFunc != nil {
+		return callable.closeFunc()
+	}
 	return errors.Join(callable.callback.Close(), callable.owner.Close())
+}
+
+func prepareParityExactGuestBatch(source string) (*parityPreparedCallable, error) {
+	callback, err := ember.PrepareExactGuestBatchForParityTest(source)
+	if err != nil {
+		return nil, err
+	}
+	return &parityPreparedCallable{callback: callback, closeFunc: callback.Close}, nil
 }
 
 type parityTimedCall func() ([]ember.Value, error)
@@ -1141,7 +1153,12 @@ func TestRuntimeParityLive(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s create Luau guest workload: %v", tc.name, err)
 		}
-		owner, err := prepareParityEmberRuntimeNamed(emberSource, "parity/"+entry.Corpus+"/"+entry.Name)
+		var owner *parityPreparedCallable
+		if executionMode == "prepared" {
+			owner, err = prepareParityExactGuestBatch(programSource + "return " + parityDefaultFixtureVariant.batchName + "\n")
+		} else {
+			owner, err = prepareParityEmberRuntimeNamed(emberSource, "parity/"+entry.Corpus+"/"+entry.Name)
+		}
 		if err != nil {
 			t.Fatalf("%s prepare Ember guest runtime: %v", tc.name, err)
 		}

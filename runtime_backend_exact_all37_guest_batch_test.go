@@ -2,6 +2,7 @@ package ember
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -33,26 +34,31 @@ type backendExactGuestBatchCase struct {
 }
 
 type backendExactGuestBatchGeneratedCase struct {
-	declarations []byte
-	caseProto    int32
-	entryProto   int32
-	function     string
+	declarations       []byte
+	caseProto          int32
+	entryProto         int32
+	function           string
+	programHash        [32]byte
+	holdoutProgramHash [32]byte
+}
+
+type backendExactGuestBatchPreparedArtifact struct {
+	programHashes [2][32]byte
+	caseProto     int32
+	entryProto    int32
+	function      machinePreparedFunction
 }
 
 func TestBackendGoExactAll37GuestBatchFixtureIsFresh(t *testing.T) {
-	standard := backendExactAll37GuestBatchArtifact(t, false)
-	holdout := backendExactAll37GuestBatchArtifact(t, true)
-	if !bytes.Equal(standard, holdout) {
-		t.Fatal("identity holdout changed the all-37 generated guest-batch artifact")
-	}
-	if len(standard) > backendExactAll37GuestBatchMaxGeneratedBytes {
+	generated := backendExactAll37GuestBatchArtifact(t)
+	if len(generated) > backendExactAll37GuestBatchMaxGeneratedBytes {
 		t.Fatalf(
 			"generated exact all-37 guest-batch bytes = %d, want at most %d",
-			len(standard), backendExactAll37GuestBatchMaxGeneratedBytes,
+			len(generated), backendExactAll37GuestBatchMaxGeneratedBytes,
 		)
 	}
 	if os.Getenv(backendExactAll37GuestBatchUpdateEnvironment) == "1" {
-		if err := os.WriteFile(backendExactAll37GuestBatchGeneratedPath, standard, 0o644); err != nil {
+		if err := os.WriteFile(backendExactAll37GuestBatchGeneratedPath, generated, 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -60,7 +66,7 @@ func TestBackendGoExactAll37GuestBatchFixtureIsFresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(got, standard) {
+	if !bytes.Equal(got, generated) {
 		t.Fatalf(
 			"generated exact all-37 guest-batch fixture is stale; rerun with %s=1",
 			backendExactAll37GuestBatchUpdateEnvironment,
@@ -70,11 +76,11 @@ func TestBackendGoExactAll37GuestBatchFixtureIsFresh(t *testing.T) {
 
 func TestMachinePreparedExactAll37GuestBatchMatchesGeneric(t *testing.T) {
 	cases := backendExactGuestBatchCases(t)
-	if got := len(backendGeneratedExactAll37GuestBatchFunctions); got != len(cases) {
+	if got := len(backendGeneratedExactAll37GuestBatchArtifacts); got != len(cases) {
 		t.Fatalf("generated exact guest-batch function inventory = %d, want %d", got, len(cases))
 	}
 	hash := sha256.New()
-	for index, tc := range cases {
+	for _, tc := range cases {
 		for _, holdout := range []bool{false, true} {
 			variant := "standard"
 			if holdout {
@@ -86,11 +92,20 @@ func TestMachinePreparedExactAll37GuestBatchMatchesGeneric(t *testing.T) {
 				caseProto, entryProto := backendExactGuestBatchProtos(t, irs)
 				preparedCalls := 0
 				preparedReplays := 0
-				generated := backendGeneratedExactAll37GuestBatchFunctions[index]
-				programImage := machinePreparedTestImageForSource(t, source)
+				programImage, err := backendExactGuestBatchProgramImage(source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				artifact, err := backendExactGuestBatchPreparedArtifactForImage(programImage)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if artifact.caseProto != caseProto || artifact.entryProto != entryProto {
+					t.Fatalf("selected Proto inventory = %d/%d, want %d/%d", artifact.caseProto, artifact.entryProto, caseProto, entryProto)
+				}
 				program := machinePreparedTestProgram(t, programImage, 0, entryProto, func(context machinePreparedContext) machinePreparedExit {
 					preparedCalls++
-					exit := generated(context)
+					exit := artifact.function(context)
 					if exit.kind != machinePreparedExitReturnOneNumber {
 						preparedReplays++
 					}
@@ -136,6 +151,27 @@ func TestMachinePreparedExactAll37GuestBatchMatchesGeneric(t *testing.T) {
 				if got := len(prepared.closures.closures); got != preparedClosureCount {
 					t.Fatalf("prepared execution materialized %d closures, want %d", got, preparedClosureCount)
 				}
+				if !holdout && !checkptrInstrumentedTest() {
+					args := machineExactGuestBatchArgs(t, prepared, 3, 17)
+					lease, err := prepared.beginRun()
+					if err != nil {
+						t.Fatal(err)
+					}
+					var runErr error
+					allocations := testing.AllocsPerRun(10, func() {
+						runErr = prepared.executeStopped(0, entryProto, preparedClosure, args, nil, machineRunEffects{})
+					})
+					lease.end()
+					if runErr != nil {
+						t.Fatal(runErr)
+					}
+					if allocations != 0 {
+						t.Fatalf("warmed prepared guest-batch allocations = %v, want 0", allocations)
+					}
+					if preparedReplays != 0 {
+						t.Fatalf("allocation probe prepared replay exits = %d, want 0", preparedReplays)
+					}
+				}
 			})
 		}
 	}
@@ -145,23 +181,69 @@ func TestMachinePreparedExactAll37GuestBatchMatchesGeneric(t *testing.T) {
 	}
 }
 
-func backendExactAll37GuestBatchArtifact(t *testing.T, holdout bool) []byte {
+func TestBackendGoExactAll37GuestBatchInventoryRejectsUnknownProgram(t *testing.T) {
+	image := machinePreparedTestImageForSource(t, "return 1\n")
+	if _, err := backendExactGuestBatchPreparedArtifactForImage(image); err == nil {
+		t.Fatal("selected a prepared guest-batch artifact for an unknown Program")
+	}
+}
+
+func TestPrepareExactGuestBatchForParityTestUsesVerifiedPreparedCallback(t *testing.T) {
+	tc := loadLuauBenchmarkCases(t, "classicLuauCases", []string{"recursive_fibonacci"})[0]
+	callback, err := PrepareExactGuestBatchForParityTest(backendExactGuestBatchSource(t, tc.source, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, err := callback.Call(context.Background(), NumberValue(3), NumberValue(17))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 {
+		t.Fatalf("prepared parity callback results = %d, want 1", len(values))
+	}
+	result, ok := values[0].Number()
+	if !ok || result != 90152 {
+		t.Fatalf("prepared parity callback result = %v/%t, want 90152", result, ok)
+	}
+	if err := callback.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := callback.Call(context.Background(), NumberValue(3), NumberValue(17)); err == nil {
+		t.Fatal("closed prepared parity callback accepted a call")
+	}
+}
+
+func backendExactAll37GuestBatchArtifact(t *testing.T) []byte {
 	t.Helper()
 	cases := backendExactGuestBatchCases(t)
 	var declarations bytes.Buffer
 	imports := make(map[string]bool)
-	functions := make([]string, 0, len(cases))
+	generatedCases := make([]backendExactGuestBatchGeneratedCase, 0, len(cases))
 	for index, tc := range cases {
-		generated := backendExactGuestBatchGenerateCase(t, tc, index, holdout, imports)
-		if len(generated.declarations) > backendExactAll37GuestBatchMaxCaseBytes {
+		standardImports := make(map[string]bool)
+		standard := backendExactGuestBatchGenerateCase(t, tc, index, false, standardImports)
+		holdoutImports := make(map[string]bool)
+		holdout := backendExactGuestBatchGenerateCase(t, tc, index, true, holdoutImports)
+		if !bytes.Equal(standard.declarations, holdout.declarations) ||
+			standard.caseProto != holdout.caseProto ||
+			standard.entryProto != holdout.entryProto ||
+			standard.function != holdout.function ||
+			!mapsEqual(standardImports, holdoutImports) {
+			t.Fatalf("%s/%s identity holdout changed generated executable inventory", tc.corpus, tc.name)
+		}
+		for path := range standardImports {
+			imports[path] = true
+		}
+		standard.holdoutProgramHash = holdout.programHash
+		if len(standard.declarations) > backendExactAll37GuestBatchMaxCaseBytes {
 			t.Fatalf(
 				"%s/%s generated bytes = %d, want at most %d",
-				tc.corpus, tc.name, len(generated.declarations), backendExactAll37GuestBatchMaxCaseBytes,
+				tc.corpus, tc.name, len(standard.declarations), backendExactAll37GuestBatchMaxCaseBytes,
 			)
 		}
-		declarations.Write(generated.declarations)
+		declarations.Write(standard.declarations)
 		declarations.WriteString("\n\n")
-		functions = append(functions, generated.function)
+		generatedCases = append(generatedCases, standard)
 	}
 	var source bytes.Buffer
 	source.WriteString("// Code generated by Ember's private prepared proof compiler; DO NOT EDIT.\n\npackage ember\n")
@@ -180,9 +262,29 @@ func backendExactAll37GuestBatchArtifact(t *testing.T, holdout bool) []byte {
 	}
 	source.WriteString("\n")
 	source.Write(declarations.Bytes())
-	source.WriteString("var backendGeneratedExactAll37GuestBatchFunctions = [...]machinePreparedFunction{\n")
-	for _, function := range functions {
-		fmt.Fprintf(&source, "\t%s,\n", function)
+	source.WriteString("var backendGeneratedExactAll37GuestBatchArtifacts = [...]backendExactGuestBatchPreparedArtifact{\n")
+	for _, generated := range generatedCases {
+		source.WriteString("\t{programHashes: [2][32]byte{")
+		for hashIndex, hash := range [2][32]byte{generated.programHash, generated.holdoutProgramHash} {
+			if hashIndex != 0 {
+				source.WriteString(", ")
+			}
+			source.WriteString("{")
+			for index, value := range hash {
+				if index != 0 {
+					source.WriteString(", ")
+				}
+				fmt.Fprintf(&source, "0x%02x", value)
+			}
+			source.WriteString("}")
+		}
+		fmt.Fprintf(
+			&source,
+			"}, caseProto: %d, entryProto: %d, function: %s},\n",
+			generated.caseProto,
+			generated.entryProto,
+			generated.function,
+		)
 	}
 	source.WriteString("}\n")
 	formatted, err := format.Source(source.Bytes())
@@ -203,6 +305,14 @@ func backendExactGuestBatchGenerateCase(
 	source := backendExactGuestBatchSource(t, tc.source, holdout)
 	irs, image := backendExactCorpusIRs(t, source)
 	caseProto, entryProto := backendExactGuestBatchProtos(t, irs)
+	programImage, err := backendExactGuestBatchProgramImage(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	programIR, err := buildBackendProgramIR(programImage)
+	if err != nil {
+		t.Fatal(err)
+	}
 	prefix := fmt.Sprintf("backendGeneratedExactAll37GuestBatchCase%02d", index)
 	preparedFunction := prefix + "Prepared"
 	files, err := emitBackendGoNumericProgram(irs, backendGoNumericProgramOptions{
@@ -224,7 +334,80 @@ func backendExactGuestBatchGenerateCase(
 		caseProto:    caseProto,
 		entryProto:   entryProto,
 		function:     preparedFunction,
+		programHash:  programIR.programHash,
 	}
+}
+
+func backendExactGuestBatchPreparedArtifactForImage(
+	image *programImage,
+) (backendExactGuestBatchPreparedArtifact, error) {
+	ir, err := buildBackendProgramIR(image)
+	if err != nil {
+		return backendExactGuestBatchPreparedArtifact{}, fmt.Errorf("select prepared guest batch: %w", err)
+	}
+	var selected backendExactGuestBatchPreparedArtifact
+	found := false
+	for _, artifact := range backendGeneratedExactAll37GuestBatchArtifacts {
+		matches := false
+		for _, programHash := range artifact.programHashes {
+			matches = matches || programHash == ir.programHash
+		}
+		if !matches {
+			continue
+		}
+		if found {
+			return backendExactGuestBatchPreparedArtifact{}, fmt.Errorf("select prepared guest batch: ambiguous Program hash")
+		}
+		selected = artifact
+		found = true
+	}
+	if !found {
+		return backendExactGuestBatchPreparedArtifact{}, fmt.Errorf("select prepared guest batch: unknown Program hash")
+	}
+	if len(image.modules) != 1 || image.modules[0].code == nil ||
+		selected.caseProto <= 0 || selected.entryProto <= 0 ||
+		int(selected.caseProto) >= len(image.modules[0].code.prototypes) ||
+		int(selected.entryProto) >= len(image.modules[0].code.prototypes) ||
+		selected.function == nil {
+		return backendExactGuestBatchPreparedArtifact{}, fmt.Errorf("select prepared guest batch: invalid generated inventory")
+	}
+	return selected, nil
+}
+
+func mapsEqual(left, right map[string]bool) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func backendExactGuestBatchProgramImage(source string) (*programImage, error) {
+	proto, err := Compile(source)
+	if err != nil {
+		return nil, err
+	}
+	code, err := proto.preparedCodeImage()
+	if err != nil {
+		return nil, err
+	}
+	image := &programImage{
+		modules: []programImageModule{{
+			moduleID: 0,
+			key:      moduleKey{kind: moduleKeyLogical, path: "exact-guest-batch"},
+			code:     code,
+		}},
+		entrypoints: []programImageEntrypoint{{name: "main", moduleID: 0}},
+	}
+	image.globalNames, err = programImageGlobalNames(image.modules)
+	if err != nil {
+		return nil, err
+	}
+	return image, nil
 }
 
 func backendExactGuestBatchAppendDeclarations(
@@ -280,7 +463,7 @@ func backendExactGuestBatchSource(t testing.TB, caseSource string, holdout bool)
 	variant := parityfixture.GuestBatchVariant{CaseName: "__case", BatchName: "__batch"}
 	if holdout {
 		variant = parityfixture.GuestBatchVariant{
-			CaseName: "holdoutCase", BatchName: "holdoutBatch", Holdout: true,
+			CaseName: "__holdout_case", BatchName: "__holdout_batch", Holdout: true,
 		}
 	}
 	fixture, err := parityfixture.BuildGuestBatch(caseSource, variant)
