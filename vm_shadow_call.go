@@ -29,8 +29,9 @@ type directCompactSelfOperation struct {
 }
 
 // directCompactSelfFunctionPlan is a bounded loader-decoded program for one
-// closed unary numeric function. It contains no closure, Proto, Value, or
-// source identity; execution revalidates the live self upvalue at entry.
+// effect-free unary numeric function. It contains no closure, Proto, Value, or
+// source identity; execution revalidates the live self upvalue and snapshots
+// every numeric captured upvalue before mutation.
 type directCompactSelfFunctionPlan struct {
 	startPC        int32
 	operationCount uint8
@@ -320,6 +321,14 @@ func directCompactSelfTransfer(
 		if !numeric {
 			return out, false
 		}
+		out.add(ins.a)
+	case opGetUpvalue:
+		if ins.b < 0 || ins.b >= len(proto.upvalues) {
+			return out, false
+		}
+		// The executor guards and snapshots the live value before touching the
+		// frame. The effect-free proof below makes that snapshot stable across
+		// every internally executed recursive call.
 		out.add(ins.a)
 	case opMove:
 		if !require(ins.b) {
@@ -631,6 +640,19 @@ func (thread *vmThread) runDirectCompactSelfFunction(
 	if !ok || closure != frame.currentClosure {
 		return NilValue(), 0, false
 	}
+	var capturedNumbers [directCompactSelfFunctionInstructionCap]float64
+	operationCount := int(plan.operationCount)
+	for index := 0; index < operationCount; index++ {
+		operation := plan.operations[index]
+		if operation.op != opGetUpvalue {
+			continue
+		}
+		captured, ok := directClosureUpvalue(frame.currentClosure, int(operation.b))
+		if !ok || valueKind(captured) != NumberKind {
+			return NilValue(), 0, false
+		}
+		capturedNumbers[index] = valueNumber(captured)
+	}
 	owner := frame.window.owner
 	if owner == nil {
 		owner = frame.owner
@@ -646,7 +668,6 @@ func (thread *vmThread) runDirectCompactSelfFunction(
 	highWater := len(owner.values)
 	base := rootBase
 	operationIndex := 0
-	operationCount := int(plan.operationCount)
 	for {
 		operation := plan.operations[operationIndex]
 		frame.pc = int(operation.wordPC)
@@ -655,6 +676,8 @@ func (thread *vmThread) runDirectCompactSelfFunction(
 		switch operation.op {
 		case opLoadConst:
 			registers[operation.a] = NumberValue(constantNumbers[operation.constant])
+		case opGetUpvalue:
+			registers[operation.a] = NumberValue(capturedNumbers[operationIndex])
 		case opMove:
 			registers[operation.a] = registers[operation.b]
 		case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow:

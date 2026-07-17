@@ -499,6 +499,137 @@ return triangular(40)
 	}
 }
 
+func TestProductionExecutesCompactSelfFunctionWithNumericCapture(t *testing.T) {
+	proto, err := Compile(`
+local function run(seed)
+	local function fib(n)
+		if n < (2 + (seed % 3)) then
+			return n
+		end
+		return fib(n - 1) + fib(n - 2)
+	end
+	return fib(20)
+end
+return run(17)
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := newVMThread(runtimeGlobals(nil))
+	enableAdaptiveShadowForTest(t, &production)
+	got, gotErr := production.run(proto, nil, nil)
+	instrumented := newVMThread(runtimeGlobals(nil))
+	instrumented.directFrameInstrumented = true
+	want, wantErr := instrumented.run(proto, nil, nil)
+	if difference := differentialDifference(
+		differentialRun{values: want, err: wantErr},
+		differentialRun{values: got, err: gotErr},
+	); difference != "" {
+		t.Fatalf("numeric-capture execution differs: %s", difference)
+	}
+
+	executed := false
+	var disassembly []string
+	for instanceProto, instance := range production.functionInstances {
+		disassembly = append(disassembly, disassembleProto(instanceProto)...)
+		for _, plan := range instance.shadow.compactSelfFunctions {
+			word := instance.shadow.words[int(plan.startPC)]
+			if word.handler() == directHandlerCompactSelfFunction && word.counter() > 0 {
+				executed = true
+			}
+		}
+	}
+	if !executed {
+		t.Fatalf("numeric captured upvalue did not execute through a compact self-function:\n%s", strings.Join(disassembly, "\n"))
+	}
+}
+
+func TestCompactSelfFunctionSnapshotsNumericCaptureAtEachRootCall(t *testing.T) {
+	proto, err := Compile(`
+local seed = 0
+local function fib(n)
+	if n < (2 + (seed % 3)) then
+		return n
+	end
+	return fib(n - 1) + fib(n - 2)
+end
+local first = fib(9)
+seed = 1
+return first, fib(9)
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := newVMThread(runtimeGlobals(nil))
+	enableAdaptiveShadowForTest(t, &production)
+	got, gotErr := production.run(proto, nil, nil)
+	instrumented := newVMThread(runtimeGlobals(nil))
+	instrumented.directFrameInstrumented = true
+	want, wantErr := instrumented.run(proto, nil, nil)
+	if difference := differentialDifference(
+		differentialRun{values: want, err: wantErr},
+		differentialRun{values: got, err: gotErr},
+	); difference != "" {
+		t.Fatalf("live numeric-capture execution differs: %s", difference)
+	}
+	if len(got) != 2 || valueNumber(got[0]) != 34 || valueNumber(got[1]) != 55 {
+		t.Fatalf("results = %v, want [34 55]", got)
+	}
+
+	executions := uint8(0)
+	for _, instance := range production.functionInstances {
+		for _, plan := range instance.shadow.compactSelfFunctions {
+			executions += instance.shadow.words[int(plan.startPC)].counter()
+		}
+	}
+	if executions != 2 {
+		t.Fatalf("compact numeric-capture executions = %d, want 2 root calls", executions)
+	}
+}
+
+func TestCompactSelfFunctionNonNumericCaptureFallsBackBeforeMutation(t *testing.T) {
+	proto, err := Compile(`
+local seed = {}
+local function fib(n)
+	if n < (2 + (seed % 3)) then
+		return n
+	end
+	return fib(n - 1) + fib(n - 2)
+end
+return fib(4)
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := newVMThread(runtimeGlobals(nil))
+	enableAdaptiveShadowForTest(t, &production)
+	got, gotErr := production.run(proto, nil, nil)
+	instrumented := newVMThread(runtimeGlobals(nil))
+	instrumented.directFrameInstrumented = true
+	want, wantErr := instrumented.run(proto, nil, nil)
+	if difference := differentialDifference(
+		differentialRun{values: want, err: wantErr},
+		differentialRun{values: got, err: gotErr},
+	); difference != "" {
+		t.Fatalf("non-numeric capture fallback differs: %s", difference)
+	}
+
+	found := false
+	for _, instance := range production.functionInstances {
+		for _, plan := range instance.shadow.compactSelfFunctions {
+			found = true
+			word := instance.shadow.words[int(plan.startPC)]
+			generic := directHandlerID(opcode(uint8(word.raw()) & uint8(wordcodeOpcodeMask)))
+			if word.handler() != generic || word.counter() != 0 {
+				t.Fatalf("capture guard miss left compact handler/counter %d/%d, want generic %d/0", word.handler(), word.counter(), generic)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("non-numeric captured-upvalue source had no compact self-function plan")
+	}
+}
+
 func TestCompactSelfFunctionGuardMissDequickensBeforeMutation(t *testing.T) {
 	proto, err := Compile(`
 local function recurse(n)
@@ -1060,6 +1191,78 @@ return fib(20)
 			b.StopTimer()
 			if len(result) != 1 || valueNumber(result[0]) != 6765 {
 				b.Fatalf("result = %v, want 6765", result)
+			}
+		})
+	}
+}
+
+func BenchmarkVMRecursiveFibonacciCapturedShadow(b *testing.B) {
+	proto, err := Compile(`
+local function run(seed)
+	local function fib(n)
+		if n < (2 + (seed % 3)) then
+			return n
+		end
+		return fib(n - 1) + fib(n - 2)
+	end
+	return fib(20)
+end
+return run(17)
+`)
+	if err != nil {
+		b.Fatal(err)
+	}
+	for _, benchmark := range []struct {
+		name           string
+		disableCompact bool
+	}{
+		{name: "call_trace", disableCompact: true},
+		{name: "compact_function"},
+	} {
+		benchmark := benchmark
+		b.Run(benchmark.name, func(b *testing.B) {
+			thread := newVMThread(runtimeGlobals(nil))
+			owner := newRuntimeOwner()
+			if err := thread.bindOwner(owner); err != nil {
+				b.Fatal(err)
+			}
+			defer func() {
+				thread.unbindOwner()
+				if err := owner.close(); err != nil {
+					b.Error(err)
+				}
+			}()
+			if benchmark.disableCompact {
+				for _, child := range proto.prototypes {
+					for _, grandchild := range child.prototypes {
+						instance, err := thread.shadowFunctionInstance(grandchild)
+						if err != nil {
+							b.Fatal(err)
+						}
+						for _, plan := range instance.shadow.compactSelfFunctions {
+							pc := int(plan.startPC)
+							word := instance.shadow.words[pc]
+							generic := directHandlerID(opcode(uint8(word.raw()) & uint8(wordcodeOpcodeMask)))
+							instance.shadow.words[pc] = word.withHandler(generic)
+						}
+					}
+				}
+			}
+			result, err := thread.run(proto, nil, nil)
+			if err != nil || len(result) != 1 || valueNumber(result[0]) != 10946 {
+				b.Fatalf("preflight result = (%v, %v), want 10946", result, err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				result, err = thread.run(proto, nil, nil)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.StopTimer()
+			if len(result) != 1 || valueNumber(result[0]) != 10946 {
+				b.Fatalf("result = %v, want 10946", result)
 			}
 		})
 	}
