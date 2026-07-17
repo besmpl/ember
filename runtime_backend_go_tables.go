@@ -54,6 +54,7 @@ type backendGoScalarTablePlan struct {
 	indexFallback          map[backendValueID]backendValueID
 	metatableByPC          map[int32]backendGoScalarMetatable
 	dynamicExternalGetByPC map[int32]backendGoScalarDynamicExternalGet
+	dynamicExternalSetByPC map[int32]backendGoScalarDynamicExternalGet
 	iteratorValues         []bool
 	iteratorByPC           map[int32]int
 	externalRoot           backendValueID
@@ -108,6 +109,7 @@ func analyzeBackendGoScalarTablesExcludingCountWithFields(
 		indexFallback:          make(map[backendValueID]backendValueID),
 		metatableByPC:          make(map[int32]backendGoScalarMetatable),
 		dynamicExternalGetByPC: make(map[int32]backendGoScalarDynamicExternalGet),
+		dynamicExternalSetByPC: make(map[int32]backendGoScalarDynamicExternalGet),
 		iteratorByPC:           make(map[int32]int),
 		externalRoot:           invalidBackendValueID,
 		tableUpvalues:          make([]bool, len(ir.upvalues)),
@@ -458,6 +460,12 @@ func analyzeBackendGoScalarTablesExcludingCountWithFields(
 		switch nativeFuncID(operation.nativeID) {
 		case nativeFuncSetMetatable:
 			if _, ok := plan.metatableByPC[operation.pc]; !ok {
+				table := backendOperationUse(operation, operation.a)
+				metatable := backendOperationUse(operation, operation.a+1)
+				if backendGoExcludedTableValue(ir, table, excluded) &&
+					backendGoExcludedTableValue(ir, metatable, excluded) {
+					continue
+				}
 				return backendGoScalarTablePlan{}, nil
 			}
 			continue
@@ -603,6 +611,36 @@ func analyzeBackendGoScalarTablesExcludingCountWithFields(
 			}
 		}
 	}
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op != opSetIndex {
+			continue
+		}
+		table := plan.root(backendOperationUse(operation, operation.a))
+		if !plan.capturedExternalRoots[table] {
+			continue
+		}
+		var tags backendTagMask
+		fieldCount := 0
+		valid := true
+		for _, field := range plan.fields {
+			if field.key.table != table || field.child != invalidBackendValueID || field.methodProto >= 0 {
+				continue
+			}
+			fieldCount++
+			if tags == 0 {
+				tags = field.tags
+			} else if tags != field.tags {
+				valid = false
+				break
+			}
+		}
+		if valid && fieldCount != 0 {
+			plan.dynamicExternalSetByPC[operation.pc] = backendGoScalarDynamicExternalGet{
+				table: table, tags: tags,
+			}
+		}
+	}
 	if !plan.analyzeIterators(ir) {
 		return backendGoScalarTablePlan{}, nil
 	}
@@ -640,6 +678,13 @@ func analyzeBackendGoScalarTablesExcludingCountWithFields(
 					}
 					return backendGoScalarTablePlan{}, nil
 				}
+			case opSetIndex:
+				if use.register == operation.a {
+					if _, dynamic := plan.dynamicExternalSetByPC[operation.pc]; dynamic {
+						continue
+					}
+				}
+				return backendGoScalarTablePlan{}, nil
 			case opSetField:
 				if use.register != operation.a && use.register != operation.c {
 					return backendGoScalarTablePlan{}, nil
@@ -695,6 +740,18 @@ func analyzeBackendGoScalarTablesExcludingCountWithFields(
 		}
 	}
 	return plan, nil
+}
+
+func backendGoExcludedTableValue(
+	ir *backendProtoIR,
+	id backendValueID,
+	excluded map[backendValueID]bool,
+) bool {
+	if !ir.validBackendValue(id) {
+		return false
+	}
+	value := &ir.values[id-1]
+	return value.object == backendObjectTable && len(value.origins) == 1 && excluded[value.origins[0]]
 }
 
 func (plan backendGoScalarTablePlan) isExternalRoot(root backendValueID) bool {
@@ -887,6 +944,14 @@ func backendGoStringFieldIsIndex(ir *backendProtoIR, constant int32) bool {
 		int(constant) < len(ir.constants) &&
 		ir.constants[constant].kind == StringKind &&
 		ir.constants[constant].flags&machineConstantFlagIndexName != 0
+}
+
+func backendGoStringFieldIsNewIndex(ir *backendProtoIR, constant int32) bool {
+	return ir != nil &&
+		constant >= 0 &&
+		int(constant) < len(ir.constants) &&
+		ir.constants[constant].kind == StringKind &&
+		ir.constants[constant].flags&machineConstantFlagNewIndexName != 0
 }
 
 func backendGoArrayIndexConstant(ir *backendProtoIR, constant int32) (uint32, bool) {

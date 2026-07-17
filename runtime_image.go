@@ -87,7 +87,10 @@ type machineConstant struct {
 	bits  uint64
 }
 
-const machineConstantFlagIndexName uint8 = 1 << 0
+const (
+	machineConstantFlagIndexName    uint8 = 1 << 0
+	machineConstantFlagNewIndexName uint8 = 1 << 1
+)
 
 type machineBlock struct {
 	first int32
@@ -253,6 +256,9 @@ func (builder *machineImageBuilder) prepare(proto *Proto, id int32) (machineProt
 			text := value.stringText()
 			if text == "__index" {
 				descriptor.flags |= machineConstantFlagIndexName
+			}
+			if text == "__newindex" {
+				descriptor.flags |= machineConstantFlagNewIndexName
 			}
 			id, err := builder.internString(text)
 			if err != nil {

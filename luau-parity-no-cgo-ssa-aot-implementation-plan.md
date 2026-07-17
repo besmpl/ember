@@ -1002,6 +1002,41 @@ The retained path has moved beyond the original starting state:
   table, runtime string, allocation, or VM dispatch. Twenty-three of the 25
   Scenario kernels now emit through the compiler proof route.
 
+- The finite mutation-metatable slice lowers the real
+  `dirty_metatable_writes` pressure. One nonescaping empty proxy, its exact
+  two-closure metatable, one five-field numeric backing record, and one
+  five-key dirty-count table become ten typed numeric locals. The caller's
+  `__index` reads call one typed finite-key target over backing-field pointers;
+  `__newindex` writes call a second target over dirty and backing pointers.
+  Discovery proves capture identity and identical finite domains, exactly one
+  numeric initializer per backing field, and the handler data flow
+  `dirty[key] = (dirty[key] or 0) + 1; backing[key] = value`; same-opcode-count
+  changes to the fallback, increment, or stored value fail closed. A
+  module-local agreeing-origin lattice follows `setmetatable` results through
+  moves and loop-phi SCCs without teaching generic table analysis about
+  proxy semantics. Generated Go, prepared owner, generic Machine, and the
+  independent interpreter agree across negative, ordinary, and large seeds,
+  including the canonical result `8487`. Private-function renaming is
+  byte-identical; changed or extended metatables, observed table/metatable
+  identity, mixed backing fields, and changed handler semantics fail closed.
+  Unknown index keys return the source-defined zero, while unknown writes
+  replay without mutation. Rebinding `setmetatable` replays canonical Machine
+  before work, controlled execution remains generic, owner table/string counts
+  stay unchanged, and direct/prepared paths allocate zero when warmed. Five
+  local samples measured medians of about 1.790 microseconds direct and 1.999
+  microseconds through the prepared owner, versus about 186.717 microseconds
+  through generic Machine. The pinned Luau 0.728 `-O2 -g0` corpus batch had a
+  five-sample median of about 25.376 microseconds per call, making prepared
+  about `0.079x` Luau; this is exploratory evidence, not either required clean
+  `guest_batch_v1` capture. Deterministic generated source is 15,212 bytes
+  across caller and two targets. Linked ARM64 is 1,296 bytes for the direct
+  caller, 1,440 bytes for the prepared body, 240 bytes for the wrapper, 224
+  bytes for the index target, and 480 bytes for the newindex target. Generated
+  bodies contain eleven intentional typed target calls plus cold
+  bounds/stack-growth helpers and no opcode, descriptor, Machine table,
+  runtime string, allocation, or VM dispatch. Twenty-four of the 25 Scenario
+  kernels now have production compiler-proof routes.
+
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
 all-37 parity. General non-dense iteration, general table mutation, general

@@ -13,7 +13,7 @@ func backendGoNumericFixedResultCountFor(
 	if ir == nil {
 		return 0, false
 	}
-	resultCount := 0
+	resultCount := -1
 	for blockIndex := range ir.blocks {
 		block := &ir.blocks[blockIndex]
 		if !block.reachable {
@@ -28,16 +28,16 @@ func backendGoNumericFixedResultCountFor(
 			if !ok {
 				return 0, false
 			}
-			if count <= 0 || count > backendGoMaxFixedResultCount {
+			if count < 0 || count > backendGoMaxFixedResultCount {
 				return 0, false
 			}
-			if resultCount != 0 && resultCount != count {
+			if resultCount >= 0 && resultCount != count {
 				return 0, false
 			}
 			resultCount = count
 		}
 	}
-	return resultCount, resultCount != 0
+	return resultCount, resultCount >= 0
 }
 
 func backendGoNumericReturnCount(
@@ -56,7 +56,7 @@ func backendGoNumericReturnCount(
 			return int(operation.returnCount), true
 		}
 		if operation.returnCount >= 0 {
-			return 0, false
+			return 0, true
 		}
 	default:
 		return 0, false

@@ -39,17 +39,18 @@ type backendGoNumericPlan struct {
 	// scalarReplacedValues have no canonical Machine value in prepared code.
 	scalarReplacedValues []bool
 	// replayEntry marks exits whose exact spill would require one of those values.
-	replayEntry    []bool
-	tables         backendGoScalarTablePlan
-	keys           backendGoStructuralKeyPlan
-	records        backendGoRecordTablePlan
-	closures       backendGoScalarClosurePlan
-	methods        backendGoScalarMethodPlan
-	captured       backendGoCapturedRecordPlan
-	callSets       backendGoFiniteCallSetPlan
-	closureSets    backendGoFiniteClosureSetPlan
-	coroutines     backendGoScalarCoroutinePlan
-	indexFunctions backendGoRecordIndexFunctionPlan
+	replayEntry       []bool
+	tables            backendGoScalarTablePlan
+	keys              backendGoStructuralKeyPlan
+	records           backendGoRecordTablePlan
+	closures          backendGoScalarClosurePlan
+	methods           backendGoScalarMethodPlan
+	captured          backendGoCapturedRecordPlan
+	callSets          backendGoFiniteCallSetPlan
+	closureSets       backendGoFiniteClosureSetPlan
+	coroutines        backendGoScalarCoroutinePlan
+	indexFunctions    backendGoRecordIndexFunctionPlan
+	mutationMetatable backendGoMutationMetatablePlan
 }
 
 type backendGoNumericEmitter struct {
@@ -320,6 +321,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		fmt.Fprintf(&source, "\t_ = i%d\n", arrayIndex)
 	}
 	writeBackendGoRecordDeclarations(&source, plan.records)
+	writeBackendGoMutationMetatableDeclarations(&source, plan.mutationMetatable)
 	for cell := 0; cell < plan.closures.cellCount; cell++ {
 		fmt.Fprintf(&source, "\tvar c%d float64\n", cell)
 		fmt.Fprintf(&source, "\t_ = c%d\n", cell)
@@ -341,6 +343,12 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 				operation.op == opCall && backendGoNumericScalarReplacedCall(ir, options, operation) ||
 				operation.op == opCallMethodOne)
 		if _, ok := plan.indexFunctions.call(operation); ok {
+			needsOK = true
+		}
+		if get, ok := plan.mutationMetatable.get(operation); ok && !get.dirty {
+			needsOK = true
+		}
+		if plan.mutationMetatable.set(operation) {
 			needsOK = true
 		}
 		if _, ok := plan.coroutines.resumes[operation.pc]; ok {
@@ -425,6 +433,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			fmt.Fprintf(&source, "\t_ = i%d\n", arrayIndex)
 		}
 		writeBackendGoRecordDeclarations(&source, plan.records)
+		writeBackendGoMutationMetatableDeclarations(&source, plan.mutationMetatable)
 		for cell := 0; cell < plan.closures.cellCount; cell++ {
 			fmt.Fprintf(&source, "\tvar c%d float64\n", cell)
 			fmt.Fprintf(&source, "\t_ = c%d\n", cell)
@@ -446,6 +455,12 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 					operation.op == opCall && backendGoNumericScalarReplacedCall(ir, options, operation) ||
 					operation.op == opCallMethodOne)
 			if _, ok := plan.indexFunctions.call(operation); ok {
+				needsOK = true
+			}
+			if get, ok := plan.mutationMetatable.get(operation); ok && !get.dirty {
+				needsOK = true
+			}
+			if plan.mutationMetatable.set(operation) {
 				needsOK = true
 			}
 			if _, ok := plan.coroutines.resumes[operation.pc]; ok {
@@ -490,10 +505,11 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			_, recordArrayRemove := plan.records.arrayRemovePC[operation.pc]
 			_, recordArrayRawLen := plan.records.arrayRawLenPC[operation.pc]
 			_, recordMetatable := plan.records.metatableOperation(operation)
+			mutationMetatable := plan.mutationMetatable.metatable(operation)
 			if _, structuralToString := plan.keys.tostring(operation); !structuralToString &&
 				!backendGoNumericMathMin(operation) &&
 				!recordFamilyRawLen && !recordFamilyRemove &&
-				!recordArrayInsert && !recordArrayRemove && !recordArrayRawLen && !recordMetatable {
+				!recordArrayInsert && !recordArrayRemove && !recordArrayRawLen && !recordMetatable && !mutationMetatable {
 				if !plan.coroutines.createOperation(operation) &&
 					!plan.coroutines.statusOperation(operation) {
 					if _, resume := plan.coroutines.resume(operation); !resume {
@@ -650,6 +666,7 @@ func verifyBackendGoNumericTargets(targets []backendGoNumericTarget) error {
 
 func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptions) (backendGoNumericPlan, error) {
 	keys := analyzeBackendGoStructuralKeys(ir, options)
+	mutationMetatable := discoverBackendGoMutationMetatable(ir, options)
 	records := analyzeBackendGoRecordTables(ir, keys)
 	callSets := discoverBackendGoFiniteCallSets(ir, records, options)
 	closures, err := analyzeBackendGoScalarClosures(ir, options)
@@ -715,6 +732,9 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 	for root := range closureSets.excludedRoots {
 		excludedTables[root] = true
 	}
+	for root := range mutationMetatable.excludedRoots {
+		excludedTables[root] = true
+	}
 	receiverTables := backendGoNumericReceiverTableCount(options.receiverTable, options.receiverTables)
 	tables, err := analyzeBackendGoScalarTablesExcludingCountWithFields(
 		ir, receiverTables, excludedTables, options.capturedTableFields,
@@ -750,6 +770,7 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		closureSets:          closureSets,
 		coroutines:           coroutines,
 		indexFunctions:       indexFunctions,
+		mutationMetatable:    mutationMetatable,
 	}
 	parameterTags, ok := backendGoNumericParameterTags(ir, options.fixedVarargCount)
 	if !ok {
@@ -813,12 +834,15 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 					tags = backendTagFunction
 				case opNewTable:
 					if plan.tables.root(value.id) != invalidBackendValueID ||
+						plan.mutationMetatable.scalarValue(value.id) ||
 						valueIndex < len(plan.callSets.scalarValues) && plan.callSets.scalarValues[valueIndex] ||
 						valueIndex < len(plan.closureSets.scalarValues) && plan.closureSets.scalarValues[valueIndex] {
 						tags = backendTagTable
 					}
 				case opGetStringField:
-					if _, ok := plan.indexFunctions.call(operation); ok {
+					if _, ok := plan.mutationMetatable.get(operation); ok {
+						tags = backendTagNumber
+					} else if _, ok := plan.indexFunctions.call(operation); ok {
 						tags = backendTagNumber
 					} else if field, ok := plan.records.fieldsByPC[operation.pc]; ok {
 						tags = plan.records.fieldTagsFor(plan.tags, field)
@@ -838,7 +862,9 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						tags = plan.records.childRecordFieldTags(plan.tags, fused.family)
 					}
 				case opGetIndex:
-					if _, ok := plan.closureSets.selector(operation); ok {
+					if _, ok := plan.mutationMetatable.get(operation); ok {
+						tags = backendTagNumber
+					} else if _, ok := plan.closureSets.selector(operation); ok {
 						tags = backendTagNumber
 					} else if plan.callSets.selector(operation) {
 						tags = backendTagNumber
@@ -891,7 +917,9 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						}
 					}
 				case opFastCall:
-					if _, ok := plan.records.arrayRawLenPC[operation.pc]; ok {
+					if plan.mutationMetatable.metatable(operation) {
+						tags = backendTagTable
+					} else if _, ok := plan.records.arrayRawLenPC[operation.pc]; ok {
 						tags = backendTagNumber
 					} else if _, ok := plan.records.arrayInsertPC[operation.pc]; ok {
 						tags = backendTagNil
@@ -1046,6 +1074,12 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		if _, ok := plan.indexFunctions.call(operation); ok {
 			plan.replayEntry[pc] = true
 		}
+		if _, ok := plan.mutationMetatable.get(operation); ok {
+			plan.replayEntry[pc] = true
+		}
+		if plan.mutationMetatable.set(operation) {
+			plan.replayEntry[pc] = true
+		}
 		if _, ok := plan.captured.call(operation); ok {
 			plan.replayEntry[pc] = true
 		}
@@ -1101,6 +1135,11 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		}
 	}
 	for valueIndex, scalar := range plan.records.scalarValues {
+		if scalar {
+			markScalarReplaced(backendValueID(valueIndex + 1))
+		}
+	}
+	for valueIndex, scalar := range plan.mutationMetatable.scalarReplaced {
 		if scalar {
 			markScalarReplaced(backendValueID(valueIndex + 1))
 		}
@@ -1516,6 +1555,9 @@ func verifyBackendGoNumericOperation(
 	case opMove:
 		return nil
 	case opClosure:
+		if plan.mutationMetatable.scalarValue(operation.defs[0].value) {
+			return nil
+		}
 		for _, definition := range operation.defs {
 			if plan.used[definition.value-1] {
 				return fmt.Errorf("emit backend Go numeric proof: PC %d closure escapes scalar replacement", operation.pc)
@@ -1532,6 +1574,12 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opSetStringField:
+		if _, ok := plan.mutationMetatable.backingSetter(operation); ok {
+			return require(operation.c, backendTagNumber)
+		}
+		if plan.mutationMetatable.setter(operation) {
+			return nil
+		}
 		if plan.callSets.setter(operation) || plan.closureSets.setter(operation) {
 			return nil
 		}
@@ -1593,6 +1641,12 @@ func verifyBackendGoNumericOperation(
 		}
 		return require(operation.c, array.tags)
 	case opSetIndex:
+		if plan.mutationMetatable.set(operation) {
+			if err := requireOptional(operation.b, backendTagString); err != nil {
+				return err
+			}
+			return require(operation.c, backendTagNumber)
+		}
 		if _, ok := plan.records.arraySetByPC[operation.pc]; ok {
 			return requireOptional(operation.b, backendTagNumber)
 		}
@@ -1602,11 +1656,28 @@ func verifyBackendGoNumericOperation(
 			}
 			return requireStore(operation.c, plan.records.dynamicFieldTags(plan.tags, dynamic))
 		}
+		if dynamic, ok := plan.tables.dynamicExternalSetByPC[operation.pc]; ok {
+			if err := requireOptional(operation.b, backendTagString); err != nil {
+				return err
+			}
+			return require(operation.c, dynamic.tags)
+		}
 		if _, ok := plan.records.mapSetByPC[operation.pc]; !ok {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record-map store", operation.pc)
 		}
 		return nil
 	case opGetIndex:
+		if _, ok := plan.mutationMetatable.get(operation); ok {
+			if err := requireOptional(operation.c, backendTagString); err != nil {
+				return err
+			}
+			for _, definition := range operation.defs {
+				if plan.tags[definition.value-1] != backendTagNumber {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d mutation-metatable result is not numeric", operation.pc)
+				}
+			}
+			return nil
+		}
 		if _, ok := plan.closureSets.selector(operation); ok {
 			return require(operation.c, backendTagString)
 		}
@@ -1716,6 +1787,14 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opGetStringField:
+		if _, ok := plan.mutationMetatable.get(operation); ok {
+			for _, definition := range operation.defs {
+				if plan.tags[definition.value-1] != backendTagNumber {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d mutation-metatable field is not numeric", operation.pc)
+				}
+			}
+			return nil
+		}
 		if _, ok := plan.indexFunctions.call(operation); ok {
 			for _, definition := range operation.defs {
 				if plan.tags[definition.value-1] != backendTagNumber {
@@ -1841,6 +1920,12 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opFastCall:
+		if plan.mutationMetatable.metatable(operation) {
+			if operation.c != 2 || operation.d != 1 {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d changes mutation metatable shape", operation.pc)
+			}
+			return nil
+		}
 		if metatable, ok := plan.records.metatableOperation(operation); ok {
 			if operation.c != 2 || operation.d != 1 {
 				return fmt.Errorf("emit backend Go numeric proof: PC %d changes record setmetatable shape", operation.pc)
@@ -2755,6 +2840,12 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 	case opNewTable:
 		return false, nil
 	case opSetStringField:
+		if handled, err := emitter.emitMutationMetatableBackingSet(operation, use); handled {
+			return false, err
+		}
+		if emitter.plan.mutationMetatable.setter(operation) {
+			return false, nil
+		}
 		if emitter.plan.callSets.setter(operation) || emitter.plan.closureSets.setter(operation) {
 			return false, nil
 		}
@@ -2804,17 +2895,47 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		}
 		fmt.Fprintf(&emitter.body, "\ta%d[%d] = v%d\n", arrayIndex, element-1, source)
 	case opSetIndex:
+		if handled, err := emitter.emitMutationMetatableSet(operation, use); handled {
+			return false, err
+		}
 		if handled, err := emitter.emitRecordArraySet(operation); handled {
 			return false, err
 		}
 		if handled, err := emitter.emitRecordDynamicSet(operation, use); handled {
 			return false, err
 		}
+		if dynamic, ok := emitter.plan.tables.dynamicExternalSetByPC[operation.pc]; ok {
+			key, err := use(operation.b)
+			if err != nil {
+				return false, err
+			}
+			source, err := use(operation.c)
+			if err != nil {
+				return false, err
+			}
+			emitter.emitOptionalPresenceGuard(operation, 1, key)
+			fmt.Fprintf(&emitter.body, "\tswitch v%d {\n", key)
+			for fieldIndex, field := range emitter.plan.tables.fields {
+				if field.key.table != dynamic.table || field.tags != dynamic.tags ||
+					field.child != invalidBackendValueID || field.methodProto >= 0 {
+					continue
+				}
+				fmt.Fprintf(&emitter.body, "\tcase uint32(%d):\n", field.key.name)
+				fmt.Fprintf(&emitter.body, "\t\t%s = v%d\n", emitter.scalarField(fieldIndex), source)
+			}
+			emitter.body.WriteString("\tdefault:\n")
+			fmt.Fprintf(&emitter.body, "\t\t%s\n", emitter.failureReturn())
+			emitter.body.WriteString("\t}\n")
+			return false, nil
+		}
 		if handled, err := emitter.emitRecordMapSet(operation); handled {
 			return false, err
 		}
 		return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record-map store", operation.pc)
 	case opGetIndex:
+		if handled, err := emitter.emitMutationMetatableGet(operation, definition, use); handled {
+			return false, err
+		}
 		if set, ok := emitter.plan.closureSets.selector(operation); ok {
 			return false, emitter.emitFiniteClosureSelector(operation, set, definition)
 		}
@@ -2898,6 +3019,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		}
 		return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no fused child-record lookup", operation.pc)
 	case opGetStringField:
+		if handled, err := emitter.emitMutationMetatableGet(operation, definition, use); handled {
+			return false, err
+		}
 		if handled, err := emitter.emitRecordIndexFunctionGet(operation, definition); handled {
 			return false, err
 		}
@@ -2956,6 +3080,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		emitter.emitGoto(int32(block.id), nextBlock, 1)
 		return true, nil
 	case opFastCall:
+		if emitter.plan.mutationMetatable.metatable(operation) {
+			return false, nil
+		}
 		if _, ok := emitter.plan.records.metatableOperation(operation); ok {
 			return false, nil
 		}
@@ -3607,6 +3734,10 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		} else if emitter.prepared {
 			fmt.Fprintf(&emitter.body, "\treturn machinePreparedReturnOneNumber(v%d)\n", results[0])
 		} else {
+			if resultCount == 0 {
+				emitter.body.WriteString("\treturn true\n")
+				return true, nil
+			}
 			emitter.body.WriteString("\treturn ")
 			for result, value := range results {
 				if result != 0 {

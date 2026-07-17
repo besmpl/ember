@@ -85,7 +85,53 @@ func backendGoNumericParameterTags(
 			return nil, false
 		}
 	}
+	capturedRoots := make(map[backendValueID]bool)
+	for _, roots := range backendGoCapturedRecordUpvalues(ir) {
+		for _, root := range roots {
+			capturedRoots[root] = true
+		}
+	}
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		var table, key backendValueID
+		switch operation.op {
+		case opGetIndex:
+			table = backendOperationUse(operation, operation.b)
+			key = backendOperationUse(operation, operation.c)
+		case opSetIndex:
+			table = backendOperationUse(operation, operation.a)
+			key = backendOperationUse(operation, operation.b)
+		default:
+			continue
+		}
+		if capturedRoots[table] &&
+			!backendGoNumericRequireParameterTag(ir, origins, tags, key, backendTagString) {
+			return nil, false
+		}
+	}
 	return tags, true
+}
+
+func backendGoNumericRequireParameterTag(
+	ir *backendProtoIR,
+	origins []int,
+	tags []backendTagMask,
+	value backendValueID,
+	want backendTagMask,
+) bool {
+	if !ir.validBackendValue(value) {
+		return false
+	}
+	parameter := origins[value-1]
+	if parameter < 0 {
+		return true
+	}
+	if parameter >= len(tags) ||
+		tags[parameter] != backendTagNumber && tags[parameter] != want {
+		return false
+	}
+	tags[parameter] = want
+	return true
 }
 
 func backendGoNumericConstrainParameterTag(

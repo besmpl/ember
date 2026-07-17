@@ -962,7 +962,7 @@ func (plan *backendGoRecordTablePlan) propagateFamilyValues(ir *backendProtoIR) 
 					family = candidate
 					found = true
 				} else if value.kind != backendValuePhi ||
-					!backendGoRecordRefAliasCandidate(ir, origin, value.register) {
+					!backendGoIdentityAliasCandidate(ir, origin, value.register) {
 					all = false
 				}
 			}
@@ -1082,7 +1082,7 @@ func (plan *backendGoRecordTablePlan) propagateArrayKeys(ir *backendProtoIR) boo
 					arrayIndex = candidate
 					foundKey = true
 				} else if value.kind != backendValuePhi ||
-					!backendGoRecordRefAliasCandidate(ir, origin, value.register) {
+					!backendGoIdentityAliasCandidate(ir, origin, value.register) {
 					allKeys = false
 				}
 			}
@@ -1291,7 +1291,7 @@ func (plan *backendGoRecordTablePlan) propagateRefsAndIterators(ir *backendProto
 					foundRef = true
 				} else {
 					if value.kind != backendValuePhi ||
-						!backendGoRecordRefAliasCandidate(ir, origin, value.register) {
+						!backendGoIdentityAliasCandidate(ir, origin, value.register) {
 						allRef = false
 					}
 				}
@@ -1312,7 +1312,7 @@ func (plan *backendGoRecordTablePlan) propagateRefsAndIterators(ir *backendProto
 	return false
 }
 
-func backendGoRecordRefAliasCandidate(
+func backendGoIdentityAliasCandidate(
 	ir *backendProtoIR,
 	id backendValueID,
 	register int32,
