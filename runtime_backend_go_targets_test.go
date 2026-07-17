@@ -74,6 +74,47 @@ func TestInferBackendGoNumericTargetsRejectsAmbiguousVarargArity(t *testing.T) {
 	}
 }
 
+func TestBackendGoCapturedRecordCallPreservesTargetFieldABIOrder(t *testing.T) {
+	tc := loadLuauBenchmarkCases(t, "scenarioLuauCases", []string{"command_vararg_router"})[0]
+	irs, _ := backendExactCorpusIRs(t, backendExactGuestBatchSource(t, tc.source, false))
+	targets, err := inferBackendGoNumericTargets(irs, []int32{1, 2}, "backendGeneratedCapturedOrder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	callerPlan, err := buildBackendGoNumericPlan(irs[1], backendGoNumericOptions{
+		functionName:        targets[1].functionName,
+		directTargets:       targets,
+		capturedTableFields: targets[1].capturedTableFields,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetPlan, err := buildBackendGoNumericPlan(irs[2], backendGoNumericOptions{
+		functionName:        targets[2].functionName,
+		fixedVarargCount:    targets[2].fixedVarargCount,
+		capturedTableFields: targets[2].capturedTableFields,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(callerPlan.captured.calls) != 1 {
+		t.Fatalf("captured record calls = %d, want 1", len(callerPlan.captured.calls))
+	}
+	for _, call := range callerPlan.captured.calls {
+		if len(call.callerFields) != len(targetPlan.tables.fields) {
+			t.Fatalf("captured caller fields = %d, target ABI fields = %d", len(call.callerFields), len(targetPlan.tables.fields))
+		}
+		for index, callerField := range call.callerFields {
+			record := &callerPlan.records.records[callerField.index]
+			got := record.fieldNames[callerField.field]
+			want := targetPlan.tables.fields[index].key.name
+			if got != want {
+				t.Fatalf("captured caller field %d name = %d, target ABI name = %d", index, got, want)
+			}
+		}
+	}
+}
+
 func TestInferBackendGoNumericTargetsInfersMutationMetatableSharedFields(t *testing.T) {
 	irs := backendDirtyMetatableProofIRs(t, backendDirtyMetatableProofSource)
 	targets, err := inferBackendGoNumericTargets(irs, []int32{2, 3}, "backendGeneratedModule0")

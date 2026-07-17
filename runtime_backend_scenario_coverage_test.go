@@ -63,6 +63,7 @@ func TestBackendGoExactBenchmarkGuestBatchCanGenerate(t *testing.T) {
 	for _, group := range backendExactBenchmarkGroups() {
 		for _, tc := range loadLuauBenchmarkCases(t, group.variable, group.cases) {
 			t.Run(group.name+"/"+tc.name, func(t *testing.T) {
+				var standardGenerated string
 				for _, variant := range []parityfixture.GuestBatchVariant{
 					{CaseName: "__case", BatchName: "__batch"},
 					{CaseName: "holdoutCase", BatchName: "holdoutBatch", Holdout: true},
@@ -101,6 +102,13 @@ func TestBackendGoExactBenchmarkGuestBatchCanGenerate(t *testing.T) {
 						var generated strings.Builder
 						for _, file := range files {
 							generated.Write(file.source)
+						}
+						if variant.Holdout {
+							if got := generated.String(); got != standardGenerated {
+								t.Fatal("identity holdout changed generated guest-batch code")
+							}
+						} else {
+							standardGenerated = generated.String()
 						}
 						switch tc.name {
 						case "coroutine_yield":
@@ -141,7 +149,7 @@ func backendExactProgramCanGenerate(t *testing.T, source string) {
 	}
 }
 
-func backendExactCorpusIRs(t *testing.T, source string) ([]*backendProtoIR, *codeImage) {
+func backendExactCorpusIRs(t testing.TB, source string) ([]*backendProtoIR, *codeImage) {
 	t.Helper()
 	proto, err := Compile(source)
 	if err != nil {

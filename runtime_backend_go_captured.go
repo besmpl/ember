@@ -83,9 +83,10 @@ func analyzeBackendGoCapturedRecordCalls(
 			continue
 		}
 		targetPlan, err := buildBackendGoNumericPlan(target.ir, backendGoNumericOptions{
-			functionName:     target.functionName,
-			directTargets:    options.directTargets,
-			fixedVarargCount: target.fixedVarargCount,
+			functionName:        target.functionName,
+			directTargets:       options.directTargets,
+			fixedVarargCount:    target.fixedVarargCount,
+			capturedTableFields: target.capturedTableFields,
 		})
 		if err != nil || targetPlan.tables.externalRoot == invalidBackendValueID {
 			continue

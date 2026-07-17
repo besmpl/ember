@@ -4739,7 +4739,7 @@ func backendCoroutineProofTargets(irs []*backendProtoIR) []backendGoNumericTarge
 	return targets
 }
 
-func backendCoroutineDeadStringID(t *testing.T, image *codeImage) machineStringID {
+func backendCoroutineDeadStringID(t testing.TB, image *codeImage) machineStringID {
 	t.Helper()
 	if image == nil {
 		return invalidMachineStringID
