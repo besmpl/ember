@@ -1034,8 +1034,19 @@ The retained path has moved beyond the original starting state:
   bytes for the index target, and 480 bytes for the newindex target. Generated
   bodies contain eleven intentional typed target calls plus cold
   bounds/stack-growth helpers and no opcode, descriptor, Machine table,
-  runtime string, allocation, or VM dispatch. Twenty-four of the 25 Scenario
-  kernels now have production compiler-proof routes.
+  runtime string, allocation, or VM dispatch.
+- An exhaustive exact-corpus contract now compiles all 25 `scenarioLuauCases`
+  sources through their production compiler-proof routes: nineteen
+  single-Proto kernels and six nested-Proto families. It exposed a regression
+  from the prototype-fallback slice: captured command-state reads were allowed
+  to infer fields before the caller supplied their exact shape, which discarded
+  the established write-derived scalar plan. Captured reads without explicit
+  caller fields now remain fail-closed, while ordinary receiver tables and
+  explicit prototype/metatable fields retain their existing paths. The exact
+  command router, its parameterized fixture, generated freshness, prototype
+  fallback, mutation metatables, and all 25 exact sources pass uncached focused
+  checks. Twenty-five of the 25 Scenario kernels now have production
+  compiler-proof routes.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final

@@ -353,7 +353,7 @@ func analyzeBackendGoScalarTablesExcludingCountWithFields(
 				key := backendGoScalarFieldKey{table: table, name: name}
 				fieldIndex, exists := plan.index[key]
 				if !exists {
-					if !plan.isExternalRoot(table) || len(operation.defs) != 1 {
+					if receiverTables == 0 || !plan.isExternalRoot(table) || len(operation.defs) != 1 {
 						continue
 					}
 					tags := backendGoScalarRequiredTags(ir, operation.defs[0].value, nil)

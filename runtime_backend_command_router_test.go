@@ -52,7 +52,12 @@ return kernel
 
 func backendCommandRouterProofIRs(t *testing.T) []*backendProtoIR {
 	t.Helper()
-	proto, err := Compile(backendCommandRouterProofSource)
+	return backendCommandRouterProofIRsForSource(t, backendCommandRouterProofSource)
+}
+
+func backendCommandRouterProofIRsForSource(t *testing.T, source string) []*backendProtoIR {
+	t.Helper()
+	proto, err := Compile(source)
 	if err != nil {
 		t.Fatal(err)
 	}
