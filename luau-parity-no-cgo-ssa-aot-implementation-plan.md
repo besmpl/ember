@@ -762,6 +762,32 @@ The retained path has moved beyond the original starting state:
   contain no opcode, descriptor, Machine table, runtime string, interning, or
   VM dispatch. Sixteen of the 25 Scenario kernels now emit through the
   compiler proof route.
+- The empty nested record-array slice carries a complete zero-length shape for
+  every member of a verified child-array family. Empty members now retain the
+  family's field inventory and zero-length presence vectors, so declarations,
+  guards, selectors, and field tags remain structurally valid without
+  inventing an element. A parameterized `path_relaxation` holdout proves nine
+  outer node records, ten distinct nested edge arrays, one genuinely empty
+  member, twelve edge records, dynamic next-node selection, nested iteration,
+  and cross-record mutation. Generated Go, prepared owner, generic Machine,
+  and the independent interpreter agree across negative, ordinary, and large
+  seeds. Private function renaming is byte-identical; mixed edge payloads,
+  child shape drift, and escaping edge arrays fail closed; controlled
+  execution stays generic; invalid prepared arguments replay entry; owner
+  table/string counts remain unchanged; direct and prepared paths allocate
+  zero when warmed. The direct kernel has a five-sample median of about 4.443
+  microseconds (4.440-4.449 microseconds observed), while the prepared owner
+  has a median of about 4.718 microseconds (4.706-4.727 microseconds observed),
+  versus about 455.3 microseconds through generic Machine. The corresponding
+  pinned Luau `-O2 -g0` corpus batch has a five-sample median of about 30.51
+  microseconds per call, including its cold first process sample, making
+  prepared about `0.155x` Luau; this is exploratory evidence, not the required
+  `guest_batch_v1` capture. Deterministic generated source is 36,038 bytes.
+  Linked ARM64 is 2,400 bytes for the direct kernel, 2,720 bytes for the
+  prepared body, and 128 bytes for the wrapper; generated bodies call only
+  cold bounds/stack-growth helpers and contain no opcode, descriptor, Machine
+  table, runtime string, interning, or VM dispatch. Seventeen of the 25
+  Scenario kernels now emit through the compiler proof route.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final

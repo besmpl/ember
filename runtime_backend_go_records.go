@@ -2458,6 +2458,7 @@ func (plan *backendGoRecordTablePlan) discoverChildArrayFamilies(ir *backendProt
 				}
 				child.fieldNames = append([]machineStringID(nil), shapeNames...)
 				child.fieldIndex = make(map[machineStringID]int, len(shapeIndex))
+				child.fieldPresent = make([][]bool, len(shapeNames))
 				for childName, field := range shapeIndex {
 					child.fieldIndex[childName] = field
 				}
