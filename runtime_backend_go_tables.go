@@ -766,6 +766,9 @@ func backendGoOperationExecutionBound(ir *backendProtoIR, operation *backendOper
 			continue
 		}
 		count, ok := backendGoStaticNumericLoopCount(ir, int32(headerIndex), members)
+		if !ok {
+			count, ok = backendGoBoundedNumericLoopCount(ir, int32(headerIndex), members)
+		}
 		if !ok || count == 0 ||
 			bound*uint64(count) > uint64(backendGoMaxScalarArrayCapacity) {
 			return 0, false
@@ -773,6 +776,161 @@ func backendGoOperationExecutionBound(ir *backendProtoIR, operation *backendOper
 		bound *= uint64(count)
 	}
 	return uint32(bound), true
+}
+
+func backendGoBoundedNumericLoopCount(
+	ir *backendProtoIR,
+	header int32,
+	members map[int32]bool,
+) (uint32, bool) {
+	if ir == nil || header < 0 || int(header) >= len(ir.blocks) {
+		return 0, false
+	}
+	var check *backendOperationIR
+	block := &ir.blocks[header]
+	for pc := block.first; pc < block.last; pc++ {
+		operation := &ir.ops[pc]
+		if operation.op != opNumericForCheck || check != nil {
+			if operation.op == opNumericForCheck {
+				return 0, false
+			}
+			continue
+		}
+		check = operation
+	}
+	if check == nil {
+		return 0, false
+	}
+	start, startOK := backendGoLoopInitialNumber(ir, header, members, backendOperationUse(check, check.a))
+	limitLow, limitHigh, limitOK := backendGoLoopInitialNumberBounds(
+		ir, header, members, backendOperationUse(check, check.b),
+	)
+	step, stepOK := backendGoLoopInitialNumber(ir, header, members, backendOperationUse(check, check.c))
+	if !startOK || !limitOK || !stepOK ||
+		math.IsNaN(start) || math.IsNaN(limitLow) || math.IsNaN(limitHigh) || math.IsNaN(step) ||
+		math.IsInf(start, 0) || math.IsInf(limitLow, 0) || math.IsInf(limitHigh, 0) || math.IsInf(step, 0) ||
+		step == 0 {
+		return 0, false
+	}
+	limit := limitHigh
+	if step < 0 {
+		limit = limitLow
+	}
+	current := start
+	for count := uint32(0); ; count++ {
+		if (step > 0 && current > limit) || (step < 0 && current < limit) {
+			return count, true
+		}
+		if count == backendGoMaxScalarArrayCapacity {
+			return 0, false
+		}
+		next := current + step
+		if next == current || math.IsInf(next, 0) {
+			return 0, false
+		}
+		current = next
+	}
+}
+
+func backendGoLoopInitialNumberBounds(
+	ir *backendProtoIR,
+	header int32,
+	members map[int32]bool,
+	id backendValueID,
+) (float64, float64, bool) {
+	if !ir.validBackendValue(id) {
+		return 0, 0, false
+	}
+	value := &ir.values[id-1]
+	if value.kind != backendValuePhi || value.block != header {
+		return backendGoNumberBounds(ir, id, nil)
+	}
+	block := &ir.blocks[header]
+	phi := block.phis[value.register]
+	var low, high float64
+	found := false
+	for inputIndex, input := range phi.inputs {
+		if members[block.predecessors[inputIndex]] {
+			continue
+		}
+		candidateLow, candidateHigh, ok := backendGoNumberBounds(ir, input, nil)
+		if !ok {
+			return 0, 0, false
+		}
+		if !found || candidateLow < low {
+			low = candidateLow
+		}
+		if !found || candidateHigh > high {
+			high = candidateHigh
+		}
+		found = true
+	}
+	return low, high, found
+}
+
+func backendGoNumberBounds(
+	ir *backendProtoIR,
+	id backendValueID,
+	seen map[backendValueID]bool,
+) (float64, float64, bool) {
+	if !ir.validBackendValue(id) {
+		return 0, 0, false
+	}
+	if seen == nil {
+		seen = make(map[backendValueID]bool)
+	}
+	if seen[id] {
+		return 0, 0, false
+	}
+	seen[id] = true
+	defer delete(seen, id)
+	value := &ir.values[id-1]
+	if value.kind != backendValueOperation || value.pc < 0 || int(value.pc) >= len(ir.ops) {
+		return 0, 0, false
+	}
+	operation := &ir.ops[value.pc]
+	constant := func(index int32) (float64, bool) {
+		if index < 0 || int(index) >= len(ir.constants) || ir.constants[index].kind != NumberKind {
+			return 0, false
+		}
+		number := math.Float64frombits(ir.constants[index].bits)
+		return number, !math.IsNaN(number) && !math.IsInf(number, 0)
+	}
+	switch operation.op {
+	case opLoadConst:
+		number, ok := constant(operation.b)
+		return number, number, ok
+	case opMove:
+		return backendGoNumberBounds(ir, backendOperationUse(operation, operation.b), seen)
+	case opModK:
+		divisor, ok := constant(operation.c)
+		if !ok || divisor <= 0 {
+			return 0, 0, false
+		}
+		return 0, divisor, true
+	case opAddK, opSubK:
+		leftLow, leftHigh, ok := backendGoNumberBounds(ir, backendOperationUse(operation, operation.b), seen)
+		right, rightOK := constant(operation.c)
+		if !ok || !rightOK {
+			return 0, 0, false
+		}
+		if operation.op == opAddK {
+			return leftLow + right, leftHigh + right, true
+		}
+		return leftLow - right, leftHigh - right, true
+	case opAdd, opSub:
+		leftLow, leftHigh, leftOK := backendGoNumberBounds(ir, backendOperationUse(operation, operation.b), seen)
+		rightLow, rightHigh, rightOK := backendGoNumberBounds(ir, backendOperationUse(operation, operation.c), seen)
+		if !leftOK || !rightOK {
+			return 0, 0, false
+		}
+		if operation.op == opAdd {
+			return leftLow + rightLow, leftHigh + rightHigh, true
+		}
+		return leftLow - rightHigh, leftHigh - rightLow, true
+	default:
+		return 0, 0, false
+	}
 }
 
 func backendGoNaturalLoopMembers(ir *backendProtoIR, header int32) map[int32]bool {

@@ -472,9 +472,13 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			}
 			_, recordFamilyRawLen := plan.records.familyRawLenPC[operation.pc]
 			_, recordFamilyRemove := plan.records.familyRemovePC[operation.pc]
+			_, recordArrayInsert := plan.records.arrayInsertPC[operation.pc]
+			_, recordArrayRemove := plan.records.arrayRemovePC[operation.pc]
+			_, recordArrayRawLen := plan.records.arrayRawLenPC[operation.pc]
 			if _, structuralToString := plan.keys.tostring(operation); !structuralToString &&
 				!backendGoNumericMathMin(operation) &&
-				!recordFamilyRawLen && !recordFamilyRemove {
+				!recordFamilyRawLen && !recordFamilyRemove &&
+				!recordArrayInsert && !recordArrayRemove && !recordArrayRawLen {
 				if !plan.coroutines.createOperation(operation) &&
 					!plan.coroutines.statusOperation(operation) {
 					if _, resume := plan.coroutines.resume(operation); !resume {
@@ -859,7 +863,13 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						}
 					}
 				case opFastCall:
-					if _, ok := plan.records.familyRawLenPC[operation.pc]; ok {
+					if _, ok := plan.records.arrayRawLenPC[operation.pc]; ok {
+						tags = backendTagNumber
+					} else if _, ok := plan.records.arrayInsertPC[operation.pc]; ok {
+						tags = backendTagNil
+					} else if _, ok := plan.records.arrayRemovePC[operation.pc]; ok {
+						tags = backendTagNil
+					} else if _, ok := plan.records.familyRawLenPC[operation.pc]; ok {
 						tags = backendTagNumber
 					} else if _, ok := plan.records.familyRemovePC[operation.pc]; ok {
 						tags = backendTagNil
@@ -1502,6 +1512,9 @@ func verifyBackendGoNumericOperation(
 		}
 		return require(operation.c, array.tags)
 	case opSetIndex:
+		if _, ok := plan.records.arraySetByPC[operation.pc]; ok {
+			return requireOptional(operation.b, backendTagNumber)
+		}
 		if dynamic, ok := plan.records.dynamicSetByPC[operation.pc]; ok {
 			if err := requireOptional(operation.b, backendTagString); err != nil {
 				return err
@@ -1728,6 +1741,42 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opFastCall:
+		if _, ok := plan.records.arrayRawLenPC[operation.pc]; ok {
+			if operation.c != 1 || operation.d != 1 {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d changes record-array rawlen shape", operation.pc)
+			}
+			for _, definition := range operation.defs {
+				if plan.tags[definition.value-1] != backendTagNumber {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d record-array rawlen result is not numeric", operation.pc)
+				}
+			}
+			return nil
+		}
+		if _, ok := plan.records.arrayInsertPC[operation.pc]; ok {
+			if operation.c != 2 || operation.d != 1 {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d changes record-array insert shape", operation.pc)
+			}
+			for _, definition := range operation.defs {
+				if plan.used[definition.value-1] || plan.tags[definition.value-1] != backendTagNil {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d observes record-array insert result", operation.pc)
+				}
+			}
+			return nil
+		}
+		if _, ok := plan.records.arrayRemovePC[operation.pc]; ok {
+			if operation.c != 2 || operation.d != 1 {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d changes record-array remove shape", operation.pc)
+			}
+			if err := requireOptional(operation.a+1, backendTagNumber); err != nil {
+				return err
+			}
+			for _, definition := range operation.defs {
+				if plan.used[definition.value-1] || plan.tags[definition.value-1] != backendTagNil {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d observes removed record", operation.pc)
+				}
+			}
+			return nil
+		}
 		if _, ok := plan.records.familyRawLenPC[operation.pc]; ok {
 			if operation.c != 1 || operation.d != 1 {
 				return fmt.Errorf("emit backend Go numeric proof: PC %d changes child-array rawlen shape", operation.pc)
@@ -2641,6 +2690,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		}
 		fmt.Fprintf(&emitter.body, "\ta%d[%d] = v%d\n", arrayIndex, element-1, source)
 	case opSetIndex:
+		if handled, err := emitter.emitRecordArraySet(operation); handled {
+			return false, err
+		}
 		if handled, err := emitter.emitRecordDynamicSet(operation, use); handled {
 			return false, err
 		}
@@ -2763,6 +2815,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		emitter.emitGoto(int32(block.id), nextBlock, 1)
 		return true, nil
 	case opFastCall:
+		if handled, err := emitter.emitRecordRootArrayIntrinsic(operation, definition, use); handled {
+			return false, err
+		}
 		if handled, err := emitter.emitRecordFamilyIntrinsic(operation, definition, use); handled {
 			return false, err
 		}

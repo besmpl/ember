@@ -940,6 +940,38 @@ The retained path has moved beyond the original starting state:
   lookup, dynamic call, or VM dispatch. Twenty-one of the 25 Scenario kernels
   now emit through the compiler proof route.
 
+- The bounded root record-array compaction slice lowers the real
+  `array_hole_compaction` pressure. A conservative numeric interval proof now
+  bounds parameterized loop limits formed from constants, addition,
+  subtraction, and positive-divisor modulo; the existing 4,096-element ceiling
+  remains the hard rejection boundary. One empty root table becomes parallel
+  fixed-capacity Go arrays only when every dynamic write is bounded and dense
+  at runtime, every appended record has one identical proved shape, and no row
+  reference survives compaction. Verified `rawlen`, append-form
+  `table.insert`, and unobserved `table.remove` share the record module's field
+  copy and in-place shift mechanisms; values and presence lanes move together,
+  while every prepared intrinsic dependency replays canonical Machine before
+  mutation when rebound. Generated Go, prepared owner, generic Machine, and
+  the independent interpreter agree across negative, ordinary, and large
+  seeds. Private-function renaming is byte-identical; parameter-unbounded
+  fills, heterogeneous append shapes, escaping arrays, observed removed
+  records, and live row aliases across removal fail closed; sparse writes keep
+  an explicit dense-index replay guard. Controlled execution remains generic,
+  owner table/string counts stay unchanged, and direct/prepared paths allocate
+  zero when warmed. A three-sample local run measured a direct median of about
+  2.136 microseconds and a prepared-owner median of about 2.366 microseconds,
+  versus about 338.1 microseconds through generic Machine. The pinned Luau
+  0.728 `-O2 -g0` corpus batch had a three-sample median of about 28.377
+  microseconds per call, making prepared about `0.083x` Luau; this is
+  exploratory evidence, not either required clean `guest_batch_v1` capture.
+  Deterministic generated source is 12,284 bytes. Linked ARM64 is 1,008 bytes
+  for the direct kernel, 1,104 bytes for the prepared body, and 352 bytes for
+  the guarded wrapper; generated bodies contain no opcode, descriptor, Machine
+  table, runtime string, allocation, or VM dispatch. Focused compiler/owner
+  proofs, `go test ./...`, `scripts/check-fast`, and `scripts/check` pass.
+  Twenty-two of the 25 Scenario kernels now emit through the compiler proof
+  route.
+
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
 all-37 parity. General non-dense iteration, general table mutation, general

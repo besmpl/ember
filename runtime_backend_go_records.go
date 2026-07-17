@@ -64,6 +64,7 @@ type backendGoRecordArrayOperation struct {
 	index   int
 	record  int
 	element uint32
+	key     backendValueID
 }
 
 type backendGoRecordArray struct {
@@ -74,6 +75,7 @@ type backendGoRecordArray struct {
 	fieldPresent [][]bool
 	records      []int
 	length       uint32
+	capacity     uint32
 	mutable      bool
 }
 
@@ -187,6 +189,9 @@ type backendGoRecordTablePlan struct {
 	arrays                 []backendGoRecordArray
 	arraySetByPC           map[int32]backendGoRecordArrayOperation
 	arrayGetByPC           map[int32]int
+	arrayInsertPC          map[int32]backendGoRecordArrayOperation
+	arrayRemovePC          map[int32]int
+	arrayRawLenPC          map[int32]int
 	arrayKeyValues         map[backendValueID]int
 	arrayPreparePC         map[int32]int
 	arrayNextPC            map[int32]int
@@ -248,6 +253,9 @@ func analyzeBackendGoRecordTablesWithOptions(
 		arrayByRoot:            make(map[backendValueID]int),
 		arraySetByPC:           make(map[int32]backendGoRecordArrayOperation),
 		arrayGetByPC:           make(map[int32]int),
+		arrayInsertPC:          make(map[int32]backendGoRecordArrayOperation),
+		arrayRemovePC:          make(map[int32]int),
+		arrayRawLenPC:          make(map[int32]int),
 		arrayKeyValues:         make(map[backendValueID]int),
 		arrayPreparePC:         make(map[int32]int),
 		arrayNextPC:            make(map[int32]int),
@@ -371,6 +379,32 @@ func analyzeBackendGoRecordTablesWithOptions(
 			if table == invalidBackendValueID || !recordOK {
 				continue
 			}
+			key := backendOperationUse(operation, operation.b)
+			if ir.validBackendValue(key) && ir.values[key-1].tags == backendTagNumber {
+				executions, bounded := backendGoOperationExecutionBound(ir, operation)
+				if !bounded || executions == 0 {
+					plan.rejectReason = "record array fill is not bounded"
+					return plan
+				}
+				arrayIndex := plan.ensureArray(table)
+				array := &plan.arrays[arrayIndex]
+				if uint64(array.capacity)+uint64(executions) > uint64(backendGoMaxScalarArrayCapacity) {
+					plan.rejectReason = "record array fill exceeds capacity"
+					return plan
+				}
+				array.capacity += executions
+				array.mutable = true
+				plan.arraySetByPC[operation.pc] = backendGoRecordArrayOperation{
+					index: arrayIndex, record: record, key: key,
+				}
+				if plan.records[record].storedAtPC >= 0 &&
+					plan.records[record].storedAtPC != operation.pc {
+					plan.rejectReason = "record has multiple container stores"
+					return plan
+				}
+				plan.records[record].storedAtPC = operation.pc
+				continue
+			}
 			mapIndex := plan.ensureMap(table)
 			plan.mapSetByPC[operation.pc] = backendGoRecordMapOperation{
 				index: mapIndex, record: record,
@@ -393,6 +427,7 @@ func analyzeBackendGoRecordTablesWithOptions(
 			arrayIndex := plan.ensureArray(table)
 			if element > plan.arrays[arrayIndex].length {
 				plan.arrays[arrayIndex].length = element
+				plan.arrays[arrayIndex].capacity = element
 			}
 			plan.arraySetByPC[operation.pc] = backendGoRecordArrayOperation{
 				index: arrayIndex, record: record, element: element,
@@ -404,6 +439,9 @@ func analyzeBackendGoRecordTablesWithOptions(
 			}
 			plan.records[record].storedAtPC = operation.pc
 		}
+	}
+	if !plan.discoverRootArrayIntrinsics(ir) {
+		return plan
 	}
 	plan.discoverEmptyChildArrays(ir)
 	standaloneDynamic := false
@@ -563,6 +601,16 @@ func analyzeBackendGoRecordTablesWithOptions(
 		plan.scalarValues[operation.key.value-1] = true
 	}
 	for pc := range plan.familyRemovePC {
+		for _, definition := range ir.ops[pc].defs {
+			plan.scalarValues[definition.value-1] = true
+		}
+	}
+	for pc := range plan.arrayInsertPC {
+		for _, definition := range ir.ops[pc].defs {
+			plan.scalarValues[definition.value-1] = true
+		}
+	}
+	for pc := range plan.arrayRemovePC {
 		for _, definition := range ir.ops[pc].defs {
 			plan.scalarValues[definition.value-1] = true
 		}
@@ -1322,8 +1370,49 @@ func (plan *backendGoRecordTablePlan) finishShapesAndKeys(
 			return false
 		}
 		if current.length == 0 {
+			if current.capacity == 0 {
+				continue
+			}
+			recordIndexes := make([]int, 0, 2)
+			for pc, operation := range plan.arraySetByPC {
+				if operation.index != arrayIndex || operation.key == invalidBackendValueID {
+					continue
+				}
+				if !plan.recordInitializedBefore(ir, operation.record, &ir.ops[pc]) {
+					return false
+				}
+				recordIndexes = append(recordIndexes, operation.record)
+				recordUses[operation.record]++
+			}
+			for pc, operation := range plan.arrayInsertPC {
+				if operation.index != arrayIndex {
+					continue
+				}
+				if !plan.recordInitializedBefore(ir, operation.record, &ir.ops[pc]) {
+					return false
+				}
+				recordIndexes = append(recordIndexes, operation.record)
+				recordUses[operation.record]++
+			}
+			if !plan.setArrayShapeFromRecords(current, recordIndexes) {
+				return false
+			}
+			shape := plan.records[recordIndexes[0]].fieldIndex
+			for _, recordIndex := range recordIndexes[1:] {
+				candidate := plan.records[recordIndex].fieldIndex
+				if len(candidate) != len(shape) {
+					return false
+				}
+				for name := range shape {
+					if _, ok := candidate[name]; !ok {
+						return false
+					}
+				}
+			}
+			current.records = append([]int(nil), recordIndexes...)
 			continue
 		}
+		current.capacity = current.length
 		recordIndexes := make([]int, current.length)
 		present := make([]bool, current.length)
 		for pc, operation := range plan.arraySetByPC {
@@ -2360,7 +2449,7 @@ func (plan *backendGoRecordTablePlan) finalizeFieldTags(
 			}]; ok {
 				fieldTags = backendTagNumber
 			}
-			if array.length == 0 {
+			if len(array.records) == 0 {
 				array.fieldTags[field] = 0
 				continue
 			}
@@ -2529,6 +2618,15 @@ func (plan *backendGoRecordTablePlan) validateUses(ir *backendProtoIR) bool {
 	}
 	for pc := range ir.ops {
 		operation := &ir.ops[pc]
+		if arrayIndex, remove := plan.arrayRemovePC[operation.pc]; remove {
+			for _, spill := range operation.spillValues {
+				ref, live := plan.refs[spill.value]
+				if live && ref.kind == backendGoRecordRefArray && ref.index == arrayIndex {
+					plan.rejectReason = "record array remove has a live element reference at PC " + strconv.Itoa(int(operation.pc))
+					return false
+				}
+			}
+		}
 		if operation.op == opGetStringFieldIndex {
 			base := backendOperationUse(operation, operation.b)
 			if _, ref := plan.refs[base]; ref {
@@ -2585,6 +2683,9 @@ func (plan *backendGoRecordTablePlan) validateUses(ir *backendProtoIR) bool {
 						return false
 					}
 				case opSetIndex:
+					if _, arraySet := plan.arraySetByPC[operation.pc]; arraySet {
+						break
+					}
 					if _, ok := plan.mapSetByPC[operation.pc]; !ok {
 						if _, dynamic := plan.dynamicSetByPC[operation.pc]; dynamic {
 							break
@@ -2627,6 +2728,24 @@ func (plan *backendGoRecordTablePlan) validateUses(ir *backendProtoIR) bool {
 						plan.rejectReason = "unclassified record iterator next at PC " + strconv.Itoa(int(operation.pc))
 						return false
 					}
+				case opFastCall:
+					insert, isInsert := plan.arrayInsertPC[operation.pc]
+					_, isRemove := plan.arrayRemovePC[operation.pc]
+					_, isRawLen := plan.arrayRawLenPC[operation.pc]
+					if !isInsert && !isRemove && !isRawLen {
+						plan.rejectReason = "unclassified record array intrinsic at PC " + strconv.Itoa(int(operation.pc))
+						return false
+					}
+					if use.register == operation.a {
+						break
+					}
+					if isInsert && use.register == operation.a+1 {
+						if record, ok := plan.recordByRoot[root]; ok && record == insert.record {
+							break
+						}
+					}
+					plan.rejectReason = "unsupported record array intrinsic use at PC " + strconv.Itoa(int(operation.pc))
+					return false
 				case opJumpIfTableHasMetatable:
 					if use.register != operation.a {
 						plan.rejectReason = "record metatable guard use at PC " + strconv.Itoa(int(operation.pc))
@@ -2719,6 +2838,67 @@ func (plan *backendGoRecordTablePlan) ensureArray(root backendValueID) int {
 	plan.arrayByRoot[root] = index
 	plan.arrays = append(plan.arrays, backendGoRecordArray{root: root})
 	return index
+}
+
+func (plan *backendGoRecordTablePlan) discoverRootArrayIntrinsics(ir *backendProtoIR) bool {
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op != opFastCall {
+			continue
+		}
+		table := plan.root(backendOperationUse(operation, operation.a))
+		arrayIndex, arrayExists := plan.arrayByRoot[table]
+		switch nativeFuncID(operation.nativeID) {
+		case nativeFuncTableInsert:
+			recordRoot := plan.root(backendOperationUse(operation, operation.a+1))
+			record, recordExists := plan.recordByRoot[recordRoot]
+			if table == invalidBackendValueID || !recordExists {
+				continue
+			}
+			executions, bounded := backendGoOperationExecutionBound(ir, operation)
+			if operation.c != 2 || operation.d != 1 || !bounded || executions == 0 {
+				plan.rejectReason = "record array append is not bounded"
+				return false
+			}
+			arrayIndex = plan.ensureArray(table)
+			array := &plan.arrays[arrayIndex]
+			if uint64(array.capacity)+uint64(executions) > uint64(backendGoMaxScalarArrayCapacity) {
+				plan.rejectReason = "record array append exceeds capacity"
+				return false
+			}
+			array.capacity += executions
+			array.mutable = true
+			plan.arrayInsertPC[operation.pc] = backendGoRecordArrayOperation{
+				index: arrayIndex, record: record,
+			}
+			if plan.records[record].storedAtPC >= 0 &&
+				plan.records[record].storedAtPC != operation.pc {
+				plan.rejectReason = "record has multiple container stores"
+				return false
+			}
+			plan.records[record].storedAtPC = operation.pc
+		case nativeFuncTableRemove:
+			if !arrayExists {
+				continue
+			}
+			if operation.c != 2 || operation.d != 1 {
+				plan.rejectReason = "unsupported record array remove shape"
+				return false
+			}
+			plan.arrays[arrayIndex].mutable = true
+			plan.arrayRemovePC[operation.pc] = arrayIndex
+		case nativeFuncRawLen:
+			if !arrayExists {
+				continue
+			}
+			if operation.c != 1 || operation.d != 1 {
+				plan.rejectReason = "unsupported record array rawlen shape"
+				return false
+			}
+			plan.arrayRawLenPC[operation.pc] = arrayIndex
+		}
+	}
+	return true
 }
 
 func (plan *backendGoRecordTablePlan) discoverEmptyChildArrays(ir *backendProtoIR) {
@@ -3361,11 +3541,15 @@ func writeBackendGoRecordDeclarations(
 		}
 	}
 	for arrayIndex, array := range plan.arrays {
+		capacity := array.capacity
+		if capacity == 0 {
+			capacity = array.length
+		}
 		for field := range array.fieldNames {
 			goType, _ := backendGoScalarPayloadType(array.fieldTags[field])
-			fmt.Fprintf(source, "\tvar ra%d_%d [%d]%s\n", arrayIndex, field, array.length, goType)
+			fmt.Fprintf(source, "\tvar ra%d_%d [%d]%s\n", arrayIndex, field, capacity, goType)
 			if _, optional := backendGoOptionalScalarTags(array.fieldTags[field]); optional {
-				fmt.Fprintf(source, "\tvar rap%d_%d [%d]bool\n", arrayIndex, field, array.length)
+				fmt.Fprintf(source, "\tvar rap%d_%d [%d]bool\n", arrayIndex, field, capacity)
 			}
 		}
 		fmt.Fprintf(source, "\tvar ri%d int\n", arrayIndex)
@@ -3477,8 +3661,12 @@ func (emitter *backendGoNumericEmitter) emitRecordSetStringField(
 		}
 		fmt.Fprintf(&emitter.body, "\tmf%d_%d[int(v%d)-1] = v%d\n", field.index, field.field, field.ref, source)
 	case backendGoRecordFieldArray:
-		length := emitter.plan.records.arrays[field.index].length
-		if err := emitter.emitRecordRefGuard(field.ref, int(length)); err != nil {
+		array := emitter.plan.records.arrays[field.index]
+		if array.mutable {
+			fmt.Fprintf(&emitter.body, "\tif v%d < 1 || v%d > float64(rn%d) {\n", field.ref, field.ref, field.index)
+			fmt.Fprintf(&emitter.body, "\t\t%s\n", emitter.failureReturn())
+			emitter.body.WriteString("\t}\n")
+		} else if err := emitter.emitRecordRefGuard(field.ref, int(array.length)); err != nil {
 			return true, err
 		}
 		if _, optional := backendGoOptionalScalarTags(emitter.plan.records.arrays[field.index].fieldTags[field.field]); optional {
@@ -3527,8 +3715,12 @@ func (emitter *backendGoNumericEmitter) emitRecordGetStringField(
 		}
 		fmt.Fprintf(&emitter.body, "\tv%d = mf%d_%d[int(v%d)-1]\n", destination, field.index, field.field, field.ref)
 	case backendGoRecordFieldArray:
-		length := emitter.plan.records.arrays[field.index].length
-		if err := emitter.emitRecordRefGuard(field.ref, int(length)); err != nil {
+		array := emitter.plan.records.arrays[field.index]
+		if array.mutable {
+			fmt.Fprintf(&emitter.body, "\tif v%d < 1 || v%d > float64(rn%d) {\n", field.ref, field.ref, field.index)
+			fmt.Fprintf(&emitter.body, "\t\t%s\n", emitter.failureReturn())
+			emitter.body.WriteString("\t}\n")
+		} else if err := emitter.emitRecordRefGuard(field.ref, int(array.length)); err != nil {
 			return true, err
 		}
 		fmt.Fprintf(&emitter.body, "\tv%d = ra%d_%d[int(v%d)-1]\n", destination, field.index, field.field, field.ref)
@@ -3747,6 +3939,81 @@ func (emitter *backendGoNumericEmitter) emitRecordFamilyIntrinsic(
 	emitter.body.WriteString("\tdefault:\n")
 	fmt.Fprintf(&emitter.body, "\t\t%s\n", emitter.failureReturn())
 	emitter.body.WriteString("\t}\n")
+	return true, nil
+}
+
+func (emitter *backendGoNumericEmitter) emitRecordRootArrayIntrinsic(
+	operation *backendOperationIR,
+	definition func(int32) (backendValueID, error),
+	use func(int32) (backendValueID, error),
+) (bool, error) {
+	if arrayIndex, ok := emitter.plan.records.arrayRawLenPC[operation.pc]; ok {
+		if arrayIndex < 0 || arrayIndex >= len(emitter.plan.records.arrays) {
+			return true, fmt.Errorf("emit backend Go numeric proof: PC %d has invalid record-array rawlen", operation.pc)
+		}
+		destination, err := definition(operation.a)
+		if err != nil {
+			return true, err
+		}
+		fmt.Fprintf(&emitter.body, "\tv%d = float64(rn%d)\n", destination, arrayIndex)
+		return true, nil
+	}
+	if insert, ok := emitter.plan.records.arrayInsertPC[operation.pc]; ok {
+		if insert.index < 0 || insert.index >= len(emitter.plan.records.arrays) {
+			return true, fmt.Errorf("emit backend Go numeric proof: PC %d has invalid record-array insert", operation.pc)
+		}
+		array := emitter.plan.records.arrays[insert.index]
+		fmt.Fprintf(&emitter.body, "\tif rn%d >= %d {\n", insert.index, array.capacity)
+		fmt.Fprintf(&emitter.body, "\t\t%s\n", emitter.failureReturn())
+		emitter.body.WriteString("\t}\n")
+		if err := emitter.emitRecordArrayCopy(insert.index, insert.record, fmt.Sprintf("rn%d", insert.index)); err != nil {
+			return true, err
+		}
+		fmt.Fprintf(&emitter.body, "\trn%d++\n", insert.index)
+		return true, nil
+	}
+	arrayIndex, ok := emitter.plan.records.arrayRemovePC[operation.pc]
+	if !ok {
+		return false, nil
+	}
+	if arrayIndex < 0 || arrayIndex >= len(emitter.plan.records.arrays) {
+		return true, fmt.Errorf("emit backend Go numeric proof: PC %d has invalid record-array remove", operation.pc)
+	}
+	position, err := use(operation.a + 1)
+	if err != nil {
+		return true, err
+	}
+	emitter.emitOptionalPresenceGuard(operation, 1, position)
+	emitter.needsMath = true
+	fmt.Fprintf(
+		&emitter.body,
+		"\tif v%d < 1 || v%d > float64(rn%d) || v%d != math.Trunc(v%d) {\n",
+		position, position, arrayIndex, position, position,
+	)
+	fmt.Fprintf(&emitter.body, "\t\t%s\n", emitter.failureReturn())
+	emitter.body.WriteString("\t}\n")
+	fmt.Fprintf(
+		&emitter.body,
+		"\tfor rrm%d := int(v%d) - 1; rrm%d < rn%d-1; rrm%d++ {\n",
+		operation.pc, position, operation.pc, arrayIndex, operation.pc,
+	)
+	array := emitter.plan.records.arrays[arrayIndex]
+	for field := range array.fieldNames {
+		fmt.Fprintf(
+			&emitter.body,
+			"\t\tra%d_%d[rrm%d] = ra%d_%d[rrm%d+1]\n",
+			arrayIndex, field, operation.pc, arrayIndex, field, operation.pc,
+		)
+		if _, optional := backendGoOptionalScalarTags(array.fieldTags[field]); optional {
+			fmt.Fprintf(
+				&emitter.body,
+				"\t\trap%d_%d[rrm%d] = rap%d_%d[rrm%d+1]\n",
+				arrayIndex, field, operation.pc, arrayIndex, field, operation.pc,
+			)
+		}
+	}
+	emitter.body.WriteString("\t}\n")
+	fmt.Fprintf(&emitter.body, "\trn%d--\n", arrayIndex)
 	return true, nil
 }
 
@@ -4125,8 +4392,52 @@ func (emitter *backendGoNumericEmitter) emitRecordArraySet(
 	if !ok {
 		return false, nil
 	}
-	array := emitter.plan.records.arrays[arrayOperation.index]
-	record := emitter.plan.records.records[arrayOperation.record]
+	if arrayOperation.index < 0 || arrayOperation.index >= len(emitter.plan.records.arrays) {
+		return true, fmt.Errorf("emit backend Go numeric proof: PC %d has invalid record-array store", operation.pc)
+	}
+	target := ""
+	if arrayOperation.key != invalidBackendValueID {
+		array := emitter.plan.records.arrays[arrayOperation.index]
+		emitter.needsMath = true
+		fmt.Fprintf(
+			&emitter.body,
+			"\tif v%d != float64(rn%d+1) || v%d != math.Trunc(v%d) || rn%d >= %d {\n",
+			arrayOperation.key,
+			arrayOperation.index,
+			arrayOperation.key,
+			arrayOperation.key,
+			arrayOperation.index,
+			array.capacity,
+		)
+		fmt.Fprintf(&emitter.body, "\t\t%s\n", emitter.failureReturn())
+		emitter.body.WriteString("\t}\n")
+		target = fmt.Sprintf("rn%d", arrayOperation.index)
+	} else {
+		if arrayOperation.element == 0 {
+			return true, fmt.Errorf("emit backend Go numeric proof: PC %d has invalid static record-array index", operation.pc)
+		}
+		target = strconv.Itoa(int(arrayOperation.element - 1))
+	}
+	if err := emitter.emitRecordArrayCopy(arrayOperation.index, arrayOperation.record, target); err != nil {
+		return true, err
+	}
+	if arrayOperation.key != invalidBackendValueID {
+		fmt.Fprintf(&emitter.body, "\trn%d++\n", arrayOperation.index)
+	}
+	return true, nil
+}
+
+func (emitter *backendGoNumericEmitter) emitRecordArrayCopy(
+	arrayIndex int,
+	recordIndex int,
+	target string,
+) error {
+	if arrayIndex < 0 || arrayIndex >= len(emitter.plan.records.arrays) ||
+		recordIndex < 0 || recordIndex >= len(emitter.plan.records.records) {
+		return fmt.Errorf("emit backend Go numeric proof: invalid record-array copy")
+	}
+	array := emitter.plan.records.arrays[arrayIndex]
+	record := emitter.plan.records.records[recordIndex]
 	for field, name := range array.fieldNames {
 		recordField, ok := record.fieldIndex[name]
 		if !ok {
@@ -4134,11 +4445,11 @@ func (emitter *backendGoNumericEmitter) emitRecordArraySet(
 		}
 		fmt.Fprintf(
 			&emitter.body,
-			"\tra%d_%d[%d] = r%d_%d\n",
-			arrayOperation.index,
+			"\tra%d_%d[%s] = r%d_%d\n",
+			arrayIndex,
 			field,
-			arrayOperation.element-1,
-			arrayOperation.record,
+			target,
+			recordIndex,
 			recordField,
 		)
 		if _, optional := backendGoOptionalScalarTags(array.fieldTags[field]); optional {
@@ -4146,25 +4457,25 @@ func (emitter *backendGoNumericEmitter) emitRecordArraySet(
 			if recordField < len(record.fieldOptional) && record.fieldOptional[recordField] {
 				fmt.Fprintf(
 					&emitter.body,
-					"\trap%d_%d[%d] = rp%d_%d\n",
-					arrayOperation.index,
+					"\trap%d_%d[%s] = rp%d_%d\n",
+					arrayIndex,
 					field,
-					arrayOperation.element-1,
-					arrayOperation.record,
+					target,
+					recordIndex,
 					recordField,
 				)
 			} else if present {
 				fmt.Fprintf(
 					&emitter.body,
-					"\trap%d_%d[%d] = true\n",
-					arrayOperation.index,
+					"\trap%d_%d[%s] = true\n",
+					arrayIndex,
 					field,
-					arrayOperation.element-1,
+					target,
 				)
 			}
 		}
 	}
-	return true, nil
+	return nil
 }
 
 func (emitter *backendGoNumericEmitter) emitRecordArrayPrepare(
@@ -4563,12 +4874,12 @@ func (emitter *backendGoNumericEmitter) emitRecordArrayGet(
 		return true, fmt.Errorf("emit backend Go numeric proof: PC %d has invalid record-array lookup", operation.pc)
 	}
 	emitter.needsMath = true
-	length := emitter.plan.records.arrays[arrayIndex].length
+	length := emitter.recordArrayLengthExpression(arrayIndex)
 	emitter.emitOptionalPresenceGuard(operation, 1, key)
 	fmt.Fprintf(&emitter.body, "\tv%d = 0\n", destination)
 	fmt.Fprintf(
 		&emitter.body,
-		"\tif v%d >= 1 && v%d <= %d && v%d == math.Trunc(v%d) {\n",
+		"\tif v%d >= 1 && v%d <= float64(%s) && v%d == math.Trunc(v%d) {\n",
 		key,
 		key,
 		length,

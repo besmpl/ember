@@ -2302,6 +2302,123 @@ func TestMachinePreparedBuffStackAvoidsRuntimeTables(t *testing.T) {
 	}
 }
 
+func TestMachinePreparedArrayHoleCompactionAvoidsRuntimeTables(t *testing.T) {
+	image := machinePreparedTestImageForSource(t, backendArrayHoleCompactionProofSource)
+	calls := 0
+	var observed machinePreparedExit
+	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
+		calls++
+		observed = backendGeneratedArrayHoleCompactionPreparedFixture(context)
+		return observed
+	})
+	prepared, err := newMachineOwnerWithPrepared(image, program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generic, err := newMachineOwner(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := prepared.close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := generic.close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	preparedArg, err := prepared.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericArg, err := generic.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tableCount := len(prepared.tables.tables)
+	stringCount := len(prepared.strings.records)
+	want, ok := backendGeneratedArrayHoleCompaction(29)
+	if !ok {
+		t.Fatal("generated array-hole oracle exited")
+	}
+	runMachinePreparedTestProto(t, prepared, 1, []slot{preparedArg}, nil)
+	runMachinePreparedTestProto(t, generic, 1, []slot{genericArg}, nil)
+	assertMachineOwnerNumberResult(t, prepared, want)
+	assertMachineOwnerNumberResult(t, generic, want)
+	if calls != 1 || observed.kind != machinePreparedExitReturnOneNumber {
+		t.Fatalf("prepared array-hole success = calls %d exit %#v", calls, observed)
+	}
+	if len(prepared.tables.tables) != tableCount || len(prepared.strings.records) != stringCount {
+		t.Fatalf(
+			"prepared array-hole changed owner tables/strings from %d/%d to %d/%d",
+			tableCount, stringCount, len(prepared.tables.tables), len(prepared.strings.records),
+		)
+	}
+
+	preparedController, err := newExecutionController(context.Background(), ExecutionLimits{MaxInstructions: 1_000_000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericController, err := newExecutionController(context.Background(), ExecutionLimits{MaxInstructions: 1_000_000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runMachinePreparedTestProto(t, prepared, 1, []slot{preparedArg}, preparedController)
+	runMachinePreparedTestProto(t, generic, 1, []slot{genericArg}, genericController)
+	if calls != 1 || preparedController.remaining != genericController.remaining {
+		t.Fatalf(
+			"controlled array-hole calls/remaining = %d/%d, generic remaining %d",
+			calls, preparedController.remaining, genericController.remaining,
+		)
+	}
+
+	override := baseTable()
+	if err := override.Set(StringValue("remove"), HostFuncValue(func([]Value) ([]Value, error) {
+		return nil, errors.New("array-hole remove override")
+	})); err != nil {
+		t.Fatal(err)
+	}
+	globals := map[string]Value{"table": TableValue(override)}
+	if err := prepared.importGlobalsStopped(globals); err != nil {
+		t.Fatal(err)
+	}
+	if err := generic.importGlobalsStopped(globals); err != nil {
+		t.Fatal(err)
+	}
+	preparedOverrideErr := runMachinePreparedTestProtoError(t, prepared, 1, []slot{preparedArg}, nil)
+	genericOverrideErr := runMachinePreparedTestProtoError(t, generic, 1, []slot{genericArg}, nil)
+	if calls != 2 || observed.kind != machinePreparedExitReplayEntry {
+		t.Fatalf("prepared array-hole intrinsic fallback = calls %d exit %#v", calls, observed)
+	}
+	if preparedOverrideErr == nil || genericOverrideErr == nil ||
+		preparedOverrideErr.Error() != genericOverrideErr.Error() ||
+		!strings.Contains(preparedOverrideErr.Error(), "array-hole remove override") {
+		t.Fatalf("prepared/generic array-hole override errors = %v / %v", preparedOverrideErr, genericOverrideErr)
+	}
+	if err := prepared.importGlobalsStopped(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if !checkptrInstrumentedTest() {
+		lease, err := prepared.beginRun()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var runErr error
+		allocations := testing.AllocsPerRun(1000, func() {
+			runErr = prepared.executeStopped(0, 1, machineClosureHandle{}, []slot{preparedArg}, nil, machineRunEffects{})
+		})
+		lease.end()
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if allocations != 0 {
+			t.Fatalf("prepared array-hole owner allocations = %v, want 0", allocations)
+		}
+	}
+}
+
 func TestMachinePreparedStateMachineAvoidsRuntimeTablesAndStrings(t *testing.T) {
 	image := machinePreparedTestImageForSource(t, backendStateMachineProofSource)
 	calls := 0
@@ -4419,6 +4536,17 @@ func BenchmarkMachinePreparedBuffStackOwner(b *testing.B) {
 
 func BenchmarkMachineGenericBuffStackOwner(b *testing.B) {
 	image := machinePreparedBenchmarkImage(b, backendBuffStackProofSource)
+	benchmarkMachineNumericOwner(b, image, nil)
+}
+
+func BenchmarkMachinePreparedArrayHoleCompactionOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendArrayHoleCompactionProofSource)
+	program := machinePreparedBenchmarkProgram(b, image, backendGeneratedArrayHoleCompactionPreparedFixture)
+	benchmarkMachineNumericOwner(b, image, program)
+}
+
+func BenchmarkMachineGenericArrayHoleCompactionOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendArrayHoleCompactionProofSource)
 	benchmarkMachineNumericOwner(b, image, nil)
 }
 
