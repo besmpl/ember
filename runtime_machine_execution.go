@@ -46,7 +46,7 @@ func (execution *machineRuntimeExecution) runHook(runtime *Runtime, ctx context.
 		return fmt.Errorf("runtime: begin run: %w", err)
 	}
 	defer lease.end()
-	if err := runtime.pendingModuleInitializationError("runtime: begin hook"); err != nil {
+	if err := runtime.pendingModuleInitializationError("runtime: begin dispatch"); err != nil {
 		return err
 	}
 	outcome, err := execution.runHookResumableRun(runtime, ctx, hook, args, true)
@@ -62,7 +62,7 @@ func (execution *machineRuntimeExecution) runHook(runtime *Runtime, ctx context.
 		if outcome.target != nil {
 			outcome.target.close()
 		}
-		return fmt.Errorf("runtime: hook %s suspended in completion-only RunHook", hook)
+		return fmt.Errorf("runtime: operation %s suspended in completion-only Dispatch", hook)
 	}
 	if report != nil && outcome.hook != nil {
 		*report = *outcome.hook
@@ -125,12 +125,12 @@ func (execution *machineRuntimeExecution) runMachineHook(runtime *Runtime, ctx c
 		return fmt.Errorf("runtime: begin run: %w", err)
 	}
 	defer lease.end()
-	if err := runtime.pendingModuleInitializationError("runtime: begin hook"); err != nil {
+	if err := runtime.pendingModuleInitializationError("runtime: begin dispatch"); err != nil {
 		return err
 	}
 
 	if hook == "" {
-		return fmt.Errorf("runtime: empty hook")
+		return fmt.Errorf("runtime: empty operation")
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -143,16 +143,9 @@ func (execution *machineRuntimeExecution) runMachineHook(runtime *Runtime, ctx c
 	for _, entrypoint := range execution.image.entrypoints {
 		module := execution.image.modules[entrypoint.moduleID]
 		moduleID := moduleIDFromKey(module.key)
-		call := HookCallReport{
-			Entrypoint: entrypoint.name,
-			Module:     moduleID,
-			Hook:       hook,
-		}
+		call := newDispatchCallReport(entrypoint.name, moduleID, hook)
 
-		loadGlobals, err := runtime.hostGlobals(ctx, HostCall{
-			Entrypoint: entrypoint.name,
-			Module:     moduleID,
-		})
+		loadGlobals, err := runtime.hostGlobals(ctx, newHostCall(entrypoint.name, moduleID, ""))
 		if err != nil {
 			return fmt.Errorf("runtime: host globals for %s load: %w", entrypoint.name, err)
 		}
@@ -170,11 +163,7 @@ func (execution *machineRuntimeExecution) runMachineHook(runtime *Runtime, ctx c
 		}
 		call.Loaded = loaded
 
-		hookGlobals, err := runtime.hostGlobals(ctx, HostCall{
-			Entrypoint: entrypoint.name,
-			Module:     moduleID,
-			Hook:       hook,
-		})
+		hookGlobals, err := runtime.hostGlobals(ctx, newHostCall(entrypoint.name, moduleID, hook))
 		if err != nil {
 			return fmt.Errorf("runtime: host globals for %s.%s: %w", entrypoint.name, hook, err)
 		}
@@ -192,11 +181,11 @@ func (execution *machineRuntimeExecution) runMachineHook(runtime *Runtime, ctx c
 			continue
 		}
 		if slotValueKind(hookValue) != FunctionKind {
-			return fmt.Errorf("runtime: hook %s.%s is %s, want function", entrypoint.name, hook, slotValueKind(hookValue))
+			return fmt.Errorf("runtime: operation %s.%s is %s, want function", entrypoint.name, hook, slotValueKind(hookValue))
 		}
 		machineArgs, err := importMachineValuesStopped(execution.owner, args)
 		if err != nil {
-			return fmt.Errorf("runtime: import hook %s.%s arguments: %w", entrypoint.name, hook, err)
+			return fmt.Errorf("runtime: import operation %s.%s arguments: %w", entrypoint.name, hook, err)
 		}
 		hookScope := runtime.newInvocationScope(ctx, module.key, hookGlobals, controller)
 		if err := execution.owner.executeClosureStopped(
@@ -205,7 +194,7 @@ func (execution *machineRuntimeExecution) runMachineHook(runtime *Runtime, ctx c
 			controller,
 			machineRunEffects{ctx: contextWithInvocationScope(ctx, hookScope)},
 		); err != nil {
-			return fmt.Errorf("runtime: call hook %s.%s: %w", entrypoint.name, hook, err)
+			return fmt.Errorf("runtime: call operation %s.%s: %w", entrypoint.name, hook, err)
 		}
 		call.Called = true
 		appendHookCallReport(report, call)

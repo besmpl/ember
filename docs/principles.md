@@ -11,9 +11,9 @@ Use these principles as decision rules when designing the runtime.
 - Build one vertical runtime slice at a time.
 - Prefer compatibility tests over promises.
 - Keep public interfaces small, typed, useful, and hard to misuse.
-- Keep core behavior deterministic where Hearth simulation needs it.
+- Keep core behavior deterministic for hosts that need repeatable execution.
 - Keep host systems at the edges: files, clocks, randomness, logging, I/O,
-  networking, Hearth worlds, process lifecycle, and native code.
+  networking, application state, process lifecycle, and native code.
 - Avoid hidden global runtime ownership.
 - Avoid unsafe code until profiling or compatibility proves it is necessary.
 - Prefer ordinary Go objects and Go runtime features behind Ember interfaces:

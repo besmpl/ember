@@ -5,7 +5,7 @@
 Phase G requires a fresh profile after the VM consolidation work. Immutable
 table-literal templates and runtime-owned table slabs are justified only when
 table construction or storage remains a top-three CPU or allocation source in
-the persistent workloads that matter to Hearth.
+the persistent workloads supplied by Ember's first production host, Hearth.
 
 The profile was captured at commit `2146770a` on Darwin arm64 with Go 1.26.4.
 The repeatable audit used five 200 ms samples and CPU/allocation profiles:
@@ -68,7 +68,7 @@ fresh profile rather than reviving the table allocator from stateless data.
 - No dormant allocator flags, migration adapters, or alternate table paths are
   introduced.
 - Stateless table-heavy workloads remain a known cost, but they do not justify
-  complexity that fails to improve persistent Hearth updates.
+  complexity that fails to improve the measured first-host persistent updates.
 - A future table-allocation slice must re-run this gate and show a material
   persistent benefit before changing the decision.
 
@@ -79,7 +79,7 @@ fresh profile rather than reviving the table allocator from stateless data.
   update loop.
 - **Prototype table slabs and exact byte accounting anyway.** Rejected because
   G3 requires G1 to prove persistent table allocation dominance and demands a
-  material Hearth gain.
+  material gain in the measured workload.
 - **Use retained stateless results as the persistent proof.** Rejected because
   retaining one result proves escape safety pressure, not repeated mutation on
-  a loaded Hearth runtime.
+  a loaded runtime.

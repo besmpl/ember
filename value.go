@@ -929,7 +929,7 @@ func ContextHostFuncValue(fn ContextHostFunc) Value {
 }
 
 // ResumableHostFuncValue returns a context-aware host callback value that may
-// suspend explicit resumable hook and callback operations.
+// suspend explicit resumable dispatch and callback operations.
 func ResumableHostFuncValue(fn ResumableHostFunc) Value {
 	callable := &hostCallable{resumableHost: fn}
 	callable.yieldableHost = func(globals *globalEnv, args []Value) vmHostCallResult {

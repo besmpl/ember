@@ -1108,7 +1108,7 @@ func TestAnalyzerCheckAllowsAnnotatedTableReassignmentFieldFromIndexer(t *testin
 		Text: `
 --!strict
 local source: {[string]: string} = {name = "ember"}
-local target: {name: string} = {name = "hearth"}
+local target: {name: string} = {name = "forge"}
 target = source
 return target
 `,
@@ -1953,7 +1953,7 @@ func TestAnalyzerCheckReportsReadOnlyTableFieldWrite(t *testing.T) {
 	source := `
 --!strict
 local player: {read Name: string} = {Name = "ember"}
-player.Name = "hearth"
+player.Name = "forge"
 return player.Name
 `
 	result, err := analyzer.Check(context.Background(), ember.Source{
@@ -1986,7 +1986,7 @@ func TestAnalyzerCheckReportsWriteOnlyTableFieldRead(t *testing.T) {
 	source := `
 --!strict
 local player: {write Name: string} = {Name = "ember"}
-player.Name = "hearth"
+player.Name = "forge"
 return player.Name
 `
 	result, err := analyzer.Check(context.Background(), ember.Source{
@@ -5893,7 +5893,7 @@ local player = {}
 if true then
 	player.name = "ember"
 else
-	player.name = "hearth"
+	player.name = "forge"
 end
 return player
 `,

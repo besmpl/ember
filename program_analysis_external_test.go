@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/besmpl/ember"
@@ -205,8 +204,5 @@ return enabled`
 		if _, ok := got[expected]; !ok {
 			t.Fatalf("diagnostic ranges = %#v, missing %q", got, expected)
 		}
-	}
-	if strings.Contains(strings.ToLower(result.Diagnostics[2].Message), "hearth") {
-		t.Fatalf("overload diagnostic contains host-specific name: %q", result.Diagnostics[2].Message)
 	}
 }

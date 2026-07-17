@@ -16,8 +16,8 @@ testable seam.
 
 - Export only names that callers need for a proven slice.
 - Document exported behavior, errors, defaults, and side effects.
-- Keep host integration explicit; do not hide Hearth or process ownership in
-  the runtime.
+- Keep host integration explicit; do not hide application or process ownership
+  in the runtime.
 - Do not expose internal bytecode, parser, stack, or GC machinery for
   convenience.
 - Prefer stable plain values and small interfaces over large configuration
@@ -127,7 +127,8 @@ testable seam.
 - Execution failures returned to Go are represented by `*RuntimeError` when
   script frames are available. `RuntimeError.Message` is the stable message,
   `Frames` is ordered innermost-first, and `Cause` remains available through
-  `errors.Is` and `errors.As`; `RunHook` adds contextual `%w` wrapping while
+  `errors.Is` and `errors.As`; `Runtime.Invoke` and `Runtime.Dispatch` add
+  contextual `%w` wrapping while
   `Callback.Call` preserves the runtime error without flattening it. Ordinary
   script and host errors are values under `pcall`/`xpcall` (the latter may
   invoke its handler), while
@@ -144,6 +145,23 @@ testable seam.
   host userdata values through script code. Local and upvalue names take
   precedence over globals. With `RunWithGlobals`, global assignments write back
   to the provided globals map.
+- `Runtime.Invoke(ctx, Invocation, args...)` initializes one module if needed
+  and calls either its named exported script function or, when
+  `Invocation.Export` is empty, its returned script function directly.
+  `Invocation.Globals` is copied and is
+  explicit input to both initialization and the call. The method returns all
+  script results and applies no entrypoint fan-out, ordering, skip, or reporting
+  policy. A missing module/export or non-callable target is an error.
+- `Runtime.InvokeResumable` is the suspension-capable form of the same
+  single-module operation. Its `ExecutionResult` contains values or pending
+  suspensions and has no dispatch report. Suspensions are attributed to the
+  invoked `Module` and `Operation`; `Entrypoint` is empty.
+- `Runtime.Dispatch` is an optional cohort convenience. It initializes every
+  configured entrypoint in declared order, calls a shared named operation where
+  present, and returns `DispatchReport`. `RuntimeHost.Globals` supplies its
+  per-load and per-operation environments through `HostCall.Operation`.
+  Applications without this table-or-nil, fan-out, and skip policy should build
+  their own orchestration from `Invoke`.
 - `CaptureCallback(ctx context.Context, value Value) (Callback, error)` captures
   a script function passed to a `ContextHostFuncValue` while Ember is executing
   a runtime call. The captured callback keeps the owning runtime, module
@@ -158,14 +176,15 @@ testable seam.
   `HostReturn`, `HostError`, or `HostSuspend`. A suspension carries an opaque
   host-owned token and creates no goroutine, timer, channel, retry, or
   scheduler.
-- `Runtime.RunHookResumable` and `Callback.CallResumable` run to a quiescent
-  execution snapshot. `ExecutionResult.Suspensions` contains every
-  host-visible wait still pending; hook waits are ordered by declared
-  entrypoint order. If an independently started operation is blocked only on a
+- `Runtime.InvokeResumable`, `Runtime.DispatchResumable`, and
+  `Callback.CallResumable` retain execution until completion or suspension.
+  `ExecutionResult.Suspensions` contains every host-visible wait still pending;
+  dispatch waits are ordered by declared entrypoint order. If an independently
+  started operation is blocked only on a
   module initializer owned by another operation, its result contains one
   tokenless dependency continuation instead of pretending the operation
   completed or duplicating the initializer token. `ExecutionResult.Suspension`
-  remains an alias for the first pending handle. Completed and skipped hook
+  remains an alias for the first pending handle. Completed and skipped dispatch
   calls are reported in declared order even when the host resumes waits in
   another order.
 - `Suspension.Token` exposes only a host-owned token and is nil for a dependency
@@ -173,17 +192,19 @@ testable seam.
   true for a dependency continuation when its initializer completes or fails.
   An early `Resume` or `Fail` returns `ErrSuspensionPending` without consuming
   the handle; once ready, resuming continues that operation with the shared
-  initializer result. `Entrypoint`, `Module`, and `Hook` identify hook waits;
-  retained callback waits have empty attribution. `Cancel` is idempotent; after
+  initializer result. `Entrypoint`, `Module`, and `Operation` identify dispatch
+  waits; direct invocation waits omit `Entrypoint`, and retained callback waits
+  omit all attribution. `Cancel` is idempotent; after
   it, `Resume` and `Fail` report `ErrSuspensionStale`. A resumed script may
   expose zero, one, or several successor suspensions.
-- Entrypoint top-level code and newly required module initializers participate
-  in the same resumable operation as their hook or callback. Every module,
+- Module top-level code and newly required module initializers participate in
+  the same resumable operation as their invocation, dispatch, or callback.
+  Every module,
   including an entrypoint root, has at most one in-flight initializer and one
   cache result. Independent initializers may remain suspended together and
   finish in host-selected order. Internal dependency waits are never exposed as
   host tokens; dependency continuations represent whole independently started
-  operations, while ready dependents inside one hook operation are pumped in
+  operations, while ready dependents inside one dispatch operation are pumped in
   declared entrypoint order. Recursive require paths still report the complete
   active-loading cycle.
 - Every resumable step uses normal runtime serialization and receives a fresh
@@ -191,7 +212,8 @@ testable seam.
   occur before the handle is consumed under the same serialization decision.
   A context already canceled or a runtime already busy therefore leaves the
   exact handle retryable. Several idle suspended invocations may coexist. A
-  completion-only `RunHook` or `Callback.Call` returns `ErrRuntimeBusy` before
+  completion-only `Invoke`, `Dispatch`, or `Callback.Call` returns an error
+  before
   guest execution while module initialization is suspended because that call
   cannot return a continuation.
   Canceling the public owner of a module initializer aborts that initializer
@@ -199,8 +221,10 @@ testable seam.
   waits remain valid and later initialization retries cleanly. `Runtime.Close`
   applies the same cleanup to all retained execution state and tokens; later
   handle use reports `ErrSuspensionStale`.
-- Existing `RunHook` and `Callback.Call` remain completion-only for hosts that
-  do not suspend.
+- `RunHook`, `RunHookResumable`, `HookReport`, `HookCallReport`,
+  `HostCall.Hook`, `ExecutionResult.Hook`, and `Suspension.Hook` are deprecated
+  compatibility names. `Callback.Call` remains completion-only for callbacks
+  that do not suspend.
 - Seeded base globals are `type`, which returns Luau-style kind names for the
   current value model, and `math`, which currently provides `abs`, `floor`,
   `min`, `max`, and `pi`, plus `table`, which currently provides `pack`,
@@ -352,6 +376,6 @@ These are candidates, not commitments:
 - `compile`: source-to-bytecode compilation.
 - `vm`: execution internals if the root package gets too crowded.
 - `conformance`: test harness helpers.
-- `hearth`: optional Hearth adapter above the core runtime.
+- Host adapters belong in their application repositories, not in Ember.
 
 Do not create these until implementation pressure proves they are useful.

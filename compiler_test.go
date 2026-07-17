@@ -672,9 +672,9 @@ func TestCompileAndRunStringLengthOperator(t *testing.T) {
 }
 
 func TestCompileAndRunStringConcatenation(t *testing.T) {
-	got := compileAndRunString(t, `return "ember" .. " hearth"`)
-	if got != "ember hearth" {
-		t.Fatalf("Run result is %q, want ember hearth", got)
+	got := compileAndRunString(t, `return "ember" .. " runtime"`)
+	if got != "ember runtime" {
+		t.Fatalf("Run result is %q, want ember runtime", got)
 	}
 }
 
@@ -1980,11 +1980,11 @@ return table.insert(values, 10)
 
 func TestCompileAndRunTableConcatJoinsArrayPrefix(t *testing.T) {
 	got := compileAndRunString(t, `
-local values = {"he", "ar", "th"}
+local values = {"run", "time"}
 return table.concat(values)
 `)
-	if got != "hearth" {
-		t.Fatalf("Run result is %q, want hearth", got)
+	if got != "runtime" {
+		t.Fatalf("Run result is %q, want runtime", got)
 	}
 }
 

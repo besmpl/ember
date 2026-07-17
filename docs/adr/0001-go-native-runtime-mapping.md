@@ -52,7 +52,8 @@ before implementation:
 - memory quotas and deterministic memory accounting;
 - coroutine yield/resume edge cases;
 - debug hooks and stack inspection;
-- deterministic scheduling for Hearth simulation.
+- deterministic scheduling for hosts with repeatable simulation or workflow
+  requirements.
 
 When one of those features arrives, add the smallest Ember interface that
 preserves Luau behavior, and keep the Go runtime machinery behind that seam.

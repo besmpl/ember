@@ -195,15 +195,20 @@ const (
 	vmEntrypointCallingHook
 )
 
-// vmEntrypointTarget keeps module initialization and the following hook call
-// inside one resumable operation. The host sees only the deepest host wait;
-// the transition from a completed initializer into its hook is automatic.
+// vmEntrypointTarget keeps module initialization and the following exported
+// function call inside one resumable operation. The host sees only the deepest
+// host wait; the transition from a completed initializer into its call is
+// automatic.
 type vmEntrypointTarget struct {
 	runtime    *Runtime
 	entrypoint programEntrypoint
 	hook       string
 	args       []Value
 	call       *HookCallReport
+	globals    map[string]Value
+	explicit   bool
+	direct     bool
+	required   bool
 	inner      *vmResumableTarget
 	moduleWait *runtimeModuleWait
 	stage      vmEntrypointStage
@@ -256,9 +261,9 @@ func (target *vmEntrypointTarget) resumeRun(ctx context.Context, values []Value,
 }
 
 func (target *vmEntrypointTarget) startLoad(ctx context.Context, stopped bool) (resumableOutcome, error) {
-	if target.hook == "" {
+	if target.hook == "" && !target.direct {
 		target.close()
-		return resumableOutcome{}, fmt.Errorf("runtime: empty hook")
+		return resumableOutcome{}, fmt.Errorf("runtime: empty operation")
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -275,10 +280,7 @@ func (target *vmEntrypointTarget) startLoad(ctx context.Context, stopped bool) (
 		return target.startHook(ctx, export, stopped)
 	}
 	key := target.entrypoint.key
-	loadGlobals, err := target.runtime.hostGlobals(ctx, HostCall{
-		Entrypoint: target.entrypoint.name,
-		Module:     target.call.Module,
-	})
+	loadGlobals, err := target.callGlobals(ctx, "")
 	if err != nil {
 		target.close()
 		return resumableOutcome{}, fmt.Errorf("runtime: host globals for %s load: %w", target.entrypoint.name, err)
@@ -328,7 +330,7 @@ func (target *vmEntrypointTarget) acceptInner(ctx context.Context, outcome resum
 	if target.stage == vmEntrypointCallingHook {
 		target.call.Called = true
 		target.finish()
-		return resumableOutcome{}, nil
+		return resumableOutcome{values: outcome.values}, nil
 	}
 	return resumableOutcome{}, fmt.Errorf("runtime: entrypoint load completed outside module initializer")
 }
@@ -355,7 +357,7 @@ func (target *vmEntrypointTarget) bindDependencyState(state *suspensionState, on
 	if target == nil || target.moduleWait == nil {
 		return
 	}
-	target.moduleWait.bindState(state)
+	target.moduleWait.bindDependencyState(state)
 	target.moduleWait.bind(onCancel)
 }
 
@@ -396,7 +398,9 @@ func (target *vmEntrypointTarget) continueAfterModuleWait(ctx context.Context, i
 }
 
 func (target *vmEntrypointTarget) startLoadedHook(ctx context.Context, export Value, stopped bool) (resumableOutcome, error) {
-	target.runtime.entrypoints[target.entrypoint.key] = export
+	if !target.explicit {
+		target.runtime.entrypoints[target.entrypoint.key] = export
+	}
 	return target.startHook(ctx, export, stopped)
 }
 
@@ -407,40 +411,53 @@ func (target *vmEntrypointTarget) startHook(ctx context.Context, export Value, s
 		target.close()
 		return resumableOutcome{}, err
 	}
-	hookGlobals, err := target.runtime.hostGlobals(ctx, HostCall{
-		Entrypoint: target.entrypoint.name,
-		Module:     target.call.Module,
-		Hook:       target.hook,
-	})
+	hookGlobals, err := target.callGlobals(ctx, target.hook)
 	if err != nil {
 		target.close()
 		return resumableOutcome{}, fmt.Errorf("runtime: host globals for %s.%s: %w", target.entrypoint.name, target.hook, err)
 	}
 	if export.IsNil() {
+		if target.required {
+			target.close()
+			return resumableOutcome{}, fmt.Errorf("runtime: module %s returned nil, want callable export", target.call.Module.String())
+		}
 		target.call.Skipped = true
 		target.finish()
 		return resumableOutcome{}, nil
 	}
-	table, ok := export.Table()
-	if !ok {
-		target.close()
-		return resumableOutcome{}, fmt.Errorf("runtime: entrypoint %s returned %s, want table or nil", target.entrypoint.name, export.Kind())
-	}
-	hookEnv := globalEnv{host: hookGlobals, owner: target.runtime.owner}
-	hookValue, err := runtimeTableAccess(&hookEnv).get(table, StringValue(target.hook))
-	if err != nil {
-		target.close()
-		return resumableOutcome{}, err
-	}
-	if hookValue.IsNil() {
-		target.call.Skipped = true
-		target.finish()
-		return resumableOutcome{}, nil
+	hookValue := export
+	if !target.direct {
+		table, ok := export.Table()
+		if !ok {
+			target.close()
+			return resumableOutcome{}, fmt.Errorf("runtime: module %s returned %s, want table or nil", target.call.Module.String(), export.Kind())
+		}
+		hookEnv := globalEnv{host: hookGlobals, owner: target.runtime.owner}
+		hookValue, err = runtimeTableAccess(&hookEnv).get(table, StringValue(target.hook))
+		if err != nil {
+			target.close()
+			return resumableOutcome{}, err
+		}
+		if hookValue.IsNil() {
+			if target.required {
+				target.close()
+				return resumableOutcome{}, fmt.Errorf("runtime: module %s has no export %q", target.call.Module.String(), target.hook)
+			}
+			target.call.Skipped = true
+			target.finish()
+			return resumableOutcome{}, nil
+		}
 	}
 	closure, ok := hookValue.scriptFunction()
 	if !ok {
 		target.close()
-		return resumableOutcome{}, fmt.Errorf("runtime: resumable hook %s.%s is %s, want script function", target.entrypoint.name, target.hook, hookValue.Kind())
+		if target.explicit {
+			if target.direct {
+				return resumableOutcome{}, fmt.Errorf("runtime: module %s returned %s, want script function", target.call.Module.String(), hookValue.Kind())
+			}
+			return resumableOutcome{}, fmt.Errorf("runtime: module %s export %q is %s, want script function", target.call.Module.String(), target.hook, hookValue.Kind())
+		}
+		return resumableOutcome{}, fmt.Errorf("runtime: resumable operation %s.%s is %s, want script function", target.entrypoint.name, target.hook, hookValue.Kind())
 	}
 	scope := target.runtime.newInvocationScope(ctx, target.entrypoint.key, hookGlobals, controller)
 	target.inner, err = newVMResumableTarget(target.runtime, scope, closure)
@@ -457,8 +474,17 @@ func (target *vmEntrypointTarget) startHook(ctx context.Context, export Value, s
 }
 
 func (target *vmEntrypointTarget) wrapError(err error) error {
+	if target.explicit {
+		if target.stage != vmEntrypointCallingHook {
+			return fmt.Errorf("runtime: load module %s: %w", target.call.Module.String(), err)
+		}
+		if target.direct {
+			return fmt.Errorf("runtime: call module %s: %w", target.call.Module.String(), err)
+		}
+		return fmt.Errorf("runtime: call module %s export %q: %w", target.call.Module.String(), target.hook, err)
+	}
 	if target.stage == vmEntrypointCallingHook {
-		return fmt.Errorf("runtime: call hook %s.%s: %w", target.entrypoint.name, target.hook, err)
+		return fmt.Errorf("runtime: call operation %s.%s: %w", target.entrypoint.name, target.hook, err)
 	}
 	return fmt.Errorf("runtime: load entrypoint %s: %w", target.entrypoint.name, err)
 }
@@ -468,6 +494,14 @@ func (target *vmEntrypointTarget) finish() {
 	target.inner = nil
 	target.runtime = nil
 	target.args = nil
+	target.globals = nil
+}
+
+func (target *vmEntrypointTarget) callGlobals(ctx context.Context, operation string) (map[string]Value, error) {
+	if target.explicit {
+		return copyGlobals(target.globals), nil
+	}
+	return target.runtime.hostGlobals(ctx, newHostCall(target.entrypoint.name, target.call.Module, operation))
 }
 
 func (target *vmEntrypointTarget) close() {
@@ -527,11 +561,7 @@ func (run *vmHookRun) start(ctx context.Context) (resumableOutcome, error) {
 	}
 	for index, entrypoint := range run.runtime.program.entrypoints {
 		entry := &run.entries[index]
-		entry.call = HookCallReport{
-			Entrypoint: entrypoint.name,
-			Module:     moduleIDFromKey(entrypoint.key),
-			Hook:       run.hook,
-		}
+		entry.call = newDispatchCallReport(entrypoint.name, moduleIDFromKey(entrypoint.key), run.hook)
 		target := &vmEntrypointTarget{
 			runtime:    run.runtime,
 			entrypoint: entrypoint,
@@ -637,7 +667,7 @@ func (run *vmHookRun) resumeEntry(
 	outcome, err := resumeResumableTarget(entry.target, ctx, values, failure, stopped)
 	if err != nil {
 		run.close()
-		return resumableOutcome{}, fmt.Errorf("runtime: call hook %s.%s: %w", entry.call.Entrypoint, run.hook, err)
+		return resumableOutcome{}, fmt.Errorf("runtime: call operation %s.%s: %w", entry.call.Entrypoint, run.hook, err)
 	}
 	run.applyEntryOutcome(index, outcome)
 	if err := run.pump(ctx, stopped); err != nil {
@@ -699,7 +729,7 @@ func (run *vmHookRun) bindDeferredState(state *suspensionState) {
 }
 
 func (run *vmHookRun) snapshot() resumableOutcome {
-	report := HookReport{Hook: run.hook}
+	report := newDispatchReport(run.hook)
 	pending := make([]resumablePending, 0, len(run.entries))
 	hidden := false
 	for index := range run.entries {

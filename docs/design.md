@@ -1,8 +1,8 @@
 # Ember Design
 
 Ember is a Go-native runtime for Luau-compatible scripting. It should be small
-enough to test without Hearth, files, windows, clocks, networking, or native
-codegen.
+enough to test without an application framework, files, windows, clocks,
+networking, or native codegen.
 
 ## Runtime Model
 
@@ -15,8 +15,8 @@ The root vocabulary should grow around a few concepts:
 - State: owned VM state, stacks, globals, interned strings, tables, and
   garbage-collection bookkeeping.
 - Function: either an Ember closure or an explicit Go host callback.
-- Host: the outer adapter that provides callbacks, modules, I/O, clocks,
-  randomness, logging, and Hearth integration.
+- Host: an outer adapter that provides callbacks, modules, I/O, clocks,
+  randomness, logging, and application integration.
 
 ## Go-Native Mapping
 
@@ -40,9 +40,9 @@ See `docs/adr/0001-go-native-runtime-mapping.md` for the full decision.
 
 ## Early Boundary
 
-The root package should not own Hearth worlds, rendering, audio, assets,
-editor tooling, network transports, background workers, native executable
-memory, or external process lifecycle.
+The root package should not own game worlds, request routing, job scheduling,
+rendering, audio, assets, editor tooling, network transports, background
+workers, native executable memory, or external process lifecycle.
 
 This is not a permanent ban. It keeps the runtime small while the VM proves
 itself. Outer packages can attach these capabilities later if real examples

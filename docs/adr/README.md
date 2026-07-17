@@ -3,6 +3,10 @@
 Use ADRs for compatibility, runtime, or public-interface decisions that future
 work will need to understand.
 
+Some historical performance ADRs name Hearth because it supplied Ember's first
+production workload. Those references are workload evidence, not runtime API or
+domain-model requirements.
+
 Keep each ADR focused:
 
 - context;
@@ -21,7 +25,7 @@ Current runtime decisions:
   the narrow slot, compact-call, and loop-kernel experiments; ADR 0007 makes
   that VM the migration oracle rather than the final engine.
 - `0006-persistent-table-allocation-gate.md`: stop the table allocator campaign
-  when fresh profiles show that persistent Hearth updates are dominated by
+  when fresh first-host profiles show that persistent updates are dominated by
   runtime call-boundary setup instead.
 - `0007-compact-production-machine.md`: accepted `CodeImage`/owner-bound
   `Machine` architecture, pure-Go production kernel, migration invariants, and

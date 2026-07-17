@@ -58,6 +58,17 @@ func (wait *runtimeModuleWait) bindState(state *suspensionState) {
 	}
 }
 
+func (wait *runtimeModuleWait) bindDependencyState(state *suspensionState) {
+	if wait == nil || wait.initialization == nil || state == nil {
+		return
+	}
+	if child, ok := wait.initialization.token.(*runtimeModuleWait); ok && child != nil && child.initialization != nil && !child.initialization.done {
+		child.bindDependencyState(state)
+		return
+	}
+	wait.bindState(state)
+}
+
 func (wait *runtimeModuleWait) close() {
 	if wait == nil || wait.initialization == nil {
 		return
@@ -168,7 +179,7 @@ func (target *moduleCallTarget) bindSuspensionState(state *suspensionState) {
 	if target == nil || target.wait == nil {
 		return
 	}
-	target.wait.bindState(state)
+	target.wait.bindDependencyState(state)
 }
 
 func (target *moduleCallTarget) setWait(wait *runtimeModuleWait) {

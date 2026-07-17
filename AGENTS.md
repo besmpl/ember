@@ -50,22 +50,23 @@ For implementation:
 
 ## Project Direction
 
-Ember is a Go-native Luau-compatible scripting runtime for Hearth. It should be
+Ember is a reusable Go-native Luau-compatible scripting runtime. It should be
 grown in small vertical slices: bytecode, values, VM execution, compiler paths,
 standard libraries, host embedding, compatibility tests, and only later deeper
-analysis or native-code experiments.
+analysis or native-code experiments. Hearth is one adapter and acceptance host,
+not Ember's domain model.
 
 ## Core Idea
 
 Ember should make Luau-shaped scripting feel natural from Go. Core runtime
 logic should stay easy to test with plain values, while host systems such as
-Hearth worlds, files, clocks, randomness, networking, logging, and platform
-lifecycles remain explicit outer layers.
+game worlds, request routers, job queues, files, clocks, randomness, networking,
+logging, and platform lifecycles remain explicit outer layers.
 
 - Keep the root package small until real examples prove a split is useful.
 - Use upstream Luau as the behavioral reference, not as a mechanical porting
   target.
-- Preserve deterministic behavior where Hearth simulation needs it.
+- Preserve deterministic behavior for hosts that require repeatable execution.
 - Prefer compatibility tests and vertical examples over speculative public API.
 - Prefer Go-native runtime mapping behind Ember interfaces: ordinary Go objects,
   Go GC, and standard Go runtime tools before custom allocator, GC, or scheduler
@@ -86,12 +87,13 @@ lifecycles remain explicit outer layers.
 - Keep side effects near the edges; let runtime policy decide what should happen
   and host mechanisms perform effects.
 - Pass dependencies explicitly. Do not smuggle clocks, randomness, host
-  services, or Hearth worlds through globals.
+  services, or application state through globals.
 - Keep constructors, imports, module loading, and global setup boring; hide no
   expensive work there.
 - Do not add dependencies unless they clearly reduce real complexity.
-- Do not add Hearth integration to the root runtime package until an embedding
-  slice proves the interface.
+- Keep every host adapter outside the root runtime package; promote only generic
+  mechanisms that at least two distinct host shapes can prove through the
+  public interface.
 - Prefer a flat root package until implementation pressure proves a split is
   needed.
 

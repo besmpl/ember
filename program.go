@@ -112,6 +112,8 @@ type ModuleReport struct {
 
 // RuntimeOptions configures mutable execution state for a Program.
 type RuntimeOptions struct {
+	// Host supplies environments for Dispatch. Invoke receives its environment
+	// explicitly through Invocation.Globals and does not call Host.
 	Host   RuntimeHost
 	Limits ExecutionLimits
 
@@ -122,7 +124,8 @@ type RuntimeOptions struct {
 	MaxInstructions uint64
 }
 
-// RuntimeHost supplies host-owned values for runtime calls.
+// RuntimeHost supplies host-owned values for Dispatch entrypoint loading and
+// operation calls. Hosts built on Invoke do not need this interface.
 type RuntimeHost interface {
 	Globals(context.Context, HostCall) (map[string]Value, error)
 }
@@ -139,11 +142,26 @@ func (fn RuntimeHostFunc) Globals(ctx context.Context, call HostCall) (map[strin
 type HostCall struct {
 	Entrypoint string
 	Module     ModuleID
-	Hook       string
+	// Operation is the named entrypoint export being dispatched. It is empty
+	// while the entrypoint module itself is loading.
+	Operation string
+	// Hook is the legacy name for Operation.
+	//
+	// Deprecated: use Operation.
+	Hook string
 }
 
-// Runtime owns mutable execution state for one Program owner. RunHook and
-// captured Callback calls must not overlap. Close may run concurrently; it
+func newHostCall(entrypoint string, module ModuleID, operation string) HostCall {
+	return HostCall{
+		Entrypoint: entrypoint,
+		Module:     module,
+		Operation:  operation,
+		Hook:       operation,
+	}
+}
+
+// Runtime owns mutable execution state for one Program owner. Invoke, Dispatch,
+// and captured Callback calls must not overlap. Close may run concurrently; it
 // reports an active runtime without tearing down the in-flight call.
 type Runtime struct {
 	closeMu            sync.Mutex
@@ -163,20 +181,51 @@ type Runtime struct {
 	suspensions        map[*suspensionState]struct{}
 }
 
-// HookReport describes one RunHook call.
-type HookReport struct {
-	Hook  string
-	Calls []HookCallReport
+// DispatchReport describes one Dispatch call.
+type DispatchReport struct {
+	Operation string
+	Calls     []DispatchCallReport
+	// Hook is the legacy name for Operation.
+	//
+	// Deprecated: use Operation.
+	Hook string
 }
 
-// HookCallReport describes one entrypoint considered during RunHook.
-type HookCallReport struct {
+// DispatchCallReport describes one entrypoint considered during Dispatch.
+type DispatchCallReport struct {
 	Entrypoint string
 	Module     ModuleID
-	Hook       string
-	Loaded     bool
-	Called     bool
-	Skipped    bool
+	Operation  string
+	// Hook is the legacy name for Operation.
+	//
+	// Deprecated: use Operation.
+	Hook    string
+	Loaded  bool
+	Called  bool
+	Skipped bool
+}
+
+// HookReport is the legacy name for DispatchReport.
+//
+// Deprecated: use DispatchReport.
+type HookReport = DispatchReport
+
+// HookCallReport is the legacy name for DispatchCallReport.
+//
+// Deprecated: use DispatchCallReport.
+type HookCallReport = DispatchCallReport
+
+func newDispatchReport(operation string) DispatchReport {
+	return DispatchReport{Operation: operation, Hook: operation}
+}
+
+func newDispatchCallReport(entrypoint string, module ModuleID, operation string) DispatchCallReport {
+	return DispatchCallReport{
+		Entrypoint: entrypoint,
+		Module:     module,
+		Operation:  operation,
+		Hook:       operation,
+	}
 }
 
 // LoadProgram loads, parses, checks if requested, and compiles an immutable
@@ -244,7 +293,7 @@ func loadProgramWithArtifactStore(ctx context.Context, loader ModuleLoader, opti
 }
 
 // NewRuntime creates mutable execution state for p. It does not execute script
-// code until RunHook is called.
+// code until Invoke, Dispatch, or a captured callback is called.
 func (p *Program) NewRuntime(options RuntimeOptions) (*Runtime, error) {
 	if p == nil {
 		return nil, fmt.Errorf("runtime: nil program")
@@ -272,24 +321,41 @@ func (p *Program) NewRuntime(options RuntimeOptions) (*Runtime, error) {
 	return runtime, nil
 }
 
-// RunHook loads entrypoints lazily and calls hook in entrypoint order.
-func (r *Runtime) RunHook(ctx context.Context, hook string, args ...Value) (HookReport, error) {
-	report := HookReport{Hook: hook}
-	err := r.runHook(ctx, hook, args, &report)
+// Dispatch loads entrypoints lazily and calls the named exported operation in
+// entrypoint order. An entrypoint that returns nil or does not export operation
+// is reported as skipped.
+func (r *Runtime) Dispatch(ctx context.Context, operation string, args ...Value) (DispatchReport, error) {
+	report := newDispatchReport(operation)
+	err := r.runHook(ctx, operation, args, &report)
 	return report, err
 }
 
-// RunHookResumable runs a hook until completion or host suspension.
-func (r *Runtime) RunHookResumable(ctx context.Context, hook string, args ...Value) (ExecutionResult, error) {
+// DispatchResumable dispatches an operation until completion or host
+// suspension.
+func (r *Runtime) DispatchResumable(ctx context.Context, operation string, args ...Value) (ExecutionResult, error) {
 	execution, err := r.executionAdapter()
 	if err != nil {
 		return ExecutionResult{}, err
 	}
-	outcome, err := execution.runHookResumable(r, ctx, hook, args)
+	outcome, err := execution.runHookResumable(r, ctx, operation, args)
 	if err != nil {
 		return ExecutionResult{}, err
 	}
 	return r.executionResult(outcome), nil
+}
+
+// RunHook is the legacy name for Dispatch.
+//
+// Deprecated: use Dispatch.
+func (r *Runtime) RunHook(ctx context.Context, hook string, args ...Value) (HookReport, error) {
+	return r.Dispatch(ctx, hook, args...)
+}
+
+// RunHookResumable is the legacy name for DispatchResumable.
+//
+// Deprecated: use DispatchResumable.
+func (r *Runtime) RunHookResumable(ctx context.Context, hook string, args ...Value) (ExecutionResult, error) {
+	return r.DispatchResumable(ctx, hook, args...)
 }
 
 // runHook executes one hook invocation. A nil report keeps the same execution
@@ -321,11 +387,11 @@ func (r *Runtime) runVMHook(ctx context.Context, hook string, args []Value, repo
 		return fmt.Errorf("runtime: begin run: %w", err)
 	}
 	defer lease.end()
-	if err := r.pendingModuleInitializationError("runtime: begin hook"); err != nil {
+	if err := r.pendingModuleInitializationError("runtime: begin dispatch"); err != nil {
 		return err
 	}
 	if hook == "" {
-		return fmt.Errorf("runtime: empty hook")
+		return fmt.Errorf("runtime: empty operation")
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -336,15 +402,12 @@ func (r *Runtime) runVMHook(ctx context.Context, hook string, args []Value, repo
 	}
 
 	for _, entrypoint := range r.program.entrypoints {
-		call := HookCallReport{
-			Entrypoint: entrypoint.name,
-			Module:     moduleIDFromKey(entrypoint.key),
-			Hook:       hook,
-		}
-		loadGlobals, err := r.hostGlobals(ctx, HostCall{
-			Entrypoint: entrypoint.name,
-			Module:     moduleIDFromKey(entrypoint.key),
-		})
+		call := newDispatchCallReport(entrypoint.name, moduleIDFromKey(entrypoint.key), hook)
+		loadGlobals, err := r.hostGlobals(ctx, newHostCall(
+			entrypoint.name,
+			moduleIDFromKey(entrypoint.key),
+			"",
+		))
 		if err != nil {
 			return fmt.Errorf("runtime: host globals for %s load: %w", entrypoint.name, err)
 		}
@@ -354,11 +417,11 @@ func (r *Runtime) runVMHook(ctx context.Context, hook string, args []Value, repo
 		}
 		call.Loaded = loaded
 
-		hookGlobals, err := r.hostGlobals(ctx, HostCall{
-			Entrypoint: entrypoint.name,
-			Module:     moduleIDFromKey(entrypoint.key),
-			Hook:       hook,
-		})
+		hookGlobals, err := r.hostGlobals(ctx, newHostCall(
+			entrypoint.name,
+			moduleIDFromKey(entrypoint.key),
+			hook,
+		))
 		if err != nil {
 			return fmt.Errorf("runtime: host globals for %s.%s: %w", entrypoint.name, hook, err)
 		}
@@ -378,7 +441,7 @@ func (r *Runtime) runVMHook(ctx context.Context, hook string, args []Value, repo
 		}
 		hookValue, err := runtimeTableAccess(&hookEnv).get(table, StringValue(hook))
 		if err != nil {
-			return fmt.Errorf("runtime: get hook %s.%s: %w", entrypoint.name, hook, err)
+			return fmt.Errorf("runtime: get operation %s.%s: %w", entrypoint.name, hook, err)
 		}
 		if hookValue.IsNil() {
 			call.Skipped = true
@@ -386,7 +449,7 @@ func (r *Runtime) runVMHook(ctx context.Context, hook string, args []Value, repo
 			continue
 		}
 		if !callableValue(hookValue) {
-			return fmt.Errorf("runtime: hook %s.%s is %s, want function", entrypoint.name, hook, hookValue.Kind())
+			return fmt.Errorf("runtime: operation %s.%s is %s, want function", entrypoint.name, hook, hookValue.Kind())
 		}
 		callContext := r.newInvocationScope(ctx, entrypoint.key, hookGlobals, controller)
 		var callErr error
@@ -402,7 +465,7 @@ func (r *Runtime) runVMHook(ctx context.Context, hook string, args []Value, repo
 			_, callErr = callValueWithContextController(ctx, hookValue, callContext.envWithRequire(), args, controller)
 		}
 		if callErr != nil {
-			return fmt.Errorf("runtime: call hook %s.%s: %w", entrypoint.name, hook, callErr)
+			return fmt.Errorf("runtime: call operation %s.%s: %w", entrypoint.name, hook, callErr)
 		}
 		call.Called = true
 		appendHookCallReport(report, call)

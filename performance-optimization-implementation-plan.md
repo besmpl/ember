@@ -1,5 +1,9 @@
 # Ember Performance Optimization Implementation Plan
 
+Hearth references in this historical plan identify the first production-host
+workload used for measurement. They do not define Ember's reusable interface or
+domain model.
+
 Status: historical; superseded for future runtime work by
 [`runtime-speed-2x-no-cgo-production-migration-implementation-plan.md`](runtime-speed-2x-no-cgo-production-migration-implementation-plan.md)
 
@@ -932,7 +936,7 @@ Relevant files and modules:
 
 - `program.go`
 - `docs/public-surface.md`
-- `docs/hearth-integration.md`
+- `docs/embedding.md`
 - `program_test.go`
 - `runtime_benchmark_test.go`
 - VM call-result helpers in `vm.go`

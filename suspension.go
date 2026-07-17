@@ -17,15 +17,20 @@ var (
 )
 
 // ExecutionResult is one completed or suspended resumable execution step.
-// Values are populated for callback calls; Hook is populated for hook calls.
+// Values are populated for invocation and callback calls; Dispatch is populated
+// for dispatch calls.
 type ExecutionResult struct {
-	Values []Value
-	Hook   *HookReport
+	Values   []Value
+	Dispatch *DispatchReport
+	// Hook is the legacy name for Dispatch.
+	//
+	// Deprecated: use Dispatch.
+	Hook *HookReport
 	// Suspensions contains every host-visible call still pending after the
 	// execution step reaches quiescence. If an independently started operation
 	// is waiting on another operation's suspension, it instead contains one
-	// tokenless dependency continuation. Hook suspensions are ordered by declared
-	// entrypoint order.
+	// tokenless dependency continuation. Dispatch suspensions are ordered by
+	// declared entrypoint order.
 	Suspensions []*Suspension
 	// Suspension is the first pending suspension, retained for compatibility
 	// with callers that drive one suspension chain at a time.
@@ -151,15 +156,22 @@ func (s *Suspension) Module() ModuleID {
 	return s.state.module
 }
 
-// Hook returns the hook owning this suspension, or an empty string for a
-// retained callback call.
-func (s *Suspension) Hook() string {
+// Operation returns the named operation owning this suspension, or an empty
+// string for a direct module invocation or retained callback call.
+func (s *Suspension) Operation() string {
 	if s == nil || s.state == nil {
 		return ""
 	}
 	s.state.mu.Lock()
 	defer s.state.mu.Unlock()
 	return s.state.hook
+}
+
+// Hook is the legacy name for Operation.
+//
+// Deprecated: use Operation.
+func (s *Suspension) Hook() string {
+	return s.Operation()
 }
 
 // Resume resumes the suspended host call with values.
@@ -177,7 +189,7 @@ func (s *Suspension) Fail(ctx context.Context, err error) (ExecutionResult, erro
 }
 
 // Cancel abandons this pending invocation without resuming script execution.
-// Other suspensions from the same hook step remain valid.
+// Other suspensions from the same dispatch step remain valid.
 func (s *Suspension) Cancel() error {
 	if s == nil || s.state == nil {
 		return ErrSuspensionStale
@@ -304,8 +316,9 @@ func (r *Runtime) beginSuspensionRun() (*suspensionRunAdmission, error) {
 
 func (r *Runtime) executionResult(outcome resumableOutcome) ExecutionResult {
 	result := ExecutionResult{
-		Values: append([]Value(nil), outcome.values...),
-		Hook:   outcome.hook,
+		Values:   append([]Value(nil), outcome.values...),
+		Dispatch: outcome.hook,
+		Hook:     outcome.hook,
 	}
 	if outcome.target != nil {
 		pending := resumablePending{

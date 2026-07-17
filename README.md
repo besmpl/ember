@@ -1,11 +1,11 @@
 # Ember
 
-Ember is a Go-native Luau-compatible scripting runtime for Hearth.
+Ember is a reusable Go-native Luau-compatible scripting runtime.
 
 The long-term goal is not to mechanically translate Luau's C++ source into Go.
 The goal is to grow a small, testable Go implementation piece by piece, using
-upstream Luau as the behavioral reference and Hearth as the first host that
-proves the embedding API.
+upstream Luau as the behavioral reference. Hearth is the first production host
+that proves the embedding interface, not the domain model of the runtime.
 
 ## Current Shape
 
@@ -66,13 +66,19 @@ The root package should remain small. Future packages should exist only after a
 slice proves that the split makes the public interface smaller or the
 implementation easier to test.
 
+For embedding, compile a program and use `Runtime.Invoke` to call one module
+export with explicit globals. Use `InvokeResumable` when host calls may wait;
+use `Dispatch` only when the application intentionally wants ordered fan-out
+across an entrypoint cohort. See the runnable `ExampleRuntime_Invoke` and
+[host embedding guide](docs/embedding.md).
+
 ## Project Direction
 
 Ember should be:
 
 - Go-native, with ordinary Go values, errors, tests, and package structure;
 - Luau-compatible where compatibility is claimed;
-- deterministic enough for headless Hearth simulations;
+- deterministic for hosts that need repeatable execution;
 - embeddable without hidden global runtime ownership;
 - explicit about host callbacks, clocks, I/O, randomness, and cancellation;
 - built in vertical slices that run real scripts or conformance fixtures.
@@ -86,7 +92,7 @@ Start with the small durable documentation set:
 - [docs/design.md](docs/design.md)
 - [docs/compatibility.md](docs/compatibility.md)
 - [docs/public-surface.md](docs/public-surface.md)
-- [docs/hearth-integration.md](docs/hearth-integration.md)
+- [docs/embedding.md](docs/embedding.md)
 - [docs/checks.md](docs/checks.md)
 
 The compatibility document is the maintained feature manifest: every claimed

@@ -48,15 +48,15 @@ return player.stats.hp
 
 func TestCompileAndRunTableIndexThenFieldRead(t *testing.T) {
 	got := compileAndRunValue(t, `
-local players = {{name = "ember"}, {name = "hearth"}}
+local players = {{name = "ember"}, {name = "forge"}}
 return players[2].name
 `)
 	value, ok := got.String()
 	if !ok {
 		t.Fatalf("Run result is %s, want string", got.Kind())
 	}
-	if value != "hearth" {
-		t.Fatalf("Run result is %q, want hearth", value)
+	if value != "forge" {
+		t.Fatalf("Run result is %q, want forge", value)
 	}
 }
 
@@ -357,7 +357,7 @@ local meta = {
 }
 local left = {id = "ember"}
 local same = {id = "ember"}
-local other = {id = "hearth"}
+local other = {id = "forge"}
 setmetatable(left, meta)
 setmetatable(same, meta)
 setmetatable(other, meta)
@@ -1427,15 +1427,15 @@ return values[key] + values[other]
 func TestCompileAndRunTableFieldScalarAssignment(t *testing.T) {
 	got := compileAndRunValue(t, `
 local item = {name = "ember"}
-item.name = "hearth"
+item.name = "forge"
 return item.name
 `)
 	value, ok := got.String()
 	if !ok {
 		t.Fatalf("Run result is %s, want string", got.Kind())
 	}
-	if value != "hearth" {
-		t.Fatalf("Run result is %q, want hearth", value)
+	if value != "forge" {
+		t.Fatalf("Run result is %q, want forge", value)
 	}
 }
 

@@ -15,7 +15,7 @@ and retire or delete it when the slice lands or is abandoned.
 | Runtime design | `../README.md`, `principles.md`, `design.md`, `public-surface.md` | Use before changing bytecode, values, VM state, errors, or package shape. |
 | Go implementation work | `golang-rules.md`, `checks.md`, nearby package docs | Keep tests focused and public interfaces small. |
 | Luau compatibility work | `compatibility.md`, `design.md` | State which upstream behavior is being matched and how it is verified. |
-| Hearth embedding work | `hearth-integration.md`, `public-surface.md` | Keep Hearth as an adapter above the runtime until the seam is proven. |
+| Host embedding work | `embedding.md`, `public-surface.md` | Start with one explicit module invocation; keep application orchestration in adapters. |
 | Durable decisions | `adr/README.md`, relevant ADRs | Use when a decision should outlive the implementation slice that produced it. |
 
 ## Core Documents
@@ -28,7 +28,8 @@ and retire or delete it when the slice lands or is abandoned.
 - `compiler.md`: arena representation, layout checks, and compiler allocation
   gates.
 - `public-surface.md`: initial import and API surface rules.
-- `hearth-integration.md`: host boundary notes for Hearth.
+- `embedding.md`: generic host invocation, dispatch, typed catalogs, and
+  cooperative suspension; Hearth appears only as a first-host case study.
 - `golang-rules.md`: Go coding rules for this repository.
 - `checks.md`: local verification commands.
 - `adr/0001-go-native-runtime-mapping.md`: public Go ownership decision; ADR 0007
@@ -64,6 +65,6 @@ the retired files are available through Git history for archaeology.
 ## First-Contact Rule
 
 Beginner docs should teach the smallest path that runs real behavior. Do not
-present parser, compiler, VM, analyzer, JIT, and Hearth embedding as competing
+present parser, compiler, VM, analyzer, JIT, and host embedding as competing
 starts. Add public packages, examples, or first-contact concepts only when a
 slice proves they reduce the user's decision surface.

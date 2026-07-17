@@ -1,5 +1,9 @@
 # Performance Profile Audit
 
+Hearth-shaped lanes in this historical audit represent Ember's first
+production-host workload. They are benchmark evidence, not requirements on the
+runtime interface or domain model.
+
 ## Current baseline
 
 The compact-Machine migration baseline was captured on 2026-07-14 from commit
