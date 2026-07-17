@@ -879,6 +879,37 @@ The retained path has moved beyond the original starting state:
   runtime string, interning, closure, upvalue, or VM dispatch. Nineteen of the
   25 Scenario kernels now emit through the compiler proof route.
 
+- The finite call-set slice lowers the real nested-Proto `event_dispatch`
+  pressure. One nonescaping local handler table whose fields are fixed,
+  capture-free receiver functions becomes a compiler-private call selector;
+  a dynamic finite string lookup becomes an ordinary Go switch over verified
+  image string IDs. Each case copies only that target's numeric receiver
+  fields to scratch, calls its typed generated function, and commits only after
+  success. An unknown selector or target guard replays canonical entry before
+  mutation. Handler reassignment, mismatched target arity, handler-table
+  escape, unproved handler/root uses, nonnumeric receiver fields, and
+  incompatible targets fail closed. Generated Go, prepared owner, generic
+  Machine, and the independent interpreter agree across negative, ordinary,
+  and large seeds; private-function renaming is byte-identical, controlled
+  execution remains generic, rebinding the target's `math.min` intrinsic
+  replays before work, owner table/string counts stay unchanged, and direct
+  and prepared paths allocate zero when warmed. The direct kernel has a
+  five-sample median of about 647.2 ns (645.9-661.0 ns observed), while the
+  prepared owner has a median of about 764.2 ns (762.1-765.1 ns observed),
+  versus about 192.5 microseconds through generic Machine. The pinned Luau
+  `-O2 -g0` corpus batch has a five-sample median of about 15.99 microseconds
+  per call, including its cold first process sample, making prepared about
+  `0.048x` Luau; this is exploratory evidence, not the required
+  `guest_batch_v1` capture. Deterministic generated source is 10,775 bytes
+  across the caller and three targets. Linked ARM64 is 656 bytes for the
+  direct caller, 224 bytes for the non-inlined damage target, 736 bytes for the
+  prepared body, and 192 bytes for the wrapper; the heal and score targets
+  inline completely. Caller and prepared code contain one intentional direct
+  damage-target call plus cold bounds/stack-growth helpers and no opcode,
+  descriptor, Machine table, runtime string, interning, closure lookup,
+  dynamic call, or VM dispatch. Twenty of the 25 Scenario kernels now emit
+  through the compiler proof route.
+
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
 all-37 parity. General non-dense iteration, general table mutation, general

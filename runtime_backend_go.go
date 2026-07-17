@@ -41,6 +41,7 @@ type backendGoNumericPlan struct {
 	closures    backendGoScalarClosurePlan
 	methods     backendGoScalarMethodPlan
 	captured    backendGoCapturedRecordPlan
+	callSets    backendGoFiniteCallSetPlan
 	coroutines  backendGoScalarCoroutinePlan
 }
 
@@ -308,7 +309,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			continue
 		}
 		needsOK := !backendGoNumericOperationDead(plan, operation) &&
-			(operation.op == opCallLocalOne ||
+			(operation.op == opCallOne || operation.op == opCallLocalOne ||
 				operation.op == opCall && backendGoNumericScalarReplacedCall(ir, options, operation) ||
 				operation.op == opCallMethodOne)
 		if _, ok := plan.coroutines.resumes[operation.pc]; ok {
@@ -409,7 +410,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 				continue
 			}
 			needsOK := !backendGoNumericOperationDead(plan, operation) &&
-				(operation.op == opCallLocalOne ||
+				(operation.op == opCallOne || operation.op == opCallLocalOne ||
 					operation.op == opCall && backendGoNumericScalarReplacedCall(ir, options, operation) ||
 					operation.op == opCallMethodOne)
 			if _, ok := plan.coroutines.resumes[operation.pc]; ok {
@@ -608,6 +609,25 @@ func verifyBackendGoNumericTargets(targets []backendGoNumericTarget) error {
 func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptions) (backendGoNumericPlan, error) {
 	keys := analyzeBackendGoStructuralKeys(ir, options)
 	records := analyzeBackendGoRecordTables(ir, keys)
+	callSets := discoverBackendGoFiniteCallSets(ir, records, options)
+	if len(callSets.calls) != 0 {
+		allowedCalls := make(map[int32]bool, len(callSets.calls))
+		for pc := range callSets.calls {
+			allowedCalls[pc] = true
+		}
+		records = analyzeBackendGoRecordTablesWithOptions(ir, keys, backendGoRecordAnalysisOptions{
+			excludedRoots: callSets.excludedRoots,
+			allowedCalls:  allowedCalls,
+		})
+		if records.enabled {
+			var ok bool
+			callSets, ok = finalizeBackendGoFiniteCallSets(callSets, records)
+			if !ok {
+				records = backendGoRecordTablePlan{}
+				callSets = backendGoFiniteCallSetPlan{}
+			}
+		}
+	}
 	excludedTables := make(map[backendValueID]bool)
 	if records.enabled {
 		for root := range records.recordByRoot {
@@ -621,6 +641,10 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		}
 	} else {
 		records = backendGoRecordTablePlan{}
+		callSets = backendGoFiniteCallSetPlan{}
+	}
+	for root := range callSets.excludedRoots {
+		excludedTables[root] = true
 	}
 	tables, err := analyzeBackendGoScalarTablesExcluding(ir, options.receiverTable, excludedTables)
 	if err != nil {
@@ -653,6 +677,7 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		closures:             closures,
 		methods:              methods,
 		captured:             captured,
+		callSets:             callSets,
 		coroutines:           coroutines,
 	}
 	parameterTags, ok := backendGoNumericParameterTags(ir, options.fixedVarargCount)
@@ -712,7 +737,8 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 				case opClosure:
 					tags = backendTagFunction
 				case opNewTable:
-					if plan.tables.root(value.id) != invalidBackendValueID {
+					if plan.tables.root(value.id) != invalidBackendValueID ||
+						valueIndex < len(plan.callSets.scalarValues) && plan.callSets.scalarValues[valueIndex] {
 						tags = backendTagTable
 					}
 				case opGetStringField:
@@ -734,7 +760,9 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						tags = plan.records.childRecordFieldTags(plan.tags, fused.family)
 					}
 				case opGetIndex:
-					if field, ok := plan.records.fieldsByPC[operation.pc]; ok {
+					if plan.callSets.selector(operation) {
+						tags = backendTagNumber
+					} else if field, ok := plan.records.fieldsByPC[operation.pc]; ok {
 						tags = plan.records.fieldTagsFor(plan.tags, field)
 					} else if _, ok := plan.records.dynamicChildSelectByPC[operation.pc]; ok {
 						tags = backendTagNumber
@@ -840,8 +868,10 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 							tags = plan.tags[source-1]
 						}
 					}
-				case opCallLocalOne:
-					if _, _, ok := plan.closures.factory(operation); ok {
+				case opCallOne, opCallLocalOne:
+					if _, ok := plan.callSets.call(operation); ok {
+						tags = backendTagNumber
+					} else if _, _, ok := plan.closures.factory(operation); ok {
 						tags = backendTagFunction
 					} else if _, ok := plan.closures.call(operation); ok {
 						tags = backendTagNumber
@@ -918,6 +948,10 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		if _, ok := plan.captured.call(operation); ok {
 			plan.replayEntry[pc] = true
 		}
+		if _, ok := plan.callSets.call(operation); ok {
+			markScalarReplaced(backendOperationUse(operation, operation.b))
+			plan.replayEntry[pc] = true
+		}
 		if _, ok := plan.coroutines.resume(operation); ok {
 			plan.replayEntry[pc] = true
 		}
@@ -933,6 +967,11 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		}
 	}
 	for valueIndex, scalar := range plan.captured.closureValues {
+		if scalar {
+			markScalarReplaced(backendValueID(valueIndex + 1))
+		}
+	}
+	for valueIndex, scalar := range plan.callSets.scalarValues {
 		if scalar {
 			markScalarReplaced(backendValueID(valueIndex + 1))
 		}
@@ -1059,10 +1098,11 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 				continue
 			}
 			for _, use := range operation.uses {
-				if (operation.op == opCall || operation.op == opCallLocalOne) &&
+				if (operation.op == opCall || operation.op == opCallOne || operation.op == opCallLocalOne) &&
 					use.register == operation.b &&
 					(backendGoNumericScalarReplacedCall(ir, options, operation) ||
-						plan.closures.scalarValue(use.value)) {
+						plan.closures.scalarValue(use.value) ||
+						plan.callSets.hasCall(operation)) {
 					continue
 				}
 				if operation.op == opCallMethodOne &&
@@ -1108,10 +1148,11 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 				continue
 			}
 			for _, use := range operation.uses {
-				if (operation.op == opCall || operation.op == opCallLocalOne) &&
+				if (operation.op == opCall || operation.op == opCallOne || operation.op == opCallLocalOne) &&
 					use.register == operation.b &&
 					(backendGoNumericScalarReplacedCall(ir, options, operation) ||
-						plan.closures.scalarValue(use.value)) {
+						plan.closures.scalarValue(use.value) ||
+						plan.callSets.hasCall(operation)) {
 					continue
 				}
 				if operation.op == opCallMethodOne &&
@@ -1336,6 +1377,9 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opSetStringField:
+		if plan.callSets.setter(operation) {
+			return nil
+		}
 		if field, ok := plan.records.fieldsByPC[operation.pc]; ok {
 			if _, child := plan.records.childSetByPC[operation.pc]; child {
 				return nil
@@ -1399,6 +1443,9 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opGetIndex:
+		if plan.callSets.selector(operation) {
+			return require(operation.c, backendTagString)
+		}
 		if field, ok := plan.records.fieldsByPC[operation.pc]; ok {
 			if len(operation.defs) != 1 || plan.tags[operation.defs[0].value-1] != plan.records.fieldTagsFor(plan.tags, field) {
 				return fmt.Errorf("emit backend Go numeric proof: PC %d positional record field changes scalar tags", operation.pc)
@@ -1996,6 +2043,36 @@ func verifyBackendGoNumericOperation(
 			}
 		}
 		return nil
+	case opCallOne:
+		if call, ok := plan.callSets.call(operation); ok {
+			if operation.callArgCount < 2 || len(operation.defs) != 1 ||
+				operation.defs[0].register != operation.a ||
+				plan.tags[operation.defs[0].value-1] != backendTagNumber {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d has invalid finite call-set result", operation.pc)
+			}
+			key := call.key
+			if !ir.validBackendValue(key) || plan.tags[key-1] != backendTagString {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d has a non-string finite call-set selector", operation.pc)
+			}
+			for _, variant := range call.variants {
+				parameterTags, tagsOK := backendGoNumericParameterTags(variant.target.ir, variant.target.fixedVarargCount)
+				if !tagsOK || len(parameterTags) != int(operation.callArgCount) || len(variant.callerFields) == 0 {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d has an invalid finite call-set target", operation.pc)
+				}
+				for _, field := range variant.callerFields {
+					if plan.records.fieldTagsFor(plan.tags, field) != backendTagNumber {
+						return fmt.Errorf("emit backend Go numeric proof: PC %d finite call-set receiver field is not numeric", operation.pc)
+					}
+				}
+				for argument := int32(1); argument < operation.callArgCount; argument++ {
+					if err := require(operation.callArgStart+argument, parameterTags[argument]); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}
+		return fmt.Errorf("emit backend Go numeric proof: PC %d has no finite call-set target", operation.pc)
 	case opCallLocalOne:
 		if factory, _, ok := plan.closures.factory(operation); ok {
 			if factory.captureArgument < 0 ||
@@ -2404,6 +2481,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 	case opNewTable:
 		return false, nil
 	case opSetStringField:
+		if emitter.plan.callSets.setter(operation) {
+			return false, nil
+		}
 		if handled, err := emitter.emitRecordSetStringField(operation, use); handled {
 			return false, err
 		}
@@ -2452,6 +2532,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		}
 		return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record-map store", operation.pc)
 	case opGetIndex:
+		if emitter.plan.callSets.selector(operation) {
+			return false, nil
+		}
 		if handled, err := emitter.emitRecordGetStringField(operation, definition); handled {
 			return false, err
 		}
@@ -2990,6 +3073,63 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 				fmt.Fprintf(&emitter.body, "\t_ = v%d\n", borrowed.value)
 			}
 		}
+	case opCallOne:
+		if call, ok := emitter.plan.callSets.call(operation); ok {
+			destination, err := definition(operation.a)
+			if err != nil {
+				return false, err
+			}
+			fmt.Fprintf(&emitter.body, "\tswitch v%d {\n", call.key)
+			for variantIndex, variant := range call.variants {
+				fmt.Fprintf(&emitter.body, "\tcase uint32(%d):\n", variant.key)
+				for field, callerField := range variant.callerFields {
+					fmt.Fprintf(
+						&emitter.body,
+						"\t\tm%d_%d_%d := r%d_%d\n",
+						operation.pc,
+						variantIndex,
+						field,
+						callerField.index,
+						callerField.field,
+					)
+				}
+				fmt.Fprintf(&emitter.body, "\t\tv%d, ok%d = %s(", destination, operation.pc, variant.target.functionName)
+				for field := range variant.callerFields {
+					if field != 0 {
+						emitter.body.WriteString(", ")
+					}
+					fmt.Fprintf(&emitter.body, "&m%d_%d_%d", operation.pc, variantIndex, field)
+				}
+				for argument := int32(1); argument < operation.callArgCount; argument++ {
+					emitter.body.WriteString(", ")
+					value, useErr := use(operation.callArgStart + argument)
+					if useErr != nil {
+						return false, useErr
+					}
+					fmt.Fprintf(&emitter.body, "v%d", value)
+				}
+				emitter.body.WriteString(")\n")
+				fmt.Fprintf(&emitter.body, "\t\tif !ok%d {\n", operation.pc)
+				emitter.emitReplayEntry(3)
+				emitter.body.WriteString("\t\t}\n")
+				for field, callerField := range variant.callerFields {
+					fmt.Fprintf(
+						&emitter.body,
+						"\t\tr%d_%d = m%d_%d_%d\n",
+						callerField.index,
+						callerField.field,
+						operation.pc,
+						variantIndex,
+						field,
+					)
+				}
+			}
+			emitter.body.WriteString("\tdefault:\n")
+			emitter.emitReplayEntry(2)
+			emitter.body.WriteString("\t}\n")
+			return false, nil
+		}
+		return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no finite call-set target", operation.pc)
 	case opCallLocalOne:
 		if factory, cell, ok := emitter.plan.closures.factory(operation); ok {
 			source, err := use(operation.callArgStart + factory.captureArgument)

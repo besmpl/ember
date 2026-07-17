@@ -215,11 +215,26 @@ type backendGoRecordTablePlan struct {
 	iteratorValues         []bool
 	iteratorArray          []int
 	scalarValues           []bool
+	allowedCalls           map[int32]bool
+	excludedRoots          map[backendValueID]bool
+}
+
+type backendGoRecordAnalysisOptions struct {
+	excludedRoots map[backendValueID]bool
+	allowedCalls  map[int32]bool
 }
 
 func analyzeBackendGoRecordTables(
 	ir *backendProtoIR,
 	keys backendGoStructuralKeyPlan,
+) backendGoRecordTablePlan {
+	return analyzeBackendGoRecordTablesWithOptions(ir, keys, backendGoRecordAnalysisOptions{})
+}
+
+func analyzeBackendGoRecordTablesWithOptions(
+	ir *backendProtoIR,
+	keys backendGoStructuralKeyPlan,
+	options backendGoRecordAnalysisOptions,
 ) backendGoRecordTablePlan {
 	if ir == nil {
 		return backendGoRecordTablePlan{}
@@ -259,6 +274,8 @@ func analyzeBackendGoRecordTables(
 		iteratorValues:         make([]bool, len(ir.values)),
 		iteratorArray:          make([]int, len(ir.values)),
 		scalarValues:           make([]bool, len(ir.values)),
+		allowedCalls:           options.allowedCalls,
+		excludedRoots:          options.excludedRoots,
 	}
 	for valueIndex := range plan.iteratorArray {
 		plan.iteratorArray[valueIndex] = -1
@@ -295,6 +312,9 @@ func analyzeBackendGoRecordTables(
 			continue
 		}
 		root := plan.root(backendOperationUse(operation, operation.a))
+		if options.excludedRoots[root] {
+			continue
+		}
 		if operation.op == opSetField && !positionalRecords[root] {
 			continue
 		}
@@ -1384,6 +1404,9 @@ func (plan *backendGoRecordTablePlan) classifyFields(ir *backendProtoIR) bool {
 			baseRegister = operation.a
 		}
 		base := backendOperationUse(operation, baseRegister)
+		if plan.excludedRoots[plan.root(base)] {
+			continue
+		}
 		if operation.op == opGetIndex || operation.op == opSetField {
 			_, directRecord := plan.recordByRoot[plan.root(base)]
 			_, referencedRecord := plan.refs[base]
@@ -2527,6 +2550,10 @@ func (plan *backendGoRecordTablePlan) validateUses(ir *backendProtoIR) bool {
 			}
 		}
 		for _, use := range operation.uses {
+			if plan.allowedCalls[operation.pc] &&
+				(operation.op == opCall || operation.op == opCallOne || operation.op == opCallLocalOne) {
+				continue
+			}
 			root := plan.root(use.value)
 			if root != invalidBackendValueID && accountedRoots[root] {
 				switch operation.op {
