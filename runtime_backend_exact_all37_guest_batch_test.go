@@ -264,6 +264,38 @@ func TestPrepareExactGuestBatchForParityTestUsesVerifiedPreparedCallback(t *test
 	}
 }
 
+func TestPrepareExactGuestBatchThroughputForParityTestUsesPreparedOwnerEntry(t *testing.T) {
+	tc := loadLuauBenchmarkCases(t, "classicLuauCases", []string{"recursive_fibonacci"})[0]
+	t.Setenv("EMBER_RUNTIME_ENGINE", "invalid-but-overridden")
+	callback, err := PrepareExactGuestBatchThroughputForParityTest(
+		backendExactGuestBatchSource(t, tc.source, false),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, ok := callback.target.(*backendExactGuestBatchThroughputTarget)
+	if !ok || target.owner == nil || target.owner.prepared == nil {
+		t.Fatalf("prepared throughput callback target = %T, want bound owner entry", callback.target)
+	}
+	values, err := callback.Call(context.Background(), NumberValue(3), NumberValue(17))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 {
+		t.Fatalf("prepared throughput results = %d, want 1", len(values))
+	}
+	result, ok := values[0].Number()
+	if !ok || result != 90152 {
+		t.Fatalf("prepared throughput result = %v/%t, want 90152", result, ok)
+	}
+	if err := callback.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := callback.Call(context.Background(), NumberValue(3), NumberValue(17)); err == nil {
+		t.Fatal("closed prepared throughput callback accepted a call")
+	}
+}
+
 func backendExactAll37GuestBatchArtifact(t *testing.T) []byte {
 	t.Helper()
 	cases := backendExactGuestBatchCases(t)

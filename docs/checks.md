@@ -99,10 +99,12 @@ uses `EMBER_RUNTIME_ENGINE=vm`, while dynamic `candidate` uses
 and selects `EMBER_RUNTIME_ENGINE=prepared`. In test builds, that phase binds
 the checked-in generated all-37 bundle by verified Program hash and Proto
 inventory; an unknown or stale Program fails before owner creation. The bridge
-remains test-only until the public prepared lifecycle is proved, so the phase
-cannot relabel Machine evidence or silently route a production runtime.
-The phase and execution mode are recorded in schema-v2 artifacts and
-`command.txt`; workload identity never participates in engine selection.
+enters the bound owner directly so `guest_batch_v1` does not include
+`Runtime.Invoke` lifecycle work. Separate public-path tests prove that the same
+verified bundle executes through `Runtime.Invoke`, owns and detaches results
+correctly, and closes independently. The phase and execution mode are recorded
+in schema-v2 artifacts and `command.txt`; workload identity never participates
+in engine selection.
 
 On the pinned eight-logical-CPU M1, acquisition starts after three one-second
 samples with aggregate CPU at most 300%. One-minute load remains diagnostic but

@@ -677,7 +677,7 @@ func (callable *parityPreparedCallable) close() error {
 }
 
 func prepareParityExactGuestBatch(source string) (*parityPreparedCallable, error) {
-	callback, err := ember.PrepareExactGuestBatchForParityTest(source)
+	callback, err := ember.PrepareExactGuestBatchThroughputForParityTest(source)
 	if err != nil {
 		return nil, err
 	}
