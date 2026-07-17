@@ -89,6 +89,8 @@ func (cell directAdaptiveCacheCell) layout() directCacheLayout {
 
 const directAdaptiveGuardRegisterCap = 6
 
+const directAdaptiveStableHitThreshold = 2
+
 func (cell directAdaptiveCacheCell) withGuardRegisters(registers []uint8) (directAdaptiveCacheCell, bool) {
 	if len(registers) > directAdaptiveGuardRegisterCap {
 		return cell, false
@@ -111,14 +113,53 @@ func (cell directAdaptiveCacheCell) guardRegister(index int) uint8 {
 	return uint8(uint64(cell) >> (16 + index*8) & directShadowByteMask)
 }
 
+func (cell directAdaptiveCacheCell) withPlanIndex(index int) (directAdaptiveCacheCell, bool) {
+	if index < 0 || uint64(index) >= (uint64(1)<<56)-1 {
+		return cell, false
+	}
+	return directAdaptiveCacheCell(uint64(cell.layout()) | uint64(index+1)<<8), true
+}
+
+func (cell directAdaptiveCacheCell) planIndex() (int, bool) {
+	encoded := uint64(cell) >> 8
+	if encoded == 0 || encoded-1 > uint64(^uint(0)>>1) {
+		return 0, false
+	}
+	return int(encoded - 1), true
+}
+
+// observeDirectFixedSelfCall quickens a call site only after the same semantic
+// self-call transition has succeeded twice. The shadow retains no closure or
+// Proto pointer: the specialized handler rechecks current closure identity at
+// every entry and dequickens at the original word PC on a miss.
+func observeDirectFixedSelfCall(instance *vmFunctionInstance, pc int) {
+	if instance == nil || pc < 0 || pc >= len(instance.shadow.words) {
+		return
+	}
+	word := instance.shadow.words[pc]
+	if word.handler() != directHandlerID(opCallUpvalueOne) {
+		return
+	}
+	word = word.incrementCounter()
+	if word.counter() >= directAdaptiveStableHitThreshold {
+		word = word.withHandler(directHandlerFixedSelfCall)
+	}
+	instance.shadow.words[pc] = word
+}
+
 type directShadowCode struct {
-	words         []directShadowWord
-	caches        []directAdaptiveCacheCell
-	numericTraces []directNumericTracePlan
+	words                []directShadowWord
+	caches               []directAdaptiveCacheCell
+	numericTraces        []directNumericTracePlan
+	fixedSelfCallTraces  []directFixedSelfCallTracePlan
+	compactSelfFunctions []directCompactSelfFunctionPlan
 }
 
 func (code directShadowCode) retainedBytes() int64 {
-	return directShadowStateBytes(cap(code.words), cap(code.caches)) + int64(cap(code.numericTraces))*directNumericTracePlanBytes
+	return directShadowStateBytes(cap(code.words), cap(code.caches)) +
+		int64(cap(code.numericTraces))*directNumericTracePlanBytes +
+		int64(cap(code.fixedSelfCallTraces))*directFixedSelfCallTracePlanBytes +
+		int64(cap(code.compactSelfFunctions))*directCompactSelfFunctionPlanBytes
 }
 
 func directShadowStateBytes(wordCount int, cacheCount int) int64 {
@@ -202,7 +243,7 @@ func tileDirectNumericForTraces(proto *Proto, shadow *directShadowCode) error {
 			continue
 		}
 		loopIndex, ok := directNumericTraceLoop(decoded, index, proto)
-		if !ok || directNumericTraceHasInteriorEntry(decoded, index, loopIndex) {
+		if !ok || directTraceHasInteriorEntry(decoded, index, loopIndex) {
 			continue
 		}
 		guards, ok := directNumericTraceGuardRegisters(decoded[index:loopIndex+1], proto.registers)
@@ -293,7 +334,7 @@ func directNumericTraceBodyInstruction(ins instruction, proto *Proto) bool {
 	}
 }
 
-func directNumericTraceHasInteriorEntry(decoded []wordcodeDecoded, checkIndex int, loopIndex int) bool {
+func directTraceHasInteriorEntry(decoded []wordcodeDecoded, checkIndex int, loopIndex int) bool {
 	startPC := decoded[checkIndex].wordPC
 	loopPC := decoded[loopIndex].wordPC
 	for index, entry := range decoded {

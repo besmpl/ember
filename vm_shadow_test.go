@@ -3,12 +3,27 @@ package ember
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
 	"time"
 	"unsafe"
 )
+
+func enableAdaptiveShadowForTest(t *testing.T, thread *vmThread) {
+	t.Helper()
+	owner := newRuntimeOwner()
+	if err := thread.bindOwner(owner); err != nil {
+		t.Fatalf("bind adaptive-shadow owner: %v", err)
+	}
+	t.Cleanup(func() {
+		thread.unbindOwner()
+		if err := owner.close(); err != nil {
+			t.Errorf("close adaptive-shadow owner: %v", err)
+		}
+	})
+}
 
 func TestBuildDirectShadowPreservesPhysicalWordcodeAndGeneratedHandlers(t *testing.T) {
 	proto, err := Compile(`
@@ -92,6 +107,18 @@ func TestDirectShadowEncodingIsBoundedAndSaturating(t *testing.T) {
 	}
 	if size := unsafe.Sizeof(directNumericTracePlan{}); size != directNumericTracePlanBytes {
 		t.Fatalf("directNumericTracePlan size = %d, declared %d", size, directNumericTracePlanBytes)
+	}
+	if size := unsafe.Sizeof(directFixedSelfCallTracePlan{}); size != directFixedSelfCallTracePlanBytes {
+		t.Fatalf("directFixedSelfCallTracePlan size = %d, declared %d", size, directFixedSelfCallTracePlanBytes)
+	}
+	if size := unsafe.Sizeof(directFixedSelfContinuation{}); size != directFixedSelfContinuationBytes {
+		t.Fatalf("directFixedSelfContinuation size = %d, declared %d", size, directFixedSelfContinuationBytes)
+	}
+	if size := unsafe.Sizeof(directCompactSelfOperation{}); size != 12 {
+		t.Fatalf("directCompactSelfOperation size = %d, want 12", size)
+	}
+	if size := unsafe.Sizeof(directCompactSelfFunctionPlan{}); size != directCompactSelfFunctionPlanBytes {
+		t.Fatalf("directCompactSelfFunctionPlan size = %d, declared %d", size, directCompactSelfFunctionPlanBytes)
 	}
 	word := newDirectShadowWord(0xfedcba98, directHandlerID(opAdd), 7)
 	for range 300 {
@@ -243,6 +270,7 @@ return total
 		t.Fatal(err)
 	}
 	production := newVMThread(runtimeGlobals(nil))
+	enableAdaptiveShadowForTest(t, &production)
 	got, err := production.run(proto, nil, nil)
 	if err != nil {
 		t.Fatalf("production run returned error: %v", err)
@@ -268,6 +296,380 @@ return total
 	}
 }
 
+func TestProductionQuickensObservedFixedSelfCall(t *testing.T) {
+	proto, err := Compile(`
+	local decrement = 1
+	local function triangular(n)
+		if n < 1 then
+			return 0
+		end
+		return n + triangular(n - decrement)
+	end
+	return triangular(40)
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := newVMThread(runtimeGlobals(nil))
+	enableAdaptiveShadowForTest(t, &production)
+	got, err := production.run(proto, nil, nil)
+	if err != nil {
+		t.Fatalf("production run returned error: %v", err)
+	}
+	instrumented := newVMThread(runtimeGlobals(nil))
+	instrumented.directFrameInstrumented = true
+	want, err := instrumented.run(proto, nil, nil)
+	if err != nil {
+		t.Fatalf("instrumented run returned error: %v", err)
+	}
+	if !valuesEqualList(got, want) {
+		t.Fatalf("production result = %#v, instrumented = %#v", got, want)
+	}
+
+	quickened := false
+	for _, instance := range production.functionInstances {
+		for _, word := range instance.shadow.words {
+			if word.handler() == directHandlerFixedSelfCall && word.counter() > 0 {
+				quickened = true
+			}
+		}
+	}
+	if !quickened {
+		var disassembly []string
+		for index, child := range proto.prototypes {
+			disassembly = append(disassembly, fmt.Sprintf("child %d:", index))
+			disassembly = append(disassembly, disassembleProto(child)...)
+		}
+		for instanceProto, instance := range production.functionInstances {
+			decoded, _, decodeErr := wordcodeDecodeWords(instanceProto.words)
+			if decodeErr != nil {
+				continue
+			}
+			for _, entry := range decoded {
+				if entry.ins.op == opCallUpvalueOne {
+					word := instance.shadow.words[entry.wordPC]
+					disassembly = append(disassembly, fmt.Sprintf("call pc%d handler=%d counter=%d", entry.wordPC, word.handler(), word.counter()))
+				}
+			}
+		}
+		t.Fatalf("production run did not quicken an observed fixed self-call:\n%s", strings.Join(disassembly, "\n"))
+	}
+}
+
+func TestShadowTilesGeneralMoveNumericFixedSelfCallTrace(t *testing.T) {
+	proto, err := Compile(`
+local function descend(n)
+	if n < 1 then
+		return 0
+	end
+	return n + descend(n - 1)
+end
+return descend(20)
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread := newVMThread(runtimeGlobals(nil))
+	for _, child := range proto.prototypes {
+		if _, err := thread.shadowFunctionInstance(child); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tiled := 0
+	compact := 0
+	for instanceProto, instance := range thread.functionInstances {
+		decoded, _, err := wordcodeDecodeWords(instanceProto.words)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range decoded {
+			if instance.shadow.words[entry.wordPC].handler() != directHandlerFixedSelfCallTrace {
+				continue
+			}
+			if entry.ins.op != opMove {
+				t.Fatalf("call trace begins at %s, want MOVE", opcodeName(entry.ins.op))
+			}
+			tiled++
+		}
+		for _, plan := range instance.shadow.fixedSelfCallTraces {
+			if plan.compact == 0 {
+				t.Fatal("closed unary numeric recursion did not receive compact continuation eligibility")
+			}
+		}
+		for _, plan := range instance.shadow.compactSelfFunctions {
+			compact++
+			if instance.shadow.words[int(plan.startPC)].handler() != directHandlerCompactSelfFunction {
+				t.Fatal("compact self-function plan did not own the function entry handler")
+			}
+		}
+	}
+	if tiled == 0 {
+		t.Fatal("general Move+numeric+fixed-self-call sequence was not tiled")
+	}
+	if compact == 0 {
+		t.Fatal("closed unary numeric recursion did not receive a compact function plan")
+	}
+}
+
+func TestProductionExecutesFixedSelfCallTraceAndMatchesInstrumentedOracle(t *testing.T) {
+	proto, err := Compile(`
+local function triangular(n)
+	if n == -1 then
+		return "unreachable nonnumeric result"
+	end
+	if n < 1 then
+		return 0
+	end
+	return n + triangular(n - 1)
+end
+return triangular(40)
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := newVMThread(runtimeGlobals(nil))
+	enableAdaptiveShadowForTest(t, &production)
+	got, err := production.run(proto, nil, nil)
+	if err != nil {
+		t.Fatalf("production run returned error: %v", err)
+	}
+	instrumented := newVMThread(runtimeGlobals(nil))
+	instrumented.directFrameInstrumented = true
+	want, err := instrumented.run(proto, nil, nil)
+	if err != nil {
+		t.Fatalf("instrumented run returned error: %v", err)
+	}
+	if !valuesEqualList(got, want) {
+		t.Fatalf("production result = %#v, instrumented = %#v", got, want)
+	}
+
+	executed := false
+	for _, instance := range production.functionInstances {
+		for _, word := range instance.shadow.words {
+			if word.handler() == directHandlerFixedSelfCallTrace && word.counter() > 0 {
+				executed = true
+			}
+		}
+	}
+	if !executed {
+		t.Fatal("production run did not execute a fixed self-call trace")
+	}
+}
+
+func TestProductionExecutesCompactSelfFunctionAndMatchesInstrumentedOracle(t *testing.T) {
+	proto, err := Compile(`
+local function triangular(n)
+	if n < 1 then
+		return 0
+	end
+	return n + triangular(n - 1)
+end
+return triangular(40)
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := newVMThread(runtimeGlobals(nil))
+	enableAdaptiveShadowForTest(t, &production)
+	got, err := production.run(proto, nil, nil)
+	if err != nil {
+		t.Fatalf("production run returned error: %v", err)
+	}
+	instrumented := newVMThread(runtimeGlobals(nil))
+	instrumented.directFrameInstrumented = true
+	want, err := instrumented.run(proto, nil, nil)
+	if err != nil {
+		t.Fatalf("instrumented run returned error: %v", err)
+	}
+	if !valuesEqualList(got, want) {
+		t.Fatalf("production result = %#v, instrumented = %#v", got, want)
+	}
+
+	executed := false
+	for _, instance := range production.functionInstances {
+		for _, plan := range instance.shadow.compactSelfFunctions {
+			word := instance.shadow.words[int(plan.startPC)]
+			if word.handler() == directHandlerCompactSelfFunction && word.counter() > 0 {
+				executed = true
+			}
+		}
+	}
+	if !executed {
+		t.Fatal("production run did not execute a compact self-function")
+	}
+}
+
+func TestCompactSelfFunctionGuardMissDequickensBeforeMutation(t *testing.T) {
+	proto, err := Compile(`
+local function recurse(n)
+	if n < 1 then
+		return 0
+	end
+	return n + recurse(n - 1)
+end
+return recurse(seed)
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	globals := map[string]Value{"seed": StringValue("not-a-number")}
+	production := newVMThread(runtimeGlobals(globals))
+	enableAdaptiveShadowForTest(t, &production)
+	got, gotErr := production.run(proto, nil, nil)
+	instrumented := newVMThread(runtimeGlobals(globals))
+	instrumented.directFrameInstrumented = true
+	want, wantErr := instrumented.run(proto, nil, nil)
+	if difference := differentialDifference(
+		differentialRun{values: want, err: wantErr},
+		differentialRun{values: got, err: gotErr},
+	); difference != "" {
+		t.Fatalf("guard fallback differs: %s", difference)
+	}
+
+	found := false
+	for _, instance := range production.functionInstances {
+		for _, plan := range instance.shadow.compactSelfFunctions {
+			found = true
+			word := instance.shadow.words[int(plan.startPC)]
+			generic := directHandlerID(opcode(uint8(word.raw()) & uint8(wordcodeOpcodeMask)))
+			if word.handler() != generic || word.counter() != 0 {
+				t.Fatalf("guard miss left compact handler/counter %d/%d, want generic %d/0", word.handler(), word.counter(), generic)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("compiled guard-miss source had no compact self-function")
+	}
+}
+
+func TestCompactSelfFunctionChangedSelfUpvalueFallsBackAtEntry(t *testing.T) {
+	proto, err := Compile(`
+local target = nil
+local function recurse(n)
+	if n < 1 then
+		return 0
+	end
+	return n + target(n - 1)
+end
+local saved = recurse
+target = function(n)
+	return n
+end
+return saved(4)
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := newVMThread(runtimeGlobals(nil))
+	enableAdaptiveShadowForTest(t, &production)
+	got, gotErr := production.run(proto, nil, nil)
+	instrumented := newVMThread(runtimeGlobals(nil))
+	instrumented.directFrameInstrumented = true
+	want, wantErr := instrumented.run(proto, nil, nil)
+	if difference := differentialDifference(
+		differentialRun{values: want, err: wantErr},
+		differentialRun{values: got, err: gotErr},
+	); difference != "" {
+		t.Fatalf("changed-upvalue fallback differs: %s", difference)
+	}
+
+	found := false
+	for _, instance := range production.functionInstances {
+		for _, plan := range instance.shadow.compactSelfFunctions {
+			found = true
+			word := instance.shadow.words[int(plan.startPC)]
+			generic := directHandlerID(opcode(uint8(word.raw()) & uint8(wordcodeOpcodeMask)))
+			if word.handler() != generic || word.counter() != 0 {
+				t.Fatalf("changed self upvalue left compact handler/counter %d/%d, want generic %d/0", word.handler(), word.counter(), generic)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("changed-upvalue source had no compact self-function plan")
+	}
+}
+
+func TestFixedSelfCallTraceGuardMissDequickensBeforeMutation(t *testing.T) {
+	proto, err := Compile(`
+local target = nil
+local function recurse(n)
+	if n == 2 then
+		target = function(value)
+			return value
+		end
+	end
+	if n < 1 then
+		return 0
+	end
+	return n + target(n - 1)
+end
+target = recurse
+return target(4)
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := newVMThread(runtimeGlobals(nil))
+	enableAdaptiveShadowForTest(t, &production)
+	got, gotErr := production.run(proto, nil, nil)
+	instrumented := newVMThread(runtimeGlobals(nil))
+	instrumented.directFrameInstrumented = true
+	want, wantErr := instrumented.run(proto, nil, nil)
+	if difference := differentialDifference(
+		differentialRun{values: want, err: wantErr},
+		differentialRun{values: got, err: gotErr},
+	); difference != "" {
+		t.Fatalf("guard fallback differs: %s", difference)
+	}
+
+	found := false
+	for _, instance := range production.functionInstances {
+		for _, plan := range instance.shadow.fixedSelfCallTraces {
+			found = true
+			if plan.compact != 0 {
+				t.Fatal("mutable self upvalue received compact continuation eligibility")
+			}
+			word := instance.shadow.words[int(plan.startPC)]
+			if word.counter() == 0 {
+				t.Fatal("call trace guard missed before any stable self-call execution")
+			}
+			if word.handler() != directHandlerID(opMove) {
+				t.Fatalf("guard miss left call trace handler %d, want generic MOVE", word.handler())
+			}
+		}
+	}
+	if !found {
+		t.Fatal("compiled guard-miss source had no fixed self-call trace")
+	}
+}
+
+func TestFixedSelfCallTraceMatchesEveryInstrumentedInstructionBoundary(t *testing.T) {
+	proto, err := Compile(`
+local function triangular(n)
+	if n < 1 then
+		return 0
+	end
+	return n + triangular(n - 1)
+end
+return triangular(6)
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for budget := uint64(1); budget <= 96; budget++ {
+		test := executionDifferentialCase{
+			name:      "fixed self-call trace instruction boundary",
+			limits:    ExecutionLimits{MaxInstructions: budget},
+			withOwner: true,
+		}
+		direct := runDifferentialCase(proto, test, false)
+		instrumented := runDifferentialCase(proto, test, true)
+		if difference := differentialDifference(instrumented, direct); difference != "" {
+			t.Fatalf("budget %d: %s\ndirect=%s\ninstrumented=%s", budget, difference, errorDiagnostic(direct.err), errorDiagnostic(instrumented.err))
+		}
+	}
+}
+
 func TestNumericTraceGuardMissDequickensBeforeMutation(t *testing.T) {
 	proto, err := Compile(`
 local total = seed
@@ -281,6 +683,7 @@ return total
 	}
 	globals := map[string]Value{"seed": StringValue("not-a-number")}
 	production := newVMThread(runtimeGlobals(globals))
+	enableAdaptiveShadowForTest(t, &production)
 	_, gotErr := production.run(proto, nil, nil)
 	instrumented := newVMThread(runtimeGlobals(globals))
 	instrumented.directFrameInstrumented = true
@@ -303,6 +706,7 @@ func TestNumericTraceNaNControllerFallsBackToCanonicalError(t *testing.T) {
 	}
 	globals := map[string]Value{"seed": NumberValue(math.NaN())}
 	production := newVMThread(runtimeGlobals(globals))
+	enableAdaptiveShadowForTest(t, &production)
 	_, gotErr := production.run(proto, nil, nil)
 	instrumented := newVMThread(runtimeGlobals(globals))
 	instrumented.directFrameInstrumented = true
@@ -335,8 +739,9 @@ return total
 	}
 	for budget := uint64(1); budget <= 80; budget++ {
 		test := executionDifferentialCase{
-			name:   "numeric trace instruction boundary",
-			limits: ExecutionLimits{MaxInstructions: budget},
+			name:      "numeric trace instruction boundary",
+			limits:    ExecutionLimits{MaxInstructions: budget},
+			withOwner: true,
 		}
 		direct := runDifferentialCase(proto, test, false)
 		instrumented := runDifferentialCase(proto, test, true)
@@ -374,6 +779,7 @@ func TestNumericTracePollsCancellationInsideFusedLoop(t *testing.T) {
 			t.Fatal(err)
 		}
 		thread := newVMThreadWithContext(ctx, runtimeGlobals(nil))
+		enableAdaptiveShadowForTest(t, &thread)
 		thread.controller = controller
 		thread.directFrameInstrumented = instrumented
 		values, runErr := thread.run(proto, nil, nil)
@@ -543,6 +949,7 @@ return twice(values.amount) + 1
 		t.Fatal(err)
 	}
 	production := newVMThread(runtimeGlobals(nil))
+	enableAdaptiveShadowForTest(t, &production)
 	got, err := production.run(proto, nil, nil)
 	if err != nil {
 		t.Fatalf("production run returned error: %v", err)
@@ -579,4 +986,81 @@ func valuesEqualList(left []Value, right []Value) bool {
 		}
 	}
 	return true
+}
+
+func BenchmarkVMRecursiveFibonacciShadow(b *testing.B) {
+	proto, err := Compile(`
+local function fib(n)
+	if n < 2 then
+		return n
+	end
+	return fib(n - 1) + fib(n - 2)
+end
+return fib(20)
+`)
+	if err != nil {
+		b.Fatal(err)
+	}
+	for _, benchmark := range []struct {
+		name           string
+		disableTrace   bool
+		disableCompact bool
+	}{
+		{name: "fixed_call", disableTrace: true, disableCompact: true},
+		{name: "call_trace", disableCompact: true},
+		{name: "compact_function"},
+	} {
+		benchmark := benchmark
+		b.Run(benchmark.name, func(b *testing.B) {
+			thread := newVMThread(runtimeGlobals(nil))
+			owner := newRuntimeOwner()
+			if err := thread.bindOwner(owner); err != nil {
+				b.Fatal(err)
+			}
+			defer func() {
+				thread.unbindOwner()
+				if err := owner.close(); err != nil {
+					b.Error(err)
+				}
+			}()
+			if benchmark.disableTrace || benchmark.disableCompact {
+				for _, child := range proto.prototypes {
+					instance, err := thread.shadowFunctionInstance(child)
+					if err != nil {
+						b.Fatal(err)
+					}
+					if benchmark.disableTrace {
+						for _, plan := range instance.shadow.fixedSelfCallTraces {
+							word := instance.shadow.words[int(plan.startPC)]
+							instance.shadow.words[int(plan.startPC)] = word.withHandler(directHandlerID(opMove))
+						}
+					}
+					if benchmark.disableCompact {
+						for _, plan := range instance.shadow.compactSelfFunctions {
+							pc := int(plan.startPC)
+							word := instance.shadow.words[pc]
+							generic := directHandlerID(opcode(uint8(word.raw()) & uint8(wordcodeOpcodeMask)))
+							instance.shadow.words[pc] = word.withHandler(generic)
+						}
+					}
+				}
+			}
+			result, err := thread.run(proto, nil, nil)
+			if err != nil || len(result) != 1 || valueNumber(result[0]) != 6765 {
+				b.Fatalf("preflight result = (%v, %v), want 6765", result, err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				result, err = thread.run(proto, nil, nil)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.StopTimer()
+			if len(result) != 1 || valueNumber(result[0]) != 6765 {
+				b.Fatalf("result = %v, want 6765", result)
+			}
+		})
+	}
 }

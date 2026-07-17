@@ -293,9 +293,9 @@ func parseDispatchSpec(source []byte, want []string) ([]dispatchSpecEntry, error
 	return entries, nil
 }
 
-var fusionNames = dispatchStringSet([]string{"numeric-for-trace"})
+var fusionNames = dispatchStringSet([]string{"numeric-for-trace", "fixed-self-call", "fixed-self-call-trace", "compact-self-function"})
 
-var fusionFamilyNames = dispatchStringSet([]string{"numeric-loop"})
+var fusionFamilyNames = dispatchStringSet([]string{"numeric-loop", "direct-call"})
 
 func parseFusionSpec(source []byte) ([]fusionSpecEntry, error) {
 	text, err := rawStringDeclaration(source, "directFrameFusionSpec")
@@ -627,7 +627,7 @@ func renderVariant(template []byte, instrumented bool) ([]byte, error) {
 			{"fieldCache.resolve(table, keyText, key.stringBox())", "fieldCache.resolveCounted(table, keyText, key.stringBox(), picCounts)", 1},
 			{"cache.getValue(table, key)", "cache.getValueCounted(table, key, picCounts)", 2},
 			{"cache.getValue(nextTable, key)", "cache.getValueCounted(nextTable, key, picCounts)", 1},
-			{"thread.pushFrameRecord(record)\n", "thread.pushFrameRecord(record)\n\t\t\t\t\tthread.directFramePICCounts.addFixedCallTrampolineEntry()\n", 10},
+			{"thread.pushFrameRecord(record)\n", "thread.pushFrameRecord(record)\n\t\t\t\t\tthread.directFramePICCounts.addFixedCallTrampolineEntry()\n", 11},
 			{"\t\tshadowWords       []directShadowWord\n", "", 1},
 		} {
 			text, err = replaceAllExact(text, rewrite.old, rewrite.new, rewrite.count)
@@ -696,13 +696,6 @@ func renderVariant(template []byte, instrumented bool) ([]byte, error) {
 			return nil, fmt.Errorf("production shadow marker occurs %d times, want 2", got)
 		}
 		text, err = unwrapGoBlock(text, "if !false {")
-		if err != nil {
-			return nil, err
-		}
-		if got := strings.Count(text, "if functionInstance == nil {"); got != 6 {
-			return nil, fmt.Errorf("production lazy function-instance marker occurs %d times, want 6", got)
-		}
-		text, err = stripGoBlock(text, "if functionInstance == nil {")
 		if err != nil {
 			return nil, err
 		}

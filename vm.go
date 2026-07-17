@@ -191,6 +191,9 @@ type vmThread struct {
 	// fixed-result call bridge. The vmFrame remains the execution bridge until
 	// the rest of the call ABI moves onto records.
 	frameRecords []vmFrameRecord
+	// fixedSelfContinuations is the pointer-free continuation stack used only
+	// by function-wide proven closed numeric self recursion.
+	fixedSelfContinuations []directFixedSelfContinuation
 	// rootClosureSlots keep stable synthetic identities for physical frame
 	// roots without widening vmFrameRecord.
 	rootClosureSlots []*closure
@@ -665,6 +668,8 @@ const (
 	vmFrameRecordFlagCallerBorrowed
 	vmFrameRecordFlagOpenArguments
 	vmFrameRecordFlagCallDepth
+	vmFrameRecordFlagFixedSelfCall
+	vmFrameRecordFlagFixedSelfCallTrace
 )
 
 func (thread *vmThread) pushFrameRecord(record vmFrameRecord) {
@@ -722,6 +727,8 @@ func (thread *vmThread) clearFrameRecords() {
 	thread.releaseRecordCallDepth(0)
 	clear(thread.frameRecords)
 	thread.frameRecords = thread.frameRecords[:0]
+	clear(thread.fixedSelfContinuations)
+	thread.fixedSelfContinuations = thread.fixedSelfContinuations[:0]
 	thread.maxFrameRecords = 0
 }
 
@@ -1531,8 +1538,29 @@ func (thread *vmThread) shadowFunctionInstance(proto *Proto) (*vmFunctionInstanc
 	if err := tileDirectNumericForTraces(proto, &shadow); err != nil {
 		return nil, fmt.Errorf("shadow: tile: %w", err)
 	}
+	if err := tileDirectFixedSelfCallTraces(proto, &shadow); err != nil {
+		return nil, fmt.Errorf("shadow: tile calls: %w", err)
+	}
 	instance.shadow = shadow
 	return instance, nil
+}
+
+// executionShadowFunctionInstance returns adaptive state only when it already
+// exists or the thread is bound to a reusable runtime owner. One-shot Run
+// calls stay on immutable wordcode so cold allocation remains independent of
+// script length; owner-backed dynamic scripts pay loader analysis once and
+// retain the result across invocations.
+func (thread *vmThread) executionShadowFunctionInstance(proto *Proto) (*vmFunctionInstance, error) {
+	if thread == nil || proto == nil {
+		return nil, nil
+	}
+	if instance := thread.functionInstances[proto]; instance != nil && instance.shadow.words != nil {
+		return instance, nil
+	}
+	if !thread.ownerBound {
+		return nil, nil
+	}
+	return thread.shadowFunctionInstance(proto)
 }
 
 func (thread *vmThread) functionInstanceFor(proto *Proto, required bool) *vmFunctionInstance {
@@ -2981,10 +3009,160 @@ func (thread *vmThread) newBorrowedFixedFrameRecord(
 	return child, record, true
 }
 
-// enterRecordOnlyFixedCall switches the live physical frame to a fixed-result
-// callee and leaves the caller continuation entirely in a compact record.
-// Caller cells remain indexed on the thread and are reconstructed when the
-// physical frame is rebound to the saved closure.
+// directFixedSelfCallEntry stages a proven same-closure frame slide so all
+// fallible work precedes mutation of the live physical frame.
+type directFixedSelfCallEntry struct {
+	owner           *vmStackOwner
+	record          vmFrameRecord
+	childBase       int
+	childEnd        int
+	previousLength  int
+	recordBaseDepth int
+	physicalDepth   int
+}
+
+func (thread *vmThread) enterRecordOnlyFixedSelfCallOne(
+	closure *closure,
+	frame *vmFrame,
+	returnPC int,
+	argumentStart int,
+	argumentCount int,
+	destinationRegister int,
+) (vmFrameRecord, bool) {
+	entry, ok := thread.prepareRecordOnlyFixedSelfCallOne(closure, frame, returnPC, argumentStart, argumentCount, destinationRegister)
+	if !ok {
+		return vmFrameRecord{}, false
+	}
+	commitRecordOnlyFixedSelfCallOne(frame, entry)
+	return entry.record, true
+}
+
+// prepareRecordOnlyFixedSelfCallOne proves every fallible guard and reserves
+// the owner window before a fused caller mutates a source register. Commit is
+// consequently a non-failing state transition, which keeps same-PC fallback
+// possible for superword guard misses without rollback state.
+func (thread *vmThread) prepareRecordOnlyFixedSelfCallOne(
+	closure *closure,
+	frame *vmFrame,
+	returnPC int,
+	argumentStart int,
+	argumentCount int,
+	destinationRegister int,
+) (directFixedSelfCallEntry, bool) {
+	if thread == nil || closure == nil || closure.proto == nil || frame == nil ||
+		closure != frame.currentClosure || closure.proto != frame.proto {
+		return directFixedSelfCallEntry{}, false
+	}
+	proto := closure.proto
+	if proto.variadic || len(proto.capturedLocals) != 0 || frame.varargCount != 0 || len(frame.cells) != 0 ||
+		thread.controller != nil || thread.debugHook != nil || thread.coroutine != nil ||
+		thread.nonYieldableDepth != 0 || thread.nearestProtectedFrame != noProtectedFrame ||
+		frame.hasPendingCall || frame.openResultStart >= 0 || frame.hasOpenRange() || frame.callDepthCharged ||
+		frame.debugLine() != -1 || destinationRegister < 0 || destinationRegister >= frame.registerCount ||
+		argumentCount < 0 || argumentStart < 0 || argumentStart > frame.registerCount ||
+		argumentCount > frame.registerCount-argumentStart || proto.registers < 0 || proto.params < 0 {
+		return directFixedSelfCallEntry{}, false
+	}
+	owner := frame.window.owner
+	if owner == nil {
+		owner = frame.owner
+	}
+	if owner == nil || owner != thread.stackOwner || frame.registerBase < 0 ||
+		argumentStart > int(^uint(0)>>1)-frame.registerBase {
+		return directFixedSelfCallEntry{}, false
+	}
+
+	callerBase, callerBaseOK := vmFrameRecordUint32(frame.registerBase)
+	callerTop, callerTopOK := vmFrameRecordAddUint32(frame.registerBase, frame.registerCount)
+	returnPCValue, returnPCOK := vmFrameRecordUint32(returnPC)
+	resultDestination, resultOK := vmFrameRecordAddUint32(frame.registerBase, destinationRegister)
+	argumentCountValue, argumentCountOK := vmFrameRecordUint16(argumentCount)
+	frameDepth, frameDepthOK := vmFrameRecordUint16(frame.depth)
+	previousStackLength, previousStackLengthOK := vmFrameRecordUint32(frame.window.previousStackLength)
+	childBase := frame.registerBase + argumentStart
+	childBaseValue, childBaseOK := vmFrameRecordUint32(childBase)
+	if !callerBaseOK || !callerTopOK || !returnPCOK || !resultOK || !argumentCountOK ||
+		!frameDepthOK || !previousStackLengthOK || !childBaseOK ||
+		childBase > int(^uint(0)>>1)-proto.registers {
+		return directFixedSelfCallEntry{}, false
+	}
+	childEnd := childBase + proto.registers
+	previousLength := len(owner.values)
+	if childEnd > previousLength {
+		thread.growStack(childEnd)
+		owner = thread.stackOwner
+	}
+	if owner == nil || childEnd > len(owner.values) {
+		return directFixedSelfCallEntry{}, false
+	}
+
+	recordBaseDepth := frame.recordBaseDepth
+	if recordBaseDepth < 0 {
+		recordBaseDepth = len(thread.frameRecords)
+	}
+	callerBorrowed := frame.window.borrowed
+	physicalDepth := frame.depth
+
+	flags := vmFrameRecordFlagRecordOnly | vmFrameRecordFlagFixedSelfCall
+	if callerBorrowed {
+		flags |= vmFrameRecordFlagCallerBorrowed
+	}
+	return directFixedSelfCallEntry{
+		owner:           owner,
+		childBase:       childBase,
+		childEnd:        childEnd,
+		previousLength:  previousLength,
+		recordBaseDepth: recordBaseDepth,
+		physicalDepth:   physicalDepth,
+		record: vmFrameRecord{
+			closure:           closure,
+			returnPC:          returnPCValue,
+			base:              callerBase,
+			top:               callerTop,
+			resultDestination: resultDestination,
+			resultCount:       1,
+			argumentBase:      childBaseValue,
+			varargBase:        previousStackLength,
+			frameDepth:        frameDepth,
+			argumentCount:     argumentCountValue,
+			flags:             flags,
+		},
+	}, true
+}
+
+func commitRecordOnlyFixedSelfCallOne(frame *vmFrame, entry directFixedSelfCallEntry) {
+	proto := entry.record.closure.proto
+	registers := entry.owner.values[entry.childBase:entry.childEnd]
+	for _, register := range proto.entryNilRegisters {
+		registers[register] = NilValue()
+	}
+	paramCount := proto.params
+	if paramCount > len(registers) {
+		paramCount = len(registers)
+	}
+	for register := int(entry.record.argumentCount); register < paramCount; register++ {
+		registers[register] = NilValue()
+	}
+
+	frame.registerBase = entry.childBase
+	frame.registerCount = len(registers)
+	frame.owner = entry.owner
+	frame.registers = registers
+	frame.varargOwner = nil
+	frame.varargBase = entry.childEnd
+	frame.varargCount = 0
+	frame.pc = 0
+	frame.recordBaseDepth = entry.recordBaseDepth
+	frame.depth = entry.physicalDepth
+	frame.window = vmRegisterWindow{
+		owner:               entry.owner,
+		base:                entry.childBase,
+		length:              len(registers),
+		previousStackLength: entry.previousLength,
+		borrowed:            true,
+	}
+}
+
 func (thread *vmThread) maybeEnterRecordOnlyFixedCall(
 	closure *closure,
 	frame *vmFrame,
@@ -2999,6 +3177,10 @@ func (thread *vmThread) maybeEnterRecordOnlyFixedCall(
 	return thread.enterRecordOnlyFixedCall(closure, frame, returnPC, argumentStart, argumentCount, destination)
 }
 
+// enterRecordOnlyFixedCall switches the live physical frame to a fixed-result
+// callee and leaves the caller continuation entirely in a compact record.
+// Caller cells remain indexed on the thread and are reconstructed when the
+// physical frame is rebound to the saved closure.
 func (thread *vmThread) enterRecordOnlyFixedCall(
 	closure *closure,
 	frame *vmFrame,
@@ -3805,6 +3987,8 @@ func (thread *vmThread) dropFrames(depth int) {
 	}
 	thread.frames = thread.frames[:depth]
 	if depth == 0 {
+		clear(thread.fixedSelfContinuations)
+		thread.fixedSelfContinuations = thread.fixedSelfContinuations[:0]
 		if owner := thread.stackOwner; owner != nil {
 			clear(owner.values)
 			owner.values = owner.values[:0]
@@ -5917,6 +6101,9 @@ func (thread *vmThread) resumeRecordOnlyFixedCallOne(rootRecordDepth int, frame 
 	if record.flags&vmFrameRecordFlagRecordOnly == 0 || record.closure == nil || record.resultCount != 1 {
 		return false
 	}
+	if record.flags&vmFrameRecordFlagFixedSelfCall != 0 && thread.resumeRecordOnlyFixedSelfCallOne(frame, record, value) {
+		return true
+	}
 	base, baseOK := vmFrameRecordUint32ToInt(record.base)
 	top, topOK := vmFrameRecordUint32ToInt(record.top)
 	returnPC, returnPCOK := vmFrameRecordUint32ToInt(record.returnPC)
@@ -5988,6 +6175,70 @@ func (thread *vmThread) resumeRecordOnlyFixedCallOne(rootRecordDepth int, frame 
 		current.recordBaseDepth = -1
 	}
 	current.setRegister(destination-base, value)
+	return true
+}
+
+func (thread *vmThread) resumeRecordOnlyFixedSelfCallOne(frame **vmFrame, record vmFrameRecord, value Value) bool {
+	if thread == nil || frame == nil || *frame == nil || record.closure == nil || record.closure.proto == nil ||
+		record.flags&vmFrameRecordFlagRecordOnly == 0 || record.flags&vmFrameRecordFlagFixedSelfCall == 0 ||
+		record.resultCount != 1 {
+		return false
+	}
+	base, baseOK := vmFrameRecordUint32ToInt(record.base)
+	top, topOK := vmFrameRecordUint32ToInt(record.top)
+	returnPC, returnPCOK := vmFrameRecordUint32ToInt(record.returnPC)
+	destination, destinationOK := vmFrameRecordUint32ToInt(record.resultDestination)
+	previousStackLength, previousStackLengthOK := vmFrameRecordUint32ToInt(record.varargBase)
+	if !baseOK || !topOK || !returnPCOK || !destinationOK || !previousStackLengthOK ||
+		base < 0 || top < base || destination < base || destination >= top {
+		return false
+	}
+	current := *frame
+	if current.proto != record.closure.proto || current.currentClosure != record.closure ||
+		current.proto.variadic || len(current.proto.capturedLocals) != 0 || len(current.cells) != 0 ||
+		current.varargCount != 0 || current.hasPendingCall || current.openResultStart >= 0 || current.hasOpenRange() {
+		return false
+	}
+	owner := current.window.owner
+	if owner == nil {
+		owner = current.owner
+	}
+	if owner == nil || owner != thread.stackOwner || top > len(owner.values) {
+		return false
+	}
+	childStart := current.window.base
+	childEnd := childStart + current.window.length
+	if childStart < 0 || childEnd < childStart || childEnd > len(owner.values) {
+		return false
+	}
+	cleanupEnd, cleanupOK := vmFrameCleanupEnd(record, current, owner, childEnd)
+	if !cleanupOK {
+		return false
+	}
+	clearOwnerRangeExcept(owner, childStart, cleanupEnd, destination, destination+1)
+	owner.values = owner.values[:top]
+	thread.stack = owner.values
+	_, _ = thread.popFrameRecord()
+
+	current.registerBase = base
+	current.registerCount = top - base
+	current.owner = owner
+	current.registers = owner.values[base:top]
+	current.varargOwner = nil
+	current.varargBase = top
+	current.varargCount = 0
+	current.pc = returnPC
+	current.window = vmRegisterWindow{
+		owner:               owner,
+		base:                base,
+		length:              top - base,
+		previousStackLength: previousStackLength,
+		borrowed:            record.flags&vmFrameRecordFlagCallerBorrowed != 0,
+	}
+	if current.recordBaseDepth >= 0 && len(thread.frameRecords) == current.recordBaseDepth {
+		current.recordBaseDepth = -1
+	}
+	owner.values[destination] = value
 	return true
 }
 

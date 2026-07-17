@@ -81,4 +81,7 @@ opReturn                       none                  barrier         none
 const directFrameFusionSpec = `
 # name             family        instruction cap
 numeric-for-trace  numeric-loop  16
+fixed-self-call    direct-call   1
+fixed-self-call-trace direct-call 3
+compact-self-function direct-call 16
 `

@@ -127,8 +127,12 @@ func TestGeneratedDirectSemanticCatalogCoversOpcodeMetadata(t *testing.T) {
 	if directGeneratedHandlerCount > directAdaptiveHandlerCap {
 		t.Fatalf("generated handler count = %d, cap = %d", directGeneratedHandlerCount, directAdaptiveHandlerCap)
 	}
-	if directFusedHandlerCount != 1 || directHandlerNumericForTrace < directHandlerID(opcodeLimit+directAdaptiveHandlerCount) {
-		t.Fatalf("numeric trace handler/count = %d/%d", directHandlerNumericForTrace, directFusedHandlerCount)
+	if directFusedHandlerCount != 4 ||
+		directHandlerNumericForTrace < directHandlerID(opcodeLimit+directAdaptiveHandlerCount) ||
+		directHandlerFixedSelfCall <= directHandlerNumericForTrace ||
+		directHandlerFixedSelfCallTrace <= directHandlerFixedSelfCall ||
+		directHandlerCompactSelfFunction <= directHandlerFixedSelfCallTrace {
+		t.Fatalf("fused handler inventory = numeric:%d self-call:%d call-trace:%d compact-self:%d count:%d", directHandlerNumericForTrace, directHandlerFixedSelfCall, directHandlerFixedSelfCallTrace, directHandlerCompactSelfFunction, directFusedHandlerCount)
 	}
 	seenSpecialized := make(map[directHandlerID]opcode)
 	for _, op := range allOpcodes {
@@ -402,11 +406,11 @@ func TestDirectFrameFunctionInstanceLookupMatchesGeneratedPolicy(t *testing.T) {
 			t.Fatalf("%s does not reset its lazy runtime function state", name)
 		}
 		if production {
-			if got := strings.Count(setup, "functionInstance, shadowErr = thread.shadowFunctionInstance(proto)"); got != 1 {
+			if got := strings.Count(setup, "thread.executionShadowFunctionInstance(proto)"); got != 1 {
 				t.Fatalf("%s has %d owner-shadow lookups, want one per reload", name, got)
 			}
-			if strings.Contains(loop, "functionInstance = thread.functionInstance(proto)") {
-				t.Fatalf("%s retained cache-local function-instance lookups after shadow binding", name)
+			if !strings.Contains(setup, "shadowWords = nil") || !strings.Contains(loop, "if shadowWords != nil {") {
+				t.Fatalf("%s does not preserve the zero-allocation immutable-wordcode fallback", name)
 			}
 		} else {
 			if strings.Contains(loop, "shadowFunctionInstance") || strings.Contains(loop, "shadowWords") {
@@ -415,9 +419,9 @@ func TestDirectFrameFunctionInstanceLookupMatchesGeneratedPolicy(t *testing.T) {
 			if strings.Contains(setup, "thread.functionInstance(proto)") {
 				t.Fatalf("%s eagerly looks up runtime function state on every frame reload", name)
 			}
-			if got, want := strings.Count(loop, "functionInstance = thread.functionInstance(proto)"), 6; got != want {
-				t.Fatalf("%s has %d lazy runtime function lookups, want %d cache paths", name, got, want)
-			}
+		}
+		if got, want := strings.Count(loop, "functionInstance = thread.functionInstance(proto)"), 6; got != want {
+			t.Fatalf("%s has %d lazy runtime function lookups, want %d cache paths", name, got, want)
 		}
 		if got, want := strings.Count(loop, "cache := functionInstance.cacheAt(cacheID)"), 6; got != want {
 			t.Fatalf("%s has %d runtime cache reads, want %d cache paths", name, got, want)
