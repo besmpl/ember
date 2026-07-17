@@ -1042,6 +1042,52 @@ func TestBackendGoNumericProofGeneratedFixtureIsFreshAndCorrect(t *testing.T) {
 	}
 }
 
+func TestBackendGoPreparedProofCanTargetExternalPublicAPI(t *testing.T) {
+	generated, err := emitBackendGoNumericProof(backendNumericProofIR(t), backendGoNumericOptions{
+		packageName:          "preparedfixture",
+		functionName:         "numericKernel",
+		preparedFunctionName: "numericPrepared",
+		preparedImportPath:   "github.com/besmpl/ember",
+		preparedQualifier:    "emberapi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(generated)
+	for _, required := range []string{
+		`emberapi "github.com/besmpl/ember"`,
+		"func numericPrepared(context emberapi.PreparedContext) emberapi.PreparedExit",
+		"context.NumberParameter(0)",
+		"emberapi.PreparedReplayEntry()",
+		"emberapi.PreparedReturnOneNumber(",
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("external prepared source lacks %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"machinePreparedContext",
+		"machinePreparedExit",
+		"context.numberParameter",
+		"machinePreparedReplayEntry",
+		"machinePreparedReturnOneNumber",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("external prepared source contains private symbol %q", forbidden)
+		}
+	}
+	for _, options := range []backendGoNumericOptions{
+		{packageName: "fixture", functionName: "direct", preparedFunctionName: "prepared", preparedImportPath: "github.com/besmpl/ember"},
+		{packageName: "fixture", functionName: "direct", preparedFunctionName: "prepared", preparedQualifier: "emberapi"},
+		{packageName: "fixture", functionName: "direct", preparedFunctionName: "prepared", preparedImportPath: "github.com/besmpl/ember", preparedQualifier: "math"},
+		{packageName: "fixture", functionName: "direct", preparedImportPath: "github.com/besmpl/ember", preparedQualifier: "emberapi"},
+	} {
+		if _, err := emitBackendGoNumericProof(backendNumericProofIR(t), options); err == nil {
+			t.Fatalf("invalid external prepared options generated source: %#v", options)
+		}
+	}
+}
+
 func TestBackendGoNumericPreparedExitFixtureIsFreshAndDirect(t *testing.T) {
 	generated, err := emitBackendGoNumericProof(backendNumericExitProofIR(t), backendGoNumericOptions{
 		packageName:          "ember",
