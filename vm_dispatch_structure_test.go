@@ -123,6 +123,102 @@ func TestGeneratedDispatchMatchesSemanticSource(t *testing.T) {
 	}
 }
 
+func TestGeneratedDirectSemanticCatalogCoversOpcodeMetadata(t *testing.T) {
+	if directAdaptiveHandlerCount > directAdaptiveHandlerCap {
+		t.Fatalf("adaptive handler count = %d, cap = %d", directAdaptiveHandlerCount, directAdaptiveHandlerCap)
+	}
+	seenSpecialized := make(map[directHandlerID]opcode)
+	for _, op := range allOpcodes {
+		semantic, ok := directSemanticMetadataFor(op)
+		if !ok {
+			t.Fatalf("missing generated semantic metadata for %s", opcodeName(op))
+		}
+		base, _ := opcodeMetadata(op)
+		if semantic.source != op || semantic.genericHandler != directHandlerID(op) {
+			t.Fatalf("%s source/handler = %d/%d", opcodeName(op), semantic.source, semantic.genericHandler)
+		}
+		if semantic.guestCharge != base.machine.guestCharge || semantic.errorClass != base.machine.errorClass {
+			t.Fatalf("%s charge/error metadata drifted", opcodeName(op))
+		}
+		if semantic.effects != base.effects || semantic.wordcode != base.wordcode {
+			t.Fatalf("%s effect/encoding metadata drifted", opcodeName(op))
+		}
+		if semantic.family == directSpecializationNone {
+			if semantic.specializedHandler != directHandlerInvalid {
+				t.Fatalf("%s has no family but handler %d", opcodeName(op), semantic.specializedHandler)
+			}
+			continue
+		}
+		if semantic.specializedHandler < directHandlerID(opcodeLimit) {
+			t.Fatalf("%s specialized handler %d overlaps generic opcode space", opcodeName(op), semantic.specializedHandler)
+		}
+		if previous, duplicate := seenSpecialized[semantic.specializedHandler]; duplicate {
+			t.Fatalf("%s and %s share specialized handler %d", opcodeName(previous), opcodeName(op), semantic.specializedHandler)
+		}
+		seenSpecialized[semantic.specializedHandler] = op
+	}
+	if len(seenSpecialized) != directAdaptiveHandlerCount {
+		t.Fatalf("specialized handlers = %d, declared %d", len(seenSpecialized), directAdaptiveHandlerCount)
+	}
+	if _, ok := directSemanticMetadataFor(opcodeLimit); ok {
+		t.Fatal("semantic metadata accepted opcodeLimit")
+	}
+}
+
+func TestGeneratedDirectSemanticCatalogRejectsMalformedMetadata(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*[opcodeLimit]directSemanticMetadata)
+		want   string
+	}{
+		{
+			name: "missing entry",
+			mutate: func(table *[opcodeLimit]directSemanticMetadata) {
+				table[opAdd] = directSemanticMetadata{}
+			},
+			want: "is unclassified",
+		},
+		{
+			name: "base metadata drift",
+			mutate: func(table *[opcodeLimit]directSemanticMetadata) {
+				table[opAdd].guestCharge++
+			},
+			want: "charge metadata drifted",
+		},
+		{
+			name: "generic handler drift",
+			mutate: func(table *[opcodeLimit]directSemanticMetadata) {
+				table[opAdd].genericHandler = directHandlerID(opSub)
+			},
+			want: "generic handler",
+		},
+		{
+			name: "duplicate specialized handler",
+			mutate: func(table *[opcodeLimit]directSemanticMetadata) {
+				table[opSub].specializedHandler = table[opAdd].specializedHandler
+			},
+			want: "duplicate specialized handler",
+		},
+		{
+			name: "pure control transfer",
+			mutate: func(table *[opcodeLimit]directSemanticMetadata) {
+				table[opJump].tiling = directTilingPure
+			},
+			want: "pure tiling transfers control",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			table := generatedDirectSemanticMetadata
+			test.mutate(&table)
+			err := validateDirectSemanticMetadata(table)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("validateDirectSemanticMetadata error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestVMExecutionDoesNotMaterializePackedInstructions(t *testing.T) {
 	_, testFile, _, ok := runtime.Caller(0)
 	if !ok {

@@ -14,6 +14,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -117,6 +118,10 @@ func render() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	semanticSpec, err := parseDispatchSpec(specText, semanticNames)
+	if err != nil {
+		return nil, err
+	}
 	template, err := os.ReadFile(templateFile)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", templateFile, err)
@@ -161,6 +166,12 @@ func render() ([]byte, error) {
 	}
 	output = append(output, importsBlock...)
 	output = append(output, '\n')
+	catalog, err := renderSemanticCatalog(semanticSpec)
+	if err != nil {
+		return nil, err
+	}
+	output = append(output, catalog...)
+	output = append(output, '\n', '\n')
 	if bytes.Count(production, []byte("func runDirectFrameProductionLoop")) != 1 || bytes.Count(instrumented, []byte("func runDirectFrameProductionLoop")) != 1 {
 		return nil, fmt.Errorf("rendered variants must each contain one canonical loop function")
 	}
@@ -174,6 +185,353 @@ func render() ([]byte, error) {
 		return nil, fmt.Errorf("format generated source: %w", err)
 	}
 	return formatted, nil
+}
+
+type dispatchSpecEntry struct {
+	opcode string
+	family string
+	tiling string
+	cache  string
+}
+
+var dispatchSpecializationFamilyNames = []string{
+	"none",
+	"global-read",
+	"field-read",
+	"field-write",
+	"index-read",
+	"index-write",
+	"iteration",
+	"number-binary",
+	"number-constant",
+	"number-unary",
+	"length",
+	"concat",
+	"compare",
+	"numeric-loop",
+	"table-shape",
+	"builtin-call",
+	"truth-branch",
+	"direct-call",
+}
+
+var dispatchTilingPolicyNames = []string{"pure", "guarded", "terminal", "barrier"}
+
+var dispatchCacheLayoutNames = []string{"none", "type", "global", "field", "index", "iteration", "shape", "call"}
+
+var dispatchSpecializationFamilies = dispatchStringSet(dispatchSpecializationFamilyNames)
+
+var dispatchTilingPolicies = dispatchStringSet(dispatchTilingPolicyNames)
+
+var dispatchCacheLayouts = dispatchStringSet(dispatchCacheLayoutNames)
+
+func dispatchStringSet(values []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		set[value] = struct{}{}
+	}
+	return set
+}
+
+func parseDispatchSpec(source []byte, want []string) ([]dispatchSpecEntry, error) {
+	file, err := parser.ParseFile(token.NewFileSet(), specFile, source, 0)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", specFile, err)
+	}
+	declarations := 0
+	var literal *ast.BasicLit
+	for _, declaration := range file.Decls {
+		gen, ok := declaration.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, node := range gen.Specs {
+			value, ok := node.(*ast.ValueSpec)
+			if !ok || len(value.Names) != 1 || value.Names[0].Name != "directFrameSemanticSpec" {
+				continue
+			}
+			declarations++
+			if len(value.Values) == 1 {
+				literal, _ = value.Values[0].(*ast.BasicLit)
+			}
+		}
+	}
+	if declarations != 1 {
+		return nil, fmt.Errorf("%s must declare directFrameSemanticSpec exactly once, found %d", specFile, declarations)
+	}
+	if literal == nil || literal.Kind != token.STRING || !strings.HasPrefix(literal.Value, "`") {
+		return nil, fmt.Errorf("%s directFrameSemanticSpec must be one raw string literal", specFile)
+	}
+	text, err := strconv.Unquote(literal.Value)
+	if err != nil {
+		return nil, fmt.Errorf("decode %s directFrameSemanticSpec: %w", specFile, err)
+	}
+	wantSet := make(map[string]struct{}, len(want))
+	for _, opcode := range want {
+		wantSet[opcode] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(want))
+	entries := make([]dispatchSpecEntry, 0, len(want))
+	for lineNumber, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 4 {
+			return nil, fmt.Errorf("%s semantic spec line %d: want opcode family tiling cache", specFile, lineNumber+1)
+		}
+		entry := dispatchSpecEntry{opcode: fields[0], family: fields[1], tiling: fields[2], cache: fields[3]}
+		if _, ok := wantSet[entry.opcode]; !ok {
+			return nil, fmt.Errorf("%s semantic spec line %d: unknown opcode %s", specFile, lineNumber+1, entry.opcode)
+		}
+		if _, ok := seen[entry.opcode]; ok {
+			return nil, fmt.Errorf("%s semantic spec line %d: duplicate %s", specFile, lineNumber+1, entry.opcode)
+		}
+		if _, ok := dispatchSpecializationFamilies[entry.family]; !ok {
+			return nil, fmt.Errorf("%s semantic spec line %d: unknown specialization family %q", specFile, lineNumber+1, entry.family)
+		}
+		if _, ok := dispatchTilingPolicies[entry.tiling]; !ok {
+			return nil, fmt.Errorf("%s semantic spec line %d: unknown tiling policy %q", specFile, lineNumber+1, entry.tiling)
+		}
+		if _, ok := dispatchCacheLayouts[entry.cache]; !ok {
+			return nil, fmt.Errorf("%s semantic spec line %d: unknown cache layout %q", specFile, lineNumber+1, entry.cache)
+		}
+		if (entry.family == "none") != (entry.cache == "none") {
+			return nil, fmt.Errorf("%s semantic spec line %d: specialization family %q and cache layout %q disagree", specFile, lineNumber+1, entry.family, entry.cache)
+		}
+		seen[entry.opcode] = struct{}{}
+		entries = append(entries, entry)
+	}
+	for _, opcode := range want {
+		if _, ok := seen[opcode]; !ok {
+			return nil, fmt.Errorf("%s semantic spec is missing %s", specFile, opcode)
+		}
+	}
+	return entries, nil
+}
+
+func renderSemanticCatalog(entries []dispatchSpecEntry) ([]byte, error) {
+	adaptiveCount := 0
+	for _, entry := range entries {
+		if entry.family != "none" {
+			adaptiveCount++
+		}
+	}
+	const adaptiveHandlerCap = 96
+	if adaptiveCount > adaptiveHandlerCap {
+		return nil, fmt.Errorf("semantic spec declares %d adaptive handlers, cap is %d", adaptiveCount, adaptiveHandlerCap)
+	}
+
+	var output bytes.Buffer
+	output.WriteString(`type directHandlerID uint8
+
+const (
+	directHandlerInvalid directHandlerID = 0
+	directAdaptiveHandlerCap = 96
+`)
+	fmt.Fprintf(&output, "\tdirectAdaptiveHandlerCount = %d\n", adaptiveCount)
+	output.WriteString(`)
+
+type directSpecializationFamily uint8
+
+const (
+`)
+	for index, family := range dispatchSpecializationFamilyNames {
+		name := dispatchGoIdentifier("directSpecialization", family)
+		if index == 0 {
+			fmt.Fprintf(&output, "\t%s directSpecializationFamily = iota\n", name)
+		} else {
+			fmt.Fprintf(&output, "\t%s\n", name)
+		}
+	}
+	output.WriteString(`)
+
+type directCacheLayout uint8
+
+const (
+`)
+	for index, layout := range dispatchCacheLayoutNames {
+		name := dispatchGoIdentifier("directCache", layout)
+		if index == 0 {
+			fmt.Fprintf(&output, "\t%s directCacheLayout = iota\n", name)
+		} else {
+			fmt.Fprintf(&output, "\t%s\n", name)
+		}
+	}
+	output.WriteString(`)
+
+type directTilingPolicy uint8
+
+const (
+`)
+	for index, policy := range dispatchTilingPolicyNames {
+		name := dispatchGoIdentifier("directTiling", policy)
+		if index == 0 {
+			fmt.Fprintf(&output, "\t%s directTilingPolicy = iota + 1\n", name)
+		} else {
+			fmt.Fprintf(&output, "\t%s\n", name)
+		}
+	}
+	output.WriteString(`)
+
+type directSemanticMetadata struct {
+	classified        bool
+	source            opcode
+	genericHandler    directHandlerID
+	specializedHandler directHandlerID
+	family            directSpecializationFamily
+	tiling            directTilingPolicy
+	cache             directCacheLayout
+	guestCharge       uint8
+	errorClass        opcodeMachineErrorClass
+	effects           opcodeEffects
+	wordcode          wordcodeEncodingMetadata
+}
+
+func newDirectSemanticMetadata(op opcode, specializedHandler directHandlerID, family directSpecializationFamily, tiling directTilingPolicy, cache directCacheLayout) directSemanticMetadata {
+	base := opcodeMetadataTable[op]
+	return directSemanticMetadata{
+		classified:         true,
+		source:             op,
+		genericHandler:     directHandlerID(op),
+		specializedHandler: specializedHandler,
+		family:             family,
+		tiling:             tiling,
+		cache:              cache,
+		guestCharge:        base.machine.guestCharge,
+		errorClass:         base.machine.errorClass,
+		effects:            base.effects,
+		wordcode:           base.wordcode,
+	}
+}
+
+var generatedDirectSemanticMetadata = func() [opcodeLimit]directSemanticMetadata {
+	var table [opcodeLimit]directSemanticMetadata
+`)
+	adaptiveIndex := 0
+	for _, entry := range entries {
+		handler := "directHandlerInvalid"
+		if entry.family != "none" {
+			handler = fmt.Sprintf("directHandlerID(opcodeLimit + %d)", adaptiveIndex)
+			adaptiveIndex++
+		}
+		fmt.Fprintf(
+			&output,
+			"\ttable[%s] = newDirectSemanticMetadata(%s, %s, %s, %s, %s)\n",
+			entry.opcode,
+			entry.opcode,
+			handler,
+			dispatchGoIdentifier("directSpecialization", entry.family),
+			dispatchGoIdentifier("directTiling", entry.tiling),
+			dispatchGoIdentifier("directCache", entry.cache),
+		)
+	}
+	output.WriteString(`	return table
+}()
+
+func directSemanticMetadataFor(op opcode) (directSemanticMetadata, bool) {
+	if op >= opcodeLimit {
+		return directSemanticMetadata{}, false
+	}
+	metadata := generatedDirectSemanticMetadata[op]
+	return metadata, metadata.classified
+}
+
+func validateDirectSemanticMetadata(table [opcodeLimit]directSemanticMetadata) error {
+	var specializedSeen [1 << 8]bool
+	adaptiveCount := 0
+	for _, op := range allOpcodes {
+		metadata := table[op]
+		if !metadata.classified {
+			return fmt.Errorf("%s direct semantic metadata is unclassified", opcodeName(op))
+		}
+		if metadata.source != op {
+			return fmt.Errorf("%s direct semantic source is %s", opcodeName(op), opcodeName(metadata.source))
+		}
+		if metadata.genericHandler != directHandlerID(op) {
+			return fmt.Errorf("%s generic handler is %d, want %d", opcodeName(op), metadata.genericHandler, op)
+		}
+		base := opcodeMetadataTable[op]
+		if metadata.guestCharge != base.machine.guestCharge {
+			return fmt.Errorf("%s charge metadata drifted", opcodeName(op))
+		}
+		if metadata.errorClass != base.machine.errorClass {
+			return fmt.Errorf("%s error metadata drifted", opcodeName(op))
+		}
+		if metadata.effects != base.effects {
+			return fmt.Errorf("%s effect metadata drifted", opcodeName(op))
+		}
+		if metadata.wordcode != base.wordcode {
+			return fmt.Errorf("%s wordcode metadata drifted", opcodeName(op))
+		}
+		if metadata.family == directSpecializationNone {
+			if metadata.specializedHandler != directHandlerInvalid {
+				return fmt.Errorf("%s has no specialization family but handler %d", opcodeName(op), metadata.specializedHandler)
+			}
+			if metadata.cache != directCacheNone {
+				return fmt.Errorf("%s has no specialization family but cache layout %d", opcodeName(op), metadata.cache)
+			}
+		} else {
+			if metadata.specializedHandler < directHandlerID(opcodeLimit) {
+				return fmt.Errorf("%s specialized handler %d overlaps generic handlers", opcodeName(op), metadata.specializedHandler)
+			}
+			if specializedSeen[metadata.specializedHandler] {
+				return fmt.Errorf("%s has duplicate specialized handler %d", opcodeName(op), metadata.specializedHandler)
+			}
+			specializedSeen[metadata.specializedHandler] = true
+			adaptiveCount++
+			if metadata.cache == directCacheNone {
+				return fmt.Errorf("%s specialization has no cache layout", opcodeName(op))
+			}
+		}
+		if metadata.cache > directCacheCall {
+			return fmt.Errorf("%s has invalid cache layout %d", opcodeName(op), metadata.cache)
+		}
+		switch metadata.tiling {
+		case directTilingPure:
+			if base.controlFlow != opcodeControlNone {
+				return fmt.Errorf("%s pure tiling transfers control", opcodeName(op))
+			}
+			effects := metadata.effects
+			if effects.invokesScriptOrHostCode || effects.mayYield || effects.mayError || effects.allocatesOrObservesIdentity ||
+				effects.writesGlobals || effects.writesUpvalues || effects.writesTables || effects.writesUnknownHeap {
+				return fmt.Errorf("%s pure tiling has observable effects", opcodeName(op))
+			}
+		case directTilingGuarded, directTilingTerminal, directTilingBarrier:
+		default:
+			return fmt.Errorf("%s has invalid tiling policy %d", opcodeName(op), metadata.tiling)
+		}
+	}
+	if adaptiveCount != directAdaptiveHandlerCount {
+		return fmt.Errorf("adaptive handler count is %d, want %d", adaptiveCount, directAdaptiveHandlerCount)
+	}
+	if adaptiveCount > directAdaptiveHandlerCap {
+		return fmt.Errorf("adaptive handler count is %d, cap is %d", adaptiveCount, directAdaptiveHandlerCap)
+	}
+	return nil
+}
+
+func init() {
+	if err := validateDirectSemanticMetadata(generatedDirectSemanticMetadata); err != nil {
+		panic(err)
+	}
+}
+`)
+	return output.Bytes(), nil
+}
+
+func dispatchGoIdentifier(prefix string, value string) string {
+	var identifier strings.Builder
+	identifier.WriteString(prefix)
+	for _, part := range strings.Split(value, "-") {
+		if part == "" {
+			continue
+		}
+		identifier.WriteString(strings.ToUpper(part[:1]))
+		identifier.WriteString(part[1:])
+	}
+	return identifier.String()
 }
 
 func renderVariant(template []byte, instrumented bool) ([]byte, error) {
