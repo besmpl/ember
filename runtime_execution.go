@@ -20,28 +20,35 @@ type runtimeExecution interface {
 
 type vmRuntimeExecution struct{}
 
-func selectRuntimeExecution(program *Program) (runtimeExecution, error) {
+func selectRuntimeExecution(program *Program, prepared *PreparedBundle) (runtimeExecution, error) {
+	if prepared != nil {
+		return selectMachineRuntimeExecution(program, prepared.machineProgram())
+	}
 	switch engine := os.Getenv(runtimeEngineEnvironment); engine {
 	case "", "vm":
 		return vmRuntimeExecution{}, nil
 	case "machine":
-		image, err := program.preparedProgramImage()
-		if err != nil {
-			return nil, fmt.Errorf("runtime: prepare machine Program image: %w", err)
-		}
-		for _, module := range image.modules {
-			if module.code == nil || !module.code.eligible {
-				reason := "missing code image"
-				if module.code != nil && module.code.rejectReason != "" {
-					reason = module.code.rejectReason
-				}
-				return nil, fmt.Errorf("runtime: machine Program is ineligible: module %s: %s", module.key.String(), reason)
-			}
-		}
-		return &machineRuntimeExecution{image: image}, nil
+		return selectMachineRuntimeExecution(program, nil)
 	default:
 		return nil, fmt.Errorf("runtime: invalid %s %q (want vm or machine)", runtimeEngineEnvironment, engine)
 	}
+}
+
+func selectMachineRuntimeExecution(program *Program, prepared *machinePreparedProgram) (runtimeExecution, error) {
+	image, err := program.preparedProgramImage()
+	if err != nil {
+		return nil, fmt.Errorf("runtime: prepare machine Program image: %w", err)
+	}
+	for _, module := range image.modules {
+		if module.code == nil || !module.code.eligible {
+			reason := "missing code image"
+			if module.code != nil && module.code.rejectReason != "" {
+				reason = module.code.rejectReason
+			}
+			return nil, fmt.Errorf("runtime: machine Program is ineligible: module %s: %s", module.key.String(), reason)
+		}
+	}
+	return &machineRuntimeExecution{image: image, prepared: prepared}, nil
 }
 
 func (r *Runtime) executionAdapter() (runtimeExecution, error) {

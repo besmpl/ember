@@ -33,10 +33,7 @@ type machinePreparedBoundModule struct {
 	spills    [][][]int32
 }
 
-type machinePreparedContext struct {
-	machine *scalarMachine
-	target  *machineProto
-}
+type machinePreparedContext = PreparedContext
 
 type machinePreparedExitKind uint8
 
@@ -47,12 +44,7 @@ const (
 	machinePreparedExitReturnOneNumber
 )
 
-type machinePreparedExit struct {
-	kind       machinePreparedExitKind
-	pc         int32
-	spillCount uint32
-	numberBits uint64
-}
+type machinePreparedExit = PreparedExit
 
 type machinePreparedSpillKind uint8
 
@@ -78,16 +70,16 @@ func bindMachinePreparedProgram(image *programImage, program *machinePreparedPro
 		return nil, fmt.Errorf("bind prepared Program: %w", err)
 	}
 	if program.abiVersion != ir.abiVersion {
-		return nil, fmt.Errorf("bind prepared Program: ABI version %d, want %d", program.abiVersion, ir.abiVersion)
+		return nil, preparedBundleErrorf("ABI version %d, want %d", program.abiVersion, ir.abiVersion)
 	}
 	if program.semanticVersion != ir.semanticVersion {
-		return nil, fmt.Errorf("bind prepared Program: semantic version %d, want %d", program.semanticVersion, ir.semanticVersion)
+		return nil, preparedBundleErrorf("semantic version %d, want %d", program.semanticVersion, ir.semanticVersion)
 	}
 	if program.programHash != ir.programHash {
-		return nil, fmt.Errorf("bind prepared Program: Program hash mismatch")
+		return nil, preparedBundleErrorf("Program hash mismatch")
 	}
 	if len(program.modules) != len(ir.modules) {
-		return nil, fmt.Errorf("bind prepared Program: module inventory %d, want %d", len(program.modules), len(ir.modules))
+		return nil, preparedBundleErrorf("module inventory %d, want %d", len(program.modules), len(ir.modules))
 	}
 	binding := &machinePreparedBinding{
 		modules: make([]machinePreparedBoundModule, len(program.modules)),
@@ -95,11 +87,11 @@ func bindMachinePreparedProgram(image *programImage, program *machinePreparedPro
 	for moduleIndex := range program.modules {
 		module := &program.modules[moduleIndex]
 		if module.moduleID != programModuleID(moduleIndex) {
-			return nil, fmt.Errorf("bind prepared Program: module %d has ID %d", moduleIndex, module.moduleID)
+			return nil, preparedBundleErrorf("module %d has ID %d", moduleIndex, module.moduleID)
 		}
 		wantFunctions := len(ir.modules[moduleIndex].protos)
 		if len(module.functions) != wantFunctions {
-			return nil, fmt.Errorf("bind prepared Program: module %d function inventory %d, want %d", moduleIndex, len(module.functions), wantFunctions)
+			return nil, preparedBundleErrorf("module %d function inventory %d, want %d", moduleIndex, len(module.functions), wantFunctions)
 		}
 		bound := &binding.modules[moduleIndex]
 		bound.functions = append([]machinePreparedFunction(nil), module.functions...)
@@ -144,7 +136,7 @@ func (binding *machinePreparedBinding) spillRegisters(moduleID programModuleID, 
 	return protos[protoID][pc]
 }
 
-func (context machinePreparedContext) numberParameter(index int) (float64, bool) {
+func (context PreparedContext) numberParameter(index int) (float64, bool) {
 	if context.machine == nil || context.target == nil ||
 		index < 0 || index >= context.target.params || index >= len(context.machine.registers) {
 		return 0, false
@@ -157,11 +149,11 @@ func (context machinePreparedContext) numberParameter(index int) (float64, bool)
 	return number, err == nil
 }
 
-func (context machinePreparedContext) intrinsicUnchanged(pc int32) bool {
+func (context PreparedContext) intrinsicUnchanged(pc int32) bool {
 	return context.intrinsicUnchangedTarget(context.target, pc)
 }
 
-func (context machinePreparedContext) intrinsicUnchangedAt(protoID, pc int32) bool {
+func (context PreparedContext) intrinsicUnchangedAt(protoID, pc int32) bool {
 	if context.machine == nil ||
 		context.machine.persistentOwner == nil ||
 		context.machine.persistentOwner.image == nil ||
@@ -179,7 +171,7 @@ func (context machinePreparedContext) intrinsicUnchangedAt(protoID, pc int32) bo
 	return context.intrinsicUnchangedTarget(&image.prototypes[protoID], pc)
 }
 
-func (context machinePreparedContext) intrinsicUnchangedTarget(target *machineProto, pc int32) bool {
+func (context PreparedContext) intrinsicUnchangedTarget(target *machineProto, pc int32) bool {
 	if context.machine == nil ||
 		context.machine.persistentOwner == nil ||
 		target == nil ||
@@ -223,7 +215,7 @@ func machinePreparedReplayEntry() machinePreparedExit {
 	return machinePreparedExit{kind: machinePreparedExitReplayEntry}
 }
 
-func (context machinePreparedContext) replayBeforeOperation(pc int32, spillCount int) machinePreparedExit {
+func (context PreparedContext) replayBeforeOperation(pc int32, spillCount int) machinePreparedExit {
 	if context.machine == nil || context.target == nil ||
 		pc < 0 || int(pc) >= len(context.target.operations) ||
 		spillCount < 0 || spillCount > cap(context.machine.preparedSpills) {
@@ -238,11 +230,11 @@ func (context machinePreparedContext) replayBeforeOperation(pc int32, spillCount
 	}
 }
 
-func (context machinePreparedContext) spillNil(index int, register int32) {
+func (context PreparedContext) spillNil(index int, register int32) {
 	context.stageSpill(index, machinePreparedSpill{register: register, kind: machinePreparedSpillNil})
 }
 
-func (context machinePreparedContext) spillBool(index int, register int32, value bool) {
+func (context PreparedContext) spillBool(index int, register int32, value bool) {
 	bits := uint64(0)
 	if value {
 		bits = 1
@@ -250,7 +242,7 @@ func (context machinePreparedContext) spillBool(index int, register int32, value
 	context.stageSpill(index, machinePreparedSpill{register: register, kind: machinePreparedSpillBool, bits: bits})
 }
 
-func (context machinePreparedContext) spillNumber(index int, register int32, value float64) {
+func (context PreparedContext) spillNumber(index int, register int32, value float64) {
 	context.stageSpill(index, machinePreparedSpill{
 		register: register,
 		kind:     machinePreparedSpillNumber,
@@ -258,7 +250,7 @@ func (context machinePreparedContext) spillNumber(index int, register int32, val
 	})
 }
 
-func (context machinePreparedContext) stageSpill(index int, spill machinePreparedSpill) {
+func (context PreparedContext) stageSpill(index int, spill machinePreparedSpill) {
 	if context.machine == nil || index < 0 || index >= len(context.machine.preparedSpills) {
 		return
 	}

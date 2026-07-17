@@ -10,8 +10,9 @@ import (
 // a Runtime. Mutable Machine state stays here rather than occupying the VM
 // fields on Runtime.
 type machineRuntimeExecution struct {
-	image *programImage
-	owner *machineOwner
+	image    *programImage
+	prepared *machinePreparedProgram
+	owner    *machineOwner
 }
 
 func (execution *machineRuntimeExecution) initialize(runtime *Runtime) error {
@@ -21,7 +22,7 @@ func (execution *machineRuntimeExecution) initialize(runtime *Runtime) error {
 	if runtime == nil {
 		return fmt.Errorf("runtime: initialize Machine execution: nil runtime")
 	}
-	owner, err := newMachineOwner(execution.image)
+	owner, err := newMachineOwnerWithPrepared(execution.image, execution.prepared)
 	if err != nil {
 		return fmt.Errorf("runtime: initialize Machine execution: %w", err)
 	}

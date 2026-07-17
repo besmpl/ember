@@ -116,6 +116,10 @@ type RuntimeOptions struct {
 	// explicitly through Invocation.Globals and does not call Host.
 	Host   RuntimeHost
 	Limits ExecutionLimits
+	// Prepared explicitly selects the Machine runtime with one generated bundle.
+	// The bundle must match this exact Program or NewRuntime fails before owner
+	// state is created. Nil preserves the ordinary runtime selection path.
+	Prepared *PreparedBundle
 
 	// MaxInstructions is the legacy instruction limit. Use Limits instead.
 	// If both fields are nonzero, they must be equal.
@@ -305,7 +309,7 @@ func (p *Program) NewRuntime(options RuntimeOptions) (*Runtime, error) {
 	if err := validateExecutionLimits(limits); err != nil {
 		return nil, err
 	}
-	execution, err := selectRuntimeExecution(p)
+	execution, err := selectRuntimeExecution(p, options.Prepared)
 	if err != nil {
 		return nil, err
 	}
