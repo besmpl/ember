@@ -363,7 +363,7 @@ return i
 	}
 }
 
-func TestDirectFrameDefersRuntimeFunctionInstanceLookupUntilCacheUse(t *testing.T) {
+func TestDirectFrameFunctionInstanceLookupMatchesGeneratedPolicy(t *testing.T) {
 	_, testFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
@@ -374,6 +374,7 @@ func TestDirectFrameDefersRuntimeFunctionInstanceLookupUntilCacheUse(t *testing.
 	}
 	text := string(source)
 	for _, name := range []string{"runGeneratedDirectFrameProductionLoop", "runGeneratedDirectFrameInstrumentedLoop"} {
+		production := name == "runGeneratedDirectFrameProductionLoop"
 		start := strings.Index(text, "func "+name)
 		if start < 0 {
 			t.Fatalf("generated dispatch is missing %s", name)
@@ -394,14 +395,26 @@ func TestDirectFrameDefersRuntimeFunctionInstanceLookupUntilCacheUse(t *testing.
 			t.Fatalf("%s is missing reload/dispatch markers", name)
 		}
 		setup := loop[reload : reload+dispatch]
-		if strings.Contains(setup, "thread.functionInstance(proto)") {
-			t.Fatalf("%s eagerly looks up runtime function state on every frame reload", name)
-		}
 		if !strings.Contains(setup, "functionInstance = nil") {
 			t.Fatalf("%s does not reset its lazy runtime function state", name)
 		}
-		if got, want := strings.Count(loop, "functionInstance = thread.functionInstance(proto)"), 6; got != want {
-			t.Fatalf("%s has %d lazy runtime function lookups, want %d cache paths", name, got, want)
+		if production {
+			if got := strings.Count(setup, "functionInstance, shadowErr = thread.shadowFunctionInstance(proto)"); got != 1 {
+				t.Fatalf("%s has %d owner-shadow lookups, want one per reload", name, got)
+			}
+			if strings.Contains(loop, "functionInstance = thread.functionInstance(proto)") {
+				t.Fatalf("%s retained cache-local function-instance lookups after shadow binding", name)
+			}
+		} else {
+			if strings.Contains(loop, "shadowFunctionInstance") || strings.Contains(loop, "shadowWords") {
+				t.Fatalf("%s retained production shadow policy", name)
+			}
+			if strings.Contains(setup, "thread.functionInstance(proto)") {
+				t.Fatalf("%s eagerly looks up runtime function state on every frame reload", name)
+			}
+			if got, want := strings.Count(loop, "functionInstance = thread.functionInstance(proto)"), 6; got != want {
+				t.Fatalf("%s has %d lazy runtime function lookups, want %d cache paths", name, got, want)
+			}
 		}
 		if got, want := strings.Count(loop, "cache := functionInstance.cacheAt(cacheID)"), 6; got != want {
 			t.Fatalf("%s has %d runtime cache reads, want %d cache paths", name, got, want)
@@ -413,6 +426,13 @@ func TestDirectFrameDefersRuntimeFunctionInstanceLookupUntilCacheUse(t *testing.
 		}
 		if strings.Contains(dispatchLoop[:opSwitch], "cacheSiteAt(pc)") {
 			t.Fatalf("%s resolves cache metadata before opcode dispatch", name)
+		}
+		if production {
+			for _, marker := range []string{"shadowWord := shadowWords[pc]", "raw = shadowWord.raw()", "op = opcode(shadowWord.handler())"} {
+				if !strings.Contains(dispatchLoop[:opSwitch], marker) {
+					t.Fatalf("%s fetch is missing %q", name, marker)
+				}
+			}
 		}
 		if got, want := strings.Count(loop, "cacheSiteAt(pc)"), 6; got != want {
 			t.Fatalf("%s has %d cache metadata lookups, want %d cache opcode handlers", name, got, want)

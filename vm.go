@@ -973,6 +973,7 @@ type vmFunctionInstance struct {
 	caches           []*dynamicStringIndexCache
 	fieldCaches      []propertyIC
 	canonicalClosure *closure
+	shadow           directShadowCode
 }
 
 // dynamicStringIndexCacheCold marks a cache site that has been observed once
@@ -1512,7 +1513,27 @@ func newVMThreadWithContext(ctx context.Context, globals *globalEnv) vmThread {
 }
 
 func (thread *vmThread) functionInstance(proto *Proto) *vmFunctionInstance {
-	if thread == nil || proto == nil || (proto.cacheSiteCount == 0 && !proto.reuseZeroCaptureClosure) {
+	return thread.functionInstanceFor(proto, false)
+}
+
+func (thread *vmThread) shadowFunctionInstance(proto *Proto) (*vmFunctionInstance, error) {
+	instance := thread.functionInstanceFor(proto, true)
+	if instance == nil {
+		return nil, fmt.Errorf("shadow: unavailable function instance")
+	}
+	if instance.shadow.words != nil {
+		return instance, nil
+	}
+	shadow, err := buildDirectShadow(proto.words, generatedDirectSemanticMetadata)
+	if err != nil {
+		return nil, fmt.Errorf("shadow: build: %w", err)
+	}
+	instance.shadow = shadow
+	return instance, nil
+}
+
+func (thread *vmThread) functionInstanceFor(proto *Proto, required bool) *vmFunctionInstance {
+	if thread == nil || proto == nil || (!required && proto.cacheSiteCount == 0 && !proto.reuseZeroCaptureClosure) {
 		return nil
 	}
 	if thread.functionInstances == nil {
@@ -1540,6 +1561,22 @@ func (thread *vmThread) functionInstance(proto *Proto) *vmFunctionInstance {
 		}
 	}
 	return instance
+}
+
+func (thread *vmThread) dropDirectShadows() {
+	if thread == nil {
+		return
+	}
+	for proto, instance := range thread.functionInstances {
+		if instance == nil {
+			delete(thread.functionInstances, proto)
+			continue
+		}
+		instance.shadow = directShadowCode{}
+		if len(instance.caches) == 0 && len(instance.fieldCaches) == 0 && instance.canonicalClosure == nil {
+			delete(thread.functionInstances, proto)
+		}
+	}
 }
 
 func acquireVMThread(ctx context.Context, globals *globalEnv) *vmThread {
@@ -1664,6 +1701,9 @@ func (thread *vmThread) resetForPool() {
 	thread.directFramePICCounts = nil
 	thread.directFramePCCounts = nil
 	thread.intrinsicGuards = nil
+	if !owned {
+		thread.dropDirectShadows()
+	}
 	if len(thread.functionInstances) > 64 || thread.functionInstanceSites > 1024 {
 		thread.functionInstances = nil
 		thread.functionInstanceSites = 0

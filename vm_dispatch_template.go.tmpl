@@ -35,6 +35,7 @@ func runDirectFrameProductionLoop(thread *vmThread, frameRef **vmFrame, instrume
 		constantNumbers   []float64
 		constantNumberOK  []bool
 		registers         []Value
+		shadowWords       []directShadowWord
 		picCounts         *directFramePICCounts
 		runLineHook       bool
 		runCountHook      bool
@@ -56,6 +57,14 @@ reload:
 	constantNumbers = proto.constantNumbers
 	constantNumberOK = proto.constantNumberOK
 	registers = frame.registers
+	if !instrumented {
+		var shadowErr error
+		functionInstance, shadowErr = thread.shadowFunctionInstance(proto)
+		if shadowErr != nil {
+			return directFrameExitAt(frame, frame.pc, directFrameFail(shadowErr))
+		}
+		shadowWords = functionInstance.shadow.words
+	}
 	pc = frame.pc
 	picCounts = nil
 	if instrumented {
@@ -73,6 +82,11 @@ reload:
 		}
 		raw := words[pc]
 		op := opcode(uint8(raw) & uint8(wordcodeOpcodeMask))
+		if !instrumented {
+			shadowWord := shadowWords[pc]
+			raw = shadowWord.raw()
+			op = opcode(shadowWord.handler())
+		}
 		// Verified wordcode lets the production loop decode the common primary
 		// fields directly. Opcode-specific wide, signed, AUX, and jump operands
 		// are decoded in their cases below, avoiding metadata dispatch on every

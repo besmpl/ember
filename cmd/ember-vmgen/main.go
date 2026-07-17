@@ -540,7 +540,7 @@ func renderVariant(template []byte, instrumented bool) ([]byte, error) {
 		return nil, fmt.Errorf("canonical loop parameter marker occurs %d times, want one", got)
 	}
 	text = strings.ReplaceAll(text, ", instrumented bool", "")
-	const policyMarkerCount = 37
+	const policyMarkerCount = 39
 	if instrumented {
 		var err error
 		text, err = replaceAllExact(text, "instrumented", "true", policyMarkerCount)
@@ -559,11 +559,19 @@ func renderVariant(template []byte, instrumented bool) ([]byte, error) {
 			{"cache.getValue(table, key)", "cache.getValueCounted(table, key, picCounts)", 2},
 			{"cache.getValue(nextTable, key)", "cache.getValueCounted(nextTable, key, picCounts)", 1},
 			{"thread.pushFrameRecord(record)\n", "thread.pushFrameRecord(record)\n\t\t\t\t\tthread.directFramePICCounts.addFixedCallTrampolineEntry()\n", 10},
+			{"\t\tshadowWords       []directShadowWord\n", "", 1},
 		} {
 			text, err = replaceAllExact(text, rewrite.old, rewrite.new, rewrite.count)
 			if err != nil {
 				return nil, err
 			}
+		}
+		if got := strings.Count(text, "if !true {"); got != 2 {
+			return nil, fmt.Errorf("instrumented shadow marker occurs %d times, want 2", got)
+		}
+		text, err = stripGoBlock(text, "if !true {")
+		if err != nil {
+			return nil, err
 		}
 	} else {
 		var err error
@@ -615,6 +623,20 @@ func renderVariant(template []byte, instrumented bool) ([]byte, error) {
 				return nil, err
 			}
 		}
+		if got := strings.Count(text, "if !false {"); got != 2 {
+			return nil, fmt.Errorf("production shadow marker occurs %d times, want 2", got)
+		}
+		text, err = unwrapGoBlock(text, "if !false {")
+		if err != nil {
+			return nil, err
+		}
+		if got := strings.Count(text, "if functionInstance == nil {"); got != 6 {
+			return nil, fmt.Errorf("production lazy function-instance marker occurs %d times, want 6", got)
+		}
+		text, err = stripGoBlock(text, "if functionInstance == nil {")
+		if err != nil {
+			return nil, err
+		}
 	}
 	if strings.Contains(text, "instrumented") {
 		return nil, fmt.Errorf("variant still contains instrumented marker")
@@ -630,13 +652,31 @@ func renderVariant(template []byte, instrumented bool) ([]byte, error) {
 			}
 		}
 	} else {
-		for _, marker := range []string{"picCounts", "runLineHook", "runCountHook", "Counted", "addFixedCallTrampolineEntry", "if false", "if true"} {
+		for _, marker := range []string{"picCounts", "runLineHook", "runCountHook", "Counted", "addFixedCallTrampolineEntry", "if false", "if true", "if !false"} {
 			if strings.Contains(text, marker) {
 				return nil, fmt.Errorf("production variant retains instrumentation marker %s", marker)
 			}
 		}
 	}
 	return variant, nil
+}
+
+func unwrapGoBlock(source string, marker string) (string, error) {
+	for {
+		start := findCodeMarker(source, marker)
+		if start < 0 {
+			return source, nil
+		}
+		open := strings.Index(source[start:], "{") + start
+		if open < start {
+			return source, fmt.Errorf("marker %q has no opening brace", marker)
+		}
+		end, ok := matchingBrace(source, open)
+		if !ok {
+			return source, fmt.Errorf("marker %q has unbalanced braces", marker)
+		}
+		source = source[:start] + source[open+1:end-1] + source[end:]
+	}
 }
 
 func replaceAllExact(source, old, replacement string, want int) (string, error) {

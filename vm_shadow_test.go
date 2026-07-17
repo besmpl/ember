@@ -143,3 +143,158 @@ func TestBuildDirectShadowFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestVMFunctionInstancesOwnIndependentLazyShadows(t *testing.T) {
+	proto, err := Compile(`local x = 1 return x + 2`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstThread := newVMThread(runtimeGlobals(nil))
+	first, err := firstThread.shadowFunctionInstance(proto)
+	if err != nil {
+		t.Fatalf("first shadowFunctionInstance returned error: %v", err)
+	}
+	again, err := firstThread.shadowFunctionInstance(proto)
+	if err != nil {
+		t.Fatalf("second shadowFunctionInstance returned error: %v", err)
+	}
+	if first != again || len(first.shadow.words) != len(proto.words) {
+		t.Fatal("one thread did not reuse its lazily built shadow")
+	}
+
+	secondThread := newVMThread(runtimeGlobals(nil))
+	second, err := secondThread.shadowFunctionInstance(proto)
+	if err != nil {
+		t.Fatalf("independent shadowFunctionInstance returned error: %v", err)
+	}
+	if first == second || len(second.shadow.words) == 0 || &first.shadow.words[0] == &second.shadow.words[0] {
+		t.Fatal("independent threads shared mutable shadow state")
+	}
+	original := proto.words[0]
+	first.shadow.words[0] = first.shadow.words[0].incrementCounter()
+	if second.shadow.words[0].counter() != 0 || proto.words[0] != original {
+		t.Fatal("owner-local shadow mutation escaped its thread")
+	}
+}
+
+func TestUnownedPoolResetDropsDirectShadows(t *testing.T) {
+	proto, err := Compile(`return 1 + 2`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread := newVMThread(runtimeGlobals(nil))
+	instance, err := thread.shadowFunctionInstance(proto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instance.shadow.words) == 0 {
+		t.Fatal("shadow was not built")
+	}
+	thread.resetForPool()
+	if retained := thread.functionInstances[proto]; retained != nil && len(retained.shadow.words) != 0 {
+		t.Fatal("unowned pooled thread retained shadow wordcode")
+	}
+}
+
+func TestOwnerDetachReusesShadowAndCollectionClearsIt(t *testing.T) {
+	proto, err := Compile(`local x = 1 return x + 2`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := newRuntimeOwner()
+	firstThread := newVMThread(runtimeGlobals(nil))
+	if err := firstThread.bindOwner(owner); err != nil {
+		t.Fatal(err)
+	}
+	first, err := firstThread.shadowFunctionInstance(proto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.shadow.words[0] = first.shadow.words[0].incrementCounter()
+	firstThread.unbindOwner()
+
+	secondThread := newVMThread(runtimeGlobals(nil))
+	if err := secondThread.bindOwner(owner); err != nil {
+		t.Fatal(err)
+	}
+	second, err := secondThread.shadowFunctionInstance(proto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.shadow.words[0].counter() != 1 {
+		t.Fatal("owner detach discarded reusable shadow feedback")
+	}
+	secondThread.unbindOwner()
+
+	if _, err := owner.collect(nil); err != nil {
+		t.Fatalf("owner.collect returned error: %v", err)
+	}
+	thirdThread := newVMThread(runtimeGlobals(nil))
+	if err := thirdThread.bindOwner(owner); err != nil {
+		t.Fatal(err)
+	}
+	third, err := thirdThread.shadowFunctionInstance(proto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.shadow.words[0].counter() != 0 {
+		t.Fatal("collection retained stale shadow feedback")
+	}
+	thirdThread.unbindOwner()
+	if err := owner.close(); err != nil {
+		t.Fatalf("owner.close returned error: %v", err)
+	}
+	if owner.idleVMCaches != nil {
+		t.Fatal("owner close retained shadow cache bundles")
+	}
+}
+
+func TestProductionDirectFrameRunsGeneratedGenericShadow(t *testing.T) {
+	proto, err := Compile(`
+local function twice(value)
+	return value * 2
+end
+local values = {amount = 4}
+return twice(values.amount) + 1
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := newVMThread(runtimeGlobals(nil))
+	got, err := production.run(proto, nil, nil)
+	if err != nil {
+		t.Fatalf("production run returned error: %v", err)
+	}
+	want, _, err := runWithDirectFrameMechanismCounters(proto, nil)
+	if err != nil {
+		t.Fatalf("instrumented oracle returned error: %v", err)
+	}
+	if !valuesEqualList(got, want) {
+		t.Fatalf("production results = %#v, instrumented = %#v", got, want)
+	}
+	instance := production.functionInstances[proto]
+	if instance == nil || len(instance.shadow.words) != len(proto.words) {
+		t.Fatal("production direct frame did not retain its owner-local generic shadow")
+	}
+	for pc, word := range instance.shadow.words {
+		if word.handler() == directHandlerInvalid {
+			continue
+		}
+		op := opcode(uint8(proto.words[pc]) & uint8(wordcodeOpcodeMask))
+		if word.handler() != directHandlerID(op) {
+			t.Fatalf("word %d handler = %d, want generic %d", pc, word.handler(), op)
+		}
+	}
+}
+
+func valuesEqualList(left []Value, right []Value) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if !valuesEqual(left[index], right[index]) {
+			return false
+		}
+	}
+	return true
+}
