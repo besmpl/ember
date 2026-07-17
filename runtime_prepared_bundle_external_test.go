@@ -124,6 +124,84 @@ func TestGeneratedPreparedBundleReplayPreservesPublicRuntimeError(t *testing.T) 
 	}
 }
 
+func TestGeneratedPreparedBundleHonorsPublicInstructionLimits(t *testing.T) {
+	module := ember.LogicalModule("prepared/external")
+	program, _, err := ember.LoadProgram(context.Background(), externalPreparedLoader{
+		module.String(): externalPreparedBundleSource,
+	}, ember.ProgramOptions{Entrypoints: []ember.Entrypoint{{Name: "main", Module: module}}, Parallelism: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	failedBudgets := 0
+	for budget := uint64(1); budget <= 128; budget++ {
+		canonicalValue, canonicalLimit := invokeExternalPreparedWithLimit(t, program, module, nil, budget)
+		preparedValue, preparedLimit := invokeExternalPreparedWithLimit(t, program, module, preparedfixture.Bundle, budget)
+		if (canonicalLimit == nil) != (preparedLimit == nil) {
+			t.Fatalf("budget %d limit results = canonical %v, prepared %v", budget, canonicalLimit, preparedLimit)
+		}
+		if canonicalLimit != nil {
+			failedBudgets++
+			if *canonicalLimit != *preparedLimit {
+				t.Fatalf("budget %d limit errors = canonical %#v, prepared %#v", budget, canonicalLimit, preparedLimit)
+			}
+			continue
+		}
+		if failedBudgets == 0 {
+			t.Fatal("instruction limit did not reject any smaller budget")
+		}
+		if canonicalValue != 42 || preparedValue != canonicalValue {
+			t.Fatalf("budget %d results = canonical %v, prepared %v, want 42", budget, canonicalValue, preparedValue)
+		}
+		return
+	}
+	t.Fatal("no successful invocation within instruction-budget search range")
+}
+
+func invokeExternalPreparedWithLimit(
+	t *testing.T,
+	program *ember.Program,
+	module ember.ModuleID,
+	bundle *ember.PreparedBundle,
+	budget uint64,
+) (float64, *ember.LimitError) {
+	t.Helper()
+	if bundle == nil {
+		t.Setenv("EMBER_RUNTIME_ENGINE", "machine")
+	} else {
+		t.Setenv("EMBER_RUNTIME_ENGINE", "invalid-but-overridden")
+	}
+	runtime, err := program.NewRuntime(ember.RuntimeOptions{
+		Limits:   ember.ExecutionLimits{MaxInstructions: budget},
+		Prepared: bundle,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := runtime.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	values, err := runtime.Invoke(context.Background(), ember.Invocation{Module: module, Export: "update"}, ember.NumberValue(41))
+	if err != nil {
+		var limit *ember.LimitError
+		if !errors.As(err, &limit) || limit.Kind != ember.LimitInstructions {
+			t.Fatalf("budget %d error = %T %v, want instruction *ember.LimitError", budget, err, err)
+		}
+		return 0, limit
+	}
+	if len(values) != 1 {
+		t.Fatalf("budget %d results = %d, want 1", budget, len(values))
+	}
+	value, ok := values[0].Number()
+	if !ok {
+		t.Fatalf("budget %d result = %v, want number", budget, values[0])
+	}
+	return value, nil
+}
+
 type externalPreparedLoader map[string]string
 
 func (loader externalPreparedLoader) LoadModule(_ context.Context, id ember.ModuleID) (ember.Source, error) {
