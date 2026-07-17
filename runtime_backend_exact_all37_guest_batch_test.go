@@ -88,6 +88,18 @@ func TestMachinePreparedExactAll37GuestBatchMatchesGeneric(t *testing.T) {
 			}
 			t.Run(tc.corpus+"/"+tc.name+"/"+variant, func(t *testing.T) {
 				source := backendExactGuestBatchSource(t, tc.source, holdout)
+				publicCallback, err := PrepareExactGuestBatchForParityTest(source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				publicClosed := false
+				t.Cleanup(func() {
+					if !publicClosed {
+						if err := publicCallback.Close(); err != nil {
+							t.Error(err)
+						}
+					}
+				})
 				irs, _ := backendExactCorpusIRs(t, source)
 				caseProto, entryProto := backendExactGuestBatchProtos(t, irs)
 				preparedCalls := 0
@@ -140,8 +152,27 @@ func TestMachinePreparedExactAll37GuestBatchMatchesGeneric(t *testing.T) {
 					if math.Float64bits(preparedResult) != math.Float64bits(genericResult) {
 						t.Fatalf("seed %g result = %g, canonical Machine = %g", seed, preparedResult, genericResult)
 					}
+					publicValues, err := publicCallback.Call(
+						context.Background(),
+						NumberValue(3),
+						NumberValue(seed),
+					)
+					if err != nil {
+						t.Fatalf("seed %g public prepared Runtime: %v", seed, err)
+					}
+					if len(publicValues) != 1 {
+						t.Fatalf("seed %g public prepared Runtime results = %d, want 1", seed, len(publicValues))
+					}
+					publicResult, ok := publicValues[0].Number()
+					if !ok || math.Float64bits(publicResult) != math.Float64bits(genericResult) {
+						t.Fatalf("seed %g public prepared Runtime result = %g/%t, canonical Machine = %g", seed, publicResult, ok, genericResult)
+					}
 					fmt.Fprintf(hash, "%s/%s/%s/%g\t%016x\n", tc.corpus, tc.name, variant, seed, math.Float64bits(genericResult))
 				}
+				if err := publicCallback.Close(); err != nil {
+					t.Fatal(err)
+				}
+				publicClosed = true
 				if preparedCalls != 4 {
 					t.Fatalf("prepared calls = %d, want 4", preparedCalls)
 				}
@@ -190,26 +221,46 @@ func TestBackendGoExactAll37GuestBatchInventoryRejectsUnknownProgram(t *testing.
 
 func TestPrepareExactGuestBatchForParityTestUsesVerifiedPreparedCallback(t *testing.T) {
 	tc := loadLuauBenchmarkCases(t, "classicLuauCases", []string{"recursive_fibonacci"})[0]
-	callback, err := PrepareExactGuestBatchForParityTest(backendExactGuestBatchSource(t, tc.source, false))
-	if err != nil {
-		t.Fatal(err)
-	}
-	values, err := callback.Call(context.Background(), NumberValue(3), NumberValue(17))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(values) != 1 {
-		t.Fatalf("prepared parity callback results = %d, want 1", len(values))
-	}
-	result, ok := values[0].Number()
-	if !ok || result != 90152 {
-		t.Fatalf("prepared parity callback result = %v/%t, want 90152", result, ok)
-	}
-	if err := callback.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := callback.Call(context.Background(), NumberValue(3), NumberValue(17)); err == nil {
-		t.Fatal("closed prepared parity callback accepted a call")
+	t.Setenv("EMBER_RUNTIME_ENGINE", "invalid-but-overridden")
+	for _, holdout := range []bool{false, true} {
+		variant := "standard"
+		if holdout {
+			variant = "holdout"
+		}
+		t.Run(variant, func(t *testing.T) {
+			callback, err := PrepareExactGuestBatchForParityTest(backendExactGuestBatchSource(t, tc.source, holdout))
+			if err != nil {
+				t.Fatal(err)
+			}
+			target, ok := callback.target.(*backendExactGuestBatchCallbackTarget)
+			if !ok || target.runtime == nil {
+				t.Fatalf("prepared parity callback target = %T, want public Runtime target", callback.target)
+			}
+			execution, ok := target.runtime.execution.(*machineRuntimeExecution)
+			if !ok || execution.prepared == nil {
+				t.Fatalf("prepared parity execution = %T, want bound prepared Machine", target.runtime.execution)
+			}
+			values, err := callback.Call(context.Background(), NumberValue(3), NumberValue(17))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(values) != 1 {
+				t.Fatalf("prepared parity callback results = %d, want 1", len(values))
+			}
+			result, ok := values[0].Number()
+			if !ok || result != 90152 {
+				t.Fatalf("prepared parity callback result = %v/%t, want 90152", result, ok)
+			}
+			if err := callback.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := callback.Close(); err != nil {
+				t.Fatalf("repeat close: %v", err)
+			}
+			if _, err := callback.Call(context.Background(), NumberValue(3), NumberValue(17)); err == nil {
+				t.Fatal("closed prepared parity callback accepted a call")
+			}
+		})
 	}
 }
 
@@ -387,27 +438,11 @@ func mapsEqual(left, right map[string]bool) bool {
 }
 
 func backendExactGuestBatchProgramImage(source string) (*programImage, error) {
-	proto, err := Compile(source)
+	program, err := backendExactGuestBatchProgram(source)
 	if err != nil {
 		return nil, err
 	}
-	code, err := proto.preparedCodeImage()
-	if err != nil {
-		return nil, err
-	}
-	image := &programImage{
-		modules: []programImageModule{{
-			moduleID: 0,
-			key:      moduleKey{kind: moduleKeyLogical, path: "exact-guest-batch"},
-			code:     code,
-		}},
-		entrypoints: []programImageEntrypoint{{name: "main", moduleID: 0}},
-	}
-	image.globalNames, err = programImageGlobalNames(image.modules)
-	if err != nil {
-		return nil, err
-	}
-	return image, nil
+	return program.preparedProgramImage()
 }
 
 func backendExactGuestBatchAppendDeclarations(
