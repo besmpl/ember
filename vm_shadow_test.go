@@ -1,8 +1,12 @@
 package ember
 
 import (
+	"context"
+	"errors"
+	"math"
 	"strings"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -86,6 +90,9 @@ func TestDirectShadowEncodingIsBoundedAndSaturating(t *testing.T) {
 	if size := unsafe.Sizeof(directAdaptiveCacheCell(0)); size != 8 {
 		t.Fatalf("directAdaptiveCacheCell size = %d, want 8", size)
 	}
+	if size := unsafe.Sizeof(directNumericTracePlan{}); size != directNumericTracePlanBytes {
+		t.Fatalf("directNumericTracePlan size = %d, declared %d", size, directNumericTracePlanBytes)
+	}
 	word := newDirectShadowWord(0xfedcba98, directHandlerID(opAdd), 7)
 	for range 300 {
 		word = word.incrementCounter()
@@ -101,6 +108,281 @@ func TestDirectShadowEncodingIsBoundedAndSaturating(t *testing.T) {
 	}
 	if directShadowStateBytes(100, 100) > directShadowStateLimit(100) {
 		t.Fatal("maximally dense shadow exceeds the hard owner-Program budget")
+	}
+}
+
+func TestDirectAdaptiveCacheCellEncodesBoundedGuardRegisters(t *testing.T) {
+	cell, ok := newDirectAdaptiveCacheCell(directCacheType).withGuardRegisters([]uint8{1, 3, 5, 7, 9, 11})
+	if !ok {
+		t.Fatal("six guard registers did not fit")
+	}
+	if cell.layout() != directCacheType || cell.guardCount() != 6 {
+		t.Fatalf("cell layout/count = %d/%d, want %d/6", cell.layout(), cell.guardCount(), directCacheType)
+	}
+	for index, want := range []uint8{1, 3, 5, 7, 9, 11} {
+		if got := cell.guardRegister(index); got != want {
+			t.Fatalf("guard %d = %d, want %d", index, got, want)
+		}
+	}
+	if _, ok := cell.withGuardRegisters([]uint8{0, 1, 2, 3, 4, 5, 6}); ok {
+		t.Fatal("seven guard registers exceeded the cache-cell bound")
+	}
+}
+
+func TestShadowTilesBoundedNumericForTrace(t *testing.T) {
+	proto, err := Compile(`
+local total = 0
+for i = 1, 200 do
+	local mixed = i * 3 - i // 2
+	total = total + mixed % 5
+end
+return total
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread := newVMThread(runtimeGlobals(nil))
+	instance, err := thread.shadowFunctionInstance(proto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, _, err := wordcodeDecodeWords(proto.words)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkPC := -1
+	loopPC := -1
+	for _, entry := range decoded {
+		switch entry.ins.op {
+		case opNumericForCheck:
+			checkPC = entry.wordPC
+		case opNumericForLoop:
+			loopPC = entry.wordPC
+		}
+	}
+	if checkPC < 0 || loopPC < 0 {
+		t.Fatal("compiled source did not contain a numeric loop")
+	}
+	if len(instance.shadow.numericTraces) != 1 {
+		t.Fatalf("numeric trace plans = %d, want one", len(instance.shadow.numericTraces))
+	}
+	plan := instance.shadow.numericTraces[0]
+	if int(plan.checkPC) != checkPC || int(plan.loopPC) != loopPC || plan.operationCount == 0 {
+		t.Fatalf("numeric trace plan = %#v, want check=%d loop=%d and operations", plan, checkPC, loopPC)
+	}
+	folded := false
+	for index := uint8(0); index < plan.operationCount; index++ {
+		if plan.operations[index].guestCharge == 2 {
+			folded = true
+		}
+	}
+	if !folded {
+		t.Fatal("numeric trace plan did not form a general Move+numeric superword")
+	}
+	word := instance.shadow.words[checkPC]
+	if word.handler() != directHandlerNumericForTrace {
+		t.Fatalf("numeric check handler = %d, want fused %d", word.handler(), directHandlerNumericForTrace)
+	}
+	cacheIndex, ok := word.cacheIndex()
+	if !ok {
+		t.Fatal("fused numeric trace has no guard cache")
+	}
+	cache := instance.shadow.caches[cacheIndex]
+	if cache.guardCount() == 0 || cache.guardCount() > 6 {
+		t.Fatalf("guard count = %d, want 1..6", cache.guardCount())
+	}
+	for _, entry := range decoded {
+		if entry.wordPC <= checkPC || entry.wordPC > loopPC {
+			continue
+		}
+		if got := instance.shadow.words[entry.wordPC].handler(); got != directHandlerID(entry.ins.op) {
+			t.Fatalf("interior %s handler = %d, want generic %d", opcodeName(entry.ins.op), got, entry.ins.op)
+		}
+	}
+}
+
+func TestShadowDoesNotTileNumericLoopAcrossObservableEffects(t *testing.T) {
+	proto, err := Compile(`
+local total = 0
+local values = {}
+for i = 1, 20 do
+	values[i] = i
+	total = total + i
+end
+return total
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread := newVMThread(runtimeGlobals(nil))
+	instance, err := thread.shadowFunctionInstance(proto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, _, err := wordcodeDecodeWords(proto.words)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range decoded {
+		if entry.ins.op == opNumericForCheck && instance.shadow.words[entry.wordPC].handler() == directHandlerNumericForTrace {
+			t.Fatal("numeric loop containing a table write was fused")
+		}
+	}
+}
+
+func TestProductionExecutesNumericTraceAndMatchesInstrumentedOracle(t *testing.T) {
+	proto, err := Compile(`
+local total = 0
+for i = 1, 200 do
+	local mixed = i * 3 - i // 2
+	total = total + mixed % 5
+end
+return total
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := newVMThread(runtimeGlobals(nil))
+	got, err := production.run(proto, nil, nil)
+	if err != nil {
+		t.Fatalf("production run returned error: %v", err)
+	}
+	instrumented := newVMThread(runtimeGlobals(nil))
+	instrumented.directFrameInstrumented = true
+	want, err := instrumented.run(proto, nil, nil)
+	if err != nil {
+		t.Fatalf("instrumented run returned error: %v", err)
+	}
+	if !valuesEqualList(got, want) {
+		t.Fatalf("production result = %#v, instrumented = %#v", got, want)
+	}
+	instance := production.functionInstances[proto]
+	fusedExecutions := uint8(0)
+	for _, word := range instance.shadow.words {
+		if word.handler() == directHandlerNumericForTrace {
+			fusedExecutions += word.counter()
+		}
+	}
+	if fusedExecutions == 0 {
+		t.Fatal("production run did not execute a fused numeric trace")
+	}
+}
+
+func TestNumericTraceGuardMissDequickensBeforeMutation(t *testing.T) {
+	proto, err := Compile(`
+local total = seed
+for i = 1, 2 do
+	total = total + i
+end
+return total
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	globals := map[string]Value{"seed": StringValue("not-a-number")}
+	production := newVMThread(runtimeGlobals(globals))
+	_, gotErr := production.run(proto, nil, nil)
+	instrumented := newVMThread(runtimeGlobals(globals))
+	instrumented.directFrameInstrumented = true
+	_, wantErr := instrumented.run(proto, nil, nil)
+	if difference := errorsEquivalent(wantErr, gotErr); difference != "" {
+		t.Fatalf("guard fallback error differs: %s\nproduction=%s\ninstrumented=%s", difference, errorDiagnostic(gotErr), errorDiagnostic(wantErr))
+	}
+	instance := production.functionInstances[proto]
+	for pc, word := range instance.shadow.words {
+		if word.handler() == directHandlerNumericForTrace {
+			t.Fatalf("guard miss left word %d quickened", pc)
+		}
+	}
+}
+
+func TestNumericTraceNaNControllerFallsBackToCanonicalError(t *testing.T) {
+	proto, err := Compile(`local total = 0 for i = seed, 2 do total = total + i end return total`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	globals := map[string]Value{"seed": NumberValue(math.NaN())}
+	production := newVMThread(runtimeGlobals(globals))
+	_, gotErr := production.run(proto, nil, nil)
+	instrumented := newVMThread(runtimeGlobals(globals))
+	instrumented.directFrameInstrumented = true
+	_, wantErr := instrumented.run(proto, nil, nil)
+	if difference := errorsEquivalent(wantErr, gotErr); difference != "" {
+		t.Fatalf("NaN fallback error differs: %s\nproduction=%s\ninstrumented=%s", difference, errorDiagnostic(gotErr), errorDiagnostic(wantErr))
+	}
+	if gotErr == nil || !strings.Contains(gotErr.Error(), "numeric for operand is NaN") {
+		t.Fatalf("NaN controller error = %v", gotErr)
+	}
+	instance := production.functionInstances[proto]
+	for pc, word := range instance.shadow.words {
+		if word.handler() == directHandlerNumericForTrace {
+			t.Fatalf("NaN guard miss left word %d quickened", pc)
+		}
+	}
+}
+
+func TestNumericTraceMatchesEveryInstrumentedInstructionBoundary(t *testing.T) {
+	proto, err := Compile(`
+local total = 0
+for i = 1, 6 do
+	local mixed = i * 3 - i // 2
+	total = total + mixed % 5
+end
+return total
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for budget := uint64(1); budget <= 80; budget++ {
+		test := executionDifferentialCase{
+			name:   "numeric trace instruction boundary",
+			limits: ExecutionLimits{MaxInstructions: budget},
+		}
+		direct := runDifferentialCase(proto, test, false)
+		instrumented := runDifferentialCase(proto, test, true)
+		if difference := differentialDifference(instrumented, direct); difference != "" {
+			t.Fatalf("budget %d: %s\ndirect=%s\ninstrumented=%s", budget, difference, errorDiagnostic(direct.err), errorDiagnostic(instrumented.err))
+		}
+	}
+}
+
+type numericTracePollContext struct {
+	polls int
+}
+
+func (*numericTracePollContext) Deadline() (deadline time.Time, ok bool) { return time.Time{}, false }
+func (*numericTracePollContext) Done() <-chan struct{}                   { return nil }
+func (*numericTracePollContext) Value(any) any                           { return nil }
+
+func (ctx *numericTracePollContext) Err() error {
+	ctx.polls++
+	if ctx.polls >= 2 {
+		return context.Canceled
+	}
+	return nil
+}
+
+func TestNumericTracePollsCancellationInsideFusedLoop(t *testing.T) {
+	proto, err := Compile(`local total = 0 for i = 1, 10000 do total = total + i end return total`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, instrumented := range []bool{false, true} {
+		ctx := &numericTracePollContext{}
+		controller, err := newExecutionController(ctx, ExecutionLimits{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		thread := newVMThreadWithContext(ctx, runtimeGlobals(nil))
+		thread.controller = controller
+		thread.directFrameInstrumented = instrumented
+		values, runErr := thread.run(proto, nil, nil)
+		if values != nil || !errors.Is(runErr, context.Canceled) {
+			t.Fatalf("instrumented=%t result=(%#v, %v), want cancellation", instrumented, values, runErr)
+		}
+		if ctx.polls != 2 {
+			t.Fatalf("instrumented=%t context polls = %d, want 2", instrumented, ctx.polls)
+		}
 	}
 }
 

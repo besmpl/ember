@@ -1528,6 +1528,9 @@ func (thread *vmThread) shadowFunctionInstance(proto *Proto) (*vmFunctionInstanc
 	if err != nil {
 		return nil, fmt.Errorf("shadow: build: %w", err)
 	}
+	if err := tileDirectNumericForTraces(proto, &shadow); err != nil {
+		return nil, fmt.Errorf("shadow: tile: %w", err)
+	}
 	instance.shadow = shadow
 	return instance, nil
 }

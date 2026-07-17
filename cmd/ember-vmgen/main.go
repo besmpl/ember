@@ -122,12 +122,16 @@ func render() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	fusionSpec, err := parseFusionSpec(specText)
+	if err != nil {
+		return nil, err
+	}
 	template, err := os.ReadFile(templateFile)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", templateFile, err)
 	}
 	template = bytes.TrimPrefix(template, []byte("package ember\n\n"))
-	if err := verifyTemplateCases(append([]byte("package ember\n\n"), template...), semanticNames); err != nil {
+	if err := verifyTemplateCases(append([]byte("package ember\n\n"), template...), semanticNames, fusionSpec); err != nil {
 		return nil, err
 	}
 
@@ -166,7 +170,7 @@ func render() ([]byte, error) {
 	}
 	output = append(output, importsBlock...)
 	output = append(output, '\n')
-	catalog, err := renderSemanticCatalog(semanticSpec)
+	catalog, err := renderSemanticCatalog(semanticSpec, fusionSpec)
 	if err != nil {
 		return nil, err
 	}
@@ -192,6 +196,12 @@ type dispatchSpecEntry struct {
 	family string
 	tiling string
 	cache  string
+}
+
+type fusionSpecEntry struct {
+	name           string
+	family         string
+	instructionCap int
 }
 
 var dispatchSpecializationFamilyNames = []string{
@@ -234,37 +244,9 @@ func dispatchStringSet(values []string) map[string]struct{} {
 }
 
 func parseDispatchSpec(source []byte, want []string) ([]dispatchSpecEntry, error) {
-	file, err := parser.ParseFile(token.NewFileSet(), specFile, source, 0)
+	text, err := rawStringDeclaration(source, "directFrameSemanticSpec")
 	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", specFile, err)
-	}
-	declarations := 0
-	var literal *ast.BasicLit
-	for _, declaration := range file.Decls {
-		gen, ok := declaration.(*ast.GenDecl)
-		if !ok || gen.Tok != token.CONST {
-			continue
-		}
-		for _, node := range gen.Specs {
-			value, ok := node.(*ast.ValueSpec)
-			if !ok || len(value.Names) != 1 || value.Names[0].Name != "directFrameSemanticSpec" {
-				continue
-			}
-			declarations++
-			if len(value.Values) == 1 {
-				literal, _ = value.Values[0].(*ast.BasicLit)
-			}
-		}
-	}
-	if declarations != 1 {
-		return nil, fmt.Errorf("%s must declare directFrameSemanticSpec exactly once, found %d", specFile, declarations)
-	}
-	if literal == nil || literal.Kind != token.STRING || !strings.HasPrefix(literal.Value, "`") {
-		return nil, fmt.Errorf("%s directFrameSemanticSpec must be one raw string literal", specFile)
-	}
-	text, err := strconv.Unquote(literal.Value)
-	if err != nil {
-		return nil, fmt.Errorf("decode %s directFrameSemanticSpec: %w", specFile, err)
+		return nil, err
 	}
 	wantSet := make(map[string]struct{}, len(want))
 	for _, opcode := range want {
@@ -311,7 +293,83 @@ func parseDispatchSpec(source []byte, want []string) ([]dispatchSpecEntry, error
 	return entries, nil
 }
 
-func renderSemanticCatalog(entries []dispatchSpecEntry) ([]byte, error) {
+var fusionNames = dispatchStringSet([]string{"numeric-for-trace"})
+
+var fusionFamilyNames = dispatchStringSet([]string{"numeric-loop"})
+
+func parseFusionSpec(source []byte) ([]fusionSpecEntry, error) {
+	text, err := rawStringDeclaration(source, "directFrameFusionSpec")
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{})
+	var entries []fusionSpecEntry
+	for lineNumber, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("%s fusion spec line %d: want name family instruction-cap", specFile, lineNumber+1)
+		}
+		entry := fusionSpecEntry{name: fields[0], family: fields[1]}
+		if _, ok := fusionNames[entry.name]; !ok {
+			return nil, fmt.Errorf("%s fusion spec line %d: unknown fusion %q", specFile, lineNumber+1, entry.name)
+		}
+		if _, ok := seen[entry.name]; ok {
+			return nil, fmt.Errorf("%s fusion spec line %d: duplicate fusion %q", specFile, lineNumber+1, entry.name)
+		}
+		if _, ok := fusionFamilyNames[entry.family]; !ok {
+			return nil, fmt.Errorf("%s fusion spec line %d: unknown fusion family %q", specFile, lineNumber+1, entry.family)
+		}
+		entry.instructionCap, err = strconv.Atoi(fields[2])
+		if err != nil || entry.instructionCap < 1 || entry.instructionCap > 64 {
+			return nil, fmt.Errorf("%s fusion spec line %d: instruction cap must be in [1,64]", specFile, lineNumber+1)
+		}
+		seen[entry.name] = struct{}{}
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+func rawStringDeclaration(source []byte, name string) (string, error) {
+	file, err := parser.ParseFile(token.NewFileSet(), specFile, source, 0)
+	if err != nil {
+		return "", fmt.Errorf("parse %s: %w", specFile, err)
+	}
+	declarations := 0
+	var literal *ast.BasicLit
+	for _, declaration := range file.Decls {
+		gen, ok := declaration.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, node := range gen.Specs {
+			value, ok := node.(*ast.ValueSpec)
+			if !ok || len(value.Names) != 1 || value.Names[0].Name != name {
+				continue
+			}
+			declarations++
+			if len(value.Values) == 1 {
+				literal, _ = value.Values[0].(*ast.BasicLit)
+			}
+		}
+	}
+	if declarations != 1 {
+		return "", fmt.Errorf("%s must declare %s exactly once, found %d", specFile, name, declarations)
+	}
+	if literal == nil || literal.Kind != token.STRING || !strings.HasPrefix(literal.Value, "`") {
+		return "", fmt.Errorf("%s %s must be one raw string literal", specFile, name)
+	}
+	text, err := strconv.Unquote(literal.Value)
+	if err != nil {
+		return "", fmt.Errorf("decode %s %s: %w", specFile, name, err)
+	}
+	return text, nil
+}
+
+func renderSemanticCatalog(entries []dispatchSpecEntry, fusions []fusionSpecEntry) ([]byte, error) {
 	adaptiveCount := 0
 	for _, entry := range entries {
 		if entry.family != "none" {
@@ -319,8 +377,9 @@ func renderSemanticCatalog(entries []dispatchSpecEntry) ([]byte, error) {
 		}
 	}
 	const adaptiveHandlerCap = 96
-	if adaptiveCount > adaptiveHandlerCap {
-		return nil, fmt.Errorf("semantic spec declares %d adaptive handlers, cap is %d", adaptiveCount, adaptiveHandlerCap)
+	generatedCount := adaptiveCount + len(fusions)
+	if generatedCount > adaptiveHandlerCap {
+		return nil, fmt.Errorf("semantic spec declares %d generated handlers, cap is %d", generatedCount, adaptiveHandlerCap)
 	}
 
 	var output bytes.Buffer
@@ -331,6 +390,13 @@ const (
 	directAdaptiveHandlerCap = 96
 `)
 	fmt.Fprintf(&output, "\tdirectAdaptiveHandlerCount = %d\n", adaptiveCount)
+	fmt.Fprintf(&output, "\tdirectFusedHandlerCount = %d\n", len(fusions))
+	output.WriteString("\tdirectGeneratedHandlerCount = directAdaptiveHandlerCount + directFusedHandlerCount\n")
+	for index, fusion := range fusions {
+		fmt.Fprintf(&output, "\t%s directHandlerID = directHandlerID(opcodeLimit + directAdaptiveHandlerCount + %d)\n", dispatchGoIdentifier("directHandler", fusion.name), index)
+		fmt.Fprintf(&output, "\t%s opcode = opcode(%s)\n", dispatchGoIdentifier("directHandler", fusion.name+"-opcode"), dispatchGoIdentifier("directHandler", fusion.name))
+		fmt.Fprintf(&output, "\t%s = %d\n", dispatchGoIdentifier("direct", fusion.name+"-instruction-cap"), fusion.instructionCap)
+	}
 	output.WriteString(`)
 
 type directSpecializationFamily uint8
@@ -508,6 +574,9 @@ func validateDirectSemanticMetadata(table [opcodeLimit]directSemanticMetadata) e
 	}
 	if adaptiveCount > directAdaptiveHandlerCap {
 		return fmt.Errorf("adaptive handler count is %d, cap is %d", adaptiveCount, directAdaptiveHandlerCap)
+	}
+	if directGeneratedHandlerCount > directAdaptiveHandlerCap {
+		return fmt.Errorf("generated handler count is %d, cap is %d", directGeneratedHandlerCount, directAdaptiveHandlerCap)
 	}
 	return nil
 }
@@ -906,7 +975,7 @@ func verifyMachineTemplateCases(template []byte, want []string) error {
 	return nil
 }
 
-func verifyTemplateCases(template []byte, want []string) error {
+func verifyTemplateCases(template []byte, want []string, fusions []fusionSpecEntry) error {
 	file, err := parser.ParseFile(token.NewFileSet(), templateFile, template, 0)
 	if err != nil {
 		return fmt.Errorf("parse %s: %w", templateFile, err)
@@ -914,6 +983,9 @@ func verifyTemplateCases(template []byte, want []string) error {
 	wantSet := make(map[string]struct{}, len(want))
 	for _, name := range want {
 		wantSet[name] = struct{}{}
+	}
+	for _, fusion := range fusions {
+		wantSet[dispatchGoIdentifier("directHandler", fusion.name+"-opcode")] = struct{}{}
 	}
 	seen := make(map[string]int, len(want))
 	functions := 0
@@ -965,13 +1037,13 @@ func verifyTemplateCases(template []byte, want []string) error {
 	if invalidCase {
 		return fmt.Errorf("template direct opcode switch contains a non-identifier case")
 	}
-	for _, name := range want {
+	for name := range wantSet {
 		if seen[name] != 1 {
 			return fmt.Errorf("template has %d semantic cases for %s, want one", seen[name], name)
 		}
 	}
-	if len(seen) != len(want) {
-		return fmt.Errorf("template has %d opcode cases, want %d", len(seen), len(want))
+	if len(seen) != len(wantSet) {
+		return fmt.Errorf("template has %d opcode cases, want %d", len(seen), len(wantSet))
 	}
 	return nil
 }

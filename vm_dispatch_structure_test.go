@@ -124,8 +124,11 @@ func TestGeneratedDispatchMatchesSemanticSource(t *testing.T) {
 }
 
 func TestGeneratedDirectSemanticCatalogCoversOpcodeMetadata(t *testing.T) {
-	if directAdaptiveHandlerCount > directAdaptiveHandlerCap {
-		t.Fatalf("adaptive handler count = %d, cap = %d", directAdaptiveHandlerCount, directAdaptiveHandlerCap)
+	if directGeneratedHandlerCount > directAdaptiveHandlerCap {
+		t.Fatalf("generated handler count = %d, cap = %d", directGeneratedHandlerCount, directAdaptiveHandlerCap)
+	}
+	if directFusedHandlerCount != 1 || directHandlerNumericForTrace < directHandlerID(opcodeLimit+directAdaptiveHandlerCount) {
+		t.Fatalf("numeric trace handler/count = %d/%d", directHandlerNumericForTrace, directFusedHandlerCount)
 	}
 	seenSpecialized := make(map[directHandlerID]opcode)
 	for _, op := range allOpcodes {

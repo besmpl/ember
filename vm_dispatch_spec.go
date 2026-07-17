@@ -74,3 +74,11 @@ opJump                         none                  terminal        none
 opReturnOne                    none                  barrier         none
 opReturn                       none                  barrier         none
 `
+
+// directFrameFusionSpec is the closed inventory of multi-instruction handlers.
+// Entries describe semantic shapes only: they cannot name sources, benchmarks,
+// constants, or profiles. The instruction cap bounds tiling and execution.
+const directFrameFusionSpec = `
+# name             family        instruction cap
+numeric-for-trace  numeric-loop  16
+`

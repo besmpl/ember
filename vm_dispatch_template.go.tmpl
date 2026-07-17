@@ -118,6 +118,7 @@ reload:
 				}
 			}
 		}
+	adaptiveDispatch:
 		switch op {
 		case opLoadConst:
 			b = int(uint16(raw >> 16))
@@ -1349,6 +1350,35 @@ reload:
 				break
 			}
 			registers[a] = BoolValue(valueNumber(left) >= valueNumber(right))
+
+		case directHandlerNumericForTraceOpcode:
+			adaptiveWord := functionInstance.shadow.words[pc]
+			cacheIndex, cacheOK := adaptiveWord.cacheIndex()
+			if !cacheOK || cacheIndex < 0 || cacheIndex >= len(functionInstance.shadow.caches) {
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("numeric trace at word %d has no cache cell", pc)))
+			}
+			tracePlan, planOK := functionInstance.shadow.numericTraceAt(pc)
+			if !planOK {
+				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("numeric trace at word %d has no execution plan", pc)))
+			}
+			tracePC, errorPC, traceErr, guardOK := runDirectNumericTrace(
+				registers,
+				constantNumbers,
+				functionInstance.shadow.caches[cacheIndex],
+				tracePlan,
+				window,
+			)
+			if !guardOK {
+				functionInstance.shadow.words[pc] = adaptiveWord.withHandler(directHandlerID(opNumericForCheck))
+				op = opNumericForCheck
+				goto adaptiveDispatch
+			}
+			functionInstance.shadow.words[pc] = adaptiveWord.incrementCounter()
+			if traceErr != nil {
+				return directFrameExitAt(frame, errorPC, directFrameFail(traceErr))
+			}
+			pc = tracePC
+			continue
 
 		case opNumericForCheck:
 			d := int(int32(words[nextWord]))

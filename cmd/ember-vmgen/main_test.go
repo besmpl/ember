@@ -94,3 +94,36 @@ func TestParseDispatchSpecRequiresOneRawStringDeclaration(t *testing.T) {
 		})
 	}
 }
+
+func TestParseFusionSpecIsClosedAndBounded(t *testing.T) {
+	source := []byte("package ember\nconst directFrameFusionSpec = `\nnumeric-for-trace numeric-loop 16\n`\n")
+	entries, err := parseFusionSpec(source)
+	if err != nil {
+		t.Fatalf("parseFusionSpec returned error: %v", err)
+	}
+	if len(entries) != 1 || entries[0].name != "numeric-for-trace" || entries[0].family != "numeric-loop" || entries[0].instructionCap != 16 {
+		t.Fatalf("fusion entries = %#v", entries)
+	}
+
+	tests := []struct {
+		name string
+		spec string
+		want string
+	}{
+		{name: "duplicate", spec: "numeric-for-trace numeric-loop 16\nnumeric-for-trace numeric-loop 16", want: "duplicate fusion"},
+		{name: "unknown fusion", spec: "arithmetic-for-benchmark numeric-loop 16", want: "unknown fusion"},
+		{name: "unknown family", spec: "numeric-for-trace source-identity 16", want: "unknown fusion family"},
+		{name: "zero cap", spec: "numeric-for-trace numeric-loop 0", want: "instruction cap"},
+		{name: "large cap", spec: "numeric-for-trace numeric-loop 65", want: "instruction cap"},
+		{name: "extra field", spec: "numeric-for-trace numeric-loop 16 corpus", want: "want name family instruction-cap"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			wrapped := []byte("package ember\nconst directFrameFusionSpec = `\n" + test.spec + "\n`\n")
+			_, err := parseFusionSpec(wrapped)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("parseFusionSpec error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}

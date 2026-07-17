@@ -247,6 +247,53 @@ sampling, so their low-percentage rankings are directional rather than exact.
 This ledger records completed slices only; it is not a final-completion claim.
 The authoritative baseline above remains the implementation-start reference.
 
+### Generated adaptive VM evidence (2026-07-18)
+
+The dynamic experiment now has one generated, workload-independent semantic
+catalog and one owner-local shadow representation. The catalog covers all 64
+generic opcodes, declares 53 per-op specialization slots and one fused numeric
+trace handler under the 96-handler cap, and rejects unknown families, cache
+layouts, fusion names, duplicate entries, and instruction caps outside
+`[1,64]`. Immutable `Proto.words` remains the diagnostic oracle. Mutable
+handler words, six-register guard cells, and fixed-size numeric plans are
+owner-local and contain no semantic object references.
+
+The first numeric slice exposed three distinct results rather than one broad
+"dispatch" conclusion:
+
+| Shape | `arithmetic_for/warm_call`, Apple M1 | Decision |
+| --- | ---: | --- |
+| Generic shadow fetch before specialization | 14.614-15.368 us | Honest 16%-22% substrate tax; specialization must repay it. |
+| Raw-word whole-loop trace | 6.805-7.127 us | Retain the semantic boundary, but repeated decode and safety calls still cost too much. |
+| Unrestricted trace with accounting branched once | 5.207-5.451 us | Retain: an absent controller must remove all per-source accounting calls. |
+| Inline Move+numeric peephole expansion | 8.481-8.833 us | Delete: enlarging the Go interpreter damaged code generation/register pressure despite fewer semantic operations. |
+| Compact load-time micro-op plan with Move+numeric superwords | 4.287-4.896 us, median 4.493 us | Retain provisionally; this is the first shape near the frozen 2x arithmetic cutoff. |
+
+These are exploratory warmed-call samples, not D3 evidence. In particular,
+the exact acceptance environment fixes `GOMAXPROCS=1` and judges fitted
+`guest_batch_v1` slopes; a single-P warmed call still measured
+7.310-7.788 us because it includes the callback boundary. No `<=2x` claim is
+made until clean slope captures pass. The frozen Luau arithmetic slope remains
+about 2.33 us per guest call.
+
+The winning architectural distinction is now evidence-backed: loader work may
+decode and legally tile once into a bounded 184-byte, pointer-free plan, while
+the executor stays small and canonical `Value` registers remain authoritative.
+The losing shape put more recognition and cases inside the hot Go function.
+The retained plan folds only semantic `Move` plus in-place numeric
+constant/unary pairs; it has no source, hash, literal-identity, benchmark, or
+result selector.
+
+Exact-boundary tests compare production and immutable instrumented execution
+at every instruction budget from 1 through 80. They also prove cancellation
+polling inside a fused loop, NaN and nonnumber same-PC dequickening before
+mutation, effectful-loop rejection, owner isolation, pool/collection cleanup,
+and the `4x wordcode + 64 KiB` retained-state cap. The linked production loop
+is 64,064 bytes and the outlined numeric executor is 3,472 bytes in the
+current test binary, below the 96 KiB production-loop ceiling. Arithmetic
+still needs a clean fitted capture; calls, arrays, and event dispatch remain
+unproved, so the four-family retention gate remains open.
+
 | Slice | Commit/evidence | Decision and result |
 | --- | --- | --- |
 | compact migration 0.1 | `f5e336d7` | The overlapping invocation-environment work was reconciled, tested, and made the clean starting tree instead of being silently absorbed into a baseline. |
