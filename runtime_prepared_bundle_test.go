@@ -66,6 +66,52 @@ func TestRuntimeOptionsPreparedSelectsCopiedBundleExplicitly(t *testing.T) {
 	}
 }
 
+func TestRuntimeOptionsPreparedInvokeUsesBoundFunction(t *testing.T) {
+	t.Setenv(runtimeEngineEnvironment, "invalid-but-overridden")
+	program := preparedBundleRuntimeTestProgram(t)
+	image, err := program.preparedProgramImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ir, err := buildBackendProgramIR(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	functions := make([][]PreparedFunction, len(ir.modules))
+	for moduleIndex := range ir.modules {
+		functions[moduleIndex] = make([]PreparedFunction, len(ir.modules[moduleIndex].protos))
+	}
+	functions[0][1] = func(PreparedContext) PreparedExit {
+		calls++
+		return PreparedReturnOneNumber(42)
+	}
+	bundle := NewPreparedBundle(ir.abiVersion, ir.semanticVersion, ir.programHash, functions)
+	runtime, err := program.NewRuntime(RuntimeOptions{Prepared: bundle})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	values, err := runtime.Invoke(context.Background(), Invocation{
+		Module: LogicalModule("prepared/bundle"),
+		Export: "update",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 {
+		t.Fatalf("Invoke results = %d, want 1", len(values))
+	}
+	if number, ok := values[0].Number(); !ok || number != 42 {
+		t.Fatalf("Invoke result = %v/%t, want 42", number, ok)
+	}
+	if calls != 1 {
+		t.Fatalf("prepared Invoke calls = %d, want 1", calls)
+	}
+}
+
 func TestRuntimeOptionsPreparedMismatchIsTypedAndPrecedesOwnerMutation(t *testing.T) {
 	t.Setenv(runtimeEngineEnvironment, "vm")
 	program := preparedBundleRuntimeTestProgram(t)

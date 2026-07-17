@@ -189,7 +189,16 @@ func (owner *machineOwner) resumeHostCoroutineTransfersStopped(
 		machine.closures.openCells = machine.closures.openCells[:0]
 		return resumableOutcome{}, wrapped
 	}
-	errorPC, runErr := runGeneratedScalarMachineLoop(machine)
+	handled := false
+	errorPC := 0
+	var runErr error
+	if action.kind == machineCoroutineActionStart && machine.window.controller == nil {
+		target := &machine.image.prototypes[machine.activeProto]
+		handled, errorPC, runErr = owner.executePreparedStopped(machine.activeModule, machine.activeProto, target)
+	}
+	if !handled && runErr == nil {
+		errorPC, runErr = runGeneratedScalarMachineLoop(machine)
+	}
 	if signal := new(machineCoroutineLoopSignal); errors.As(runErr, &signal) {
 		return resumableOutcome{
 			target: machineResumableTargetMarker{},
