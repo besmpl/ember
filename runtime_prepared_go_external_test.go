@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"strings"
@@ -154,6 +155,14 @@ func TestProgramWritePreparedGoSiblingGrowthIsLinear(t *testing.T) {
 		if got := strings.Count(output.String(), "func emberPreparedM0Proto1("); got != 1 {
 			t.Fatalf("%d siblings emitted %d shared helper bodies, want 1", count, got)
 		}
+		direct, preparedBodies, preparedEntries := preparedGoFunctionInventory(t, output.Bytes())
+		wantFunctions := count + 1 // one shared helper plus one function per sibling
+		if direct != wantFunctions || preparedBodies != wantFunctions || preparedEntries != wantFunctions {
+			t.Fatalf(
+				"%d siblings generated function inventory = direct %d, prepared body %d, prepared entry %d; want %d each",
+				count, direct, preparedBodies, preparedEntries, wantFunctions,
+			)
+		}
 		return output.Bytes()
 	}
 	sixteen := generate(16)
@@ -161,6 +170,30 @@ func TestProgramWritePreparedGoSiblingGrowthIsLinear(t *testing.T) {
 	if len(thirtyTwo) >= len(sixteen)*5/2 {
 		t.Fatalf("generated growth = %d -> %d bytes, want bounded linear growth", len(sixteen), len(thirtyTwo))
 	}
+}
+
+func preparedGoFunctionInventory(t *testing.T, source []byte) (direct, preparedBodies, preparedEntries int) {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "prepared_generated.go", source, parser.AllErrors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		name := function.Name.Name
+		switch {
+		case strings.HasPrefix(name, "emberPreparedM0Proto"):
+			direct++
+		case strings.HasPrefix(name, "emberPreparedM0PreparedProto") && strings.HasSuffix(name, "Body"):
+			preparedBodies++
+		case strings.HasPrefix(name, "emberPreparedM0PreparedProto"):
+			preparedEntries++
+		}
+	}
+	return direct, preparedBodies, preparedEntries
 }
 
 func loadPreparedGoProgram(t *testing.T, source string) *ember.Program {
