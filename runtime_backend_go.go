@@ -420,8 +420,11 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			if operation.op != opFastCall {
 				continue
 			}
+			_, recordFamilyRawLen := plan.records.familyRawLenPC[operation.pc]
+			_, recordFamilyRemove := plan.records.familyRemovePC[operation.pc]
 			if _, structuralToString := plan.keys.tostring(operation); !structuralToString &&
-				!backendGoNumericMathMin(operation) {
+				!backendGoNumericMathMin(operation) &&
+				!recordFamilyRawLen && !recordFamilyRemove {
 				if !plan.coroutines.createOperation(operation) &&
 					!plan.coroutines.statusOperation(operation) {
 					if _, resume := plan.coroutines.resume(operation); !resume {
@@ -684,7 +687,9 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						}
 					}
 				case opGetStringFieldIndex:
-					if fused, ok := plan.records.fusedGetByPC[operation.pc]; ok {
+					if _, ok := plan.records.familyGetByPC[operation.pc]; ok {
+						tags = backendTagNumber
+					} else if fused, ok := plan.records.fusedGetByPC[operation.pc]; ok {
 						tags = plan.records.childRecordFieldTags(plan.tags, fused.family)
 					}
 				case opGetIndex:
@@ -725,7 +730,11 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						}
 					}
 				case opFastCall:
-					if _, ok := plan.keys.tostring(operation); ok {
+					if _, ok := plan.records.familyRawLenPC[operation.pc]; ok {
+						tags = backendTagNumber
+					} else if _, ok := plan.records.familyRemovePC[operation.pc]; ok {
+						tags = backendTagNil
+					} else if _, ok := plan.keys.tostring(operation); ok {
 						tags = backendTagString
 					} else if backendGoNumericMathMin(operation) {
 						tags = backendTagNumber
@@ -1337,6 +1346,17 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opGetStringFieldIndex:
+		if _, ok := plan.records.familyGetByPC[operation.pc]; ok {
+			if err := requireOptional(operation.d, backendTagNumber); err != nil {
+				return err
+			}
+			for _, definition := range operation.defs {
+				if plan.tags[definition.value-1] != backendTagNumber {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d child-array lookup result is not scalar", operation.pc)
+				}
+			}
+			return nil
+		}
 		fused, ok := plan.records.fusedGetByPC[operation.pc]
 		if !ok {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no fused child-record lookup", operation.pc)
@@ -1458,6 +1478,37 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opFastCall:
+		if _, ok := plan.records.familyRawLenPC[operation.pc]; ok {
+			if operation.c != 1 || operation.d != 1 {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d changes child-array rawlen shape", operation.pc)
+			}
+			if err := require(operation.a, backendTagNumber); err != nil {
+				return err
+			}
+			for _, definition := range operation.defs {
+				if plan.tags[definition.value-1] != backendTagNumber {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d child-array rawlen result is not numeric", operation.pc)
+				}
+			}
+			return nil
+		}
+		if _, ok := plan.records.familyRemovePC[operation.pc]; ok {
+			if operation.c != 2 || operation.d != 1 {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d changes child-array remove shape", operation.pc)
+			}
+			if err := require(operation.a, backendTagNumber); err != nil {
+				return err
+			}
+			if err := requireOptional(operation.a+1, backendTagNumber); err != nil {
+				return err
+			}
+			for _, definition := range operation.defs {
+				if plan.used[definition.value-1] || plan.tags[definition.value-1] != backendTagNil {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d observes removed child record", operation.pc)
+				}
+			}
+			return nil
+		}
 		if _, ok := plan.keys.tostring(operation); ok {
 			if operation.c != 1 || operation.d != 1 || len(operation.defs) != 1 {
 				return fmt.Errorf("emit backend Go numeric proof: PC %d changes structural tostring shape", operation.pc)
@@ -2292,6 +2343,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		}
 		return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record lookup", operation.pc)
 	case opGetStringFieldIndex:
+		if handled, err := emitter.emitRecordFusedArrayGet(operation, definition, use); handled {
+			return false, err
+		}
 		if handled, err := emitter.emitRecordFusedGet(operation, definition); handled {
 			return false, err
 		}
@@ -2346,6 +2400,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		emitter.emitGoto(int32(block.id), nextBlock, 1)
 		return true, nil
 	case opFastCall:
+		if handled, err := emitter.emitRecordFamilyIntrinsic(operation, definition, use); handled {
+			return false, err
+		}
 		if _, ok := emitter.plan.keys.tostring(operation); ok {
 			return false, nil
 		}

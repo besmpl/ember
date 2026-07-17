@@ -789,6 +789,34 @@ The retained path has moved beyond the original starting state:
   table, runtime string, interning, or VM dispatch. Seventeen of the 25
   Scenario kernels now emit through the compiler proof route.
 
+- The bounded nested record-array removal slice gives each mutable child-array
+  family member a runtime length and lowers verified indexed selection,
+  `rawlen`, and unobserved `table.remove` to scalar guards plus in-place field
+  compaction. Every parallel field and optional-presence array shifts together;
+  encoded element references are range-checked against the selected member's
+  current length. A parameterized `buff_stack_tick` holdout proves three
+  heterogeneous entities, three independently shrinking buff arrays, four
+  string-dispatched buff kinds, nested mutation, repeated removal, and two
+  runtime length observations. Generated Go, prepared owner, generic Machine,
+  and the independent interpreter agree across negative, ordinary, and large
+  seeds. Private-function renaming is byte-identical; mixed buff payloads,
+  escaping buff arrays, and observing the removed record fail closed;
+  rebinding either `table.remove` or `rawlen` replays canonical Machine before
+  mutation; controlled execution remains generic; invalid prepared arguments
+  replay entry; owner table/string counts remain unchanged; direct and
+  prepared paths allocate zero when warmed. The direct kernel has a five-sample
+  median of about 573.1 ns (564.5-575.5 ns observed), while the prepared owner
+  has a median of about 718.9 ns (710.0-846.2 ns observed), versus about 89.83
+  microseconds through generic Machine. The corresponding pinned Luau `-O2
+  -g0` corpus batch has a five-sample median of about 10.46 microseconds per
+  call, including its cold first process sample, making prepared about `0.069x`
+  Luau; this is exploratory evidence, not the required `guest_batch_v1`
+  capture. Deterministic generated source is 31,354 bytes. Linked ARM64 is
+  3,552 bytes for the direct kernel, 4,000 bytes for the prepared body, and 288
+  bytes for the wrapper; generated bodies contain no opcode, descriptor,
+  Machine table, runtime string, interning, or VM dispatch. Eighteen of the 25
+  Scenario kernels now emit through the compiler proof route.
+
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
 all-37 parity. General non-dense iteration, general table mutation, general
