@@ -24,6 +24,16 @@ type backendGoScalarMetatable struct {
 	fallback  backendValueID
 }
 
+type backendGoCapturedTableField struct {
+	name machineStringID
+	tags backendTagMask
+}
+
+type backendGoScalarDynamicExternalGet struct {
+	table backendValueID
+	tags  backendTagMask
+}
+
 type backendGoScalarArray struct {
 	table       backendValueID
 	tags        backendTagMask
@@ -35,19 +45,22 @@ type backendGoScalarArray struct {
 }
 
 type backendGoScalarTablePlan struct {
-	roots          []backendValueID
-	fields         []backendGoScalarField
-	index          map[backendGoScalarFieldKey]int
-	arrays         []backendGoScalarArray
-	arrayIndex     map[backendValueID]int
-	arrayGetByPC   map[int32]int
-	indexFallback  map[backendValueID]backendValueID
-	metatableByPC  map[int32]backendGoScalarMetatable
-	iteratorValues []bool
-	iteratorByPC   map[int32]int
-	externalRoot   backendValueID
-	externalRoots  []backendValueID
-	partial        bool
+	roots                  []backendValueID
+	fields                 []backendGoScalarField
+	index                  map[backendGoScalarFieldKey]int
+	arrays                 []backendGoScalarArray
+	arrayIndex             map[backendValueID]int
+	arrayGetByPC           map[int32]int
+	indexFallback          map[backendValueID]backendValueID
+	metatableByPC          map[int32]backendGoScalarMetatable
+	dynamicExternalGetByPC map[int32]backendGoScalarDynamicExternalGet
+	iteratorValues         []bool
+	iteratorByPC           map[int32]int
+	externalRoot           backendValueID
+	externalRoots          []backendValueID
+	tableUpvalues          []bool
+	capturedExternalRoots  map[backendValueID]bool
+	partial                bool
 }
 
 func analyzeBackendGoScalarTables(ir *backendProtoIR, receiverTable bool) (backendGoScalarTablePlan, error) {
@@ -75,19 +88,31 @@ func analyzeBackendGoScalarTablesExcludingCount(
 	receiverTables int,
 	excluded map[backendValueID]bool,
 ) (backendGoScalarTablePlan, error) {
+	return analyzeBackendGoScalarTablesExcludingCountWithFields(ir, receiverTables, excluded, nil)
+}
+
+func analyzeBackendGoScalarTablesExcludingCountWithFields(
+	ir *backendProtoIR,
+	receiverTables int,
+	excluded map[backendValueID]bool,
+	capturedFields map[int32][]backendGoCapturedTableField,
+) (backendGoScalarTablePlan, error) {
 	if ir == nil {
 		return backendGoScalarTablePlan{}, nil
 	}
 	plan := backendGoScalarTablePlan{
-		roots:         make([]backendValueID, len(ir.values)),
-		index:         make(map[backendGoScalarFieldKey]int),
-		arrayIndex:    make(map[backendValueID]int),
-		arrayGetByPC:  make(map[int32]int),
-		indexFallback: make(map[backendValueID]backendValueID),
-		metatableByPC: make(map[int32]backendGoScalarMetatable),
-		iteratorByPC:  make(map[int32]int),
-		externalRoot:  invalidBackendValueID,
-		partial:       len(excluded) != 0,
+		roots:                  make([]backendValueID, len(ir.values)),
+		index:                  make(map[backendGoScalarFieldKey]int),
+		arrayIndex:             make(map[backendValueID]int),
+		arrayGetByPC:           make(map[int32]int),
+		indexFallback:          make(map[backendValueID]backendValueID),
+		metatableByPC:          make(map[int32]backendGoScalarMetatable),
+		dynamicExternalGetByPC: make(map[int32]backendGoScalarDynamicExternalGet),
+		iteratorByPC:           make(map[int32]int),
+		externalRoot:           invalidBackendValueID,
+		tableUpvalues:          make([]bool, len(ir.upvalues)),
+		capturedExternalRoots:  make(map[backendValueID]bool),
+		partial:                len(excluded) != 0,
 	}
 	for valueIndex := range ir.values {
 		value := &ir.values[valueIndex]
@@ -110,11 +135,40 @@ func analyzeBackendGoScalarTablesExcludingCount(
 			plan.externalRoots = append(plan.externalRoots, root)
 			plan.roots[root-1] = root
 		}
-	} else if capturedRoots := backendGoCapturedRecordRoots(ir); len(capturedRoots) != 0 {
-		plan.externalRoot = capturedRoots[0]
-		plan.externalRoots = append(plan.externalRoots, plan.externalRoot)
-		for _, root := range capturedRoots {
-			plan.roots[root-1] = plan.externalRoot
+	}
+	capturedUpvalues := backendGoCapturedRecordUpvalues(ir)
+	for upvalue := 0; upvalue < len(ir.upvalues); upvalue++ {
+		capturedRoots := capturedUpvalues[int32(upvalue)]
+		if len(capturedRoots) == 0 {
+			continue
+		}
+		root := capturedRoots[0]
+		plan.tableUpvalues[upvalue] = true
+		if plan.externalRoot == invalidBackendValueID {
+			plan.externalRoot = root
+		}
+		plan.externalRoots = append(plan.externalRoots, root)
+		plan.capturedExternalRoots[root] = true
+		for _, capturedRoot := range capturedRoots {
+			plan.roots[capturedRoot-1] = root
+		}
+		for _, capturedField := range capturedFields[int32(upvalue)] {
+			if capturedField.name == invalidMachineStringID ||
+				capturedField.tags == 0 ||
+				capturedField.tags&^(backendTagNumber|backendTagBool|backendTagString) != 0 {
+				return backendGoScalarTablePlan{}, nil
+			}
+			key := backendGoScalarFieldKey{table: root, name: capturedField.name}
+			if fieldIndex, exists := plan.index[key]; exists {
+				if plan.fields[fieldIndex].tags != capturedField.tags {
+					return backendGoScalarTablePlan{}, nil
+				}
+				continue
+			}
+			plan.index[key] = len(plan.fields)
+			plan.fields = append(plan.fields, backendGoScalarField{
+				key: key, tags: capturedField.tags, methodProto: -1,
+			})
 		}
 	}
 	setRoot := func(id, root backendValueID) (bool, bool) {
@@ -297,7 +351,7 @@ func analyzeBackendGoScalarTablesExcludingCount(
 				key := backendGoScalarFieldKey{table: table, name: name}
 				fieldIndex, exists := plan.index[key]
 				if !exists {
-					if receiverTables == 0 || !plan.isExternalRoot(table) || len(operation.defs) != 1 {
+					if !plan.isExternalRoot(table) || len(operation.defs) != 1 {
 						continue
 					}
 					tags := backendGoScalarRequiredTags(ir, operation.defs[0].value, nil)
@@ -519,6 +573,36 @@ func analyzeBackendGoScalarTablesExcludingCount(
 		}
 		plan.arrayGetByPC[operation.pc] = arrayIndex
 	}
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op != opGetIndex || len(operation.defs) != 1 {
+			continue
+		}
+		table := plan.root(backendOperationUse(operation, operation.b))
+		if !plan.capturedExternalRoots[table] {
+			continue
+		}
+		var tags backendTagMask
+		fieldCount := 0
+		valid := true
+		for _, field := range plan.fields {
+			if field.key.table != table || field.child != invalidBackendValueID || field.methodProto >= 0 {
+				continue
+			}
+			fieldCount++
+			if tags == 0 {
+				tags = field.tags
+			} else if tags != field.tags {
+				valid = false
+				break
+			}
+		}
+		if valid && fieldCount != 0 {
+			plan.dynamicExternalGetByPC[operation.pc] = backendGoScalarDynamicExternalGet{
+				table: table, tags: tags,
+			}
+		}
+	}
 	if !plan.analyzeIterators(ir) {
 		return backendGoScalarTablePlan{}, nil
 	}
@@ -551,6 +635,9 @@ func analyzeBackendGoScalarTablesExcludingCount(
 					return backendGoScalarTablePlan{}, nil
 				}
 				if _, ok := plan.arrayGetByPC[operation.pc]; !ok {
+					if _, dynamic := plan.dynamicExternalGetByPC[operation.pc]; dynamic {
+						continue
+					}
 					return backendGoScalarTablePlan{}, nil
 				}
 			case opSetField:
@@ -619,6 +706,10 @@ func (plan backendGoScalarTablePlan) isExternalRoot(root backendValueID) bool {
 	return false
 }
 
+func (plan backendGoScalarTablePlan) tableUpvalue(upvalue int32) bool {
+	return upvalue >= 0 && int(upvalue) < len(plan.tableUpvalues) && plan.tableUpvalues[upvalue]
+}
+
 func backendGoScalarRequiredTags(
 	ir *backendProtoIR,
 	id backendValueID,
@@ -667,23 +758,88 @@ func backendGoScalarRequiredTags(
 }
 
 func backendGoCapturedRecordRoots(ir *backendProtoIR) []backendValueID {
-	if ir == nil || len(ir.upvalues) != 1 {
-		return nil
-	}
 	roots := make([]backendValueID, 0)
-	for pc := range ir.ops {
-		operation := &ir.ops[pc]
-		switch operation.op {
-		case opSetUpvalue:
-			return nil
-		case opGetUpvalue:
-			if operation.b != 0 || len(operation.defs) != 1 {
-				return nil
-			}
-			roots = append(roots, operation.defs[0].value)
-		}
+	upvalues := backendGoCapturedRecordUpvalues(ir)
+	for upvalue := 0; ir != nil && upvalue < len(ir.upvalues); upvalue++ {
+		roots = append(roots, upvalues[int32(upvalue)]...)
 	}
 	return roots
+}
+
+func backendGoCapturedRecordUpvalues(ir *backendProtoIR) map[int32][]backendValueID {
+	if ir == nil {
+		return nil
+	}
+	written := make([]bool, len(ir.upvalues))
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op == opSetUpvalue && operation.a >= 0 && int(operation.a) < len(written) {
+			written[operation.a] = true
+		}
+	}
+	upvalues := make(map[int32][]backendValueID)
+	invalid := make([]bool, len(ir.upvalues))
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op != opGetUpvalue || operation.b < 0 || int(operation.b) >= len(ir.upvalues) {
+			continue
+		}
+		if written[operation.b] || len(operation.defs) != 1 {
+			invalid[operation.b] = true
+			continue
+		}
+		root := operation.defs[0].value
+		if !backendGoCapturedTableRoot(ir, root) {
+			invalid[operation.b] = true
+			continue
+		}
+		upvalues[operation.b] = append(upvalues[operation.b], root)
+	}
+	for upvalue, rejected := range invalid {
+		if rejected {
+			delete(upvalues, int32(upvalue))
+		}
+	}
+	return upvalues
+}
+
+func backendGoCapturedTableRoot(ir *backendProtoIR, root backendValueID) bool {
+	if !ir.validBackendValue(root) {
+		return false
+	}
+	proved := false
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		for _, use := range operation.uses {
+			if use.value != root {
+				continue
+			}
+			switch operation.op {
+			case opMove:
+				if use.register != operation.b {
+					return false
+				}
+			case opGetStringField, opGetIndex:
+				if use.register != operation.b {
+					return false
+				}
+				proved = true
+			case opSetStringField, opSetField, opSetIndex:
+				if use.register != operation.a {
+					return false
+				}
+				proved = true
+			case opPrepareIter:
+				if use.register != operation.a {
+					return false
+				}
+				proved = true
+			default:
+				return false
+			}
+		}
+	}
+	return proved
 }
 
 func backendGoScalarMethodClosure(ir *backendProtoIR, id backendValueID) (int32, bool) {

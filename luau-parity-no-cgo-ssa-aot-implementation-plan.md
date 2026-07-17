@@ -972,6 +972,36 @@ The retained path has moved beyond the original starting state:
   Twenty-two of the 25 Scenario kernels now emit through the compiler proof
   route.
 
+- The finite record-prototype slice lowers the real `prototype_fallback`
+  pressure. Exact `setmetatable(record, metatable)` operations now preserve
+  record identity only when both operands remain proved, the metatable has one
+  stable `__index` closure, and every member of the heterogeneous record array
+  receives that same closure before any optional-field read. Mixed numeric and
+  table upvalues remain separate: the mutable miss counter is an explicit
+  numeric cell, while the captured prototype becomes typed scalar fields.
+  Static actor reads branch on the existing presence lanes and call one typed
+  target only on a miss; the target implements the finite dynamic prototype
+  lookup as a numeric switch and updates the shared counter directly. Generated
+  Go, prepared owner, generic Machine, and the independent interpreter agree
+  across negative, ordinary, and large seeds. Private-function renaming is
+  byte-identical; mixed captured fields, mixed table/scalar observation of one
+  upvalue, changed `__index`, mixed metatables, and observed metatable identity
+  fail closed. Rebinding `setmetatable` replays canonical Machine before work,
+  controlled execution remains generic, owner table/string counts stay
+  unchanged, and direct/prepared paths allocate zero when warmed. Five local
+  samples measured medians of about 2.186 microseconds direct and 2.256
+  microseconds through the prepared owner, versus about 334.848 microseconds
+  through generic Machine. The pinned Luau 0.728 `-O2 -g0` corpus batch had a
+  five-sample median of about 26.373 microseconds per call, making prepared
+  about `0.086x` Luau; this is exploratory evidence, not either required clean
+  `guest_batch_v1` capture. Deterministic generated source is 16,341 bytes.
+  Linked ARM64 is 1,952 bytes for the direct caller, 2,096 bytes for the
+  prepared body, 288 bytes for the wrapper, and 208 bytes for the shared index
+  target; generated bodies contain one intentional direct target call family
+  plus cold bounds/stack-growth helpers and no opcode, descriptor, Machine
+  table, runtime string, allocation, or VM dispatch. Twenty-three of the 25
+  Scenario kernels now emit through the compiler proof route.
+
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
 all-37 parity. General non-dense iteration, general table mutation, general

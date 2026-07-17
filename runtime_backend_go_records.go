@@ -67,6 +67,11 @@ type backendGoRecordArrayOperation struct {
 	key     backendValueID
 }
 
+type backendGoRecordMetatable struct {
+	table     backendValueID
+	metatable backendValueID
+}
+
 type backendGoRecordArray struct {
 	root         backendValueID
 	fieldNames   []machineStringID
@@ -195,6 +200,7 @@ type backendGoRecordTablePlan struct {
 	arrayKeyValues         map[backendValueID]int
 	arrayPreparePC         map[int32]int
 	arrayNextPC            map[int32]int
+	metatableByPC          map[int32]backendGoRecordMetatable
 	families               []backendGoRecordArrayFamily
 	familyByParent         map[backendGoRecordParentField]int
 	childByScratch         map[backendGoRecordScratchField]backendGoRecordChildArray
@@ -216,6 +222,9 @@ type backendGoRecordTablePlan struct {
 	dynamicChildSelectByPC map[int32]backendGoRecordDynamicChildSelector
 	dynamicChildGetByPC    map[int32]backendGoRecordDynamicChildField
 	fieldsByPC             map[int32]backendGoRecordFieldOperation
+	functionFields         map[backendGoRecordScratchField]int32
+	functionSetterPC       map[int32]backendGoRecordScratchField
+	functionValues         []bool
 	refs                   map[backendValueID]backendGoRecordRef
 	iteratorValues         []bool
 	iteratorArray          []int
@@ -259,6 +268,7 @@ func analyzeBackendGoRecordTablesWithOptions(
 		arrayKeyValues:         make(map[backendValueID]int),
 		arrayPreparePC:         make(map[int32]int),
 		arrayNextPC:            make(map[int32]int),
+		metatableByPC:          make(map[int32]backendGoRecordMetatable),
 		familyByParent:         make(map[backendGoRecordParentField]int),
 		childByScratch:         make(map[backendGoRecordScratchField]backendGoRecordChildArray),
 		childSetByPC:           make(map[int32]backendGoRecordChildArray),
@@ -278,6 +288,9 @@ func analyzeBackendGoRecordTablesWithOptions(
 		dynamicChildSelectByPC: make(map[int32]backendGoRecordDynamicChildSelector),
 		dynamicChildGetByPC:    make(map[int32]backendGoRecordDynamicChildField),
 		fieldsByPC:             make(map[int32]backendGoRecordFieldOperation),
+		functionFields:         make(map[backendGoRecordScratchField]int32),
+		functionSetterPC:       make(map[int32]backendGoRecordScratchField),
+		functionValues:         make([]bool, len(ir.values)),
 		refs:                   make(map[backendValueID]backendGoRecordRef),
 		iteratorValues:         make([]bool, len(ir.values)),
 		iteratorArray:          make([]int, len(ir.values)),
@@ -364,10 +377,35 @@ func analyzeBackendGoRecordTablesWithOptions(
 		record.fieldIndex[name] = field
 		record.setByPC[operation.pc] = field
 		record.writesByPC[operation.pc] = field
+		if proto, function := backendGoScalarMethodClosure(ir, source); function {
+			key := backendGoRecordScratchField{record: recordIndex, field: field}
+			plan.functionFields[key] = proto
+			plan.functionSetterPC[operation.pc] = key
+			plan.functionValues[source-1] = true
+		}
 	}
 	if len(plan.records) == 0 {
 		plan.rejectReason = "no records"
 		return plan
+	}
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op != opFastCall ||
+			nativeFuncID(operation.nativeID) != nativeFuncSetMetatable ||
+			operation.c != 2 || operation.d != 1 {
+			continue
+		}
+		table := plan.root(backendOperationUse(operation, operation.a))
+		metatable := plan.root(backendOperationUse(operation, operation.a+1))
+		if _, tableOK := plan.recordByRoot[table]; !tableOK {
+			continue
+		}
+		if _, metatableOK := plan.recordByRoot[metatable]; !metatableOK || table == metatable {
+			continue
+		}
+		plan.metatableByPC[operation.pc] = backendGoRecordMetatable{
+			table: table, metatable: metatable,
+		}
 	}
 	for pc := range ir.ops {
 		operation := &ir.ops[pc]
@@ -1184,14 +1222,20 @@ func (plan *backendGoRecordTablePlan) propagateRoots(ir *backendProtoIR) bool {
 		}
 		for pc := range ir.ops {
 			operation := &ir.ops[pc]
-			if operation.op != opMove && operation.op != opPrepareIter {
+			identityRegister := int32(-1)
+			switch {
+			case operation.op == opMove:
+				identityRegister = operation.b
+			case operation.op == opPrepareIter:
+				identityRegister = operation.a
+			case operation.op == opFastCall &&
+				nativeFuncID(operation.nativeID) == nativeFuncSetMetatable &&
+				operation.c == 2 && operation.d == 1:
+				identityRegister = operation.a
+			default:
 				continue
 			}
-			sourceRegister := operation.b
-			if operation.op == opPrepareIter {
-				sourceRegister = operation.a
-			}
-			root := plan.root(backendOperationUse(operation, sourceRegister))
+			root := plan.root(backendOperationUse(operation, identityRegister))
 			for _, definition := range operation.defs {
 				if operation.op == opPrepareIter && definition.register != operation.a {
 					continue
@@ -2387,6 +2431,11 @@ func (plan *backendGoRecordTablePlan) finalizeFieldTags(
 		record.fieldTags = make([]backendTagMask, len(record.fieldNames))
 		for field := range record.fieldValues {
 			fieldTags := plan.scratchFieldTags(tags, recordIndex, field)
+			if _, function := plan.functionFields[backendGoRecordScratchField{
+				record: recordIndex, field: field,
+			}]; function {
+				fieldTags = backendTagNumber
+			}
 			if _, ok := plan.childByScratch[backendGoRecordScratchField{
 				record: recordIndex,
 				field:  field,
@@ -2729,6 +2778,14 @@ func (plan *backendGoRecordTablePlan) validateUses(ir *backendProtoIR) bool {
 						return false
 					}
 				case opFastCall:
+					if metatable, ok := plan.metatableByPC[operation.pc]; ok {
+						if (use.register == operation.a && root == metatable.table) ||
+							(use.register == operation.a+1 && root == metatable.metatable) {
+							break
+						}
+						plan.rejectReason = "unsupported record metatable use at PC " + strconv.Itoa(int(operation.pc))
+						return false
+					}
 					insert, isInsert := plan.arrayInsertPC[operation.pc]
 					_, isRemove := plan.arrayRemovePC[operation.pc]
 					_, isRawLen := plan.arrayRawLenPC[operation.pc]
@@ -3515,6 +3572,25 @@ func (plan backendGoRecordTablePlan) iteratorValue(id backendValueID) bool {
 	return id != invalidBackendValueID &&
 		int(id) <= len(plan.iteratorValues) &&
 		plan.iteratorValues[id-1]
+}
+
+func (plan backendGoRecordTablePlan) functionSetter(operation *backendOperationIR) bool {
+	if operation == nil {
+		return false
+	}
+	_, ok := plan.functionSetterPC[operation.pc]
+	return ok
+}
+
+func (plan backendGoRecordTablePlan) metatableOperation(
+	operation *backendOperationIR,
+) (backendGoRecordMetatable, bool) {
+	if operation == nil || operation.op != opFastCall ||
+		nativeFuncID(operation.nativeID) != nativeFuncSetMetatable {
+		return backendGoRecordMetatable{}, false
+	}
+	metatable, ok := plan.metatableByPC[operation.pc]
+	return metatable, ok
 }
 
 func writeBackendGoRecordDeclarations(

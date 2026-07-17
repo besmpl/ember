@@ -19,15 +19,17 @@ type backendGoNumericOptions struct {
 	receiverTables       int
 	coroutineTarget      bool
 	coroutineDeadString  machineStringID
+	capturedTableFields  map[int32][]backendGoCapturedTableField
 }
 
 type backendGoNumericTarget struct {
-	ir               *backendProtoIR
-	functionName     string
-	selfRecursive    bool
-	fixedVarargCount int
-	receiverTable    bool
-	receiverTables   int
+	ir                  *backendProtoIR
+	functionName        string
+	selfRecursive       bool
+	fixedVarargCount    int
+	receiverTable       bool
+	receiverTables      int
+	capturedTableFields map[int32][]backendGoCapturedTableField
 }
 
 type backendGoNumericPlan struct {
@@ -37,16 +39,17 @@ type backendGoNumericPlan struct {
 	// scalarReplacedValues have no canonical Machine value in prepared code.
 	scalarReplacedValues []bool
 	// replayEntry marks exits whose exact spill would require one of those values.
-	replayEntry []bool
-	tables      backendGoScalarTablePlan
-	keys        backendGoStructuralKeyPlan
-	records     backendGoRecordTablePlan
-	closures    backendGoScalarClosurePlan
-	methods     backendGoScalarMethodPlan
-	captured    backendGoCapturedRecordPlan
-	callSets    backendGoFiniteCallSetPlan
-	closureSets backendGoFiniteClosureSetPlan
-	coroutines  backendGoScalarCoroutinePlan
+	replayEntry    []bool
+	tables         backendGoScalarTablePlan
+	keys           backendGoStructuralKeyPlan
+	records        backendGoRecordTablePlan
+	closures       backendGoScalarClosurePlan
+	methods        backendGoScalarMethodPlan
+	captured       backendGoCapturedRecordPlan
+	callSets       backendGoFiniteCallSetPlan
+	closureSets    backendGoFiniteClosureSetPlan
+	coroutines     backendGoScalarCoroutinePlan
+	indexFunctions backendGoRecordIndexFunctionPlan
 }
 
 type backendGoNumericEmitter struct {
@@ -189,11 +192,10 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		source.WriteString("import \"math\"\n\n")
 	}
 	source.WriteString(coroutineSource.String())
-	pointerUpvalues := len(ir.upvalues)
-	capturedRecord := plan.tables.externalRoot != invalidBackendValueID && receiverTables == 0
-	if options.selfRecursive || capturedRecord {
-		pointerUpvalues = 0
+	pointerUpvalue := func(upvalue int) bool {
+		return !options.selfRecursive && !plan.tables.tableUpvalue(int32(upvalue))
 	}
+	hasExternalRecords := len(plan.tables.externalRoots) != 0
 	if options.selfRecursive {
 		fmt.Fprintf(
 			&source,
@@ -206,14 +208,17 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	} else {
 		fmt.Fprintf(&source, "func %s(", options.functionName)
 		wroteParameter := false
-		for upvalue := 0; upvalue < pointerUpvalues; upvalue++ {
+		for upvalue := 0; upvalue < len(ir.upvalues); upvalue++ {
+			if !pointerUpvalue(upvalue) {
+				continue
+			}
 			if wroteParameter {
 				source.WriteString(", ")
 			}
 			fmt.Fprintf(&source, "u%d *float64", upvalue)
 			wroteParameter = true
 		}
-		if receiverTables > 0 || capturedRecord {
+		if hasExternalRecords {
 			for fieldIndex, field := range plan.tables.fields {
 				if !plan.tables.isExternalRoot(field.key.table) || field.tags == 0 {
 					continue
@@ -246,10 +251,13 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		source.WriteString(") (")
 		writeBackendGoNumericResultTypes(&source, resultTypes)
 		source.WriteString(") {\n")
-		for upvalue := 0; upvalue < pointerUpvalues; upvalue++ {
+		for upvalue := 0; upvalue < len(ir.upvalues); upvalue++ {
+			if !pointerUpvalue(upvalue) {
+				continue
+			}
 			fmt.Fprintf(&source, "\tif u%d == nil {\n\t\t%s\n\t}\n", upvalue, backendGoNumericFailureReturn(resultTypes))
 		}
-		if receiverTables > 0 || capturedRecord {
+		if hasExternalRecords {
 			for fieldIndex, field := range plan.tables.fields {
 				if !plan.tables.isExternalRoot(field.key.table) || field.tags == 0 {
 					continue
@@ -332,6 +340,9 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			(operation.op == opCallOne || operation.op == opCallLocalOne ||
 				operation.op == opCall && backendGoNumericScalarReplacedCall(ir, options, operation) ||
 				operation.op == opCallMethodOne)
+		if _, ok := plan.indexFunctions.call(operation); ok {
+			needsOK = true
+		}
 		if _, ok := plan.coroutines.resumes[operation.pc]; ok {
 			needsOK = true
 		}
@@ -434,6 +445,9 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 				(operation.op == opCallOne || operation.op == opCallLocalOne ||
 					operation.op == opCall && backendGoNumericScalarReplacedCall(ir, options, operation) ||
 					operation.op == opCallMethodOne)
+			if _, ok := plan.indexFunctions.call(operation); ok {
+				needsOK = true
+			}
 			if _, ok := plan.coroutines.resumes[operation.pc]; ok {
 				needsOK = true
 			}
@@ -475,10 +489,11 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			_, recordArrayInsert := plan.records.arrayInsertPC[operation.pc]
 			_, recordArrayRemove := plan.records.arrayRemovePC[operation.pc]
 			_, recordArrayRawLen := plan.records.arrayRawLenPC[operation.pc]
+			_, recordMetatable := plan.records.metatableOperation(operation)
 			if _, structuralToString := plan.keys.tostring(operation); !structuralToString &&
 				!backendGoNumericMathMin(operation) &&
 				!recordFamilyRawLen && !recordFamilyRemove &&
-				!recordArrayInsert && !recordArrayRemove && !recordArrayRawLen {
+				!recordArrayInsert && !recordArrayRemove && !recordArrayRawLen && !recordMetatable {
 				if !plan.coroutines.createOperation(operation) &&
 					!plan.coroutines.statusOperation(operation) {
 					if _, resume := plan.coroutines.resume(operation); !resume {
@@ -612,13 +627,14 @@ func verifyBackendGoNumericTargets(targets []backendGoNumericTarget) error {
 			return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d has no bounded fixed result shape", protoID)
 		}
 		targetOptions := backendGoNumericOptions{
-			functionName:     target.functionName,
-			directTargets:    targets,
-			selfRecursive:    target.selfRecursive,
-			fixedVarargCount: target.fixedVarargCount,
-			receiverTable:    target.receiverTable,
-			receiverTables:   target.receiverTables,
-			coroutineTarget:  backendGoNumericHasCoroutineYield(target.ir),
+			functionName:        target.functionName,
+			directTargets:       targets,
+			selfRecursive:       target.selfRecursive,
+			fixedVarargCount:    target.fixedVarargCount,
+			receiverTable:       target.receiverTable,
+			receiverTables:      target.receiverTables,
+			coroutineTarget:     backendGoNumericHasCoroutineYield(target.ir),
+			capturedTableFields: target.capturedTableFields,
 		}
 		if target.selfRecursive && (resultCount != 1 || !backendGoNumericSelfRecursiveTarget(target.ir)) {
 			return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d is not bounded self recursion", protoID)
@@ -700,7 +716,9 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		excludedTables[root] = true
 	}
 	receiverTables := backendGoNumericReceiverTableCount(options.receiverTable, options.receiverTables)
-	tables, err := analyzeBackendGoScalarTablesExcludingCount(ir, receiverTables, excludedTables)
+	tables, err := analyzeBackendGoScalarTablesExcludingCountWithFields(
+		ir, receiverTables, excludedTables, options.capturedTableFields,
+	)
 	if err != nil {
 		return backendGoNumericPlan{}, err
 	}
@@ -716,6 +734,7 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 	if err != nil {
 		return backendGoNumericPlan{}, err
 	}
+	indexFunctions := analyzeBackendGoRecordIndexFunctions(ir, records, options)
 	plan := backendGoNumericPlan{
 		tags:                 make([]backendTagMask, len(ir.values)),
 		used:                 make([]bool, len(ir.values)),
@@ -730,6 +749,7 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		callSets:             callSets,
 		closureSets:          closureSets,
 		coroutines:           coroutines,
+		indexFunctions:       indexFunctions,
 	}
 	parameterTags, ok := backendGoNumericParameterTags(ir, options.fixedVarargCount)
 	if !ok {
@@ -760,7 +780,11 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 					if !ir.blocks[block.predecessors[inputIndex]].reachable {
 						continue
 					}
-					tags |= plan.tags[input-1]
+					inputTags := plan.tags[input-1]
+					if backendGoPhiInputComesFromTruthyEdge(ir, value.block, inputIndex, input) {
+						inputTags &^= backendTagNil
+					}
+					tags |= inputTags
 				}
 			case backendValueOperation:
 				operation := &ir.ops[value.pc]
@@ -794,7 +818,9 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						tags = backendTagTable
 					}
 				case opGetStringField:
-					if field, ok := plan.records.fieldsByPC[operation.pc]; ok {
+					if _, ok := plan.indexFunctions.call(operation); ok {
+						tags = backendTagNumber
+					} else if field, ok := plan.records.fieldsByPC[operation.pc]; ok {
 						tags = plan.records.fieldTagsFor(plan.tags, field)
 					} else if _, field, ok := plan.tables.operationField(ir, operation); ok {
 						if field.child != invalidBackendValueID {
@@ -828,6 +854,8 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						tags = backendTagNumber
 					} else if _, ok := plan.records.arrayGetByPC[operation.pc]; ok {
 						tags = backendTagNumber
+					} else if dynamic, ok := plan.tables.dynamicExternalGetByPC[operation.pc]; ok {
+						tags = dynamic.tags | backendTagNil
 					} else if _, array, _, ok := plan.tables.arrayOperation(ir, operation); ok {
 						tags = array.tags
 					}
@@ -892,6 +920,10 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						tags = backendTagNil
 					} else if backendGoNumericFixedVarargSelect(ir, options.fixedVarargCount, operation) {
 						tags = backendTagNumber
+					} else if metatable, ok := plan.records.metatableOperation(operation); ok {
+						if plan.records.root(value.id) == metatable.table {
+							tags = backendTagTable
+						}
 					} else if metatable, ok := plan.tables.metatableOperation(operation); ok {
 						if plan.tables.root(value.id) == metatable.table {
 							tags = backendTagTable
@@ -1011,6 +1043,9 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		if _, ok := plan.methods.call(operation); ok {
 			plan.replayEntry[pc] = true
 		}
+		if _, ok := plan.indexFunctions.call(operation); ok {
+			plan.replayEntry[pc] = true
+		}
 		if _, ok := plan.captured.call(operation); ok {
 			plan.replayEntry[pc] = true
 		}
@@ -1067,6 +1102,11 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 	}
 	for valueIndex, scalar := range plan.records.scalarValues {
 		if scalar {
+			markScalarReplaced(backendValueID(valueIndex + 1))
+		}
+	}
+	for valueIndex, function := range plan.records.functionValues {
+		if function {
 			markScalarReplaced(backendValueID(valueIndex + 1))
 		}
 	}
@@ -1269,6 +1309,44 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 	return plan, nil
 }
 
+func backendGoPhiInputComesFromTruthyEdge(
+	ir *backendProtoIR,
+	phiBlock int32,
+	inputIndex int,
+	input backendValueID,
+) bool {
+	if ir == nil || phiBlock < 0 || int(phiBlock) >= len(ir.blocks) ||
+		inputIndex < 0 || inputIndex >= len(ir.blocks[phiBlock].predecessors) {
+		return false
+	}
+	pathBlock := ir.blocks[phiBlock].predecessors[inputIndex]
+	if pathBlock < 0 || int(pathBlock) >= len(ir.blocks) {
+		return false
+	}
+	path := &ir.blocks[pathBlock]
+	if len(path.predecessors) != 1 || path.first+1 != path.last ||
+		path.first < 0 || int(path.first) >= len(ir.ops) || ir.ops[path.first].op != opJump {
+		return false
+	}
+	guardBlock := path.predecessors[0]
+	if guardBlock < 0 || int(guardBlock) >= len(ir.blocks) {
+		return false
+	}
+	guard := &ir.blocks[guardBlock]
+	if guard.last <= guard.first || int(guard.last) > len(ir.ops) {
+		return false
+	}
+	branch := &ir.ops[guard.last-1]
+	if branch.op != opJumpIfFalse || backendOperationUse(branch, branch.a) != input {
+		return false
+	}
+	falseBlock := int32(-1)
+	if branch.targetPC >= 0 && int(branch.targetPC) < len(ir.pcToBlock) {
+		falseBlock = ir.pcToBlock[branch.targetPC]
+	}
+	return falseBlock != pathBlock
+}
+
 func backendGoNumericDirectTarget(options backendGoNumericOptions, operation *backendOperationIR) (backendGoNumericTarget, bool) {
 	if operation == nil ||
 		operation.call.kind != backendCallDirectProto ||
@@ -1457,6 +1535,9 @@ func verifyBackendGoNumericOperation(
 		if plan.callSets.setter(operation) || plan.closureSets.setter(operation) {
 			return nil
 		}
+		if plan.records.functionSetter(operation) {
+			return nil
+		}
 		if field, ok := plan.records.fieldsByPC[operation.pc]; ok {
 			if _, child := plan.records.childSetByPC[operation.pc]; child {
 				return nil
@@ -1541,6 +1622,17 @@ func verifyBackendGoNumericOperation(
 		if _, _, _, ok := plan.tables.arrayOperation(ir, operation); ok {
 			return requireOptional(operation.c, backendTagNumber)
 		}
+		if dynamic, ok := plan.tables.dynamicExternalGetByPC[operation.pc]; ok {
+			if err := requireOptional(operation.c, backendTagString); err != nil {
+				return err
+			}
+			for _, definition := range operation.defs {
+				if plan.tags[definition.value-1] != dynamic.tags|backendTagNil {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d dynamic captured-table lookup changes scalar tags", operation.pc)
+				}
+			}
+			return nil
+		}
 		if _, ok := plan.records.dynamicChildSelectByPC[operation.pc]; ok {
 			if err := requireOptional(operation.c, backendTagString); err != nil {
 				return err
@@ -1624,6 +1716,14 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opGetStringField:
+		if _, ok := plan.indexFunctions.call(operation); ok {
+			for _, definition := range operation.defs {
+				if plan.tags[definition.value-1] != backendTagNumber {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d static __index result is not numeric", operation.pc)
+				}
+			}
+			return nil
+		}
 		if field, ok := plan.records.fieldsByPC[operation.pc]; ok {
 			fieldTags := plan.records.fieldTags(field)
 			for _, definition := range operation.defs {
@@ -1741,6 +1841,17 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opFastCall:
+		if metatable, ok := plan.records.metatableOperation(operation); ok {
+			if operation.c != 2 || operation.d != 1 {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d changes record setmetatable shape", operation.pc)
+			}
+			for _, definition := range operation.defs {
+				if plan.records.root(definition.value) != metatable.table {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d changes record setmetatable identity", operation.pc)
+				}
+			}
+			return nil
+		}
 		if _, ok := plan.records.arrayRawLenPC[operation.pc]; ok {
 			if operation.c != 1 || operation.d != 1 {
 				return fmt.Errorf("emit backend Go numeric proof: PC %d changes record-array rawlen shape", operation.pc)
@@ -2647,6 +2758,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		if emitter.plan.callSets.setter(operation) || emitter.plan.closureSets.setter(operation) {
 			return false, nil
 		}
+		if emitter.plan.records.functionSetter(operation) {
+			return false, nil
+		}
 		if handled, err := emitter.emitRecordSetStringField(operation, use); handled {
 			return false, err
 		}
@@ -2735,6 +2849,30 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			fmt.Fprintf(&emitter.body, "\tv%d = a%d[int(v%d)-1]\n", destination, arrayIndex, key)
 			return false, nil
 		}
+		if dynamic, ok := emitter.plan.tables.dynamicExternalGetByPC[operation.pc]; ok {
+			destination, err := definition(operation.a)
+			if err != nil {
+				return false, err
+			}
+			key, err := use(operation.c)
+			if err != nil {
+				return false, err
+			}
+			emitter.emitOptionalPresenceGuard(operation, 1, key)
+			fmt.Fprintf(&emitter.body, "\tvp%d = false\n", destination)
+			fmt.Fprintf(&emitter.body, "\tswitch v%d {\n", key)
+			for fieldIndex, field := range emitter.plan.tables.fields {
+				if field.key.table != dynamic.table || field.tags != dynamic.tags ||
+					field.child != invalidBackendValueID || field.methodProto >= 0 {
+					continue
+				}
+				fmt.Fprintf(&emitter.body, "\tcase uint32(%d):\n", field.key.name)
+				fmt.Fprintf(&emitter.body, "\t\tv%d = %s\n", destination, emitter.scalarField(fieldIndex))
+				fmt.Fprintf(&emitter.body, "\t\tvp%d = true\n", destination)
+			}
+			emitter.body.WriteString("\t}\n")
+			return false, nil
+		}
 		if handled, err := emitter.emitRecordDynamicChildSelector(operation, definition); handled {
 			return false, err
 		}
@@ -2760,6 +2898,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		}
 		return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no fused child-record lookup", operation.pc)
 	case opGetStringField:
+		if handled, err := emitter.emitRecordIndexFunctionGet(operation, definition); handled {
+			return false, err
+		}
 		if handled, err := emitter.emitRecordGetStringField(operation, definition); handled {
 			return false, err
 		}
@@ -2815,6 +2956,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		emitter.emitGoto(int32(block.id), nextBlock, 1)
 		return true, nil
 	case opFastCall:
+		if _, ok := emitter.plan.records.metatableOperation(operation); ok {
+			return false, nil
+		}
 		if handled, err := emitter.emitRecordRootArrayIntrinsic(operation, definition, use); handled {
 			return false, err
 		}

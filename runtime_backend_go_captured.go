@@ -1,5 +1,58 @@
 package ember
 
+func backendGoCapturedTableFieldsForClosure(
+	caller *backendProtoIR,
+	target *backendProtoIR,
+	closure *backendOperationIR,
+) (map[int32][]backendGoCapturedTableField, bool) {
+	if caller == nil || target == nil || closure == nil || closure.op != opClosure {
+		return nil, false
+	}
+	capturedUpvalues := backendGoCapturedRecordUpvalues(target)
+	if len(capturedUpvalues) == 0 {
+		return nil, true
+	}
+	records := analyzeBackendGoRecordTables(caller, analyzeBackendGoStructuralKeys(caller, backendGoNumericOptions{}))
+	fields := make(map[int32][]backendGoCapturedTableField)
+	for upvalue := 0; upvalue < len(target.upvalues); upvalue++ {
+		if len(capturedUpvalues[int32(upvalue)]) == 0 {
+			continue
+		}
+		descriptor := target.upvalues[upvalue]
+		if descriptor.local == 0 || descriptor.index >= uint32(caller.registers) {
+			return nil, false
+		}
+		captured := backendValueBeforeOperation(caller, closure, int32(descriptor.index))
+		recordIndex, ok := records.recordByRoot[records.root(captured)]
+		if !ok || recordIndex < 0 || recordIndex >= len(records.records) {
+			return nil, false
+		}
+		record := &records.records[recordIndex]
+		for field, name := range record.fieldNames {
+			if field >= len(record.fieldValues) ||
+				field >= len(record.fieldPresent) || !record.fieldPresent[field] {
+				return nil, false
+			}
+			value := record.fieldValues[field]
+			if !caller.validBackendValue(value) {
+				return nil, false
+			}
+			tags := caller.values[value-1].tags
+			if tags == 0 || tags&(tags-1) != 0 ||
+				tags&^(backendTagNumber|backendTagBool|backendTagString) != 0 {
+				return nil, false
+			}
+			fields[int32(upvalue)] = append(fields[int32(upvalue)], backendGoCapturedTableField{
+				name: name, tags: tags,
+			})
+		}
+		if len(fields[int32(upvalue)]) == 0 {
+			return nil, false
+		}
+	}
+	return fields, true
+}
+
 type backendGoCapturedRecordCall struct {
 	target       backendGoNumericTarget
 	callerFields []backendGoRecordFieldOperation
