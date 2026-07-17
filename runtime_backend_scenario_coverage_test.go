@@ -48,11 +48,11 @@ func TestBackendGoExactBenchmarkCorporaCanGenerate(t *testing.T) {
 				source := "local function kernel(seed)\n" + tc.source + "\nend\nreturn kernel\n"
 				switch tc.name {
 				case "event_dispatch":
-					backendEventDispatchGeneratedSources(t, source)
+					backendExactEventDispatchCanGenerate(t, source)
 				case "prototype_fallback":
-					backendPrototypeFallbackGeneratedSources(t, source)
+					backendExactPrototypeFallbackCanGenerate(t, source)
 				case "signal_bus_callbacks":
-					backendSignalBusGeneratedSources(t, source)
+					backendExactSignalBusCanGenerate(t, source)
 				case "sparse_grid_neighbors":
 					backendScenarioSparseGridCanGenerate(t, source)
 				case "dirty_metatable_writes":
@@ -120,12 +120,41 @@ func backendExactClosureCanGenerate(t *testing.T, source string) {
 	if len(irs) != 4 {
 		t.Fatalf("exact closure Proto count = %d, want 4", len(irs))
 	}
-	targets := backendClosureProofTargets(irs)
+	targets := backendExactInferredTargets(t, irs, 2, 3)
 	if _, err := emitBackendGoNumericProof(irs[3], backendGoNumericOptions{
 		packageName: "ember", functionName: targets[3].functionName,
+		receiverTable: targets[3].receiverTable, receiverTables: targets[3].receiverTables,
+		fixedVarargCount:    targets[3].fixedVarargCount,
+		capturedTableFields: targets[3].capturedTableFields,
 	}); err != nil {
 		t.Fatal(err)
 	}
+	backendExactCallerCanGenerate(t, irs[1], targets)
+}
+
+func backendExactEventDispatchCanGenerate(t *testing.T, source string) {
+	t.Helper()
+	irs := backendEventDispatchProofIRs(t, source)
+	targets := backendExactInferredTargets(t, irs, 2, 3, 4)
+	for _, protoID := range []int32{2, 3, 4} {
+		backendExactTargetCanGenerate(t, targets[protoID], targets)
+	}
+	backendExactCallerCanGenerate(t, irs[1], targets)
+}
+
+func backendExactPrototypeFallbackCanGenerate(t *testing.T, source string) {
+	t.Helper()
+	irs := backendPrototypeFallbackProofIRs(t, source)
+	targets := backendExactInferredTargets(t, irs, 2)
+	backendExactTargetCanGenerate(t, targets[2], targets)
+	backendExactCallerCanGenerate(t, irs[1], targets)
+}
+
+func backendExactSignalBusCanGenerate(t *testing.T, source string) {
+	t.Helper()
+	irs := backendSignalBusProofIRs(t, source)
+	targets := backendExactInferredTargets(t, irs, 2, 3)
+	backendExactTargetCanGenerate(t, targets[3], targets)
 	backendExactCallerCanGenerate(t, irs[1], targets)
 }
 
@@ -135,9 +164,10 @@ func backendExactMethodCanGenerate(t *testing.T, source string) {
 	if len(irs) != 3 {
 		t.Fatalf("exact method Proto count = %d, want 3", len(irs))
 	}
-	targets := backendMethodProofTargets(irs)
+	targets := backendExactInferredTargets(t, irs, 2)
 	if _, err := emitBackendGoNumericProof(irs[2], backendGoNumericOptions{
-		packageName: "ember", functionName: targets[2].functionName, receiverTable: true,
+		packageName: "ember", functionName: targets[2].functionName,
+		receiverTable: targets[2].receiverTable, receiverTables: targets[2].receiverTables,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +180,7 @@ func backendExactVarargCanGenerate(t *testing.T, source string) {
 	if len(irs) != 3 {
 		t.Fatalf("exact vararg Proto count = %d, want 3", len(irs))
 	}
-	targets := backendVarargProofTargets(irs)
+	targets := backendExactInferredTargets(t, irs, 2)
 	if _, err := emitBackendGoNumericProof(irs[2], backendGoNumericOptions{
 		packageName: "ember", functionName: targets[2].functionName,
 		fixedVarargCount: targets[2].fixedVarargCount,
@@ -166,7 +196,7 @@ func backendExactRecursiveCanGenerate(t *testing.T, source string) {
 	if len(irs) != 3 {
 		t.Fatalf("exact recursive Proto count = %d, want 3", len(irs))
 	}
-	targets := backendRecursiveProofTargets(irs)
+	targets := backendExactInferredTargets(t, irs, 2)
 	if _, err := emitBackendGoNumericProof(irs[2], backendGoNumericOptions{
 		packageName: "ember", functionName: targets[2].functionName, selfRecursive: true,
 	}); err != nil {
@@ -179,7 +209,7 @@ func TestBackendGoOpenDirectTailReturnIsExactAndFailClosed(t *testing.T) {
 	tc := loadLuauBenchmarkCases(t, "classicLuauCases", []string{"recursive_fibonacci"})[0]
 	source := "local function kernel(seed)\n" + tc.source + "\nend\nreturn kernel\n"
 	irs, _ := backendExactCorpusIRs(t, source)
-	targets := backendRecursiveProofTargets(irs)
+	targets := backendExactInferredTargets(t, irs, 2)
 	options := backendGoNumericOptions{
 		packageName:          "ember",
 		functionName:         "backendGeneratedExactRecursiveTail",
@@ -248,10 +278,11 @@ func backendExactCoroutineCanGenerate(t *testing.T, source string) {
 	if len(irs) != 3 {
 		t.Fatalf("exact coroutine Proto count = %d, want 3", len(irs))
 	}
+	targets := backendExactInferredTargets(t, irs, 2)
 	if _, err := emitBackendGoNumericProof(irs[1], backendGoNumericOptions{
 		packageName: "ember", functionName: "backendGeneratedExactCoroutine",
 		preparedFunctionName: "backendGeneratedExactCoroutinePrepared",
-		directTargets:        backendCoroutineProofTargets(irs),
+		directTargets:        targets,
 		coroutineDeadString:  backendCoroutineDeadStringID(t, image),
 	}); err != nil {
 		t.Fatal(err)
@@ -268,10 +299,40 @@ func backendExactCallerCanGenerate(t *testing.T, ir *backendProtoIR, targets []b
 	}
 }
 
+func backendExactInferredTargets(t *testing.T, irs []*backendProtoIR, protoIDs ...int32) []backendGoNumericTarget {
+	t.Helper()
+	targets, err := inferBackendGoNumericTargets(irs, protoIDs, "backendGeneratedExactTarget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return targets
+}
+
+func backendExactTargetCanGenerate(
+	t *testing.T,
+	target backendGoNumericTarget,
+	targets []backendGoNumericTarget,
+) {
+	t.Helper()
+	if _, err := emitBackendGoNumericProof(target.ir, backendGoNumericOptions{
+		packageName:         "ember",
+		functionName:        target.functionName,
+		directTargets:       targets,
+		selfRecursive:       target.selfRecursive,
+		fixedVarargCount:    target.fixedVarargCount,
+		receiverTable:       target.receiverTable,
+		receiverTables:      target.receiverTables,
+		coroutineTarget:     backendGoNumericHasCoroutineYield(target.ir),
+		capturedTableFields: target.capturedTableFields,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func backendScenarioSparseGridCanGenerate(t *testing.T, source string) {
 	t.Helper()
 	irs := backendStructuralStringKeyProofIRs(t, source)
-	targets := backendStructuralStringKeyProofTargets(irs)
+	targets := backendExactInferredTargets(t, irs, 2)
 	if _, err := emitBackendGoNumericProof(irs[2], backendGoNumericOptions{
 		packageName: "ember", functionName: targets[2].functionName,
 	}); err != nil {
@@ -288,7 +349,7 @@ func backendScenarioSparseGridCanGenerate(t *testing.T, source string) {
 func backendScenarioCommandRouterCanGenerate(t *testing.T, source string) {
 	t.Helper()
 	irs := backendCommandRouterProofIRsForSource(t, source)
-	targets := backendCommandRouterProofTargets(irs)
+	targets := backendExactInferredTargets(t, irs, 2)
 	if _, err := emitBackendGoNumericProof(irs[2], backendGoNumericOptions{
 		packageName: "ember", functionName: targets[2].functionName,
 		fixedVarargCount: targets[2].fixedVarargCount,
