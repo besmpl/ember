@@ -313,6 +313,22 @@ p90 `<=1.05`. Results, effects, errors, instruction accounting, owner
 lifecycle, deployment facts, warmed allocations, build time, and code size are
 independent blocking gates.
 
+The guest-throughput gate is satisfied by two independent clean captures from
+exact source commit `8ee4d09ea6267f965bdbf38608bb1a78de37c88a`. Each capture
+contains 889 schema-v2 raw lines and 223 fitted-slope lines, including headers,
+for all 37 cases under Go 1.26.4 on Darwin 24.6.0/arm64, Apple M1,
+`CGO_ENABLED=0`, `GOMAXPROCS=1`, and pinned Luau 0.728. Their immutable
+directory hashes are:
+
+- A: `be815373e432ff95c57c6c4a9ab141458388348d14ff4ca3519d5194d21115b9`;
+- B: `9f57c8140a0549b87f440b834ff712430e5099943e19b88d16ecea2135dfba92`.
+
+The strict ratio gate passes all 74 capture/case rows. The largest median and
+nearest-rank p90 are `0.184557x` and `0.186843x`, both on capture A's
+`scenario/cooldown_scheduler` row. This evidence measures the owner-entry
+`guest_batch_v1` contract only; it does not relabel public-call lifecycle
+latency as guest throughput.
+
 This does not claim that dynamic `Compile` or one public callback crossing is
 1:1 unless those separately named measurements also pass.
 
