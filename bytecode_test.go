@@ -7171,7 +7171,7 @@ func loadScenarioBenchmarkCases(t *testing.T, names []string) []scenarioBenchmar
 	return loadLuauBenchmarkCases(t, "scenarioLuauCases", names)
 }
 
-func loadLuauBenchmarkCases(t *testing.T, variable string, names []string) []scenarioBenchmarkCase {
+func loadLuauBenchmarkCases(t testing.TB, variable string, names []string) []scenarioBenchmarkCase {
 	t.Helper()
 	wanted := make(map[string]bool, len(names))
 	for _, name := range names {
@@ -7220,7 +7220,7 @@ func loadLuauBenchmarkCases(t *testing.T, variable string, names []string) []sce
 	return cases
 }
 
-func parseScenarioBenchmarkCase(t *testing.T, lit *ast.CompositeLit) scenarioBenchmarkCase {
+func parseScenarioBenchmarkCase(t testing.TB, lit *ast.CompositeLit) scenarioBenchmarkCase {
 	t.Helper()
 	var tc scenarioBenchmarkCase
 	for _, element := range lit.Elts {
