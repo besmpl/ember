@@ -4,10 +4,26 @@ import (
 	"bytes"
 	goparser "go/parser"
 	"go/token"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+const backendCapturedBatchProofSource = `
+local kernel = function(value)
+    return value + 1
+end
+local batch = function(count, seed)
+    local checksum = 0
+    for index = 1, count do
+        local value = kernel(seed + index)
+        checksum = checksum + value * (index % 7 + 1)
+    end
+    return checksum
+end
+return batch
+`
 
 func TestBackendGoNumericProgramOwnsTargetRolesAndFileOrder(t *testing.T) {
 	tests := []struct {
@@ -102,17 +118,7 @@ func TestBackendGoNumericProgramFailsClosedWithoutPartialOutput(t *testing.T) {
 }
 
 func TestBackendGoNumericProgramBindsStaticCallableUpvalue(t *testing.T) {
-	const source = `
-local kernel = function(value)
-    return value + 1
-end
-local batch = function(count)
-    local value = kernel(count)
-    return value * 2
-end
-return batch
-`
-	irs, _ := backendExactCorpusIRs(t, source)
+	irs, _ := backendExactCorpusIRs(t, backendCapturedBatchProofSource)
 	entryProto := int32(2)
 	if targetProto, ok := backendGoNumericStaticUpvalueTargetProto(irs, entryProto, 0); !ok || targetProto != 1 {
 		t.Fatalf("static callable upvalue target = %d, %t, want Proto 1", targetProto, ok)
@@ -132,6 +138,22 @@ return batch
 	}
 	if !bytes.Contains(generated, []byte("backendGeneratedCapturedTargetProto1(")) {
 		t.Fatal("generated program does not call the statically captured target")
+	}
+	if !bytes.Contains(generated, []byte("var ok9 bool")) {
+		t.Fatal("generated program does not declare the captured-call guard")
+	}
+	wantPaths := map[int32]string{
+		1: "runtime_backend_captured_target_generated_test.go",
+		2: "runtime_backend_captured_batch_generated_test.go",
+	}
+	for _, file := range files {
+		want, err := os.ReadFile(wantPaths[file.protoID])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(file.source, want) {
+			t.Fatalf("generated captured-call fixture Proto %d is stale", file.protoID)
+		}
 	}
 }
 

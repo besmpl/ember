@@ -345,6 +345,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		needsOK := !backendGoNumericOperationDead(plan, operation) &&
 			(operation.op == opCallOne || operation.op == opCallLocalOne ||
 				operation.op == opCall && backendGoNumericScalarReplacedCall(ir, options, operation) ||
+				operation.op == opCallUpvalueOne && (!options.selfRecursive || operation.b != 0) ||
 				operation.op == opCallMethodOne)
 		if _, ok := plan.indexFunctions.call(operation); ok {
 			needsOK = true
@@ -457,6 +458,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			needsOK := !backendGoNumericOperationDead(plan, operation) &&
 				(operation.op == opCallOne || operation.op == opCallLocalOne ||
 					operation.op == opCall && backendGoNumericScalarReplacedCall(ir, options, operation) ||
+					operation.op == opCallUpvalueOne && (!options.selfRecursive || operation.b != 0) ||
 					operation.op == opCallMethodOne)
 			if _, ok := plan.indexFunctions.call(operation); ok {
 				needsOK = true

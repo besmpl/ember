@@ -292,6 +292,120 @@ func TestMachinePreparedDirectCallRunsWithoutClosureAndReplaysCalleeGuard(t *tes
 	}
 }
 
+func TestMachinePreparedCapturedBatchMatchesGeneric(t *testing.T) {
+	image := machinePreparedTestImageForSource(t, backendCapturedBatchProofSource)
+	calls := 0
+	var observed machinePreparedExit
+	program := machinePreparedTestProgram(t, image, 0, 2, func(context machinePreparedContext) machinePreparedExit {
+		calls++
+		observed = backendGeneratedCapturedPrepared(context)
+		return observed
+	})
+	prepared, err := newMachineOwnerWithPrepared(image, program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generic, err := newMachineOwner(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := prepared.close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := generic.close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	preparedClosure := machinePreparedCapturedBatchClosure(t, prepared)
+	genericClosure := machinePreparedCapturedBatchClosure(t, generic)
+
+	runs := 0
+	for _, count := range []float64{0, 1, 7, 29} {
+		for _, seed := range []float64{-29, -1, 0, 29} {
+			preparedCount, err := prepared.importValueStopped(NumberValue(count))
+			if err != nil {
+				t.Fatal(err)
+			}
+			preparedSeed, err := prepared.importValueStopped(NumberValue(seed))
+			if err != nil {
+				t.Fatal(err)
+			}
+			genericCount, err := generic.importValueStopped(NumberValue(count))
+			if err != nil {
+				t.Fatal(err)
+			}
+			genericSeed, err := generic.importValueStopped(NumberValue(seed))
+			if err != nil {
+				t.Fatal(err)
+			}
+			runMachinePreparedTestClosure(t, prepared, 2, preparedClosure, []slot{preparedCount, preparedSeed}, nil)
+			runMachinePreparedTestClosure(t, generic, 2, genericClosure, []slot{genericCount, genericSeed}, nil)
+			want := backendCapturedBatchExpected(count, seed)
+			assertMachineOwnerNumberResult(t, prepared, want)
+			assertMachineOwnerNumberResult(t, generic, want)
+			runs++
+		}
+	}
+	if calls != runs {
+		t.Fatalf("prepared captured-batch calls = %d, want %d", calls, runs)
+	}
+
+	preparedCount, err := prepared.importValueStopped(StringValue("7"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedSeed, err := prepared.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericCount, err := generic.importValueStopped(StringValue("7"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericSeed, err := generic.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runMachinePreparedTestClosure(t, prepared, 2, preparedClosure, []slot{preparedCount, preparedSeed}, nil)
+	runMachinePreparedTestClosure(t, generic, 2, genericClosure, []slot{genericCount, genericSeed}, nil)
+	want := backendCapturedBatchExpected(7, 29)
+	assertMachineOwnerNumberResult(t, prepared, want)
+	assertMachineOwnerNumberResult(t, generic, want)
+	if calls != runs+1 || observed.kind != machinePreparedExitReplayEntry {
+		t.Fatalf("prepared captured-batch replay = calls %d exit %#v", calls, observed)
+	}
+}
+
+func machinePreparedCapturedBatchClosure(tb testing.TB, owner *machineOwner) machineClosureHandle {
+	tb.Helper()
+	kernel, err := owner.closures.createClosureStopped(0, 1, nil)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	kernelValue, err := slotPackHandle(slotTagClosure, kernel.index, kernel.generation)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	batch, err := owner.closures.createClosureStopped(0, 2, []machineCaptureDescriptor{{
+		mode:  machineCaptureByValue,
+		value: kernelValue,
+	}})
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return batch
+}
+
+func backendCapturedBatchExpected(count, seed float64) float64 {
+	checksum := 0.0
+	for index := 1.0; index <= count; index++ {
+		value := seed + index + 1
+		checksum += value * (math.Mod(index, 7) + 1)
+	}
+	return checksum
+}
+
 func TestMachinePreparedScalarTableFieldsAvoidAllocationAndReplayEntry(t *testing.T) {
 	image := machinePreparedTestImageForSource(t, backendTableFieldProofSource)
 	calls := 0
@@ -4521,13 +4635,24 @@ func runMachinePreparedTestProto(
 	args []slot,
 	controller *executionController,
 ) {
+	runMachinePreparedTestClosure(t, owner, protoID, machineClosureHandle{}, args, controller)
+}
+
+func runMachinePreparedTestClosure(
+	t *testing.T,
+	owner *machineOwner,
+	protoID int32,
+	closure machineClosureHandle,
+	args []slot,
+	controller *executionController,
+) {
 	t.Helper()
 	lease, err := owner.beginRun()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer lease.end()
-	if err := owner.executeStopped(0, protoID, machineClosureHandle{}, args, controller, machineRunEffects{}); err != nil {
+	if err := owner.executeStopped(0, protoID, closure, args, controller, machineRunEffects{}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -4580,6 +4705,17 @@ func BenchmarkMachinePreparedNumericDirectCallOwner(b *testing.B) {
 func BenchmarkMachineGenericNumericDirectCallOwner(b *testing.B) {
 	image := machinePreparedBenchmarkImage(b, backendNumericCallProofSource)
 	benchmarkMachineNumericOwner(b, image, nil)
+}
+
+func BenchmarkMachinePreparedCapturedBatchOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendCapturedBatchProofSource)
+	program := machinePreparedBenchmarkProgramAt(b, image, 2, backendGeneratedCapturedPrepared)
+	benchmarkMachineCapturedBatchOwner(b, image, program)
+}
+
+func BenchmarkMachineGenericCapturedBatchOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendCapturedBatchProofSource)
+	benchmarkMachineCapturedBatchOwner(b, image, nil)
 }
 
 func BenchmarkMachinePreparedScalarTableFieldOwner(b *testing.B) {
@@ -4992,6 +5128,47 @@ func benchmarkMachineNumericOwner(b *testing.B, image *programImage, program *ma
 	backendGeneratedNumericSink = value
 }
 
+func benchmarkMachineCapturedBatchOwner(b *testing.B, image *programImage, program *machinePreparedProgram) {
+	b.Helper()
+	owner, err := newMachineOwnerWithPrepared(image, program)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() {
+		if err := owner.close(); err != nil {
+			b.Fatal(err)
+		}
+	})
+	closure := machinePreparedCapturedBatchClosure(b, owner)
+	count, err := owner.importValueStopped(NumberValue(1000))
+	if err != nil {
+		b.Fatal(err)
+	}
+	seed, err := owner.importValueStopped(NumberValue(29))
+	if err != nil {
+		b.Fatal(err)
+	}
+	args := []slot{count, seed}
+	lease, err := owner.beginRun()
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer lease.end()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		if err := owner.executeStopped(0, 2, closure, args, nil, machineRunEffects{}); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	value, err := owner.number(owner.results[0])
+	if err != nil {
+		b.Fatal(err)
+	}
+	backendGeneratedNumericSink = value
+}
+
 func machinePreparedBenchmarkImage(tb testing.TB, source string) *programImage {
 	tb.Helper()
 	proto, err := Compile(source)
@@ -5022,13 +5199,22 @@ func machinePreparedBenchmarkProgram(
 	image *programImage,
 	function machinePreparedFunction,
 ) *machinePreparedProgram {
+	return machinePreparedBenchmarkProgramAt(tb, image, 1, function)
+}
+
+func machinePreparedBenchmarkProgramAt(
+	tb testing.TB,
+	image *programImage,
+	protoID int32,
+	function machinePreparedFunction,
+) *machinePreparedProgram {
 	tb.Helper()
 	ir, err := buildBackendProgramIR(image)
 	if err != nil {
 		tb.Fatal(err)
 	}
 	functions := make([]machinePreparedFunction, len(ir.modules[0].protos))
-	functions[1] = function
+	functions[protoID] = function
 	return &machinePreparedProgram{
 		abiVersion:      ir.abiVersion,
 		semanticVersion: ir.semanticVersion,
