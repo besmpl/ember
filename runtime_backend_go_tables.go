@@ -40,6 +40,7 @@ type backendGoScalarTablePlan struct {
 	index          map[backendGoScalarFieldKey]int
 	arrays         []backendGoScalarArray
 	arrayIndex     map[backendValueID]int
+	arrayGetByPC   map[int32]int
 	indexFallback  map[backendValueID]backendValueID
 	metatableByPC  map[int32]backendGoScalarMetatable
 	iteratorValues []bool
@@ -64,6 +65,7 @@ func analyzeBackendGoScalarTablesExcluding(
 		roots:         make([]backendValueID, len(ir.values)),
 		index:         make(map[backendGoScalarFieldKey]int),
 		arrayIndex:    make(map[backendValueID]int),
+		arrayGetByPC:  make(map[int32]int),
 		indexFallback: make(map[backendValueID]backendValueID),
 		metatableByPC: make(map[int32]backendGoScalarMetatable),
 		iteratorByPC:  make(map[int32]int),
@@ -452,6 +454,21 @@ func analyzeBackendGoScalarTablesExcluding(
 			}
 		}
 	}
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op != opGetIndex || len(operation.defs) != 1 {
+			continue
+		}
+		table := plan.root(backendOperationUse(operation, operation.b))
+		arrayIndex, ok := plan.arrayIndex[table]
+		if !ok {
+			continue
+		}
+		if plan.arrays[arrayIndex].mutable {
+			return backendGoScalarTablePlan{}, nil
+		}
+		plan.arrayGetByPC[operation.pc] = arrayIndex
+	}
 	if !plan.analyzeIterators(ir) {
 		return backendGoScalarTablePlan{}, nil
 	}
@@ -477,6 +494,13 @@ func analyzeBackendGoScalarTablesExcluding(
 				}
 			case opGetStringField:
 				if use.register != operation.b {
+					return backendGoScalarTablePlan{}, nil
+				}
+			case opGetIndex:
+				if use.register != operation.b {
+					return backendGoScalarTablePlan{}, nil
+				}
+				if _, ok := plan.arrayGetByPC[operation.pc]; !ok {
 					return backendGoScalarTablePlan{}, nil
 				}
 			case opSetField:
@@ -984,6 +1008,12 @@ func (plan backendGoScalarTablePlan) arrayOperation(
 			return 0, backendGoScalarArray{}, 0, false
 		}
 		return arrayIndex, plan.arrays[arrayIndex], element, true
+	case opGetIndex:
+		arrayIndex, ok := plan.arrayGetByPC[operation.pc]
+		if !ok || arrayIndex < 0 || arrayIndex >= len(plan.arrays) {
+			return 0, backendGoScalarArray{}, 0, false
+		}
+		return arrayIndex, plan.arrays[arrayIndex], 0, true
 	case opPrepareIter, opArrayNextJump2:
 		arrayIndex, ok := plan.iteratorByPC[operation.pc]
 		if !ok || arrayIndex < 0 || arrayIndex >= len(plan.arrays) {

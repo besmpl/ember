@@ -1501,6 +1501,16 @@ func (plan *backendGoRecordTablePlan) finiteStringDomain(
 			if !ok {
 				return nil, false
 			}
+		case opGetIndex:
+			var ok bool
+			sources, ok = plan.fixedScalarArraySources(
+				ir,
+				backendOperationUse(operation, operation.b),
+				operation,
+			)
+			if !ok {
+				return nil, false
+			}
 		default:
 			return nil, false
 		}
@@ -1529,6 +1539,54 @@ func (plan *backendGoRecordTablePlan) finiteStringDomain(
 		}
 	}
 	return domain, true
+}
+
+func (plan *backendGoRecordTablePlan) fixedScalarArraySources(
+	ir *backendProtoIR,
+	table backendValueID,
+	consumer *backendOperationIR,
+) ([]backendValueID, bool) {
+	root := plan.root(table)
+	if root == invalidBackendValueID || consumer == nil {
+		return nil, false
+	}
+	elements := make(map[uint32]backendValueID)
+	var length uint32
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op != opSetField ||
+			plan.root(backendOperationUse(operation, operation.a)) != root {
+			continue
+		}
+		index, ok := backendGoArrayIndexConstant(ir, operation.access.constant)
+		if !ok || index == 0 || index > 32 ||
+			!backendGoScalarTableOperationDominates(ir, operation, consumer) {
+			return nil, false
+		}
+		source := backendOperationUse(operation, operation.c)
+		if !ir.validBackendValue(source) {
+			return nil, false
+		}
+		if _, duplicate := elements[index]; duplicate {
+			return nil, false
+		}
+		elements[index] = source
+		if index > length {
+			length = index
+		}
+	}
+	if length == 0 || int(length) != len(elements) {
+		return nil, false
+	}
+	sources := make([]backendValueID, length)
+	for index := uint32(1); index <= length; index++ {
+		source, ok := elements[index]
+		if !ok {
+			return nil, false
+		}
+		sources[index-1] = source
+	}
+	return sources, true
 }
 
 func (plan *backendGoRecordTablePlan) recordFieldSources(

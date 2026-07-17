@@ -731,6 +731,37 @@ The retained path has moved beyond the original starting state:
   cold bounds/stack-growth helpers and contain no opcode, descriptor, Machine
   table, runtime string, interning, or VM dispatch. Fifteen of the 25 Scenario
   kernels now emit through the single-Proto proof route.
+- The scalar string-array and optional-deletion slice lets one immutable,
+  dense, bounded scalar array feed a dynamic numeric lookup. Generated code
+  guards integer range before indexing its ordinary Go array, while finite
+  string-domain analysis follows the lookup back to all dominating constant
+  elements and expands only those verified image string IDs. This composes
+  with typed child-record presence: dynamic numeric component insertion sets
+  payload and presence, ordinary updates preserve presence, and assigning nil
+  clears presence without fabricating a zero payload. A parameterized
+  `component_churn` holdout proves a five-string key array, four heterogeneous
+  component records, four dynamic reads, three dynamic writes, insertion,
+  update, deletion, late static optional reads, and nested iteration.
+  Generated Go, prepared owner, generic Machine, and the independent
+  interpreter agree across negative, ordinary, and large seeds. Private
+  function renaming is byte-identical; mixed scalar-array elements,
+  multi-payload components, and escaping component records fail closed;
+  controlled execution stays generic; invalid prepared arguments replay
+  entry; owner table/string counts remain unchanged; direct and prepared paths
+  allocate zero when warmed. The direct kernel has a five-sample median of
+  about 4.575 microseconds (4.563-4.633 microseconds observed), while the
+  prepared owner has a median of about 4.716 microseconds (4.712-4.733
+  microseconds observed), versus about 504.6 microseconds through generic
+  Machine. The corresponding pinned Luau `-O2 -g0` corpus batch has a
+  five-sample median of about 42.24 microseconds per call, including its cold
+  first process sample, making prepared about `0.112x` Luau; this is
+  exploratory evidence, not the required `guest_batch_v1` capture.
+  Deterministic generated source is 53,325 bytes. Linked ARM64 is 7,776 bytes
+  for the direct kernel, 8,384 bytes for the prepared body, and 192 bytes for
+  the wrapper; generated bodies call only cold bounds/stack-growth helpers and
+  contain no opcode, descriptor, Machine table, runtime string, interning, or
+  VM dispatch. Sixteen of the 25 Scenario kernels now emit through the
+  compiler proof route.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final

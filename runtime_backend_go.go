@@ -694,6 +694,8 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						tags = backendTagNumber
 					} else if _, ok := plan.records.arrayGetByPC[operation.pc]; ok {
 						tags = backendTagNumber
+					} else if _, array, _, ok := plan.tables.arrayOperation(ir, operation); ok {
+						tags = array.tags
 					}
 				case opPrepareIter:
 					if _, ok := plan.records.arrayPreparePC[operation.pc]; ok {
@@ -1303,6 +1305,9 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opGetIndex:
+		if _, _, _, ok := plan.tables.arrayOperation(ir, operation); ok {
+			return requireOptional(operation.c, backendTagNumber)
+		}
 		if dynamic, ok := plan.records.dynamicGetByPC[operation.pc]; ok {
 			if err := requireOptional(operation.c, backendTagString); err != nil {
 				return err
@@ -2251,6 +2256,31 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		}
 		return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record-map store", operation.pc)
 	case opGetIndex:
+		if arrayIndex, array, _, ok := emitter.plan.tables.arrayOperation(emitter.ir, operation); ok {
+			destination, err := definition(operation.a)
+			if err != nil {
+				return false, err
+			}
+			key, err := use(operation.c)
+			if err != nil {
+				return false, err
+			}
+			emitter.emitOptionalPresenceGuard(operation, 1, key)
+			emitter.needsMath = true
+			fmt.Fprintf(
+				&emitter.body,
+				"\tif v%d < 1 || v%d > %d || v%d != math.Trunc(v%d) {\n",
+				key,
+				key,
+				array.length,
+				key,
+				key,
+			)
+			fmt.Fprintf(&emitter.body, "\t\t%s\n", emitter.failureReturn())
+			emitter.body.WriteString("\t}\n")
+			fmt.Fprintf(&emitter.body, "\tv%d = a%d[int(v%d)-1]\n", destination, arrayIndex, key)
+			return false, nil
+		}
 		if handled, err := emitter.emitRecordDynamicGet(operation, definition); handled {
 			return false, err
 		}
@@ -2402,7 +2432,7 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		if _, ok := emitter.plan.tables.metatableOperation(operation); ok {
 			return false, nil
 		}
-		arrayIndex, _, _, ok := emitter.plan.tables.arrayOperation(emitter.ir, operation)
+		arrayIndex, array, _, ok := emitter.plan.tables.arrayOperation(emitter.ir, operation)
 		if !ok {
 			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar table intrinsic", operation.pc)
 		}
@@ -2451,7 +2481,11 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			if err != nil {
 				return false, err
 			}
-			fmt.Fprintf(&emitter.body, "\tv%d = float64(n%d)\n", destination, arrayIndex)
+			if array.mutable {
+				fmt.Fprintf(&emitter.body, "\tv%d = float64(n%d)\n", destination, arrayIndex)
+			} else {
+				fmt.Fprintf(&emitter.body, "\tv%d = %d\n", destination, array.length)
+			}
 		default:
 			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported scalar array intrinsic", operation.pc)
 		}
