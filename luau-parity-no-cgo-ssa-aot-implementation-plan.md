@@ -592,8 +592,10 @@ The retained path has moved beyond the original starting state:
   records, one independent three-string key array, observed outer iterator
   indices, finite-string comparisons, and two fused child lookups. Generated
   Go, the prepared owner, generic Machine, and the independent interpreter
-  agree across negative, ordinary, and large seeds. Child escape, child shape
-  drift, mixed child-field kinds, and mixed dynamic-key kinds fail closed;
+  agree across negative, ordinary, and large seeds. Heterogeneous finite child
+  shapes now carry explicit typed presence state; an absent field replays
+  canonical entry at the first operation that requires its payload. Child
+  escape, mixed child-field kinds, and mixed dynamic-key kinds fail closed;
   unknown finite keys replay canonical entry rather than fabricating nil.
   Controlled execution stays on generic Machine; invalid prepared arguments
   replay entry; owner table/string counts remain unchanged; direct and
@@ -639,10 +641,11 @@ The retained path has moved beyond the original starting state:
   `GET_STRING_FIELD` carry the parent member as a compiler-private numeric
   reference into subsequent ordinary field reads or same-kind writes. The
   selector propagates only through proved SSA moves/phis and remains tied to
-  one uniform child family; it never materializes a table or crosses the owner
+  one finite child family; it never materializes a table or crosses the owner
   seam. Invalid selectors replay entry, while child escape, identity changes,
-  shape drift, mixed field kinds, kind-changing writes, and unresolved uses
-  fail closed. A parameterized `economy_market_tick` holdout proves one
+  mixed field kinds, kind-changing writes, and unresolved uses fail closed;
+  heterogeneous finite shapes use typed presence state and replay before a
+  missing payload is consumed. A parameterized `economy_market_tick` holdout proves one
   three-market array, nine nested stock/demand/price records, one four-order
   array, six fused dynamic reads, three fused dynamic writes, three explicit
   child-selector field reads, and guarded `math.min`. Generated Go, prepared
@@ -657,7 +660,8 @@ The retained path has moved beyond the original starting state:
   (969.0-972.4 microseconds observed). The pinned Luau CLI has a five-sample
   median of about 71.91 microseconds per call, including the cold first sample,
   making prepared about `0.131x` Luau. Deterministic generated source is
-  34,122 bytes. Linked ARM64 is 4,288 bytes for the direct kernel and 4,688
+  40,836 bytes after the optional-field representation. Linked ARM64 at the
+  original selector checkpoint was 4,288 bytes for the direct kernel and 4,688
   bytes for the prepared body; each calls Go's supported `math.archMin` helper
   and has only cold bounds/stack-growth helpers otherwise, with no opcode,
   descriptor, Machine table, runtime string, interning, or VM dispatch.
@@ -665,9 +669,10 @@ The retained path has moved beyond the original starting state:
   route.
 - The guarded union-record slice lets a fixed record array contain a finite
   set of heterogeneous shapes. Each union field carries a deterministic
-  per-member presence mask; generated reads and same-kind writes guard the
-  selected member before touching typed storage, so an absent field replays
-  canonical Machine rather than fabricating zero or changing shape. Uniform
+  per-member presence mask; generated reads and same-kind writes propagate a
+  payload local plus a presence bit through SSA, so an absent field replays
+  canonical Machine when an operation requires the payload rather than
+  fabricating zero or changing shape. Uniform
   finite-string indexing over one standalone scalarized record now lowers to
   a direct switch over verified image string IDs; unknown keys replay entry.
   A parameterized `behavior_tree_tick` holdout proves five condition/action
@@ -683,23 +688,55 @@ The retained path has moved beyond the original starting state:
   source; controlled execution remains generic; invalid prepared arguments
   replay entry; owner table/string counts remain unchanged; direct and
   prepared paths allocate zero when warmed. The direct kernel has a
-  five-sample median of about 915.2 ns (914.2-920.3 ns observed), while the
-  prepared owner path has a median of about 967.0 ns (966.8-967.8 ns
+  current three-sample median of about 917.3 ns (917.0-918.8 ns observed), while the
+  prepared owner path has a median of about 974.2 ns (972.6-975.9 ns
   observed), versus about 188.8 microseconds through generic Machine
   (188.3-189.0 microseconds observed). Pinned Luau `-O2 -g0` produced the same
   batch checksum with a warmed five-sample median of about 16.82 microseconds
   per call (16.79-17.89 microseconds observed), making prepared about `0.058x`
-  Luau. Deterministic generated source is 20,962 bytes. Linked ARM64 is 1,328
-  bytes for the direct kernel and 1,472 bytes for the prepared body; each has
+  Luau. Deterministic generated source is 22,398 bytes. Linked ARM64 at the
+  original guarded-union checkpoint was 1,328 bytes for the direct kernel and
+  1,472 bytes for the prepared body; each has
   only cold bounds/stack-growth helpers and no opcode, descriptor, Machine
   table, runtime string, interning, or VM dispatch. Fourteen of the 25
   Scenario kernels now emit through the single-Proto proof route.
+- The typed optional-union slice represents `nil|bool`, `nil|number`, and
+  `nil|string` SSA values as ordinary typed payload locals plus explicit
+  presence bits. Presence propagates through moves and phi edges, equality and
+  truthiness observe nil exactly, and payload-consuming arithmetic, lookup,
+  comparison, and intrinsic operations replay canonical Machine if absent.
+  Fixed heterogeneous record arrays use parallel presence arrays; standalone
+  nested records and heterogeneous child families use presence locals. A
+  bounded structural string-domain analysis follows constants, moves, phis,
+  and record fields, expanding dynamic child-record switches only from proved
+  image string IDs. A parameterized `dialogue_condition_eval` holdout proves
+  two heterogeneous check shapes, optional strings/numbers/bools, one
+  standalone flags child record, finite dynamic reads and insertions, four
+  late-observed flags, and nested iteration. Generated Go, prepared owner,
+  generic Machine, and the independent interpreter agree across negative,
+  ordinary, and large seeds. Private-function renaming is byte-identical;
+  mixed optional payloads and escaping child records fail closed; controlled
+  execution stays generic; invalid prepared arguments replay entry; owner
+  table/string counts remain unchanged; direct and prepared paths allocate
+  zero when warmed. The direct kernel has a five-sample median of about 2.910
+  microseconds (2.909-2.913 microseconds observed), while the prepared owner
+  has a median of about 3.013 microseconds (3.011-3.032 microseconds observed),
+  versus about 325 microseconds through generic Machine. Exploratory pinned
+  Luau `-O2 -g0` batch measurements warmed to a five-sample median of about
+  22.49 microseconds per call after the cold first process sample, making
+  prepared about `0.134x` Luau; this is not a replacement for the required
+  `guest_batch_v1` capture. Deterministic generated source is 33,418 bytes.
+  Linked ARM64 is 3,232 bytes for the direct kernel, 3,536 bytes for the
+  prepared body, and 128 bytes for the wrapper; generated bodies call only
+  cold bounds/stack-growth helpers and contain no opcode, descriptor, Machine
+  table, runtime string, interning, or VM dispatch. Fifteen of the 25 Scenario
+  kernels now emit through the single-Proto proof route.
 
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
 all-37 parity. General non-dense iteration, general table mutation, general
 generated strings, unbounded or polymorphic dynamic string-key maps,
-nil/string unions, escaping strings,
+multi-payload unions, escaping strings,
 general closures/upvalues and dynamic call sets, open varargs/results,
 heterogeneous or dynamically shaped multiple results,
 general recursion and logical-frame/error cases, dynamic/callable metatables,

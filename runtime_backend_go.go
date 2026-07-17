@@ -238,6 +238,11 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			return nil, fmt.Errorf("emit backend Go numeric proof: SSA value %d has unsupported tags %x", valueIndex+1, plan.tags[valueIndex])
 		}
 		fmt.Fprintf(&source, "\tvar v%d %s\n", valueIndex+1, goType)
+		if _, optional := backendGoOptionalScalarTags(plan.tags[valueIndex]); optional {
+			fmt.Fprintf(&source, "\tvar vp%d bool\n", valueIndex+1)
+			fmt.Fprintf(&source, "\t_ = v%d\n", valueIndex+1)
+			fmt.Fprintf(&source, "\t_ = vp%d\n", valueIndex+1)
+		}
 	}
 	for fieldIndex, field := range plan.tables.fields {
 		if field.key.table == plan.tables.externalRoot {
@@ -329,6 +334,11 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 				return nil, fmt.Errorf("emit backend Go numeric proof: SSA value %d has unsupported tags %x", valueIndex+1, plan.tags[valueIndex])
 			}
 			fmt.Fprintf(&source, "\tvar v%d %s\n", valueIndex+1, goType)
+			if _, optional := backendGoOptionalScalarTags(plan.tags[valueIndex]); optional {
+				fmt.Fprintf(&source, "\tvar vp%d bool\n", valueIndex+1)
+				fmt.Fprintf(&source, "\t_ = v%d\n", valueIndex+1)
+				fmt.Fprintf(&source, "\t_ = vp%d\n", valueIndex+1)
+			}
 		}
 		for fieldIndex, field := range plan.tables.fields {
 			if field.key.table == plan.tables.externalRoot {
@@ -935,7 +945,7 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 		operation := &ir.ops[pc]
 		for _, spill := range operation.spillValues {
 			if plan.scalarReplacedValues[spill.value-1] ||
-				plan.tags[spill.value-1] == backendTagString {
+				plan.tags[spill.value-1]&backendTagString != 0 {
 				// The numeric lowerer is effect-free, so replaying the whole
 				// function is exact when a scalar-replaced object or an
 				// owner-neutral image string ID is live.
@@ -1171,7 +1181,31 @@ func verifyBackendGoNumericOperation(
 			return fmt.Errorf("emit backend Go numeric proof: PC %d register %d has no SSA use", operation.pc, register)
 		}
 		if plan.tags[id-1] != want {
-			return fmt.Errorf("emit backend Go numeric proof: PC %d register %d has tags %x, want %x", operation.pc, register, plan.tags[id-1], want)
+			return fmt.Errorf("emit backend Go numeric proof: PC %d %s register %d has tags %x, want %x", operation.pc, opcodeName(operation.op), register, plan.tags[id-1], want)
+		}
+		return nil
+	}
+	requireOptional := func(register int32, want backendTagMask) error {
+		id := backendOperationUse(operation, register)
+		if id == invalidBackendValueID {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d register %d has no SSA use", operation.pc, register)
+		}
+		if plan.tags[id-1] == want {
+			return nil
+		}
+		payload, optional := backendGoOptionalScalarTags(plan.tags[id-1])
+		if !optional || payload != want {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d register %d has tags %x, want optional %x", operation.pc, register, plan.tags[id-1], want)
+		}
+		return nil
+	}
+	requireStore := func(register int32, fieldTags backendTagMask) error {
+		id := backendOperationUse(operation, register)
+		if id == invalidBackendValueID {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d register %d has no SSA use", operation.pc, register)
+		}
+		if !backendGoRecordStoreCompatible(plan.tags[id-1], fieldTags) {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d register %d has tags %x, incompatible with field %x", operation.pc, register, plan.tags[id-1], fieldTags)
 		}
 		return nil
 	}
@@ -1216,7 +1250,7 @@ func verifyBackendGoNumericOperation(
 			if _, child := plan.records.childRecordSet[operation.pc]; child {
 				return nil
 			}
-			return require(operation.c, plan.records.fieldTags(field))
+			return requireStore(operation.c, plan.records.fieldTags(field))
 		}
 		_, field, ok := plan.tables.operationField(ir, operation)
 		if !ok {
@@ -1244,10 +1278,10 @@ func verifyBackendGoNumericOperation(
 		if !ok {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no fused child-record mutation", operation.pc)
 		}
-		if err := require(operation.c, backendTagString); err != nil {
+		if err := requireOptional(operation.c, backendTagString); err != nil {
 			return err
 		}
-		return require(operation.d, plan.records.childRecords[fused.family].fieldTags)
+		return requireStore(operation.d, plan.records.childRecords[fused.family].fieldTags)
 	case opSetField:
 		if _, ok := plan.records.arraySetByPC[operation.pc]; ok {
 			return nil
@@ -1259,10 +1293,10 @@ func verifyBackendGoNumericOperation(
 		return require(operation.c, array.tags)
 	case opSetIndex:
 		if dynamic, ok := plan.records.dynamicSetByPC[operation.pc]; ok {
-			if err := require(operation.b, backendTagString); err != nil {
+			if err := requireOptional(operation.b, backendTagString); err != nil {
 				return err
 			}
-			return require(operation.c, plan.records.dynamicFieldTags(plan.tags, dynamic))
+			return requireStore(operation.c, plan.records.dynamicFieldTags(plan.tags, dynamic))
 		}
 		if _, ok := plan.records.mapSetByPC[operation.pc]; !ok {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record-map store", operation.pc)
@@ -1270,7 +1304,7 @@ func verifyBackendGoNumericOperation(
 		return nil
 	case opGetIndex:
 		if dynamic, ok := plan.records.dynamicGetByPC[operation.pc]; ok {
-			if err := require(operation.c, backendTagString); err != nil {
+			if err := requireOptional(operation.c, backendTagString); err != nil {
 				return err
 			}
 			fieldTags := plan.records.dynamicFieldTags(plan.tags, dynamic)
@@ -1287,7 +1321,7 @@ func verifyBackendGoNumericOperation(
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar record lookup", operation.pc)
 		}
 		if arrayGet {
-			if err := require(operation.c, backendTagNumber); err != nil {
+			if err := requireOptional(operation.c, backendTagNumber); err != nil {
 				return err
 			}
 		}
@@ -1302,7 +1336,7 @@ func verifyBackendGoNumericOperation(
 		if !ok {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no fused child-record lookup", operation.pc)
 		}
-		if err := require(operation.d, backendTagString); err != nil {
+		if err := requireOptional(operation.d, backendTagString); err != nil {
 			return err
 		}
 		fieldTags := plan.records.childRecords[fused.family].fieldTags
@@ -1439,7 +1473,7 @@ func verifyBackendGoNumericOperation(
 				return fmt.Errorf("emit backend Go numeric proof: PC %d changes math.min shape", operation.pc)
 			}
 			for argument := int32(0); argument < operation.c; argument++ {
-				if err := require(operation.a+argument, backendTagNumber); err != nil {
+				if err := requireOptional(operation.a+argument, backendTagNumber); err != nil {
 					return err
 				}
 			}
@@ -1594,17 +1628,17 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow:
-		if err := require(operation.b, backendTagNumber); err != nil {
+		if err := requireOptional(operation.b, backendTagNumber); err != nil {
 			return err
 		}
-		return require(operation.c, backendTagNumber)
+		return requireOptional(operation.c, backendTagNumber)
 	case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
-		if err := require(operation.b, backendTagNumber); err != nil {
+		if err := requireOptional(operation.b, backendTagNumber); err != nil {
 			return err
 		}
 		return verifyBackendGoNumericConstant(ir, operation, operation.c)
 	case opNeg:
-		return require(operation.b, backendTagNumber)
+		return requireOptional(operation.b, backendTagNumber)
 	case opEqual, opNotEqual:
 		left := backendOperationUse(operation, operation.b)
 		right := backendOperationUse(operation, operation.c)
@@ -1621,13 +1655,23 @@ func verifyBackendGoNumericOperation(
 			}
 			return fmt.Errorf("emit backend Go numeric proof: PC %d compares incompatible record references", operation.pc)
 		}
-		if plan.tags[left-1] != plan.tags[right-1] ||
-			(plan.tags[left-1] != backendTagNumber &&
-				plan.tags[left-1] != backendTagBool &&
-				plan.tags[left-1] != backendTagString) {
-			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported equality operands", operation.pc)
+		leftTags := plan.tags[left-1]
+		rightTags := plan.tags[right-1]
+		leftPayload, leftOptional := backendGoOptionalScalarTags(leftTags)
+		rightPayload, rightOptional := backendGoOptionalScalarTags(rightTags)
+		compatible := leftTags == rightTags &&
+			(leftTags == backendTagNumber || leftTags == backendTagBool || leftTags == backendTagString)
+		if leftOptional && rightTags == backendTagNil ||
+			rightOptional && leftTags == backendTagNil ||
+			leftOptional && rightOptional && leftPayload == rightPayload ||
+			leftOptional && rightTags == leftPayload ||
+			rightOptional && leftTags == rightPayload {
+			compatible = true
 		}
-		if plan.tags[left-1] == backendTagString {
+		if !compatible {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported equality operands %x and %x", operation.pc, leftTags, rightTags)
+		}
+		if leftTags&backendTagString != 0 && rightTags&backendTagString != 0 {
 			leftKey, leftOK := plan.keys.key(left)
 			rightKey, rightOK := plan.keys.key(right)
 			if leftOK != rightOK || leftOK && leftKey.domain != rightKey.domain {
@@ -1636,28 +1680,28 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opLess, opLessEqual, opGreater, opGreaterEqual:
-		if err := require(operation.b, backendTagNumber); err != nil {
+		if err := requireOptional(operation.b, backendTagNumber); err != nil {
 			return err
 		}
-		return require(operation.c, backendTagNumber)
+		return requireOptional(operation.c, backendTagNumber)
 	case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
-		if err := require(operation.a, backendTagNumber); err != nil {
+		if err := requireOptional(operation.a, backendTagNumber); err != nil {
 			return err
 		}
-		return require(operation.b, backendTagNumber)
+		return requireOptional(operation.b, backendTagNumber)
 	case opNumericForCheck:
-		if err := require(operation.a, backendTagNumber); err != nil {
+		if err := requireOptional(operation.a, backendTagNumber); err != nil {
 			return err
 		}
-		if err := require(operation.b, backendTagNumber); err != nil {
+		if err := requireOptional(operation.b, backendTagNumber); err != nil {
 			return err
 		}
-		return require(operation.c, backendTagNumber)
+		return requireOptional(operation.c, backendTagNumber)
 	case opNumericForLoop:
-		if err := require(operation.a, backendTagNumber); err != nil {
+		if err := requireOptional(operation.a, backendTagNumber); err != nil {
 			return err
 		}
-		return require(operation.b, backendTagNumber)
+		return requireOptional(operation.b, backendTagNumber)
 	case opGetUpvalue:
 		if operation.b < 0 || int(operation.b) >= len(ir.upvalues) {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d reads invalid upvalue %d", operation.pc, operation.b)
@@ -1678,17 +1722,26 @@ func verifyBackendGoNumericOperation(
 		if left == invalidBackendValueID {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no equality operand", operation.pc)
 		}
-		return verifyBackendGoComparableConstant(ir, operation, operation.b, plan.tags[left-1])
+		tags := plan.tags[left-1]
+		if payload, optional := backendGoOptionalScalarTags(tags); optional {
+			tags = payload
+		}
+		return verifyBackendGoComparableConstant(ir, operation, operation.b, tags)
 	case opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
-		if err := require(operation.a, backendTagNumber); err != nil {
+		if err := requireOptional(operation.a, backendTagNumber); err != nil {
 			return err
 		}
 		return verifyBackendGoNumericConstant(ir, operation, operation.b)
 	case opJumpIfFalse:
 		id := backendOperationUse(operation, operation.a)
-		if id == invalidBackendValueID ||
-			(plan.tags[id-1] != backendTagNumber && plan.tags[id-1] != backendTagBool) {
+		if id == invalidBackendValueID {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported truthy operand", operation.pc)
+		}
+		tags := plan.tags[id-1]
+		if tags != backendTagNumber && tags != backendTagBool && tags != backendTagString {
+			if _, optional := backendGoOptionalScalarTags(tags); !optional {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported truthy operand", operation.pc)
+			}
 		}
 		return nil
 	case opJumpIfTableHasMetatable:
@@ -1917,6 +1970,28 @@ func backendGoNumericType(tags backendTagMask) (string, bool) {
 	}
 }
 
+func backendGoOptionalScalarTags(tags backendTagMask) (backendTagMask, bool) {
+	if tags&backendTagNil == 0 {
+		return 0, false
+	}
+	payload := tags &^ backendTagNil
+	if _, ok := backendGoNumericType(payload); !ok {
+		return 0, false
+	}
+	return payload, true
+}
+
+func backendGoScalarPayloadType(tags backendTagMask) (string, bool) {
+	if goType, ok := backendGoNumericType(tags); ok {
+		return goType, true
+	}
+	payload, ok := backendGoOptionalScalarTags(tags)
+	if !ok {
+		return "", false
+	}
+	return backendGoNumericType(payload)
+}
+
 func backendGoNumericTypeForValue(plan backendGoNumericPlan, id backendValueID) (string, bool) {
 	if _, ok := plan.keys.key(id); ok {
 		return "backendPreparedStringKey", true
@@ -1924,7 +1999,7 @@ func backendGoNumericTypeForValue(plan backendGoNumericPlan, id backendValueID) 
 	if id == invalidBackendValueID || int(id) > len(plan.tags) {
 		return "", false
 	}
-	return backendGoNumericType(plan.tags[id-1])
+	return backendGoScalarPayloadType(plan.tags[id-1])
 }
 
 func backendGoNumericResultTypes(ir *backendProtoIR, plan backendGoNumericPlan) ([]string, error) {
@@ -2127,7 +2202,7 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		if err != nil {
 			return false, err
 		}
-		fmt.Fprintf(&emitter.body, "\tv%d = v%d\n", destination, source)
+		emitter.emitValueCopy(destination, source, 1)
 	case opNewTable:
 		return false, nil
 	case opSetStringField:
@@ -2253,6 +2328,7 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			if err != nil {
 				return false, err
 			}
+			emitter.emitOptionalPresenceGuard(operation, 1, first)
 			fmt.Fprintf(&emitter.body, "\tv%d = v%d\n", destination, first)
 			emitter.needsMath = true
 			for argument := int32(1); argument < operation.c; argument++ {
@@ -2260,6 +2336,7 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 				if err != nil {
 					return false, err
 				}
+				emitter.emitOptionalPresenceGuard(operation, 1, value)
 				fmt.Fprintf(&emitter.body, "\tv%d = math.Min(v%d, v%d)\n", destination, destination, value)
 			}
 			return false, nil
@@ -2440,15 +2517,18 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		destination, _ := definition(operation.a)
 		left, _ := use(operation.b)
 		right, _ := use(operation.c)
+		emitter.emitOptionalPresenceGuard(operation, 1, left, right)
 		emitter.emitNumericBinary(destination, left, fmt.Sprintf("v%d", right), operation.op)
 	case opAddK, opSubK, opMulK, opDivK, opModK, opIDivK:
 		destination, _ := definition(operation.a)
 		left, _ := use(operation.b)
 		right := emitter.numericConstant(operation.c)
+		emitter.emitOptionalPresenceGuard(operation, 1, left)
 		emitter.emitNumericBinary(destination, left, right, operation.op)
 	case opNeg:
 		destination, _ := definition(operation.a)
 		source, _ := use(operation.b)
+		emitter.emitOptionalPresenceGuard(operation, 1, source)
 		fmt.Fprintf(&emitter.body, "\tv%d = -v%d\n", destination, source)
 	case opGetUpvalue:
 		destination, err := definition(operation.a)
@@ -2477,8 +2557,16 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 				fmt.Fprintf(&emitter.body, "\tv%d = v%d %s 0\n", destination, right, backendGoComparisonOperator(operation.op))
 				return false, nil
 			}
+			if expression, ok := emitter.optionalEqualityExpression(left, right); ok {
+				if operation.op == opNotEqual {
+					expression = "!(" + expression + ")"
+				}
+				fmt.Fprintf(&emitter.body, "\tv%d = %s\n", destination, expression)
+				return false, nil
+			}
 		}
 		if operation.op != opEqual && operation.op != opNotEqual {
+			emitter.emitOptionalPresenceGuard(operation, 1, left, right)
 			emitter.emitNaNGuard(operation, 1, left, right)
 		}
 		fmt.Fprintf(&emitter.body, "\tv%d = v%d %s v%d\n", destination, left, backendGoComparisonOperator(operation.op), right)
@@ -2486,6 +2574,7 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		loop, _ := use(operation.a)
 		limit, _ := use(operation.b)
 		step, _ := use(operation.c)
+		emitter.emitOptionalPresenceGuard(operation, 1, loop, limit, step)
 		emitter.emitNaNGuard(operation, 1, loop, limit, step)
 		condition := fmt.Sprintf("(v%d > 0 && v%d > v%d) || (v%d <= 0 && v%d < v%d)", step, loop, limit, step, loop, limit)
 		emitter.emitBranch(int32(block.id), operation.targetPC, condition, 1)
@@ -2494,20 +2583,26 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		destination, _ := definition(operation.a)
 		loop, _ := use(operation.a)
 		step, _ := use(operation.b)
+		emitter.emitOptionalPresenceGuard(operation, 1, loop, step)
 		fmt.Fprintf(&emitter.body, "\tv%d = v%d + v%d\n", destination, loop, step)
 		emitter.emitGoto(int32(block.id), emitter.ir.pcToBlock[operation.targetPC], 1)
 		return true, nil
 	case opJumpIfNotEqualK:
 		left, _ := use(operation.a)
+		expression := fmt.Sprintf("v%d != %s", left, emitter.comparableConstant(operation.b))
+		if _, optional := backendGoOptionalScalarTags(emitter.plan.tags[left-1]); optional {
+			expression = fmt.Sprintf("!vp%d || %s", left, expression)
+		}
 		emitter.emitBranch(
 			int32(block.id),
 			operation.targetPC,
-			fmt.Sprintf("v%d != %s", left, emitter.comparableConstant(operation.b)),
+			expression,
 			1,
 		)
 		return true, nil
 	case opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK:
 		left, _ := use(operation.a)
+		emitter.emitOptionalPresenceGuard(operation, 1, left)
 		emitter.emitNaNGuard(operation, 1, left)
 		operator := backendGoComparisonOperator(operation.op)
 		condition := fmt.Sprintf("v%d %s %s", left, operator, emitter.numericConstant(operation.b))
@@ -2519,6 +2614,7 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 	case opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater:
 		left, _ := use(operation.a)
 		right, _ := use(operation.b)
+		emitter.emitOptionalPresenceGuard(operation, 1, left, right)
 		emitter.emitNaNGuard(operation, 1, left, right)
 		condition := fmt.Sprintf("v%d %s v%d", left, backendGoComparisonOperator(operation.op), right)
 		if operation.op == opJumpIfNotLess || operation.op == opJumpIfNotGreater {
@@ -2533,6 +2629,12 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			expression = fmt.Sprintf("v%d == 0", condition)
 		} else if emitter.plan.tags[condition-1] == backendTagBool {
 			expression = fmt.Sprintf("!v%d", condition)
+		} else if payload, optional := backendGoOptionalScalarTags(emitter.plan.tags[condition-1]); optional {
+			if payload == backendTagBool {
+				expression = fmt.Sprintf("!vp%d || !v%d", condition, condition)
+			} else {
+				expression = fmt.Sprintf("!vp%d", condition)
+			}
 		}
 		emitter.emitBranch(int32(block.id), operation.targetPC, expression, 1)
 		return true, nil
@@ -2798,6 +2900,50 @@ func (emitter *backendGoNumericEmitter) emitNaNGuard(operation *backendOperation
 	}
 }
 
+func (emitter *backendGoNumericEmitter) emitOptionalPresenceGuard(
+	operation *backendOperationIR,
+	indent int,
+	values ...backendValueID,
+) {
+	prefix := strings.Repeat("\t", indent)
+	for _, value := range values {
+		if _, optional := backendGoOptionalScalarTags(emitter.plan.tags[value-1]); !optional {
+			continue
+		}
+		fmt.Fprintf(&emitter.body, "%sif !vp%d {\n", prefix, value)
+		if emitter.prepared {
+			emitter.emitReplayBeforeOperation(operation, indent+1)
+		} else {
+			fmt.Fprintf(&emitter.body, "%s\t%s\n", prefix, emitter.failureReturn())
+		}
+		fmt.Fprintf(&emitter.body, "%s}\n", prefix)
+	}
+}
+
+func (emitter *backendGoNumericEmitter) optionalEqualityExpression(
+	left backendValueID,
+	right backendValueID,
+) (string, bool) {
+	leftTags := emitter.plan.tags[left-1]
+	rightTags := emitter.plan.tags[right-1]
+	leftPayload, leftOptional := backendGoOptionalScalarTags(leftTags)
+	rightPayload, rightOptional := backendGoOptionalScalarTags(rightTags)
+	switch {
+	case leftOptional && rightTags == backendTagNil:
+		return fmt.Sprintf("!vp%d", left), true
+	case rightOptional && leftTags == backendTagNil:
+		return fmt.Sprintf("!vp%d", right), true
+	case leftOptional && rightOptional && leftPayload == rightPayload:
+		return fmt.Sprintf("vp%d == vp%d && (!vp%d || v%d == v%d)", left, right, left, left, right), true
+	case leftOptional && rightTags == leftPayload:
+		return fmt.Sprintf("vp%d && v%d == v%d", left, left, right), true
+	case rightOptional && leftTags == rightPayload:
+		return fmt.Sprintf("vp%d && v%d == v%d", right, left, right), true
+	default:
+		return "", false
+	}
+}
+
 func (emitter *backendGoNumericEmitter) emitReplayBeforeOperation(operation *backendOperationIR, indent int) {
 	prefix := strings.Repeat("\t", indent)
 	if emitter.plan.replayEntry[operation.pc] {
@@ -2806,7 +2952,23 @@ func (emitter *backendGoNumericEmitter) emitReplayBeforeOperation(operation *bac
 	}
 	fmt.Fprintf(&emitter.body, "%sexit := context.replayBeforeOperation(%d, %d)\n", prefix, operation.pc, len(operation.spillValues))
 	for spillIndex, spill := range operation.spillValues {
-		switch emitter.plan.tags[spill.value-1] {
+		tags := emitter.plan.tags[spill.value-1]
+		if payload, optional := backendGoOptionalScalarTags(tags); optional {
+			fmt.Fprintf(&emitter.body, "%sif vp%d {\n", prefix, spill.value)
+			switch payload {
+			case backendTagBool:
+				fmt.Fprintf(&emitter.body, "%s\tcontext.spillBool(%d, %d, v%d)\n", prefix, spillIndex, spill.register, spill.value)
+			case backendTagNumber:
+				fmt.Fprintf(&emitter.body, "%s\tcontext.spillNumber(%d, %d, v%d)\n", prefix, spillIndex, spill.register, spill.value)
+			default:
+				fmt.Fprintf(&emitter.body, "%s\treturn machinePreparedExit{}\n", prefix)
+			}
+			fmt.Fprintf(&emitter.body, "%s} else {\n", prefix)
+			fmt.Fprintf(&emitter.body, "%s\tcontext.spillNil(%d, %d)\n", prefix, spillIndex, spill.register)
+			fmt.Fprintf(&emitter.body, "%s}\n", prefix)
+			continue
+		}
+		switch tags {
 		case backendTagNil:
 			fmt.Fprintf(&emitter.body, "%scontext.spillNil(%d, %d)\n", prefix, spillIndex, spill.register)
 		case backendTagBool:
@@ -2855,7 +3017,7 @@ func (emitter *backendGoNumericEmitter) emitGoto(from, to int32, indent int) {
 			if !emitter.plan.used[copy.destination-1] {
 				continue
 			}
-			fmt.Fprintf(&emitter.body, "%sv%d = v%d\n", prefix, copy.destination, copy.source)
+			emitter.emitValueCopy(copy.destination, copy.source, indent)
 		}
 		fmt.Fprintf(&emitter.body, "%sgoto b%d\n", prefix, to)
 		return
@@ -2865,6 +3027,34 @@ func (emitter *backendGoNumericEmitter) emitGoto(from, to int32, indent int) {
 	} else {
 		fmt.Fprintf(&emitter.body, "%s%s\n", prefix, emitter.failureReturn())
 	}
+}
+
+func (emitter *backendGoNumericEmitter) emitValueCopy(
+	destination backendValueID,
+	source backendValueID,
+	indent int,
+) {
+	prefix := strings.Repeat("\t", indent)
+	destinationTags := emitter.plan.tags[destination-1]
+	if destinationTags == backendTagNil {
+		return
+	}
+	if _, optional := backendGoOptionalScalarTags(destinationTags); !optional {
+		fmt.Fprintf(&emitter.body, "%sv%d = v%d\n", prefix, destination, source)
+		return
+	}
+	sourceTags := emitter.plan.tags[source-1]
+	if sourceTags == backendTagNil {
+		fmt.Fprintf(&emitter.body, "%svp%d = false\n", prefix, destination)
+		return
+	}
+	if _, optional := backendGoOptionalScalarTags(sourceTags); optional {
+		fmt.Fprintf(&emitter.body, "%sv%d = v%d\n", prefix, destination, source)
+		fmt.Fprintf(&emitter.body, "%svp%d = vp%d\n", prefix, destination, source)
+		return
+	}
+	fmt.Fprintf(&emitter.body, "%sv%d = v%d\n", prefix, destination, source)
+	fmt.Fprintf(&emitter.body, "%svp%d = true\n", prefix, destination)
 }
 
 func (emitter *backendGoNumericEmitter) failureReturn() string {

@@ -87,12 +87,21 @@ func backendGeneratedEconomyMarket(p0 float64) (float64, bool) {
 	var v423 uint32
 	var v424 uint32
 	var v425 float64
+	var vp425 bool
+	_ = v425
+	_ = vp425
 	var v426 uint32
 	var v427 float64
+	var vp427 bool
+	_ = v427
+	_ = vp427
 	var v428 float64
 	var v429 float64
 	var v430 uint32
 	var v431 float64
+	var vp431 bool
+	_ = v431
+	_ = vp431
 	var v432 float64
 	var v433 float64
 	var v434 float64
@@ -103,9 +112,15 @@ func backendGeneratedEconomyMarket(p0 float64) (float64, bool) {
 	var v439 float64
 	var v440 uint32
 	var v441 float64
+	var vp441 bool
+	_ = v441
+	_ = vp441
 	var v442 float64
 	var v443 uint32
 	var v444 float64
+	var vp444 bool
+	_ = v444
+	_ = vp444
 	var v445 float64
 	var v446 float64
 	var v447 uint32
@@ -119,6 +134,9 @@ func backendGeneratedEconomyMarket(p0 float64) (float64, bool) {
 	var v455 float64
 	var v456 uint32
 	var v457 float64
+	var vp457 bool
+	_ = v457
+	_ = vp457
 	var v458 float64
 	var v459 float64
 	var v460 uint32
@@ -136,23 +154,38 @@ func backendGeneratedEconomyMarket(p0 float64) (float64, bool) {
 	var v477 float64
 	var v478 float64
 	var v479 float64
+	var vp479 bool
+	_ = v479
+	_ = vp479
 	var v480 float64
 	var v481 float64
 	var v482 float64
+	var vp482 bool
+	_ = v482
+	_ = vp482
 	var v483 float64
 	var v484 float64
 	var v485 float64
 	var v486 float64
+	var vp486 bool
+	_ = v486
+	_ = vp486
 	var v487 float64
 	var v488 float64
 	var v489 float64
 	var v490 float64
 	var r0_0 float64
 	_ = r0_0
+	var rp0_0 bool
+	_ = rp0_0
 	var r0_1 float64
 	_ = r0_1
+	var rp0_1 bool
+	_ = rp0_1
 	var r0_2 float64
 	_ = r0_2
+	var rp0_2 bool
+	_ = rp0_2
 	var r1_0 float64
 	_ = r1_0
 	var r1_1 float64
@@ -161,22 +194,40 @@ func backendGeneratedEconomyMarket(p0 float64) (float64, bool) {
 	_ = r1_2
 	var r2_0 float64
 	_ = r2_0
+	var rp2_0 bool
+	_ = rp2_0
 	var r2_1 float64
 	_ = r2_1
+	var rp2_1 bool
+	_ = rp2_1
 	var r2_2 float64
 	_ = r2_2
+	var rp2_2 bool
+	_ = rp2_2
 	var r3_0 float64
 	_ = r3_0
+	var rp3_0 bool
+	_ = rp3_0
 	var r3_1 float64
 	_ = r3_1
+	var rp3_1 bool
+	_ = rp3_1
 	var r3_2 float64
 	_ = r3_2
+	var rp3_2 bool
+	_ = rp3_2
 	var r4_0 float64
 	_ = r4_0
+	var rp4_0 bool
+	_ = rp4_0
 	var r4_1 float64
 	_ = r4_1
+	var rp4_1 bool
+	_ = rp4_1
 	var r4_2 float64
 	_ = r4_2
+	var rp4_2 bool
+	_ = rp4_2
 	var r5_0 float64
 	_ = r5_0
 	var r5_1 float64
@@ -185,22 +236,40 @@ func backendGeneratedEconomyMarket(p0 float64) (float64, bool) {
 	_ = r5_2
 	var r6_0 float64
 	_ = r6_0
+	var rp6_0 bool
+	_ = rp6_0
 	var r6_1 float64
 	_ = r6_1
+	var rp6_1 bool
+	_ = rp6_1
 	var r6_2 float64
 	_ = r6_2
+	var rp6_2 bool
+	_ = rp6_2
 	var r7_0 float64
 	_ = r7_0
+	var rp7_0 bool
+	_ = rp7_0
 	var r7_1 float64
 	_ = r7_1
+	var rp7_1 bool
+	_ = rp7_1
 	var r7_2 float64
 	_ = r7_2
+	var rp7_2 bool
+	_ = rp7_2
 	var r8_0 float64
 	_ = r8_0
+	var rp8_0 bool
+	_ = rp8_0
 	var r8_1 float64
 	_ = r8_1
+	var rp8_1 bool
+	_ = rp8_1
 	var r8_2 float64
 	_ = r8_2
+	var rp8_2 bool
+	_ = rp8_2
 	var r9_0 float64
 	_ = r9_0
 	var r9_1 float64
@@ -209,16 +278,28 @@ func backendGeneratedEconomyMarket(p0 float64) (float64, bool) {
 	_ = r9_2
 	var r10_0 float64
 	_ = r10_0
+	var rp10_0 bool
+	_ = rp10_0
 	var r10_1 float64
 	_ = r10_1
+	var rp10_1 bool
+	_ = rp10_1
 	var r10_2 float64
 	_ = r10_2
+	var rp10_2 bool
+	_ = rp10_2
 	var r11_0 float64
 	_ = r11_0
+	var rp11_0 bool
+	_ = rp11_0
 	var r11_1 float64
 	_ = r11_1
+	var rp11_1 bool
+	_ = rp11_1
 	var r11_2 float64
 	_ = r11_2
+	var rp11_2 bool
+	_ = rp11_2
 	var r12_0 uint32
 	_ = r12_0
 	var r12_1 float64
@@ -259,72 +340,99 @@ func backendGeneratedEconomyMarket(p0 float64) (float64, bool) {
 	v349 = v348 - math.Floor(v348/math.Float64frombits(0x401c000000000000))*math.Float64frombits(0x401c000000000000)
 	v350 = v347 + v349
 	r0_0 = v350
+	rp0_0 = true
 	v351 = math.Float64frombits(0x4032000000000000)
 	r0_1 = v351
+	rp0_1 = true
 	v352 = math.Float64frombits(0x403e000000000000)
 	r0_2 = v352
+	rp0_2 = true
 	r1_0 = 1
 	v354 = math.Float64frombits(0x4020000000000000)
 	r2_0 = v354
+	rp2_0 = true
 	v355 = math.Float64frombits(0x402c000000000000)
 	r2_1 = v355
+	rp2_1 = true
 	v356 = math.Float64frombits(0x4018000000000000)
 	r2_2 = v356
+	rp2_2 = true
 	r1_1 = 1
 	v358 = math.Float64frombits(0x4008000000000000)
 	r3_0 = v358
+	rp3_0 = true
 	v359 = math.Float64frombits(0x4022000000000000)
 	r3_1 = v359
+	rp3_1 = true
 	v360 = math.Float64frombits(0x4010000000000000)
 	r3_2 = v360
+	rp3_2 = true
 	r1_2 = 1
 	ra0_0[0] = r1_0
 	ra0_1[0] = r1_1
 	ra0_2[0] = r1_2
 	v363 = math.Float64frombits(0x4028000000000000)
 	r4_0 = v363
+	rp4_0 = true
 	v364 = math.Float64frombits(0x4041800000000000)
 	r4_1 = v364
+	rp4_1 = true
 	v365 = math.Float64frombits(0x4034000000000000)
 	r4_2 = v365
+	rp4_2 = true
 	r5_0 = 2
 	v367 = math.Float64frombits(0x402e000000000000)
 	r6_0 = v367
+	rp6_0 = true
 	v368 = math.Float64frombits(0x4014000000000000)
 	r6_1 = v368
+	rp6_1 = true
 	v369 = math.Float64frombits(0x4024000000000000)
 	r6_2 = v369
+	rp6_2 = true
 	r5_1 = 2
 	v371 = math.Float64frombits(0x4014000000000000)
 	r7_0 = v371
+	rp7_0 = true
 	v372 = math.Float64frombits(0x401c000000000000)
 	r7_1 = v372
+	rp7_1 = true
 	v373 = math.Float64frombits(0x4018000000000000)
 	r7_2 = v373
+	rp7_2 = true
 	r5_2 = 2
 	ra0_0[1] = r5_0
 	ra0_1[1] = r5_1
 	ra0_2[1] = r5_2
 	v376 = math.Float64frombits(0x4039000000000000)
 	r8_0 = v376
+	rp8_0 = true
 	v377 = math.Float64frombits(0x4026000000000000)
 	r8_1 = v377
+	rp8_1 = true
 	v378 = math.Float64frombits(0x4049000000000000)
 	r8_2 = v378
+	rp8_2 = true
 	r9_0 = 3
 	v380 = math.Float64frombits(0x4024000000000000)
 	r10_0 = v380
+	rp10_0 = true
 	v381 = math.Float64frombits(0x4032000000000000)
 	r10_1 = v381
+	rp10_1 = true
 	v382 = math.Float64frombits(0x4010000000000000)
 	r10_2 = v382
+	rp10_2 = true
 	r9_1 = 3
 	v384 = math.Float64frombits(0x4010000000000000)
 	r11_0 = v384
+	rp11_0 = true
 	v385 = math.Float64frombits(0x4024000000000000)
 	r11_1 = v385
+	rp11_1 = true
 	v386 = math.Float64frombits(0x4008000000000000)
 	r11_2 = v386
+	rp11_2 = true
 	r9_2 = 3
 	ra0_0[2] = r9_0
 	ra0_1[2] = r9_1
@@ -435,10 +543,13 @@ b6:
 		switch v424 {
 		case uint32(1):
 			v425 = r2_0
+			vp425 = rp2_0
 		case uint32(2):
 			v425 = r2_1
+			vp425 = rp2_1
 		case uint32(3):
 			v425 = r2_2
+			vp425 = rp2_2
 		default:
 			return 0, false
 		}
@@ -446,10 +557,13 @@ b6:
 		switch v424 {
 		case uint32(1):
 			v425 = r6_0
+			vp425 = rp6_0
 		case uint32(2):
 			v425 = r6_1
+			vp425 = rp6_1
 		case uint32(3):
 			v425 = r6_2
+			vp425 = rp6_2
 		default:
 			return 0, false
 		}
@@ -457,10 +571,13 @@ b6:
 		switch v424 {
 		case uint32(1):
 			v425 = r10_0
+			vp425 = rp10_0
 		case uint32(2):
 			v425 = r10_1
+			vp425 = rp10_1
 		case uint32(3):
 			v425 = r10_2
+			vp425 = rp10_2
 		default:
 			return 0, false
 		}
@@ -476,10 +593,13 @@ b6:
 		switch v426 {
 		case uint32(1):
 			v427 = r0_0
+			vp427 = rp0_0
 		case uint32(2):
 			v427 = r0_1
+			vp427 = rp0_1
 		case uint32(3):
 			v427 = r0_2
+			vp427 = rp0_2
 		default:
 			return 0, false
 		}
@@ -487,10 +607,13 @@ b6:
 		switch v426 {
 		case uint32(1):
 			v427 = r4_0
+			vp427 = rp4_0
 		case uint32(2):
 			v427 = r4_1
+			vp427 = rp4_1
 		case uint32(3):
 			v427 = r4_2
+			vp427 = rp4_2
 		default:
 			return 0, false
 		}
@@ -498,17 +621,26 @@ b6:
 		switch v426 {
 		case uint32(1):
 			v427 = r8_0
+			vp427 = rp8_0
 		case uint32(2):
 			v427 = r8_1
+			vp427 = rp8_1
 		case uint32(3):
 			v427 = r8_2
+			vp427 = rp8_2
 		default:
 			return 0, false
 		}
 	default:
 		return 0, false
 	}
+	if !vp427 {
+		return 0, false
+	}
 	v428 = math.Floor(v427 / math.Float64frombits(0x4014000000000000))
+	if !vp425 {
+		return 0, false
+	}
 	v429 = v425 - v428
 	v430 = v423
 	if v162 < 1 || v162 > 3 {
@@ -519,10 +651,13 @@ b6:
 		switch v430 {
 		case uint32(1):
 			v431 = r3_0
+			vp431 = rp3_0
 		case uint32(2):
 			v431 = r3_1
+			vp431 = rp3_1
 		case uint32(3):
 			v431 = r3_2
+			vp431 = rp3_2
 		default:
 			return 0, false
 		}
@@ -530,10 +665,13 @@ b6:
 		switch v430 {
 		case uint32(1):
 			v431 = r7_0
+			vp431 = rp7_0
 		case uint32(2):
 			v431 = r7_1
+			vp431 = rp7_1
 		case uint32(3):
 			v431 = r7_2
+			vp431 = rp7_2
 		default:
 			return 0, false
 		}
@@ -541,10 +679,13 @@ b6:
 		switch v430 {
 		case uint32(1):
 			v431 = r11_0
+			vp431 = rp11_0
 		case uint32(2):
 			v431 = r11_1
+			vp431 = rp11_1
 		case uint32(3):
 			v431 = r11_2
+			vp431 = rp11_2
 		default:
 			return 0, false
 		}
@@ -552,6 +693,9 @@ b6:
 		return 0, false
 	}
 	v432 = v429
+	if !vp431 {
+		return 0, false
+	}
 	v433 = v431 + v432
 	if math.IsNaN(v433) {
 		return 0, false
@@ -605,10 +749,13 @@ b9:
 		switch v440 {
 		case uint32(1):
 			v441 = r0_0
+			vp441 = rp0_0
 		case uint32(2):
 			v441 = r0_1
+			vp441 = rp0_1
 		case uint32(3):
 			v441 = r0_2
+			vp441 = rp0_2
 		default:
 			return 0, false
 		}
@@ -616,10 +763,13 @@ b9:
 		switch v440 {
 		case uint32(1):
 			v441 = r4_0
+			vp441 = rp4_0
 		case uint32(2):
 			v441 = r4_1
+			vp441 = rp4_1
 		case uint32(3):
 			v441 = r4_2
+			vp441 = rp4_2
 		default:
 			return 0, false
 		}
@@ -627,10 +777,13 @@ b9:
 		switch v440 {
 		case uint32(1):
 			v441 = r8_0
+			vp441 = rp8_0
 		case uint32(2):
 			v441 = r8_1
+			vp441 = rp8_1
 		case uint32(3):
 			v441 = r8_2
+			vp441 = rp8_2
 		default:
 			return 0, false
 		}
@@ -638,6 +791,9 @@ b9:
 		return 0, false
 	}
 	v442 = v439
+	if !vp441 {
+		return 0, false
+	}
 	v442 = math.Min(v442, v441)
 	v443 = v220
 	if v211 < 1 || v211 > 3 {
@@ -648,10 +804,13 @@ b9:
 		switch v443 {
 		case uint32(1):
 			v444 = r0_0
+			vp444 = rp0_0
 		case uint32(2):
 			v444 = r0_1
+			vp444 = rp0_1
 		case uint32(3):
 			v444 = r0_2
+			vp444 = rp0_2
 		default:
 			return 0, false
 		}
@@ -659,10 +818,13 @@ b9:
 		switch v443 {
 		case uint32(1):
 			v444 = r4_0
+			vp444 = rp4_0
 		case uint32(2):
 			v444 = r4_1
+			vp444 = rp4_1
 		case uint32(3):
 			v444 = r4_2
+			vp444 = rp4_2
 		default:
 			return 0, false
 		}
@@ -670,10 +832,13 @@ b9:
 		switch v443 {
 		case uint32(1):
 			v444 = r8_0
+			vp444 = rp8_0
 		case uint32(2):
 			v444 = r8_1
+			vp444 = rp8_1
 		case uint32(3):
 			v444 = r8_2
+			vp444 = rp8_2
 		default:
 			return 0, false
 		}
@@ -681,6 +846,9 @@ b9:
 		return 0, false
 	}
 	v445 = v442
+	if !vp444 {
+		return 0, false
+	}
 	v446 = v444 - v445
 	v447 = v220
 	if v211 < 1 || v211 > 3 {
@@ -691,10 +859,13 @@ b9:
 		switch v447 {
 		case uint32(1):
 			r0_0 = v446
+			rp0_0 = true
 		case uint32(2):
 			r0_1 = v446
+			rp0_1 = true
 		case uint32(3):
 			r0_2 = v446
+			rp0_2 = true
 		default:
 			return 0, false
 		}
@@ -702,10 +873,13 @@ b9:
 		switch v447 {
 		case uint32(1):
 			r4_0 = v446
+			rp4_0 = true
 		case uint32(2):
 			r4_1 = v446
+			rp4_1 = true
 		case uint32(3):
 			r4_2 = v446
+			rp4_2 = true
 		default:
 			return 0, false
 		}
@@ -713,10 +887,13 @@ b9:
 		switch v447 {
 		case uint32(1):
 			r8_0 = v446
+			rp8_0 = true
 		case uint32(2):
 			r8_1 = v446
+			rp8_1 = true
 		case uint32(3):
 			r8_2 = v446
+			rp8_2 = true
 		default:
 			return 0, false
 		}
@@ -752,10 +929,13 @@ b10:
 		switch v456 {
 		case uint32(1):
 			v457 = r0_0
+			vp457 = rp0_0
 		case uint32(2):
 			v457 = r0_1
+			vp457 = rp0_1
 		case uint32(3):
 			v457 = r0_2
+			vp457 = rp0_2
 		default:
 			return 0, false
 		}
@@ -763,10 +943,13 @@ b10:
 		switch v456 {
 		case uint32(1):
 			v457 = r4_0
+			vp457 = rp4_0
 		case uint32(2):
 			v457 = r4_1
+			vp457 = rp4_1
 		case uint32(3):
 			v457 = r4_2
+			vp457 = rp4_2
 		default:
 			return 0, false
 		}
@@ -774,10 +957,13 @@ b10:
 		switch v456 {
 		case uint32(1):
 			v457 = r8_0
+			vp457 = rp8_0
 		case uint32(2):
 			v457 = r8_1
+			vp457 = rp8_1
 		case uint32(3):
 			v457 = r8_2
+			vp457 = rp8_2
 		default:
 			return 0, false
 		}
@@ -785,6 +971,9 @@ b10:
 		return 0, false
 	}
 	v458 = v455
+	if !vp457 {
+		return 0, false
+	}
 	v459 = v457 + v458
 	v460 = v220
 	if v211 < 1 || v211 > 3 {
@@ -795,10 +984,13 @@ b10:
 		switch v460 {
 		case uint32(1):
 			r0_0 = v459
+			rp0_0 = true
 		case uint32(2):
 			r0_1 = v459
+			rp0_1 = true
 		case uint32(3):
 			r0_2 = v459
+			rp0_2 = true
 		default:
 			return 0, false
 		}
@@ -806,10 +998,13 @@ b10:
 		switch v460 {
 		case uint32(1):
 			r4_0 = v459
+			rp4_0 = true
 		case uint32(2):
 			r4_1 = v459
+			rp4_1 = true
 		case uint32(3):
 			r4_2 = v459
+			rp4_2 = true
 		default:
 			return 0, false
 		}
@@ -817,10 +1012,13 @@ b10:
 		switch v460 {
 		case uint32(1):
 			r8_0 = v459
+			rp8_0 = true
 		case uint32(2):
 			r8_1 = v459
+			rp8_1 = true
 		case uint32(3):
 			r8_2 = v459
+			rp8_2 = true
 		default:
 			return 0, false
 		}
@@ -853,10 +1051,13 @@ b11:
 		switch v469 {
 		case uint32(1):
 			r3_0 = v468
+			rp3_0 = true
 		case uint32(2):
 			r3_1 = v468
+			rp3_1 = true
 		case uint32(3):
 			r3_2 = v468
+			rp3_2 = true
 		default:
 			return 0, false
 		}
@@ -864,10 +1065,13 @@ b11:
 		switch v469 {
 		case uint32(1):
 			r7_0 = v468
+			rp7_0 = true
 		case uint32(2):
 			r7_1 = v468
+			rp7_1 = true
 		case uint32(3):
 			r7_2 = v468
+			rp7_2 = true
 		default:
 			return 0, false
 		}
@@ -875,10 +1079,13 @@ b11:
 		switch v469 {
 		case uint32(1):
 			r11_0 = v468
+			rp11_0 = true
 		case uint32(2):
 			r11_1 = v468
+			rp11_1 = true
 		case uint32(3):
 			r11_2 = v468
+			rp11_2 = true
 		default:
 			return 0, false
 		}
@@ -922,11 +1129,17 @@ b15:
 	switch int(v478) - 1 {
 	case 0:
 		v479 = r0_0
+		vp479 = rp0_0
 	case 1:
 		v479 = r4_0
+		vp479 = rp4_0
 	case 2:
 		v479 = r8_0
+		vp479 = rp8_0
 	default:
+		return 0, false
+	}
+	if !vp479 {
 		return 0, false
 	}
 	v480 = v336 + v479
@@ -940,11 +1153,17 @@ b15:
 	switch int(v481) - 1 {
 	case 0:
 		v482 = r0_1
+		vp482 = rp0_1
 	case 1:
 		v482 = r4_1
+		vp482 = rp4_1
 	case 2:
 		v482 = r8_1
+		vp482 = rp8_1
 	default:
+		return 0, false
+	}
+	if !vp482 {
 		return 0, false
 	}
 	v483 = v482 * math.Float64frombits(0x4000000000000000)
@@ -959,11 +1178,17 @@ b15:
 	switch int(v485) - 1 {
 	case 0:
 		v486 = r0_2
+		vp486 = rp0_2
 	case 1:
 		v486 = r4_2
+		vp486 = rp4_2
 	case 2:
 		v486 = r8_2
+		vp486 = rp8_2
 	default:
+		return 0, false
+	}
+	if !vp486 {
 		return 0, false
 	}
 	v487 = v484 + v486
@@ -1060,12 +1285,21 @@ func backendGeneratedEconomyMarketPreparedFixtureBody(context machinePreparedCon
 	var v423 uint32
 	var v424 uint32
 	var v425 float64
+	var vp425 bool
+	_ = v425
+	_ = vp425
 	var v426 uint32
 	var v427 float64
+	var vp427 bool
+	_ = v427
+	_ = vp427
 	var v428 float64
 	var v429 float64
 	var v430 uint32
 	var v431 float64
+	var vp431 bool
+	_ = v431
+	_ = vp431
 	var v432 float64
 	var v433 float64
 	var v434 float64
@@ -1076,9 +1310,15 @@ func backendGeneratedEconomyMarketPreparedFixtureBody(context machinePreparedCon
 	var v439 float64
 	var v440 uint32
 	var v441 float64
+	var vp441 bool
+	_ = v441
+	_ = vp441
 	var v442 float64
 	var v443 uint32
 	var v444 float64
+	var vp444 bool
+	_ = v444
+	_ = vp444
 	var v445 float64
 	var v446 float64
 	var v447 uint32
@@ -1092,6 +1332,9 @@ func backendGeneratedEconomyMarketPreparedFixtureBody(context machinePreparedCon
 	var v455 float64
 	var v456 uint32
 	var v457 float64
+	var vp457 bool
+	_ = v457
+	_ = vp457
 	var v458 float64
 	var v459 float64
 	var v460 uint32
@@ -1109,23 +1352,38 @@ func backendGeneratedEconomyMarketPreparedFixtureBody(context machinePreparedCon
 	var v477 float64
 	var v478 float64
 	var v479 float64
+	var vp479 bool
+	_ = v479
+	_ = vp479
 	var v480 float64
 	var v481 float64
 	var v482 float64
+	var vp482 bool
+	_ = v482
+	_ = vp482
 	var v483 float64
 	var v484 float64
 	var v485 float64
 	var v486 float64
+	var vp486 bool
+	_ = v486
+	_ = vp486
 	var v487 float64
 	var v488 float64
 	var v489 float64
 	var v490 float64
 	var r0_0 float64
 	_ = r0_0
+	var rp0_0 bool
+	_ = rp0_0
 	var r0_1 float64
 	_ = r0_1
+	var rp0_1 bool
+	_ = rp0_1
 	var r0_2 float64
 	_ = r0_2
+	var rp0_2 bool
+	_ = rp0_2
 	var r1_0 float64
 	_ = r1_0
 	var r1_1 float64
@@ -1134,22 +1392,40 @@ func backendGeneratedEconomyMarketPreparedFixtureBody(context machinePreparedCon
 	_ = r1_2
 	var r2_0 float64
 	_ = r2_0
+	var rp2_0 bool
+	_ = rp2_0
 	var r2_1 float64
 	_ = r2_1
+	var rp2_1 bool
+	_ = rp2_1
 	var r2_2 float64
 	_ = r2_2
+	var rp2_2 bool
+	_ = rp2_2
 	var r3_0 float64
 	_ = r3_0
+	var rp3_0 bool
+	_ = rp3_0
 	var r3_1 float64
 	_ = r3_1
+	var rp3_1 bool
+	_ = rp3_1
 	var r3_2 float64
 	_ = r3_2
+	var rp3_2 bool
+	_ = rp3_2
 	var r4_0 float64
 	_ = r4_0
+	var rp4_0 bool
+	_ = rp4_0
 	var r4_1 float64
 	_ = r4_1
+	var rp4_1 bool
+	_ = rp4_1
 	var r4_2 float64
 	_ = r4_2
+	var rp4_2 bool
+	_ = rp4_2
 	var r5_0 float64
 	_ = r5_0
 	var r5_1 float64
@@ -1158,22 +1434,40 @@ func backendGeneratedEconomyMarketPreparedFixtureBody(context machinePreparedCon
 	_ = r5_2
 	var r6_0 float64
 	_ = r6_0
+	var rp6_0 bool
+	_ = rp6_0
 	var r6_1 float64
 	_ = r6_1
+	var rp6_1 bool
+	_ = rp6_1
 	var r6_2 float64
 	_ = r6_2
+	var rp6_2 bool
+	_ = rp6_2
 	var r7_0 float64
 	_ = r7_0
+	var rp7_0 bool
+	_ = rp7_0
 	var r7_1 float64
 	_ = r7_1
+	var rp7_1 bool
+	_ = rp7_1
 	var r7_2 float64
 	_ = r7_2
+	var rp7_2 bool
+	_ = rp7_2
 	var r8_0 float64
 	_ = r8_0
+	var rp8_0 bool
+	_ = rp8_0
 	var r8_1 float64
 	_ = r8_1
+	var rp8_1 bool
+	_ = rp8_1
 	var r8_2 float64
 	_ = r8_2
+	var rp8_2 bool
+	_ = rp8_2
 	var r9_0 float64
 	_ = r9_0
 	var r9_1 float64
@@ -1182,16 +1476,28 @@ func backendGeneratedEconomyMarketPreparedFixtureBody(context machinePreparedCon
 	_ = r9_2
 	var r10_0 float64
 	_ = r10_0
+	var rp10_0 bool
+	_ = rp10_0
 	var r10_1 float64
 	_ = r10_1
+	var rp10_1 bool
+	_ = rp10_1
 	var r10_2 float64
 	_ = r10_2
+	var rp10_2 bool
+	_ = rp10_2
 	var r11_0 float64
 	_ = r11_0
+	var rp11_0 bool
+	_ = rp11_0
 	var r11_1 float64
 	_ = r11_1
+	var rp11_1 bool
+	_ = rp11_1
 	var r11_2 float64
 	_ = r11_2
+	var rp11_2 bool
+	_ = rp11_2
 	var r12_0 uint32
 	_ = r12_0
 	var r12_1 float64
@@ -1232,72 +1538,99 @@ func backendGeneratedEconomyMarketPreparedFixtureBody(context machinePreparedCon
 	v349 = v348 - math.Floor(v348/math.Float64frombits(0x401c000000000000))*math.Float64frombits(0x401c000000000000)
 	v350 = v347 + v349
 	r0_0 = v350
+	rp0_0 = true
 	v351 = math.Float64frombits(0x4032000000000000)
 	r0_1 = v351
+	rp0_1 = true
 	v352 = math.Float64frombits(0x403e000000000000)
 	r0_2 = v352
+	rp0_2 = true
 	r1_0 = 1
 	v354 = math.Float64frombits(0x4020000000000000)
 	r2_0 = v354
+	rp2_0 = true
 	v355 = math.Float64frombits(0x402c000000000000)
 	r2_1 = v355
+	rp2_1 = true
 	v356 = math.Float64frombits(0x4018000000000000)
 	r2_2 = v356
+	rp2_2 = true
 	r1_1 = 1
 	v358 = math.Float64frombits(0x4008000000000000)
 	r3_0 = v358
+	rp3_0 = true
 	v359 = math.Float64frombits(0x4022000000000000)
 	r3_1 = v359
+	rp3_1 = true
 	v360 = math.Float64frombits(0x4010000000000000)
 	r3_2 = v360
+	rp3_2 = true
 	r1_2 = 1
 	ra0_0[0] = r1_0
 	ra0_1[0] = r1_1
 	ra0_2[0] = r1_2
 	v363 = math.Float64frombits(0x4028000000000000)
 	r4_0 = v363
+	rp4_0 = true
 	v364 = math.Float64frombits(0x4041800000000000)
 	r4_1 = v364
+	rp4_1 = true
 	v365 = math.Float64frombits(0x4034000000000000)
 	r4_2 = v365
+	rp4_2 = true
 	r5_0 = 2
 	v367 = math.Float64frombits(0x402e000000000000)
 	r6_0 = v367
+	rp6_0 = true
 	v368 = math.Float64frombits(0x4014000000000000)
 	r6_1 = v368
+	rp6_1 = true
 	v369 = math.Float64frombits(0x4024000000000000)
 	r6_2 = v369
+	rp6_2 = true
 	r5_1 = 2
 	v371 = math.Float64frombits(0x4014000000000000)
 	r7_0 = v371
+	rp7_0 = true
 	v372 = math.Float64frombits(0x401c000000000000)
 	r7_1 = v372
+	rp7_1 = true
 	v373 = math.Float64frombits(0x4018000000000000)
 	r7_2 = v373
+	rp7_2 = true
 	r5_2 = 2
 	ra0_0[1] = r5_0
 	ra0_1[1] = r5_1
 	ra0_2[1] = r5_2
 	v376 = math.Float64frombits(0x4039000000000000)
 	r8_0 = v376
+	rp8_0 = true
 	v377 = math.Float64frombits(0x4026000000000000)
 	r8_1 = v377
+	rp8_1 = true
 	v378 = math.Float64frombits(0x4049000000000000)
 	r8_2 = v378
+	rp8_2 = true
 	r9_0 = 3
 	v380 = math.Float64frombits(0x4024000000000000)
 	r10_0 = v380
+	rp10_0 = true
 	v381 = math.Float64frombits(0x4032000000000000)
 	r10_1 = v381
+	rp10_1 = true
 	v382 = math.Float64frombits(0x4010000000000000)
 	r10_2 = v382
+	rp10_2 = true
 	r9_1 = 3
 	v384 = math.Float64frombits(0x4010000000000000)
 	r11_0 = v384
+	rp11_0 = true
 	v385 = math.Float64frombits(0x4024000000000000)
 	r11_1 = v385
+	rp11_1 = true
 	v386 = math.Float64frombits(0x4008000000000000)
 	r11_2 = v386
+	rp11_2 = true
 	r9_2 = 3
 	ra0_0[2] = r9_0
 	ra0_1[2] = r9_1
@@ -1408,10 +1741,13 @@ b6:
 		switch v424 {
 		case uint32(1):
 			v425 = r2_0
+			vp425 = rp2_0
 		case uint32(2):
 			v425 = r2_1
+			vp425 = rp2_1
 		case uint32(3):
 			v425 = r2_2
+			vp425 = rp2_2
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1419,10 +1755,13 @@ b6:
 		switch v424 {
 		case uint32(1):
 			v425 = r6_0
+			vp425 = rp6_0
 		case uint32(2):
 			v425 = r6_1
+			vp425 = rp6_1
 		case uint32(3):
 			v425 = r6_2
+			vp425 = rp6_2
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1430,10 +1769,13 @@ b6:
 		switch v424 {
 		case uint32(1):
 			v425 = r10_0
+			vp425 = rp10_0
 		case uint32(2):
 			v425 = r10_1
+			vp425 = rp10_1
 		case uint32(3):
 			v425 = r10_2
+			vp425 = rp10_2
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1449,10 +1791,13 @@ b6:
 		switch v426 {
 		case uint32(1):
 			v427 = r0_0
+			vp427 = rp0_0
 		case uint32(2):
 			v427 = r0_1
+			vp427 = rp0_1
 		case uint32(3):
 			v427 = r0_2
+			vp427 = rp0_2
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1460,10 +1805,13 @@ b6:
 		switch v426 {
 		case uint32(1):
 			v427 = r4_0
+			vp427 = rp4_0
 		case uint32(2):
 			v427 = r4_1
+			vp427 = rp4_1
 		case uint32(3):
 			v427 = r4_2
+			vp427 = rp4_2
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1471,17 +1819,26 @@ b6:
 		switch v426 {
 		case uint32(1):
 			v427 = r8_0
+			vp427 = rp8_0
 		case uint32(2):
 			v427 = r8_1
+			vp427 = rp8_1
 		case uint32(3):
 			v427 = r8_2
+			vp427 = rp8_2
 		default:
 			return machinePreparedReplayEntry()
 		}
 	default:
 		return machinePreparedReplayEntry()
 	}
+	if !vp427 {
+		return machinePreparedReplayEntry()
+	}
 	v428 = math.Floor(v427 / math.Float64frombits(0x4014000000000000))
+	if !vp425 {
+		return machinePreparedReplayEntry()
+	}
 	v429 = v425 - v428
 	v430 = v423
 	if v162 < 1 || v162 > 3 {
@@ -1492,10 +1849,13 @@ b6:
 		switch v430 {
 		case uint32(1):
 			v431 = r3_0
+			vp431 = rp3_0
 		case uint32(2):
 			v431 = r3_1
+			vp431 = rp3_1
 		case uint32(3):
 			v431 = r3_2
+			vp431 = rp3_2
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1503,10 +1863,13 @@ b6:
 		switch v430 {
 		case uint32(1):
 			v431 = r7_0
+			vp431 = rp7_0
 		case uint32(2):
 			v431 = r7_1
+			vp431 = rp7_1
 		case uint32(3):
 			v431 = r7_2
+			vp431 = rp7_2
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1514,10 +1877,13 @@ b6:
 		switch v430 {
 		case uint32(1):
 			v431 = r11_0
+			vp431 = rp11_0
 		case uint32(2):
 			v431 = r11_1
+			vp431 = rp11_1
 		case uint32(3):
 			v431 = r11_2
+			vp431 = rp11_2
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1525,6 +1891,9 @@ b6:
 		return machinePreparedReplayEntry()
 	}
 	v432 = v429
+	if !vp431 {
+		return machinePreparedReplayEntry()
+	}
 	v433 = v431 + v432
 	if math.IsNaN(v433) {
 		return machinePreparedReplayEntry()
@@ -1578,10 +1947,13 @@ b9:
 		switch v440 {
 		case uint32(1):
 			v441 = r0_0
+			vp441 = rp0_0
 		case uint32(2):
 			v441 = r0_1
+			vp441 = rp0_1
 		case uint32(3):
 			v441 = r0_2
+			vp441 = rp0_2
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1589,10 +1961,13 @@ b9:
 		switch v440 {
 		case uint32(1):
 			v441 = r4_0
+			vp441 = rp4_0
 		case uint32(2):
 			v441 = r4_1
+			vp441 = rp4_1
 		case uint32(3):
 			v441 = r4_2
+			vp441 = rp4_2
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1600,10 +1975,13 @@ b9:
 		switch v440 {
 		case uint32(1):
 			v441 = r8_0
+			vp441 = rp8_0
 		case uint32(2):
 			v441 = r8_1
+			vp441 = rp8_1
 		case uint32(3):
 			v441 = r8_2
+			vp441 = rp8_2
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1611,6 +1989,9 @@ b9:
 		return machinePreparedReplayEntry()
 	}
 	v442 = v439
+	if !vp441 {
+		return machinePreparedReplayEntry()
+	}
 	v442 = math.Min(v442, v441)
 	v443 = v220
 	if v211 < 1 || v211 > 3 {
@@ -1621,10 +2002,13 @@ b9:
 		switch v443 {
 		case uint32(1):
 			v444 = r0_0
+			vp444 = rp0_0
 		case uint32(2):
 			v444 = r0_1
+			vp444 = rp0_1
 		case uint32(3):
 			v444 = r0_2
+			vp444 = rp0_2
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1632,10 +2016,13 @@ b9:
 		switch v443 {
 		case uint32(1):
 			v444 = r4_0
+			vp444 = rp4_0
 		case uint32(2):
 			v444 = r4_1
+			vp444 = rp4_1
 		case uint32(3):
 			v444 = r4_2
+			vp444 = rp4_2
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1643,10 +2030,13 @@ b9:
 		switch v443 {
 		case uint32(1):
 			v444 = r8_0
+			vp444 = rp8_0
 		case uint32(2):
 			v444 = r8_1
+			vp444 = rp8_1
 		case uint32(3):
 			v444 = r8_2
+			vp444 = rp8_2
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1654,6 +2044,9 @@ b9:
 		return machinePreparedReplayEntry()
 	}
 	v445 = v442
+	if !vp444 {
+		return machinePreparedReplayEntry()
+	}
 	v446 = v444 - v445
 	v447 = v220
 	if v211 < 1 || v211 > 3 {
@@ -1664,10 +2057,13 @@ b9:
 		switch v447 {
 		case uint32(1):
 			r0_0 = v446
+			rp0_0 = true
 		case uint32(2):
 			r0_1 = v446
+			rp0_1 = true
 		case uint32(3):
 			r0_2 = v446
+			rp0_2 = true
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1675,10 +2071,13 @@ b9:
 		switch v447 {
 		case uint32(1):
 			r4_0 = v446
+			rp4_0 = true
 		case uint32(2):
 			r4_1 = v446
+			rp4_1 = true
 		case uint32(3):
 			r4_2 = v446
+			rp4_2 = true
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1686,10 +2085,13 @@ b9:
 		switch v447 {
 		case uint32(1):
 			r8_0 = v446
+			rp8_0 = true
 		case uint32(2):
 			r8_1 = v446
+			rp8_1 = true
 		case uint32(3):
 			r8_2 = v446
+			rp8_2 = true
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1725,10 +2127,13 @@ b10:
 		switch v456 {
 		case uint32(1):
 			v457 = r0_0
+			vp457 = rp0_0
 		case uint32(2):
 			v457 = r0_1
+			vp457 = rp0_1
 		case uint32(3):
 			v457 = r0_2
+			vp457 = rp0_2
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1736,10 +2141,13 @@ b10:
 		switch v456 {
 		case uint32(1):
 			v457 = r4_0
+			vp457 = rp4_0
 		case uint32(2):
 			v457 = r4_1
+			vp457 = rp4_1
 		case uint32(3):
 			v457 = r4_2
+			vp457 = rp4_2
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1747,10 +2155,13 @@ b10:
 		switch v456 {
 		case uint32(1):
 			v457 = r8_0
+			vp457 = rp8_0
 		case uint32(2):
 			v457 = r8_1
+			vp457 = rp8_1
 		case uint32(3):
 			v457 = r8_2
+			vp457 = rp8_2
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1758,6 +2169,9 @@ b10:
 		return machinePreparedReplayEntry()
 	}
 	v458 = v455
+	if !vp457 {
+		return machinePreparedReplayEntry()
+	}
 	v459 = v457 + v458
 	v460 = v220
 	if v211 < 1 || v211 > 3 {
@@ -1768,10 +2182,13 @@ b10:
 		switch v460 {
 		case uint32(1):
 			r0_0 = v459
+			rp0_0 = true
 		case uint32(2):
 			r0_1 = v459
+			rp0_1 = true
 		case uint32(3):
 			r0_2 = v459
+			rp0_2 = true
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1779,10 +2196,13 @@ b10:
 		switch v460 {
 		case uint32(1):
 			r4_0 = v459
+			rp4_0 = true
 		case uint32(2):
 			r4_1 = v459
+			rp4_1 = true
 		case uint32(3):
 			r4_2 = v459
+			rp4_2 = true
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1790,10 +2210,13 @@ b10:
 		switch v460 {
 		case uint32(1):
 			r8_0 = v459
+			rp8_0 = true
 		case uint32(2):
 			r8_1 = v459
+			rp8_1 = true
 		case uint32(3):
 			r8_2 = v459
+			rp8_2 = true
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1826,10 +2249,13 @@ b11:
 		switch v469 {
 		case uint32(1):
 			r3_0 = v468
+			rp3_0 = true
 		case uint32(2):
 			r3_1 = v468
+			rp3_1 = true
 		case uint32(3):
 			r3_2 = v468
+			rp3_2 = true
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1837,10 +2263,13 @@ b11:
 		switch v469 {
 		case uint32(1):
 			r7_0 = v468
+			rp7_0 = true
 		case uint32(2):
 			r7_1 = v468
+			rp7_1 = true
 		case uint32(3):
 			r7_2 = v468
+			rp7_2 = true
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1848,10 +2277,13 @@ b11:
 		switch v469 {
 		case uint32(1):
 			r11_0 = v468
+			rp11_0 = true
 		case uint32(2):
 			r11_1 = v468
+			rp11_1 = true
 		case uint32(3):
 			r11_2 = v468
+			rp11_2 = true
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1895,11 +2327,17 @@ b15:
 	switch int(v478) - 1 {
 	case 0:
 		v479 = r0_0
+		vp479 = rp0_0
 	case 1:
 		v479 = r4_0
+		vp479 = rp4_0
 	case 2:
 		v479 = r8_0
+		vp479 = rp8_0
 	default:
+		return machinePreparedReplayEntry()
+	}
+	if !vp479 {
 		return machinePreparedReplayEntry()
 	}
 	v480 = v336 + v479
@@ -1913,11 +2351,17 @@ b15:
 	switch int(v481) - 1 {
 	case 0:
 		v482 = r0_1
+		vp482 = rp0_1
 	case 1:
 		v482 = r4_1
+		vp482 = rp4_1
 	case 2:
 		v482 = r8_1
+		vp482 = rp8_1
 	default:
+		return machinePreparedReplayEntry()
+	}
+	if !vp482 {
 		return machinePreparedReplayEntry()
 	}
 	v483 = v482 * math.Float64frombits(0x4000000000000000)
@@ -1932,11 +2376,17 @@ b15:
 	switch int(v485) - 1 {
 	case 0:
 		v486 = r0_2
+		vp486 = rp0_2
 	case 1:
 		v486 = r4_2
+		vp486 = rp4_2
 	case 2:
 		v486 = r8_2
+		vp486 = rp8_2
 	default:
+		return machinePreparedReplayEntry()
+	}
+	if !vp486 {
 		return machinePreparedReplayEntry()
 	}
 	v487 = v484 + v486

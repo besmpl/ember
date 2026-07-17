@@ -211,12 +211,6 @@ func TestBackendGoEconomyMarketIsIdentityBlindAndRejectsUnprovedSelectors(t *tes
 			"return markets[1].stock",
 			1,
 		),
-		"child shape mismatch": strings.Replace(
-			backendEconomyMarketProofSource,
-			"stock = {wood = 25, ore = 11, food = 50}",
-			"stock = {wood = 25, ore = 11, grain = 50}",
-			1,
-		),
 	}
 	for name, source := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -228,6 +222,22 @@ func TestBackendGoEconomyMarketIsIdentityBlindAndRejectsUnprovedSelectors(t *tes
 				t.Fatalf("child-record selector compiler accepted %s", name)
 			}
 		})
+	}
+	heterogeneous := strings.Replace(
+		backendEconomyMarketProofSource,
+		"stock = {wood = 25, ore = 11, food = 50}",
+		"stock = {wood = 25, ore = 11, grain = 50}",
+		1,
+	)
+	generated, err := emitBackendGoNumericProof(
+		backendRecordArrayProofIR(t, heterogeneous),
+		backendGoNumericOptions{packageName: "ember", functionName: "heterogeneousEconomyMarket"},
+	)
+	if err != nil {
+		t.Fatalf("heterogeneous child-record holdout was rejected: %v", err)
+	}
+	if !strings.Contains(string(generated), "var rp") {
+		t.Fatal("heterogeneous child-record holdout lacks explicit field presence")
 	}
 }
 

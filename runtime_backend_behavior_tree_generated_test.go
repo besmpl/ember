@@ -15,6 +15,9 @@ func backendGeneratedBehaviorTree(p0 float64) (float64, bool) {
 	var v80 float64
 	var v81 float64
 	var v82 float64
+	var vp82 bool
+	_ = v82
+	_ = vp82
 	var v83 float64
 	var v101 float64
 	var v102 float64
@@ -27,6 +30,9 @@ func backendGeneratedBehaviorTree(p0 float64) (float64, bool) {
 	var v126 float64
 	var v127 float64
 	var v128 float64
+	var vp128 bool
+	_ = v128
+	_ = vp128
 	var v129 float64
 	var v147 float64
 	var v148 float64
@@ -73,14 +79,32 @@ func backendGeneratedBehaviorTree(p0 float64) (float64, bool) {
 	var v227 float64
 	var v228 float64
 	var v229 float64
+	var vp229 bool
+	_ = v229
+	_ = vp229
 	var v230 float64
 	var v231 uint32
 	var v232 uint32
+	var vp232 bool
+	_ = v232
+	_ = vp232
 	var v233 float64
 	var v234 float64
+	var vp234 bool
+	_ = v234
+	_ = vp234
 	var v235 float64
+	var vp235 bool
+	_ = v235
+	_ = vp235
 	var v236 float64
+	var vp236 bool
+	_ = v236
+	_ = vp236
 	var v237 uint32
+	var vp237 bool
+	_ = v237
+	_ = vp237
 	var v238 float64
 	var v239 float64
 	var v240 float64
@@ -88,6 +112,9 @@ func backendGeneratedBehaviorTree(p0 float64) (float64, bool) {
 	var v242 float64
 	var v243 float64
 	var v244 uint32
+	var vp244 bool
+	_ = v244
+	_ = vp244
 	var v245 float64
 	var v246 float64
 	var v247 float64
@@ -101,6 +128,9 @@ func backendGeneratedBehaviorTree(p0 float64) (float64, bool) {
 	var v255 float64
 	var v256 float64
 	var v257 float64
+	var vp257 bool
+	_ = v257
+	_ = vp257
 	var v258 float64
 	var v259 float64
 	var v260 float64
@@ -178,11 +208,17 @@ func backendGeneratedBehaviorTree(p0 float64) (float64, bool) {
 	_ = r5_2
 	var ra0_0 [5]uint32
 	var ra0_1 [5]uint32
+	var rap0_1 [5]bool
 	var ra0_2 [5]float64
+	var rap0_2 [5]bool
 	var ra0_3 [5]float64
+	var rap0_3 [5]bool
 	var ra0_4 [5]float64
+	var rap0_4 [5]bool
 	var ra0_5 [5]uint32
+	var rap0_5 [5]bool
 	var ra0_6 [5]float64
+	var rap0_6 [5]bool
 	var ri0 int
 	_ = ri0
 	v1 = p0
@@ -211,9 +247,13 @@ func backendGeneratedBehaviorTree(p0 float64) (float64, bool) {
 	r1_4 = v200
 	ra0_0[0] = r1_0
 	ra0_1[0] = r1_1
+	rap0_1[0] = true
 	ra0_2[0] = r1_2
+	rap0_2[0] = true
 	ra0_3[0] = r1_3
+	rap0_3[0] = true
 	ra0_4[0] = r1_4
+	rap0_4[0] = true
 	v202 = uint32(12)
 	r2_0 = v202
 	v203 = uint32(13)
@@ -222,7 +262,9 @@ func backendGeneratedBehaviorTree(p0 float64) (float64, bool) {
 	r2_2 = v204
 	ra0_0[1] = r2_0
 	ra0_5[1] = r2_1
+	rap0_5[1] = true
 	ra0_6[1] = r2_2
+	rap0_6[1] = true
 	v206 = uint32(6)
 	r3_0 = v206
 	v207 = uint32(2)
@@ -235,9 +277,13 @@ func backendGeneratedBehaviorTree(p0 float64) (float64, bool) {
 	r3_4 = v210
 	ra0_0[2] = r3_0
 	ra0_1[2] = r3_1
+	rap0_1[2] = true
 	ra0_2[2] = r3_2
+	rap0_2[2] = true
 	ra0_3[2] = r3_3
+	rap0_3[2] = true
 	ra0_4[2] = r3_4
+	rap0_4[2] = true
 	v212 = uint32(12)
 	r4_0 = v212
 	v213 = uint32(16)
@@ -246,7 +292,9 @@ func backendGeneratedBehaviorTree(p0 float64) (float64, bool) {
 	r4_2 = v214
 	ra0_0[3] = r4_0
 	ra0_5[3] = r4_1
+	rap0_5[3] = true
 	ra0_6[3] = r4_2
+	rap0_6[3] = true
 	v216 = uint32(12)
 	r5_0 = v216
 	v217 = uint32(17)
@@ -255,7 +303,9 @@ func backendGeneratedBehaviorTree(p0 float64) (float64, bool) {
 	r5_2 = v218
 	ra0_0[4] = r5_0
 	ra0_5[4] = r5_1
+	rap0_5[4] = true
 	ra0_6[4] = r5_2
+	rap0_6[4] = true
 	if v1 != math.Float64frombits(0x4088480000000000) {
 		goto b2
 	}
@@ -304,9 +354,13 @@ b4:
 	v80 = v57
 	v81 = v58
 	v82 = v227
+	vp82 = true
 	v83 = v228
 	goto b5
 b5:
+	if !vp82 {
+		return 0, false
+	}
 	if math.IsNaN(v82) {
 		return 0, false
 	}
@@ -332,6 +386,10 @@ b6:
 	goto b7
 b7:
 	v229 = v82
+	vp229 = vp82
+	if !vp229 {
+		return 0, false
+	}
 	v230 = 0
 	if v229 >= 1 && v229 <= 5 && v229 == math.Trunc(v229) {
 		v230 = v229
@@ -348,12 +406,11 @@ b8:
 	if v230 < 1 || v230 > 5 {
 		return 0, false
 	}
-	switch int(v230) - 1 {
-	case 0, 2:
-	default:
+	v232 = ra0_1[int(v230)-1]
+	vp232 = rap0_1[int(v230)-1]
+	if !vp232 {
 		return 0, false
 	}
-	v232 = ra0_1[int(v230)-1]
 	switch v232 {
 	case uint32(1):
 		v233 = r0_0
@@ -371,12 +428,11 @@ b8:
 	if v230 < 1 || v230 > 5 {
 		return 0, false
 	}
-	switch int(v230) - 1 {
-	case 0, 2:
-	default:
+	v234 = ra0_2[int(v230)-1]
+	vp234 = rap0_2[int(v230)-1]
+	if !vp234 {
 		return 0, false
 	}
-	v234 = ra0_2[int(v230)-1]
 	if math.IsNaN(v233) {
 		return 0, false
 	}
@@ -391,47 +447,37 @@ b9:
 	if v230 < 1 || v230 > 5 {
 		return 0, false
 	}
-	switch int(v230) - 1 {
-	case 0, 2:
-	default:
-		return 0, false
-	}
 	v235 = ra0_3[int(v230)-1]
+	vp235 = rap0_3[int(v230)-1]
 	v124 = v78
 	v125 = v79
 	v126 = v80
 	v127 = v81
 	v128 = v235
+	vp128 = vp235
 	v129 = v83
 	goto b17
 b10:
 	if v230 < 1 || v230 > 5 {
 		return 0, false
 	}
-	switch int(v230) - 1 {
-	case 0, 2:
-	default:
-		return 0, false
-	}
 	v236 = ra0_4[int(v230)-1]
+	vp236 = rap0_4[int(v230)-1]
 	v124 = v78
 	v125 = v79
 	v126 = v80
 	v127 = v81
 	v128 = v236
+	vp128 = vp236
 	v129 = v83
 	goto b17
 b11:
 	if v230 < 1 || v230 > 5 {
 		return 0, false
 	}
-	switch int(v230) - 1 {
-	case 1, 3, 4:
-	default:
-		return 0, false
-	}
 	v237 = ra0_5[int(v230)-1]
-	if v237 != uint32(13) {
+	vp237 = rap0_5[int(v230)-1]
+	if !vp237 || v237 != uint32(13) {
 		goto b13
 	}
 	goto b12
@@ -455,13 +501,9 @@ b13:
 	if v230 < 1 || v230 > 5 {
 		return 0, false
 	}
-	switch int(v230) - 1 {
-	case 1, 3, 4:
-	default:
-		return 0, false
-	}
 	v244 = ra0_5[int(v230)-1]
-	if v244 != uint32(16) {
+	vp244 = rap0_5[int(v230)-1]
+	if !vp244 || v244 != uint32(16) {
 		goto b15
 	}
 	goto b14
@@ -501,12 +543,11 @@ b16:
 	if v107 < 1 || v107 > 5 {
 		return 0, false
 	}
-	switch int(v107) - 1 {
-	case 1, 3, 4:
-	default:
+	v257 = ra0_6[int(v107)-1]
+	vp257 = rap0_6[int(v107)-1]
+	if !vp257 {
 		return 0, false
 	}
-	v257 = ra0_6[int(v107)-1]
 	v258 = v101 + v257
 	v259 = r0_0
 	v260 = v258 + v259
@@ -520,6 +561,7 @@ b16:
 	v126 = v103
 	v127 = v104
 	v128 = v265
+	vp128 = true
 	v129 = v106
 	goto b17
 b17:
@@ -529,6 +571,7 @@ b17:
 	v80 = v126
 	v81 = v127
 	v82 = v128
+	vp82 = vp128
 	v83 = v266
 	goto b5
 b18:
@@ -591,6 +634,9 @@ func backendGeneratedBehaviorTreePreparedFixtureBody(context machinePreparedCont
 	var v80 float64
 	var v81 float64
 	var v82 float64
+	var vp82 bool
+	_ = v82
+	_ = vp82
 	var v83 float64
 	var v101 float64
 	var v102 float64
@@ -603,6 +649,9 @@ func backendGeneratedBehaviorTreePreparedFixtureBody(context machinePreparedCont
 	var v126 float64
 	var v127 float64
 	var v128 float64
+	var vp128 bool
+	_ = v128
+	_ = vp128
 	var v129 float64
 	var v147 float64
 	var v148 float64
@@ -649,14 +698,32 @@ func backendGeneratedBehaviorTreePreparedFixtureBody(context machinePreparedCont
 	var v227 float64
 	var v228 float64
 	var v229 float64
+	var vp229 bool
+	_ = v229
+	_ = vp229
 	var v230 float64
 	var v231 uint32
 	var v232 uint32
+	var vp232 bool
+	_ = v232
+	_ = vp232
 	var v233 float64
 	var v234 float64
+	var vp234 bool
+	_ = v234
+	_ = vp234
 	var v235 float64
+	var vp235 bool
+	_ = v235
+	_ = vp235
 	var v236 float64
+	var vp236 bool
+	_ = v236
+	_ = vp236
 	var v237 uint32
+	var vp237 bool
+	_ = v237
+	_ = vp237
 	var v238 float64
 	var v239 float64
 	var v240 float64
@@ -664,6 +731,9 @@ func backendGeneratedBehaviorTreePreparedFixtureBody(context machinePreparedCont
 	var v242 float64
 	var v243 float64
 	var v244 uint32
+	var vp244 bool
+	_ = v244
+	_ = vp244
 	var v245 float64
 	var v246 float64
 	var v247 float64
@@ -677,6 +747,9 @@ func backendGeneratedBehaviorTreePreparedFixtureBody(context machinePreparedCont
 	var v255 float64
 	var v256 float64
 	var v257 float64
+	var vp257 bool
+	_ = v257
+	_ = vp257
 	var v258 float64
 	var v259 float64
 	var v260 float64
@@ -754,11 +827,17 @@ func backendGeneratedBehaviorTreePreparedFixtureBody(context machinePreparedCont
 	_ = r5_2
 	var ra0_0 [5]uint32
 	var ra0_1 [5]uint32
+	var rap0_1 [5]bool
 	var ra0_2 [5]float64
+	var rap0_2 [5]bool
 	var ra0_3 [5]float64
+	var rap0_3 [5]bool
 	var ra0_4 [5]float64
+	var rap0_4 [5]bool
 	var ra0_5 [5]uint32
+	var rap0_5 [5]bool
 	var ra0_6 [5]float64
+	var rap0_6 [5]bool
 	var ri0 int
 	_ = ri0
 	v1 = p0
@@ -787,9 +866,13 @@ func backendGeneratedBehaviorTreePreparedFixtureBody(context machinePreparedCont
 	r1_4 = v200
 	ra0_0[0] = r1_0
 	ra0_1[0] = r1_1
+	rap0_1[0] = true
 	ra0_2[0] = r1_2
+	rap0_2[0] = true
 	ra0_3[0] = r1_3
+	rap0_3[0] = true
 	ra0_4[0] = r1_4
+	rap0_4[0] = true
 	v202 = uint32(12)
 	r2_0 = v202
 	v203 = uint32(13)
@@ -798,7 +881,9 @@ func backendGeneratedBehaviorTreePreparedFixtureBody(context machinePreparedCont
 	r2_2 = v204
 	ra0_0[1] = r2_0
 	ra0_5[1] = r2_1
+	rap0_5[1] = true
 	ra0_6[1] = r2_2
+	rap0_6[1] = true
 	v206 = uint32(6)
 	r3_0 = v206
 	v207 = uint32(2)
@@ -811,9 +896,13 @@ func backendGeneratedBehaviorTreePreparedFixtureBody(context machinePreparedCont
 	r3_4 = v210
 	ra0_0[2] = r3_0
 	ra0_1[2] = r3_1
+	rap0_1[2] = true
 	ra0_2[2] = r3_2
+	rap0_2[2] = true
 	ra0_3[2] = r3_3
+	rap0_3[2] = true
 	ra0_4[2] = r3_4
+	rap0_4[2] = true
 	v212 = uint32(12)
 	r4_0 = v212
 	v213 = uint32(16)
@@ -822,7 +911,9 @@ func backendGeneratedBehaviorTreePreparedFixtureBody(context machinePreparedCont
 	r4_2 = v214
 	ra0_0[3] = r4_0
 	ra0_5[3] = r4_1
+	rap0_5[3] = true
 	ra0_6[3] = r4_2
+	rap0_6[3] = true
 	v216 = uint32(12)
 	r5_0 = v216
 	v217 = uint32(17)
@@ -831,7 +922,9 @@ func backendGeneratedBehaviorTreePreparedFixtureBody(context machinePreparedCont
 	r5_2 = v218
 	ra0_0[4] = r5_0
 	ra0_5[4] = r5_1
+	rap0_5[4] = true
 	ra0_6[4] = r5_2
+	rap0_6[4] = true
 	if v1 != math.Float64frombits(0x4088480000000000) {
 		goto b2
 	}
@@ -880,9 +973,13 @@ b4:
 	v80 = v57
 	v81 = v58
 	v82 = v227
+	vp82 = true
 	v83 = v228
 	goto b5
 b5:
+	if !vp82 {
+		return machinePreparedReplayEntry()
+	}
 	if math.IsNaN(v82) {
 		return machinePreparedReplayEntry()
 	}
@@ -908,6 +1005,10 @@ b6:
 	goto b7
 b7:
 	v229 = v82
+	vp229 = vp82
+	if !vp229 {
+		return machinePreparedReplayEntry()
+	}
 	v230 = 0
 	if v229 >= 1 && v229 <= 5 && v229 == math.Trunc(v229) {
 		v230 = v229
@@ -924,12 +1025,11 @@ b8:
 	if v230 < 1 || v230 > 5 {
 		return machinePreparedReplayEntry()
 	}
-	switch int(v230) - 1 {
-	case 0, 2:
-	default:
+	v232 = ra0_1[int(v230)-1]
+	vp232 = rap0_1[int(v230)-1]
+	if !vp232 {
 		return machinePreparedReplayEntry()
 	}
-	v232 = ra0_1[int(v230)-1]
 	switch v232 {
 	case uint32(1):
 		v233 = r0_0
@@ -947,12 +1047,11 @@ b8:
 	if v230 < 1 || v230 > 5 {
 		return machinePreparedReplayEntry()
 	}
-	switch int(v230) - 1 {
-	case 0, 2:
-	default:
+	v234 = ra0_2[int(v230)-1]
+	vp234 = rap0_2[int(v230)-1]
+	if !vp234 {
 		return machinePreparedReplayEntry()
 	}
-	v234 = ra0_2[int(v230)-1]
 	if math.IsNaN(v233) {
 		return machinePreparedReplayEntry()
 	}
@@ -967,47 +1066,37 @@ b9:
 	if v230 < 1 || v230 > 5 {
 		return machinePreparedReplayEntry()
 	}
-	switch int(v230) - 1 {
-	case 0, 2:
-	default:
-		return machinePreparedReplayEntry()
-	}
 	v235 = ra0_3[int(v230)-1]
+	vp235 = rap0_3[int(v230)-1]
 	v124 = v78
 	v125 = v79
 	v126 = v80
 	v127 = v81
 	v128 = v235
+	vp128 = vp235
 	v129 = v83
 	goto b17
 b10:
 	if v230 < 1 || v230 > 5 {
 		return machinePreparedReplayEntry()
 	}
-	switch int(v230) - 1 {
-	case 0, 2:
-	default:
-		return machinePreparedReplayEntry()
-	}
 	v236 = ra0_4[int(v230)-1]
+	vp236 = rap0_4[int(v230)-1]
 	v124 = v78
 	v125 = v79
 	v126 = v80
 	v127 = v81
 	v128 = v236
+	vp128 = vp236
 	v129 = v83
 	goto b17
 b11:
 	if v230 < 1 || v230 > 5 {
 		return machinePreparedReplayEntry()
 	}
-	switch int(v230) - 1 {
-	case 1, 3, 4:
-	default:
-		return machinePreparedReplayEntry()
-	}
 	v237 = ra0_5[int(v230)-1]
-	if v237 != uint32(13) {
+	vp237 = rap0_5[int(v230)-1]
+	if !vp237 || v237 != uint32(13) {
 		goto b13
 	}
 	goto b12
@@ -1031,13 +1120,9 @@ b13:
 	if v230 < 1 || v230 > 5 {
 		return machinePreparedReplayEntry()
 	}
-	switch int(v230) - 1 {
-	case 1, 3, 4:
-	default:
-		return machinePreparedReplayEntry()
-	}
 	v244 = ra0_5[int(v230)-1]
-	if v244 != uint32(16) {
+	vp244 = rap0_5[int(v230)-1]
+	if !vp244 || v244 != uint32(16) {
 		goto b15
 	}
 	goto b14
@@ -1077,12 +1162,11 @@ b16:
 	if v107 < 1 || v107 > 5 {
 		return machinePreparedReplayEntry()
 	}
-	switch int(v107) - 1 {
-	case 1, 3, 4:
-	default:
+	v257 = ra0_6[int(v107)-1]
+	vp257 = rap0_6[int(v107)-1]
+	if !vp257 {
 		return machinePreparedReplayEntry()
 	}
-	v257 = ra0_6[int(v107)-1]
 	v258 = v101 + v257
 	v259 = r0_0
 	v260 = v258 + v259
@@ -1096,6 +1180,7 @@ b16:
 	v126 = v103
 	v127 = v104
 	v128 = v265
+	vp128 = true
 	v129 = v106
 	goto b17
 b17:
@@ -1105,6 +1190,7 @@ b17:
 	v80 = v126
 	v81 = v127
 	v82 = v128
+	vp82 = vp128
 	v83 = v266
 	goto b5
 b18:

@@ -209,12 +209,6 @@ func TestBackendGoSaveStateDiffIsIdentityBlindAndRejectsUnprovedChildren(t *test
 			"return before[1].inv",
 			1,
 		),
-		"child shape mismatch": strings.Replace(
-			backendSaveStateDiffProofSource,
-			"inv = {coins = 2, herbs = 1, ore = 0}",
-			"inv = {coins = 2, herbs = 1, gems = 0}",
-			1,
-		),
 		"mixed child field tags": strings.Replace(
 			backendSaveStateDiffProofSource,
 			"inv = {coins = 2, herbs = 1, ore = 0}",
@@ -238,6 +232,22 @@ func TestBackendGoSaveStateDiffIsIdentityBlindAndRejectsUnprovedChildren(t *test
 				t.Fatalf("fused child-record compiler accepted %s", name)
 			}
 		})
+	}
+	heterogeneous := strings.Replace(
+		backendSaveStateDiffProofSource,
+		"inv = {coins = 2, herbs = 1, ore = 0}",
+		"inv = {coins = 2, herbs = 1, gems = 0}",
+		1,
+	)
+	generated, err := emitBackendGoNumericProof(
+		backendRecordArrayProofIR(t, heterogeneous),
+		backendGoNumericOptions{packageName: "ember", functionName: "heterogeneousSaveStateDiff"},
+	)
+	if err != nil {
+		t.Fatalf("heterogeneous save-state holdout was rejected: %v", err)
+	}
+	if !strings.Contains(string(generated), "var rp") {
+		t.Fatal("heterogeneous save-state holdout lacks explicit field presence")
 	}
 }
 

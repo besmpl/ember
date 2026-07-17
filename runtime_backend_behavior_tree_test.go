@@ -125,7 +125,7 @@ func TestBackendGoGuardedUnionRecordArrayFixtureIsFreshAndCorrect(t *testing.T) 
 	for _, required := range []string{
 		"var ra0_0 [5]uint32",
 		"var ra0_6 [5]float64",
-		"switch int(v",
+		"var rap",
 		"switch v",
 		"case uint32(1):",
 		"case uint32(5):",

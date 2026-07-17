@@ -39,6 +39,9 @@ func backendGeneratedThreatAggro(p0 float64) (float64, bool) {
 	var v252 float64
 	var v256 float64
 	var v269 float64
+	var vp269 bool
+	_ = v269
+	_ = vp269
 	var v270 uint32
 	var v283 bool
 	var v289 float64
@@ -47,9 +50,15 @@ func backendGeneratedThreatAggro(p0 float64) (float64, bool) {
 	var v292 float64
 	var v296 float64
 	var v309 float64
+	var vp309 bool
+	_ = v309
+	_ = vp309
 	var v310 uint32
 	var v314 float64
 	var v317 float64
+	var vp317 bool
+	_ = v317
+	_ = vp317
 	var v329 float64
 	var v330 float64
 	var v331 float64
@@ -122,6 +131,9 @@ func backendGeneratedThreatAggro(p0 float64) (float64, bool) {
 	var v456 float64
 	var v457 uint32
 	var v458 float64
+	var vp458 bool
+	_ = v458
+	_ = vp458
 	var v459 float64
 	var v460 float64
 	var v461 uint32
@@ -130,16 +142,31 @@ func backendGeneratedThreatAggro(p0 float64) (float64, bool) {
 	var v469 float64
 	var v470 uint32
 	var v471 float64
+	var vp471 bool
+	_ = v471
+	_ = vp471
 	var v472 bool
 	var v473 float64
+	var vp473 bool
+	_ = v473
+	_ = vp473
 	var v474 float64
+	var vp474 bool
+	_ = v474
+	_ = vp474
 	var v475 bool
 	var v476 float64
+	var vp476 bool
+	_ = v476
+	_ = vp476
 	var v477 uint32
 	var v478 uint32
 	var v479 uint32
 	var v480 bool
 	var v481 float64
+	var vp481 bool
+	_ = v481
+	_ = vp481
 	var v482 float64
 	var v483 float64
 	var v484 float64
@@ -147,9 +174,15 @@ func backendGeneratedThreatAggro(p0 float64) (float64, bool) {
 	var v486 uint32
 	var v487 bool
 	var v488 float64
+	var vp488 bool
+	_ = v488
+	_ = vp488
 	var v489 float64
 	var v490 float64
 	var v491 float64
+	var vp491 bool
+	_ = v491
+	_ = vp491
 	var v492 float64
 	var v493 float64
 	var v494 float64
@@ -193,12 +226,20 @@ func backendGeneratedThreatAggro(p0 float64) (float64, bool) {
 	_ = r4_2
 	var r5_0 float64
 	_ = r5_0
+	var rp5_0 bool
+	_ = rp5_0
 	var r5_1 float64
 	_ = r5_1
+	var rp5_1 bool
+	_ = rp5_1
 	var r5_2 float64
 	_ = r5_2
+	var rp5_2 bool
+	_ = rp5_2
 	var r5_3 float64
 	_ = r5_3
+	var rp5_3 bool
+	_ = rp5_3
 	var r6_0 float64
 	_ = r6_0
 	var r6_1 bool
@@ -207,12 +248,20 @@ func backendGeneratedThreatAggro(p0 float64) (float64, bool) {
 	_ = r6_2
 	var r7_0 float64
 	_ = r7_0
+	var rp7_0 bool
+	_ = rp7_0
 	var r7_1 float64
 	_ = r7_1
+	var rp7_1 bool
+	_ = rp7_1
 	var r7_2 float64
 	_ = r7_2
+	var rp7_2 bool
+	_ = rp7_2
 	var r7_3 float64
 	_ = r7_3
+	var rp7_3 bool
+	_ = rp7_3
 	var r8_0 float64
 	_ = r8_0
 	var r8_1 bool
@@ -221,12 +270,20 @@ func backendGeneratedThreatAggro(p0 float64) (float64, bool) {
 	_ = r8_2
 	var r9_0 float64
 	_ = r9_0
+	var rp9_0 bool
+	_ = rp9_0
 	var r9_1 float64
 	_ = r9_1
+	var rp9_1 bool
+	_ = rp9_1
 	var r9_2 float64
 	_ = r9_2
+	var rp9_2 bool
+	_ = rp9_2
 	var r9_3 float64
 	_ = r9_3
+	var rp9_3 bool
+	_ = rp9_3
 	var r10_0 uint32
 	_ = r10_0
 	var r10_1 uint32
@@ -318,12 +375,16 @@ func backendGeneratedThreatAggro(p0 float64) (float64, bool) {
 	v385 = v384 - math.Floor(v384/math.Float64frombits(0x401c000000000000))*math.Float64frombits(0x401c000000000000)
 	v386 = v383 + v385
 	r5_0 = v386
+	rp5_0 = true
 	v387 = math.Float64frombits(0x0000000000000000)
 	r5_1 = v387
+	rp5_1 = true
 	v388 = math.Float64frombits(0x4010000000000000)
 	r5_2 = v388
+	rp5_2 = true
 	v389 = math.Float64frombits(0x4020000000000000)
 	r5_3 = v389
+	rp5_3 = true
 	r4_2 = 1
 	ra1_0[0] = r4_0
 	ra1_1[0] = r4_1
@@ -334,12 +395,16 @@ func backendGeneratedThreatAggro(p0 float64) (float64, bool) {
 	r6_1 = v392
 	v394 = math.Float64frombits(0x4024000000000000)
 	r7_0 = v394
+	rp7_0 = true
 	v395 = math.Float64frombits(0x4028000000000000)
 	r7_1 = v395
+	rp7_1 = true
 	v396 = math.Float64frombits(0x0000000000000000)
 	r7_2 = v396
+	rp7_2 = true
 	v397 = math.Float64frombits(0x4014000000000000)
 	r7_3 = v397
+	rp7_3 = true
 	r6_2 = 2
 	ra1_0[1] = r6_0
 	ra1_1[1] = r6_1
@@ -350,12 +415,16 @@ func backendGeneratedThreatAggro(p0 float64) (float64, bool) {
 	r8_1 = v400
 	v402 = math.Float64frombits(0x403e000000000000)
 	r9_0 = v402
+	rp9_0 = true
 	v403 = math.Float64frombits(0x4020000000000000)
 	r9_1 = v403
+	rp9_1 = true
 	v404 = math.Float64frombits(0x4018000000000000)
 	r9_2 = v404
+	rp9_2 = true
 	v405 = math.Float64frombits(0x4000000000000000)
 	r9_3 = v405
+	rp9_3 = true
 	r8_2 = 3
 	ra1_0[2] = r8_0
 	ra1_1[2] = r8_1
@@ -549,12 +618,16 @@ b12:
 		switch v457 {
 		case uint32(1):
 			v458 = r5_0
+			vp458 = rp5_0
 		case uint32(6):
 			v458 = r5_1
+			vp458 = rp5_1
 		case uint32(8):
 			v458 = r5_2
+			vp458 = rp5_2
 		case uint32(10):
 			v458 = r5_3
+			vp458 = rp5_3
 		default:
 			return 0, false
 		}
@@ -562,12 +635,16 @@ b12:
 		switch v457 {
 		case uint32(1):
 			v458 = r7_0
+			vp458 = rp7_0
 		case uint32(6):
 			v458 = r7_1
+			vp458 = rp7_1
 		case uint32(8):
 			v458 = r7_2
+			vp458 = rp7_2
 		case uint32(10):
 			v458 = r7_3
+			vp458 = rp7_3
 		default:
 			return 0, false
 		}
@@ -575,12 +652,16 @@ b12:
 		switch v457 {
 		case uint32(1):
 			v458 = r9_0
+			vp458 = rp9_0
 		case uint32(6):
 			v458 = r9_1
+			vp458 = rp9_1
 		case uint32(8):
 			v458 = r9_2
+			vp458 = rp9_2
 		case uint32(10):
 			v458 = r9_3
+			vp458 = rp9_3
 		default:
 			return 0, false
 		}
@@ -588,6 +669,9 @@ b12:
 		return 0, false
 	}
 	v459 = v225
+	if !vp458 {
+		return 0, false
+	}
 	v460 = v458 + v459
 	if v222 < 1 || v222 > 5 {
 		return 0, false
@@ -601,12 +685,16 @@ b12:
 		switch v461 {
 		case uint32(1):
 			r5_0 = v460
+			rp5_0 = true
 		case uint32(6):
 			r5_1 = v460
+			rp5_1 = true
 		case uint32(8):
 			r5_2 = v460
+			rp5_2 = true
 		case uint32(10):
 			r5_3 = v460
+			rp5_3 = true
 		default:
 			return 0, false
 		}
@@ -614,12 +702,16 @@ b12:
 		switch v461 {
 		case uint32(1):
 			r7_0 = v460
+			rp7_0 = true
 		case uint32(6):
 			r7_1 = v460
+			rp7_1 = true
 		case uint32(8):
 			r7_2 = v460
+			rp7_2 = true
 		case uint32(10):
 			r7_3 = v460
+			rp7_3 = true
 		default:
 			return 0, false
 		}
@@ -627,12 +719,16 @@ b12:
 		switch v461 {
 		case uint32(1):
 			r9_0 = v460
+			rp9_0 = true
 		case uint32(6):
 			r9_1 = v460
+			rp9_1 = true
 		case uint32(8):
 			r9_2 = v460
+			rp9_2 = true
 		case uint32(10):
 			r9_3 = v460
+			rp9_3 = true
 		default:
 			return 0, false
 		}
@@ -655,6 +751,7 @@ b13:
 	v252 = v132
 	v256 = v136
 	v269 = v462
+	vp269 = true
 	v270 = v463
 	goto b14
 b14:
@@ -677,12 +774,16 @@ b15:
 		switch v470 {
 		case uint32(1):
 			v471 = r5_0
+			vp471 = rp5_0
 		case uint32(6):
 			v471 = r5_1
+			vp471 = rp5_1
 		case uint32(8):
 			v471 = r5_2
+			vp471 = rp5_2
 		case uint32(10):
 			v471 = r5_3
+			vp471 = rp5_3
 		default:
 			return 0, false
 		}
@@ -690,12 +791,16 @@ b15:
 		switch v470 {
 		case uint32(1):
 			v471 = r7_0
+			vp471 = rp7_0
 		case uint32(6):
 			v471 = r7_1
+			vp471 = rp7_1
 		case uint32(8):
 			v471 = r7_2
+			vp471 = rp7_2
 		case uint32(10):
 			v471 = r7_3
+			vp471 = rp7_3
 		default:
 			return 0, false
 		}
@@ -703,12 +808,16 @@ b15:
 		switch v470 {
 		case uint32(1):
 			v471 = r9_0
+			vp471 = rp9_0
 		case uint32(6):
 			v471 = r9_1
+			vp471 = rp9_1
 		case uint32(8):
 			v471 = r9_2
+			vp471 = rp9_2
 		case uint32(10):
 			v471 = r9_3
+			vp471 = rp9_3
 		default:
 			return 0, false
 		}
@@ -727,15 +836,25 @@ b15:
 		v292 = v252
 		v296 = v256
 		v309 = v269
+		vp309 = vp269
 		v310 = v270
 		v314 = v469
 		v317 = v471
+		vp317 = vp471
 		goto b17
 	}
 	goto b16
 b16:
 	v473 = v471
+	vp473 = vp471
 	v474 = v269
+	vp474 = vp269
+	if !vp473 {
+		return 0, false
+	}
+	if !vp474 {
+		return 0, false
+	}
 	if math.IsNaN(v473) {
 		return 0, false
 	}
@@ -750,9 +869,11 @@ b16:
 	v292 = v252
 	v296 = v256
 	v309 = v269
+	vp309 = vp269
 	v310 = v270
 	v314 = v469
 	v317 = v471
+	vp317 = vp471
 	goto b17
 b17:
 	if !v283 {
@@ -762,12 +883,14 @@ b17:
 		v252 = v292
 		v256 = v296
 		v269 = v309
+		vp269 = vp309
 		v270 = v310
 		goto b14
 	}
 	goto b18
 b18:
 	v476 = v317
+	vp476 = vp317
 	if v314 < 1 || v314 > 4 {
 		return 0, false
 	}
@@ -778,6 +901,7 @@ b18:
 	v252 = v292
 	v256 = v296
 	v269 = v476
+	vp269 = vp476
 	v270 = v477
 	goto b14
 b19:
@@ -790,6 +914,10 @@ b19:
 	goto b20
 b20:
 	v481 = v269
+	vp481 = vp269
+	if !vp481 {
+		return 0, false
+	}
 	v482 = v249 + v481
 	if v256 < 1 || v256 > 3 {
 		return 0, false
@@ -812,6 +940,10 @@ b21:
 	goto b22
 b22:
 	v488 = v269
+	vp488 = vp269
+	if !vp488 {
+		return 0, false
+	}
 	v489 = v488 * math.Float64frombits(0x4000000000000000)
 	v490 = v249 + v489
 	v329 = v490
@@ -822,6 +954,10 @@ b22:
 	goto b24
 b23:
 	v491 = v269
+	vp491 = vp269
+	if !vp491 {
+		return 0, false
+	}
 	v492 = v249 + v491
 	if v256 < 1 || v256 > 3 {
 		return 0, false
@@ -919,6 +1055,9 @@ func backendGeneratedThreatAggroPreparedFixtureBody(context machinePreparedConte
 	var v252 float64
 	var v256 float64
 	var v269 float64
+	var vp269 bool
+	_ = v269
+	_ = vp269
 	var v270 uint32
 	var v283 bool
 	var v289 float64
@@ -927,9 +1066,15 @@ func backendGeneratedThreatAggroPreparedFixtureBody(context machinePreparedConte
 	var v292 float64
 	var v296 float64
 	var v309 float64
+	var vp309 bool
+	_ = v309
+	_ = vp309
 	var v310 uint32
 	var v314 float64
 	var v317 float64
+	var vp317 bool
+	_ = v317
+	_ = vp317
 	var v329 float64
 	var v330 float64
 	var v331 float64
@@ -1002,6 +1147,9 @@ func backendGeneratedThreatAggroPreparedFixtureBody(context machinePreparedConte
 	var v456 float64
 	var v457 uint32
 	var v458 float64
+	var vp458 bool
+	_ = v458
+	_ = vp458
 	var v459 float64
 	var v460 float64
 	var v461 uint32
@@ -1010,16 +1158,31 @@ func backendGeneratedThreatAggroPreparedFixtureBody(context machinePreparedConte
 	var v469 float64
 	var v470 uint32
 	var v471 float64
+	var vp471 bool
+	_ = v471
+	_ = vp471
 	var v472 bool
 	var v473 float64
+	var vp473 bool
+	_ = v473
+	_ = vp473
 	var v474 float64
+	var vp474 bool
+	_ = v474
+	_ = vp474
 	var v475 bool
 	var v476 float64
+	var vp476 bool
+	_ = v476
+	_ = vp476
 	var v477 uint32
 	var v478 uint32
 	var v479 uint32
 	var v480 bool
 	var v481 float64
+	var vp481 bool
+	_ = v481
+	_ = vp481
 	var v482 float64
 	var v483 float64
 	var v484 float64
@@ -1027,9 +1190,15 @@ func backendGeneratedThreatAggroPreparedFixtureBody(context machinePreparedConte
 	var v486 uint32
 	var v487 bool
 	var v488 float64
+	var vp488 bool
+	_ = v488
+	_ = vp488
 	var v489 float64
 	var v490 float64
 	var v491 float64
+	var vp491 bool
+	_ = v491
+	_ = vp491
 	var v492 float64
 	var v493 float64
 	var v494 float64
@@ -1073,12 +1242,20 @@ func backendGeneratedThreatAggroPreparedFixtureBody(context machinePreparedConte
 	_ = r4_2
 	var r5_0 float64
 	_ = r5_0
+	var rp5_0 bool
+	_ = rp5_0
 	var r5_1 float64
 	_ = r5_1
+	var rp5_1 bool
+	_ = rp5_1
 	var r5_2 float64
 	_ = r5_2
+	var rp5_2 bool
+	_ = rp5_2
 	var r5_3 float64
 	_ = r5_3
+	var rp5_3 bool
+	_ = rp5_3
 	var r6_0 float64
 	_ = r6_0
 	var r6_1 bool
@@ -1087,12 +1264,20 @@ func backendGeneratedThreatAggroPreparedFixtureBody(context machinePreparedConte
 	_ = r6_2
 	var r7_0 float64
 	_ = r7_0
+	var rp7_0 bool
+	_ = rp7_0
 	var r7_1 float64
 	_ = r7_1
+	var rp7_1 bool
+	_ = rp7_1
 	var r7_2 float64
 	_ = r7_2
+	var rp7_2 bool
+	_ = rp7_2
 	var r7_3 float64
 	_ = r7_3
+	var rp7_3 bool
+	_ = rp7_3
 	var r8_0 float64
 	_ = r8_0
 	var r8_1 bool
@@ -1101,12 +1286,20 @@ func backendGeneratedThreatAggroPreparedFixtureBody(context machinePreparedConte
 	_ = r8_2
 	var r9_0 float64
 	_ = r9_0
+	var rp9_0 bool
+	_ = rp9_0
 	var r9_1 float64
 	_ = r9_1
+	var rp9_1 bool
+	_ = rp9_1
 	var r9_2 float64
 	_ = r9_2
+	var rp9_2 bool
+	_ = rp9_2
 	var r9_3 float64
 	_ = r9_3
+	var rp9_3 bool
+	_ = rp9_3
 	var r10_0 uint32
 	_ = r10_0
 	var r10_1 uint32
@@ -1198,12 +1391,16 @@ func backendGeneratedThreatAggroPreparedFixtureBody(context machinePreparedConte
 	v385 = v384 - math.Floor(v384/math.Float64frombits(0x401c000000000000))*math.Float64frombits(0x401c000000000000)
 	v386 = v383 + v385
 	r5_0 = v386
+	rp5_0 = true
 	v387 = math.Float64frombits(0x0000000000000000)
 	r5_1 = v387
+	rp5_1 = true
 	v388 = math.Float64frombits(0x4010000000000000)
 	r5_2 = v388
+	rp5_2 = true
 	v389 = math.Float64frombits(0x4020000000000000)
 	r5_3 = v389
+	rp5_3 = true
 	r4_2 = 1
 	ra1_0[0] = r4_0
 	ra1_1[0] = r4_1
@@ -1214,12 +1411,16 @@ func backendGeneratedThreatAggroPreparedFixtureBody(context machinePreparedConte
 	r6_1 = v392
 	v394 = math.Float64frombits(0x4024000000000000)
 	r7_0 = v394
+	rp7_0 = true
 	v395 = math.Float64frombits(0x4028000000000000)
 	r7_1 = v395
+	rp7_1 = true
 	v396 = math.Float64frombits(0x0000000000000000)
 	r7_2 = v396
+	rp7_2 = true
 	v397 = math.Float64frombits(0x4014000000000000)
 	r7_3 = v397
+	rp7_3 = true
 	r6_2 = 2
 	ra1_0[1] = r6_0
 	ra1_1[1] = r6_1
@@ -1230,12 +1431,16 @@ func backendGeneratedThreatAggroPreparedFixtureBody(context machinePreparedConte
 	r8_1 = v400
 	v402 = math.Float64frombits(0x403e000000000000)
 	r9_0 = v402
+	rp9_0 = true
 	v403 = math.Float64frombits(0x4020000000000000)
 	r9_1 = v403
+	rp9_1 = true
 	v404 = math.Float64frombits(0x4018000000000000)
 	r9_2 = v404
+	rp9_2 = true
 	v405 = math.Float64frombits(0x4000000000000000)
 	r9_3 = v405
+	rp9_3 = true
 	r8_2 = 3
 	ra1_0[2] = r8_0
 	ra1_1[2] = r8_1
@@ -1429,12 +1634,16 @@ b12:
 		switch v457 {
 		case uint32(1):
 			v458 = r5_0
+			vp458 = rp5_0
 		case uint32(6):
 			v458 = r5_1
+			vp458 = rp5_1
 		case uint32(8):
 			v458 = r5_2
+			vp458 = rp5_2
 		case uint32(10):
 			v458 = r5_3
+			vp458 = rp5_3
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1442,12 +1651,16 @@ b12:
 		switch v457 {
 		case uint32(1):
 			v458 = r7_0
+			vp458 = rp7_0
 		case uint32(6):
 			v458 = r7_1
+			vp458 = rp7_1
 		case uint32(8):
 			v458 = r7_2
+			vp458 = rp7_2
 		case uint32(10):
 			v458 = r7_3
+			vp458 = rp7_3
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1455,12 +1668,16 @@ b12:
 		switch v457 {
 		case uint32(1):
 			v458 = r9_0
+			vp458 = rp9_0
 		case uint32(6):
 			v458 = r9_1
+			vp458 = rp9_1
 		case uint32(8):
 			v458 = r9_2
+			vp458 = rp9_2
 		case uint32(10):
 			v458 = r9_3
+			vp458 = rp9_3
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1468,6 +1685,9 @@ b12:
 		return machinePreparedReplayEntry()
 	}
 	v459 = v225
+	if !vp458 {
+		return machinePreparedReplayEntry()
+	}
 	v460 = v458 + v459
 	if v222 < 1 || v222 > 5 {
 		return machinePreparedReplayEntry()
@@ -1481,12 +1701,16 @@ b12:
 		switch v461 {
 		case uint32(1):
 			r5_0 = v460
+			rp5_0 = true
 		case uint32(6):
 			r5_1 = v460
+			rp5_1 = true
 		case uint32(8):
 			r5_2 = v460
+			rp5_2 = true
 		case uint32(10):
 			r5_3 = v460
+			rp5_3 = true
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1494,12 +1718,16 @@ b12:
 		switch v461 {
 		case uint32(1):
 			r7_0 = v460
+			rp7_0 = true
 		case uint32(6):
 			r7_1 = v460
+			rp7_1 = true
 		case uint32(8):
 			r7_2 = v460
+			rp7_2 = true
 		case uint32(10):
 			r7_3 = v460
+			rp7_3 = true
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1507,12 +1735,16 @@ b12:
 		switch v461 {
 		case uint32(1):
 			r9_0 = v460
+			rp9_0 = true
 		case uint32(6):
 			r9_1 = v460
+			rp9_1 = true
 		case uint32(8):
 			r9_2 = v460
+			rp9_2 = true
 		case uint32(10):
 			r9_3 = v460
+			rp9_3 = true
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1535,6 +1767,7 @@ b13:
 	v252 = v132
 	v256 = v136
 	v269 = v462
+	vp269 = true
 	v270 = v463
 	goto b14
 b14:
@@ -1557,12 +1790,16 @@ b15:
 		switch v470 {
 		case uint32(1):
 			v471 = r5_0
+			vp471 = rp5_0
 		case uint32(6):
 			v471 = r5_1
+			vp471 = rp5_1
 		case uint32(8):
 			v471 = r5_2
+			vp471 = rp5_2
 		case uint32(10):
 			v471 = r5_3
+			vp471 = rp5_3
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1570,12 +1807,16 @@ b15:
 		switch v470 {
 		case uint32(1):
 			v471 = r7_0
+			vp471 = rp7_0
 		case uint32(6):
 			v471 = r7_1
+			vp471 = rp7_1
 		case uint32(8):
 			v471 = r7_2
+			vp471 = rp7_2
 		case uint32(10):
 			v471 = r7_3
+			vp471 = rp7_3
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1583,12 +1824,16 @@ b15:
 		switch v470 {
 		case uint32(1):
 			v471 = r9_0
+			vp471 = rp9_0
 		case uint32(6):
 			v471 = r9_1
+			vp471 = rp9_1
 		case uint32(8):
 			v471 = r9_2
+			vp471 = rp9_2
 		case uint32(10):
 			v471 = r9_3
+			vp471 = rp9_3
 		default:
 			return machinePreparedReplayEntry()
 		}
@@ -1607,15 +1852,25 @@ b15:
 		v292 = v252
 		v296 = v256
 		v309 = v269
+		vp309 = vp269
 		v310 = v270
 		v314 = v469
 		v317 = v471
+		vp317 = vp471
 		goto b17
 	}
 	goto b16
 b16:
 	v473 = v471
+	vp473 = vp471
 	v474 = v269
+	vp474 = vp269
+	if !vp473 {
+		return machinePreparedReplayEntry()
+	}
+	if !vp474 {
+		return machinePreparedReplayEntry()
+	}
 	if math.IsNaN(v473) {
 		return machinePreparedReplayEntry()
 	}
@@ -1630,9 +1885,11 @@ b16:
 	v292 = v252
 	v296 = v256
 	v309 = v269
+	vp309 = vp269
 	v310 = v270
 	v314 = v469
 	v317 = v471
+	vp317 = vp471
 	goto b17
 b17:
 	if !v283 {
@@ -1642,12 +1899,14 @@ b17:
 		v252 = v292
 		v256 = v296
 		v269 = v309
+		vp269 = vp309
 		v270 = v310
 		goto b14
 	}
 	goto b18
 b18:
 	v476 = v317
+	vp476 = vp317
 	if v314 < 1 || v314 > 4 {
 		return machinePreparedReplayEntry()
 	}
@@ -1658,6 +1917,7 @@ b18:
 	v252 = v292
 	v256 = v296
 	v269 = v476
+	vp269 = vp476
 	v270 = v477
 	goto b14
 b19:
@@ -1670,6 +1930,10 @@ b19:
 	goto b20
 b20:
 	v481 = v269
+	vp481 = vp269
+	if !vp481 {
+		return machinePreparedReplayEntry()
+	}
 	v482 = v249 + v481
 	if v256 < 1 || v256 > 3 {
 		return machinePreparedReplayEntry()
@@ -1692,6 +1956,10 @@ b21:
 	goto b22
 b22:
 	v488 = v269
+	vp488 = vp269
+	if !vp488 {
+		return machinePreparedReplayEntry()
+	}
 	v489 = v488 * math.Float64frombits(0x4000000000000000)
 	v490 = v249 + v489
 	v329 = v490
@@ -1702,6 +1970,10 @@ b22:
 	goto b24
 b23:
 	v491 = v269
+	vp491 = vp269
+	if !vp491 {
+		return machinePreparedReplayEntry()
+	}
 	v492 = v249 + v491
 	if v256 < 1 || v256 > 3 {
 		return machinePreparedReplayEntry()
