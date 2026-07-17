@@ -47,6 +47,9 @@ and retire or delete it when the slice lands or is abandoned.
 - `adr/0008-ssa-aot-for-luau-parity.md`: accepted prepared SSA AOT-to-Go
   architecture, exact Machine side exits, lifecycle claim split, and candidate
   rejection evidence.
+- `adr/0009-generated-adaptive-superword-vm.md`: bounded dynamic-VM decision,
+  owner-local shadow-wordcode seam, semantic-generation requirement, and
+  early delete-or-retain gate.
 
 ## Workflow Documents
 

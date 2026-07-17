@@ -4,6 +4,66 @@ Hearth-shaped lanes in this historical audit represent Ember's first
 production-host workload. They are benchmark evidence, not requirements on the
 runtime interface or domain model.
 
+## Dynamic adaptive-superword baseline
+
+The bounded generated-adaptive-superword investigation starts from exact
+runtime commit `2cf1e08d6929702cbcb611c527e1a6d1e87d4f5a`. Only planning
+documents changed between that revision and the decision commit, so these
+captures bind the current VM implementation without including an experiment.
+Both schema-v2 all-37 captures used pinned Luau 0.728, `CGO_ENABLED=0`,
+`GOMAXPROCS=1`, Go 1.26.4, and Darwin 24.6.0/arm64 on Apple M1. Their shared
+acceptance-environment SHA-256 is
+`7d7d8f68a17a5295d7401e234d8cd6630ef20ceeef6e8d97aaae1908187d1d19`.
+
+| Capture | Bound directory hash | `slopes.tsv` SHA-256 | all-37 geomean |
+| --- | --- | --- | ---: |
+| VM A | `0e3714f7fcc7873fdef01178b8e087e53d9ced8b7a8d9f86b275f092ff2d7806` | `e50b9a1362f63aa3f5cedd685217a3c9cbfc50f513bfc4d872e11f818f7c0846` | `5.708984x` |
+| VM B | `3de01d04da3b7a4753832bde1c6830968af454b67024436eef96b02d0b0aa204` | `bd155568a68e953a8bd1d951993c1f8faf50f062b6dd56c82604b72d980f2113` | `5.718731x` |
+
+The immutable 444-row baseline manifest has SHA-256
+`a3281409f399daf93a785312577b12623ca14b48f0a12834911d8f7fdf818453`.
+The pair reproduces the architectural gap: arithmetic is 5.36x/5.39x Luau,
+recursive Fibonacci 5.27x/5.27x, arrays 4.60x/5.20x, and event dispatch
+8.07x/8.37x. Result-set, workload, program, source, environment, inventory,
+and contamination validation all pass. No baseline row meets the final 1:1
+contract.
+
+Two exact-revision 56-row allocation captures have bound directory hashes
+`b04d6087e91aa0ffce4e2c4efca3c775bca797d2d178de63907fc8b33334233f`
+and
+`a2c5cc305c9dbb12e82220f6e68d803b078fc2cae3720c0ce50d1fcdf41ddf4a`.
+Their ceiling manifest has SHA-256
+`7024826d3a12588b24606f2a88288f90b347274cf7d3cd35ca227e19c9779720`.
+It freezes every warmed all-37 and public lifecycle allocation row before the
+shadow VM exists.
+
+Explicit VM-only two-second profiles bind the four early gate families. In
+arithmetic, the generated direct loop is 61.61% flat, `valueKind` 9.38%, and
+instruction accounting 7.59%. Recursion attributes 30.39% flat to the loop and
+22.54% to fixed-call enter/resume. Arrays and event dispatch retain 21.40% and
+34.95% loop-flat cost; existing field/array mechanisms remain visible below
+dispatch, kind, fast-call, and accounting costs. The profile SHA-256 values are
+`b776762fafced6239cf60baa1c2d947d099ac82384cc3c9f4de17673b3bf21c7`
+(arithmetic),
+`cd71319bf0c8efc2fbec8a6f4b673e1f2bd2dbaec600722dc6d868f61c9c239c`
+(recursion),
+`4582f665d97ee797c38cb0c7b0f85bf91557bef8fa562a5f1318c34c88ad0e92`
+(arrays), and
+`433d6ca7702b057a8d53dcf9fd9340d12cb88eb7756081cb399e67bd18b6a931`
+(event). The exact test binary is
+`5831b09dde85480b2f5003687066b71990bb6261a193413a1f077dc1292c48f8`.
+Linked text is 62,944 bytes for the production direct loop, 66,352 bytes for
+the instrumented loop, and 3,856 bytes for the compact Machine loop.
+
+The existing test-only normalized mechanism observer produced the same
+16-scenario output hash twice:
+`9f93adf5bddc9dad926c8f38660b301cfe59f63de7c0f88a8500efb6cad7625b`.
+It shows broad recurring move/arithmetic/branch/iteration/call/field families
+and overwhelmingly successful field PICs. This selects generated typed/call
+specialization and bounded fusion for the first proof; it rejects another
+cache-only campaign. ADR 0009 records the candidate cutoff, semantic seam,
+sealed holdout, and mandatory deletion gate.
+
 ## Current baseline
 
 The compact-Machine migration baseline was captured on 2026-07-14 from commit

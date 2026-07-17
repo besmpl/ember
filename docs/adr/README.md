@@ -34,3 +34,6 @@ Current runtime decisions:
 - `0008-ssa-aot-for-luau-parity.md`: select build-time SSA/value/shape-
   specialized AOT to ordinary Go for prepared parity, retain exact Machine side
   exits, and defer static assembly to a profile-proven second lowerer.
+- `0009-generated-adaptive-superword-vm.md`: bound a generated adaptive
+  shadow-wordcode experiment for scripts loaded after `go build`, with one
+  semantic source, exact same-PC fallback, and an early delete-or-retain gate.
