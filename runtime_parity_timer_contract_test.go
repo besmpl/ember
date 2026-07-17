@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/besmpl/ember"
+	"github.com/besmpl/ember/internal/parityfixture"
 )
 
 const (
@@ -32,166 +33,16 @@ var (
 	}
 )
 
-func seedParityNumericLiterals(source string) (string, error) {
-	for _, declaration := range []string{
-		"local total = 0",
-		"local score = 0",
-		"local removed = 0",
-		"local a = 0",
-		"local cash = 0",
-		"local misses = 0",
-	} {
-		if index := strings.Index(source, declaration); index >= 0 {
-			value := index + len(declaration) - 1
-			return source[:value] + "(__seed % 3)" + source[value+1:], nil
-		}
-	}
-	var output strings.Builder
-	output.Grow(len(source) + len(source)/2)
-	rewrites := 0
-	for index := 0; index < len(source); {
-		switch {
-		case source[index] == '"' || source[index] == '\'':
-			next, err := copyParityQuoted(&output, source, index, source[index])
-			if err != nil {
-				return "", err
-			}
-			index = next
-		case index+1 < len(source) && source[index:index+2] == "--":
-			next := strings.IndexByte(source[index:], '\n')
-			if next < 0 {
-				output.WriteString(source[index:])
-				index = len(source)
-				continue
-			}
-			next += index + 1
-			output.WriteString(source[index:next])
-			index = next
-		case index+1 < len(source) && source[index:index+2] == "[[":
-			end := strings.Index(source[index+2:], "]]")
-			if end < 0 {
-				return "", fmt.Errorf("seed parity source: unterminated long string")
-			}
-			end += index + 4
-			output.WriteString(source[index:end])
-			index = end
-		case source[index] >= '0' && source[index] <= '9' && parityNumberBoundary(source, index):
-			end := index + 1
-			for end < len(source) && source[end] >= '0' && source[end] <= '9' {
-				end++
-			}
-			if end < len(source) && (source[end] == '.' || isParityIdentifierByte(source[end])) {
-				return "", fmt.Errorf("seed parity source: unsupported numeric literal near %q", source[index:])
-			}
-			fmt.Fprintf(&output, "(%s + (__seed %% 3))", source[index:end])
-			rewrites++
-			index = end
-			if rewrites == 1 {
-				output.WriteString(source[index:])
-				index = len(source)
-			}
-		default:
-			output.WriteByte(source[index])
-			index++
-		}
-	}
-	if rewrites == 0 {
-		return "", fmt.Errorf("seed parity source: no numeric literals")
-	}
-	return output.String(), nil
-}
-
-func copyParityQuoted(output *strings.Builder, source string, start int, quote byte) (int, error) {
-	for index := start; index < len(source); index++ {
-		output.WriteByte(source[index])
-		if source[index] == '\\' {
-			index++
-			if index >= len(source) {
-				return 0, fmt.Errorf("seed parity source: unterminated escape")
-			}
-			output.WriteByte(source[index])
-			continue
-		}
-		if index > start && source[index] == quote {
-			return index + 1, nil
-		}
-	}
-	return 0, fmt.Errorf("seed parity source: unterminated quoted string")
-}
-
-func parityNumberBoundary(source string, index int) bool {
-	return index == 0 || !isParityIdentifierByte(source[index-1])
-}
-
-func isParityIdentifierByte(value byte) bool {
-	return value == '_' ||
-		value >= 'a' && value <= 'z' ||
-		value >= 'A' && value <= 'Z' ||
-		value >= '0' && value <= '9'
-}
-
-func transformParityHoldoutSource(source string) (string, error) {
-	for index := 0; index < len(source); {
-		switch {
-		case source[index] == '"' || source[index] == '\'':
-			var copied strings.Builder
-			next, err := copyParityQuoted(&copied, source, index, source[index])
-			if err != nil {
-				return "", err
-			}
-			index = next
-		case index+1 < len(source) && source[index:index+2] == "--":
-			next := strings.IndexByte(source[index:], '\n')
-			if next < 0 {
-				return "", fmt.Errorf("holdout parity source: no numeric literal")
-			}
-			index += next + 1
-		case index+1 < len(source) && source[index:index+2] == "[[":
-			end := strings.Index(source[index+2:], "]]")
-			if end < 0 {
-				return "", fmt.Errorf("holdout parity source: unterminated long string")
-			}
-			index += end + 4
-		case source[index] >= '0' && source[index] <= '9' && parityNumberBoundary(source, index):
-			end := index + 1
-			for end < len(source) && source[end] >= '0' && source[end] <= '9' {
-				end++
-			}
-			if end < len(source) && (source[end] == '.' || isParityIdentifierByte(source[end])) {
-				return "", fmt.Errorf("holdout parity source: unsupported numeric literal near %q", source[index:])
-			}
-			return "-- identity-holdout-v1\n" + source[:end] + ".0" + source[end:], nil
-		default:
-			index++
-		}
-	}
-	return "", fmt.Errorf("holdout parity source: no numeric literal")
-}
-
 func runtimeParityGuestBatchProgram(source string, variant parityFixtureVariant) (string, string, error) {
-	seeded, err := seedParityNumericLiterals(source)
+	fixture, err := parityfixture.BuildGuestBatch(source, parityfixture.GuestBatchVariant{
+		CaseName:  variant.caseName,
+		BatchName: variant.batchName,
+		Holdout:   variant.transformHoldout,
+	})
 	if err != nil {
 		return "", "", err
 	}
-	if variant.transformHoldout {
-		seeded, err = transformParityHoldoutSource(seeded)
-		if err != nil {
-			return "", "", err
-		}
-	}
-	program := fmt.Sprintf(`local %s = function(__seed)
-%s
-end
-local %s = function(__n, __seed)
-    local __checksum = 0
-    for __i = 1, __n do
-        local __value = %s(__seed + __i)
-        __checksum = __checksum + __value * (__i %% 7 + 1)
-    end
-    return __checksum
-end
-`, variant.caseName, seeded, variant.batchName, variant.caseName)
-	return program, seeded, nil
+	return fixture.Program, fixture.SeededSource, nil
 }
 
 func runtimeParityGuestBatchFixture(source string, variant parityFixtureVariant, luau bool) (string, error) {
@@ -330,9 +181,9 @@ func TestRuntimeParityPublicCallTimerSentinel(t *testing.T) {
 	}
 }
 
-func TestSeedParityNumericLiterals(t *testing.T) {
+func TestRuntimeParityGuestBatchSeedsNumericLiterals(t *testing.T) {
 	source := "local x = 10 -- 20\nlocal s = \"30\"\nreturn x + 2"
-	got, err := seedParityNumericLiterals(source)
+	_, got, err := runtimeParityGuestBatchProgram(source, parityDefaultFixtureVariant)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +191,7 @@ func TestSeedParityNumericLiterals(t *testing.T) {
 	if got != want {
 		t.Fatalf("seeded source = %q, want %q", got, want)
 	}
-	accumulator, err := seedParityNumericLiterals("local total = 0\nreturn total + 7")
+	_, accumulator, err := runtimeParityGuestBatchProgram("local total = 0\nreturn total + 7", parityDefaultFixtureVariant)
 	if err != nil {
 		t.Fatal(err)
 	}

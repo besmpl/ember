@@ -5,6 +5,8 @@ import (
 	"go/token"
 	"strings"
 	"testing"
+
+	"github.com/besmpl/ember/internal/parityfixture"
 )
 
 type backendExactBenchmarkGroup struct {
@@ -61,40 +63,60 @@ func TestBackendGoExactBenchmarkGuestBatchCanGenerate(t *testing.T) {
 	for _, group := range backendExactBenchmarkGroups() {
 		for _, tc := range loadLuauBenchmarkCases(t, group.variable, group.cases) {
 			t.Run(group.name+"/"+tc.name, func(t *testing.T) {
-				source := `
-local __case = function(__seed)
-local __seed_guard = __seed % 3
-` + tc.source + `
-end
-local __batch = function(__n, __seed)
-    local __checksum = 0
-    for __i = 1, __n do
-        local __value = __case(__seed + __i)
-        __checksum = __checksum + __value * (__i % 7 + 1)
-    end
-    return __checksum
-end
-return __batch
-`
-				irs, image := backendExactCorpusIRs(t, source)
-				entryProto := int32(-1)
-				for pc := range irs[0].ops {
-					operation := &irs[0].ops[pc]
-					if operation.op == opClosure {
-						entryProto = operation.targetProto
+				for _, variant := range []parityfixture.GuestBatchVariant{
+					{CaseName: "__case", BatchName: "__batch"},
+					{CaseName: "holdoutCase", BatchName: "holdoutBatch", Holdout: true},
+				} {
+					name := "standard"
+					if variant.Holdout {
+						name = "holdout"
 					}
-				}
-				if entryProto < 0 {
-					t.Fatal("guest batch entry Proto is unavailable")
-				}
-				if _, err := emitBackendGoNumericProgram(irs, backendGoNumericProgramOptions{
-					packageName:          "ember",
-					functionPrefix:       "backendGeneratedGuestBatch",
-					preparedFunctionName: "backendGeneratedGuestBatchPrepared",
-					entryProto:           entryProto,
-					coroutineDeadString:  backendCoroutineDeadStringID(t, image),
-				}); err != nil {
-					t.Fatal(err)
+					t.Run(name, func(t *testing.T) {
+						fixture, err := parityfixture.BuildGuestBatch(tc.source, variant)
+						if err != nil {
+							t.Fatal(err)
+						}
+						source := fixture.Program + "return " + variant.BatchName + "\n"
+						irs, image := backendExactCorpusIRs(t, source)
+						entryProto := int32(-1)
+						for pc := range irs[0].ops {
+							operation := &irs[0].ops[pc]
+							if operation.op == opClosure {
+								entryProto = operation.targetProto
+							}
+						}
+						if entryProto < 0 {
+							t.Fatal("guest batch entry Proto is unavailable")
+						}
+						files, err := emitBackendGoNumericProgram(irs, backendGoNumericProgramOptions{
+							packageName:          "ember",
+							functionPrefix:       "backendGeneratedGuestBatch",
+							preparedFunctionName: "backendGeneratedGuestBatchPrepared",
+							entryProto:           entryProto,
+							coroutineDeadString:  backendCoroutineDeadStringID(t, image),
+						})
+						if err != nil {
+							t.Fatal(err)
+						}
+						var generated strings.Builder
+						for _, file := range files {
+							generated.Write(file.source)
+						}
+						switch tc.name {
+						case "coroutine_yield":
+							for _, required := range []string{"u0 := &state.u0", "q0.u0 ="} {
+								if !strings.Contains(generated.String(), required) {
+									t.Fatalf("captured coroutine source lacks %q", required)
+								}
+							}
+						case "recursive_fibonacci":
+							for _, required := range []string{"u0 *float64", "math.IsInf(*u0, 0)", "Body(u0,", "&c0"} {
+								if !strings.Contains(generated.String(), required) {
+									t.Fatalf("captured recursive source lacks %q", required)
+								}
+							}
+						}
+					})
 				}
 			})
 		}

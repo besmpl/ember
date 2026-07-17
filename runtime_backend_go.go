@@ -198,18 +198,56 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	}
 	source.WriteString(coroutineSource.String())
 	pointerUpvalue := func(upvalue int) bool {
-		return !options.selfRecursive && !plan.tables.tableUpvalue(int32(upvalue))
+		self, recursive := backendGoNumericSelfRecursiveUpvalue(ir)
+		return (!options.selfRecursive || !recursive || int32(upvalue) != self) &&
+			!plan.tables.tableUpvalue(int32(upvalue))
 	}
 	hasExternalRecords := len(plan.tables.externalRoots) != 0
 	if options.selfRecursive {
-		fmt.Fprintf(
-			&source,
-			"func %s(p0 float64) (float64, bool) {\n\tif math.IsNaN(p0) || p0 > %d {\n\t\treturn 0, false\n\t}\n\treturn %sBody(p0), true\n}\n\n",
-			options.functionName,
-			backendGoMaxPreparedRecursiveArgument,
-			options.functionName,
-		)
-		fmt.Fprintf(&source, "func %sBody(p0 float64) float64 {\n", options.functionName)
+		fmt.Fprintf(&source, "func %s(", options.functionName)
+		wroteUpvalue := false
+		for upvalue := range ir.upvalues {
+			if !pointerUpvalue(upvalue) {
+				continue
+			}
+			if wroteUpvalue {
+				source.WriteString(", ")
+			}
+			fmt.Fprintf(&source, "u%d *float64", upvalue)
+			wroteUpvalue = true
+		}
+		if wroteUpvalue {
+			source.WriteString(", ")
+		}
+		source.WriteString("p0 float64) (float64, bool) {\n")
+		for upvalue := range ir.upvalues {
+			if pointerUpvalue(upvalue) {
+				fmt.Fprintf(&source, "\tif u%d == nil || math.IsNaN(*u%d) || math.IsInf(*u%d, 0) {\n\t\treturn 0, false\n\t}\n", upvalue, upvalue, upvalue)
+			}
+		}
+		fmt.Fprintf(&source, "\tif math.IsNaN(p0) || p0 > %d {\n\t\treturn 0, false\n\t}\n\treturn %sBody(", backendGoMaxPreparedRecursiveArgument, options.functionName)
+		for upvalue := range ir.upvalues {
+			if pointerUpvalue(upvalue) {
+				fmt.Fprintf(&source, "u%d, ", upvalue)
+			}
+		}
+		source.WriteString("p0), true\n}\n\n")
+		fmt.Fprintf(&source, "func %sBody(", options.functionName)
+		wroteUpvalue = false
+		for upvalue := range ir.upvalues {
+			if !pointerUpvalue(upvalue) {
+				continue
+			}
+			if wroteUpvalue {
+				source.WriteString(", ")
+			}
+			fmt.Fprintf(&source, "u%d *float64", upvalue)
+			wroteUpvalue = true
+		}
+		if wroteUpvalue {
+			source.WriteString(", ")
+		}
+		source.WriteString("p0 float64) float64 {\n")
 	} else {
 		fmt.Fprintf(&source, "func %s(", options.functionName)
 		wroteParameter := false
@@ -345,7 +383,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		needsOK := !backendGoNumericOperationDead(plan, operation) &&
 			(operation.op == opCallOne || operation.op == opCallLocalOne ||
 				operation.op == opCall && backendGoNumericScalarReplacedCall(ir, options, operation) ||
-				operation.op == opCallUpvalueOne && (!options.selfRecursive || operation.b != 0) ||
+				operation.op == opCallUpvalueOne && !backendGoNumericSelfRecursiveCall(ir, options, operation) ||
 				operation.op == opCallMethodOne)
 		if _, ok := plan.indexFunctions.call(operation); ok {
 			needsOK = true
@@ -458,7 +496,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			needsOK := !backendGoNumericOperationDead(plan, operation) &&
 				(operation.op == opCallOne || operation.op == opCallLocalOne ||
 					operation.op == opCall && backendGoNumericScalarReplacedCall(ir, options, operation) ||
-					operation.op == opCallUpvalueOne && (!options.selfRecursive || operation.b != 0) ||
+					operation.op == opCallUpvalueOne && !backendGoNumericSelfRecursiveCall(ir, options, operation) ||
 					operation.op == opCallMethodOne)
 			if _, ok := plan.indexFunctions.call(operation); ok {
 				needsOK = true
@@ -1023,7 +1061,7 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						tags = backendGoDirectTargetResultTag(options, operation, 0)
 					}
 				case opCallUpvalueOne:
-					if options.selfRecursive && operation.b == 0 {
+					if backendGoNumericSelfRecursiveCall(ir, options, operation) {
 						tags = backendTagNumber
 					} else if target, ok := backendGoNumericUpvalueTarget(options, operation); ok &&
 						backendGoNumericTargetResultTag(options, target, 0) == backendTagNumber {
@@ -1267,6 +1305,16 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 				markUsed(key.first)
 				markUsed(key.second)
 				continue
+			}
+			if local, ok := plan.closures.local(operation); ok {
+				for _, capture := range local.captures {
+					markUsed(capture)
+				}
+			}
+			if plan.coroutines.createOperation(operation) {
+				for _, capture := range plan.coroutines.captures {
+					markUsed(capture)
+				}
 			}
 			if backendGoNumericPureProducer(operation.op) {
 				continue
@@ -1515,6 +1563,9 @@ func backendGoNumericOperationDead(plan backendGoNumericPlan, operation *backend
 	if operation == nil {
 		return false
 	}
+	if _, ok := plan.closures.local(operation); ok {
+		return false
+	}
 	if _, ok := plan.keys.tostring(operation); !ok {
 		if _, ok := plan.keys.concat(operation); !ok && !backendGoNumericPureProducer(operation.op) {
 			return false
@@ -1588,6 +1639,14 @@ func verifyBackendGoNumericOperation(
 		return nil
 	case opClosure:
 		if plan.mutationMetatable.scalarValue(operation.defs[0].value) {
+			return nil
+		}
+		if local, ok := plan.closures.local(operation); ok {
+			for upvalue, capture := range local.captures {
+				if capture != invalidBackendValueID && plan.tags[capture-1] != backendTagNumber {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d closure capture %d is not numeric", operation.pc, upvalue)
+				}
+			}
 			return nil
 		}
 		for _, definition := range operation.defs {
@@ -2066,6 +2125,11 @@ func verifyBackendGoNumericOperation(
 			if operation.c != 1 || operation.d != 1 {
 				return fmt.Errorf("emit backend Go numeric proof: PC %d changes scalar coroutine.create shape", operation.pc)
 			}
+			for upvalue, capture := range plan.coroutines.captures {
+				if !ir.validBackendValue(capture) || plan.tags[capture-1] != backendTagNumber {
+					return fmt.Errorf("emit backend Go numeric proof: PC %d coroutine capture %d is not numeric", operation.pc, upvalue)
+				}
+			}
 			return nil
 		}
 		if _, ok := plan.coroutines.resume(operation); ok {
@@ -2523,7 +2587,7 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opCallUpvalueOne:
-		if options.selfRecursive && operation.b == 0 {
+		if backendGoNumericSelfRecursiveCall(ir, options, operation) {
 			if operation.callArgCount != int32(ir.params) || operation.callArgCount != 1 {
 				return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported recursive call shape", operation.pc)
 			}
@@ -2889,6 +2953,16 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		case StringKind:
 			fmt.Fprintf(&emitter.body, "\tv%d = uint32(%d)\n", destination, constant.bits)
 		}
+	case opClosure:
+		local, ok := emitter.plan.closures.local(operation)
+		if !ok {
+			return false, nil
+		}
+		for upvalue, capture := range local.captures {
+			if capture != invalidBackendValueID {
+				fmt.Fprintf(&emitter.body, "\tc%d = v%d\n", local.cellStart+upvalue, capture)
+			}
+		}
 	case opMove:
 		destination, err := definition(operation.a)
 		if err != nil {
@@ -3180,6 +3254,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			return false, nil
 		}
 		if emitter.plan.coroutines.createOperation(operation) {
+			for upvalue, capture := range emitter.plan.coroutines.captures {
+				fmt.Fprintf(&emitter.body, "\tq0.u%d = v%d\n", upvalue, capture)
+			}
 			return false, nil
 		}
 		if resume, ok := emitter.plan.coroutines.resume(operation); ok {
@@ -3497,8 +3574,15 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		if err != nil {
 			return false, err
 		}
-		if emitter.options.selfRecursive && operation.b == 0 {
+		if backendGoNumericSelfRecursiveCall(emitter.ir, emitter.options, operation) {
 			fmt.Fprintf(&emitter.body, "\tv%d = %sBody(", destination, emitter.options.functionName)
+			for upvalue := range emitter.ir.upvalues {
+				self, _ := backendGoNumericSelfRecursiveUpvalue(emitter.ir)
+				if int32(upvalue) == self || emitter.plan.tables.tableUpvalue(int32(upvalue)) {
+					continue
+				}
+				fmt.Fprintf(&emitter.body, "u%d, ", upvalue)
+			}
 		} else {
 			target, ok := backendGoNumericUpvalueTarget(emitter.options, operation)
 			if !ok {
@@ -3517,7 +3601,7 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			fmt.Fprintf(&emitter.body, "v%d", value)
 		}
 		emitter.body.WriteString(")\n")
-		if !emitter.options.selfRecursive || operation.b != 0 {
+		if !backendGoNumericSelfRecursiveCall(emitter.ir, emitter.options, operation) {
 			fmt.Fprintf(&emitter.body, "\tif !ok%d {\n", operation.pc)
 			emitter.emitReplayEntry(2)
 			emitter.body.WriteString("\t}\n")
@@ -3560,14 +3644,35 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			fmt.Fprintf(&emitter.body, "\tv%d", destination)
 		}
 		fmt.Fprintf(&emitter.body, ", ok%d = %s(", operation.pc, target.functionName)
+		wroteParameter := false
 		for field := range captured.callerFields {
-			if field != 0 {
+			if wroteParameter {
 				emitter.body.WriteString(", ")
 			}
 			fmt.Fprintf(&emitter.body, "&m%d_%d", operation.pc, field)
+			wroteParameter = true
+		}
+		if target.selfRecursive && len(target.ir.upvalues) > 1 {
+			callee := backendOperationUse(operation, operation.b)
+			closure, ok := emitter.plan.closures.value(callee)
+			self, recursive := backendGoNumericSelfRecursiveUpvalue(target.ir)
+			if !ok || !recursive || closure.targetProto != operation.call.targetProto ||
+				closure.cellCount != len(target.ir.upvalues) {
+				return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar recursive captures", operation.pc)
+			}
+			for upvalue := range target.ir.upvalues {
+				if int32(upvalue) == self {
+					continue
+				}
+				if wroteParameter {
+					emitter.body.WriteString(", ")
+				}
+				fmt.Fprintf(&emitter.body, "&c%d", closure.cellStart+upvalue)
+				wroteParameter = true
+			}
 		}
 		for argument := int32(0); argument < operation.callArgCount; argument++ {
-			if argument != 0 || len(captured.callerFields) != 0 {
+			if wroteParameter {
 				emitter.body.WriteString(", ")
 			}
 			value, err := use(operation.callArgStart + argument)
@@ -3575,6 +3680,7 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 				return false, err
 			}
 			fmt.Fprintf(&emitter.body, "v%d", value)
+			wroteParameter = true
 		}
 		emitter.body.WriteString(")\n")
 		fmt.Fprintf(&emitter.body, "\tif !ok%d {\n", operation.pc)

@@ -24,12 +24,19 @@ type backendGoScalarClosureCall struct {
 	target    backendGoNumericTarget
 }
 
+type backendGoScalarLocalClosure struct {
+	cellStart   int
+	targetProto int32
+	captures    []backendValueID
+}
+
 type backendGoScalarClosurePlan struct {
 	cellCount      int
 	values         []backendGoScalarClosureValue
 	factoriesByPC  map[int32]backendGoScalarClosureFactory
 	factoryCells   map[int32]int
 	closureCalls   map[int32]backendGoScalarClosureCall
+	localsByPC     map[int32]backendGoScalarLocalClosure
 	scalarClosures []bool
 }
 
@@ -42,11 +49,53 @@ func analyzeBackendGoScalarClosures(
 		factoriesByPC:  make(map[int32]backendGoScalarClosureFactory),
 		factoryCells:   make(map[int32]int),
 		closureCalls:   make(map[int32]backendGoScalarClosureCall),
+		localsByPC:     make(map[int32]backendGoScalarLocalClosure),
 		scalarClosures: make([]bool, len(ir.values)),
 	}
 	for valueIndex := range plan.values {
 		plan.values[valueIndex].cellStart = -1
 		plan.values[valueIndex].targetProto = -1
+	}
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op != opClosure || len(operation.defs) != 1 ||
+			operation.targetProto < 0 || int(operation.targetProto) >= len(options.directTargets) {
+			continue
+		}
+		target := options.directTargets[operation.targetProto]
+		self, recursive := backendGoNumericSelfRecursiveUpvalue(target.ir)
+		if target.ir == nil || target.functionName == "" || !target.selfRecursive || !recursive ||
+			len(target.ir.upvalues) == 1 || target.ir.upvalues[self].index != uint32(operation.a) {
+			continue
+		}
+		captures := make([]backendValueID, len(target.ir.upvalues))
+		valid := true
+		for upvalue, descriptor := range target.ir.upvalues {
+			if int32(upvalue) == self {
+				continue
+			}
+			if descriptor.local == 0 || descriptor.copy == 0 || descriptor.index >= uint32(ir.registers) {
+				valid = false
+				break
+			}
+			capture := backendValueBeforeOperation(ir, operation, int32(descriptor.index))
+			if !ir.validBackendValue(capture) {
+				valid = false
+				break
+			}
+			captures[upvalue] = capture
+		}
+		if !valid {
+			continue
+		}
+		cell := plan.cellCount
+		plan.cellCount += len(target.ir.upvalues)
+		plan.localsByPC[operation.pc] = backendGoScalarLocalClosure{
+			cellStart: cell, targetProto: operation.targetProto, captures: captures,
+		}
+		plan.values[operation.defs[0].value-1] = backendGoScalarClosureValue{
+			cellStart: cell, cellCount: len(target.ir.upvalues), targetProto: operation.targetProto,
+		}
 	}
 	for pc := range ir.ops {
 		operation := &ir.ops[pc]
@@ -334,6 +383,16 @@ func (plan backendGoScalarClosurePlan) call(
 	}
 	call, ok := plan.closureCalls[operation.pc]
 	return call, ok
+}
+
+func (plan backendGoScalarClosurePlan) local(
+	operation *backendOperationIR,
+) (backendGoScalarLocalClosure, bool) {
+	if operation == nil {
+		return backendGoScalarLocalClosure{}, false
+	}
+	local, ok := plan.localsByPC[operation.pc]
+	return local, ok
 }
 
 func (plan backendGoScalarClosurePlan) scalarValue(id backendValueID) bool {

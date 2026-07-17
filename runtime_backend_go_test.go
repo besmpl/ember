@@ -3616,6 +3616,30 @@ local function kernel(seed)
 end
 return kernel
 `,
+		"unbounded captured base": `
+local function kernel(seed)
+    local function recurse(n)
+        if n < seed then
+            return n
+        end
+        return recurse(n - 1)
+    end
+    return recurse(10)
+end
+return kernel
+`,
+		"captured base above recursion bound": `
+local function kernel(seed)
+    local function recurse(n)
+        if n < 30 + seed % 3 then
+            return n
+        end
+        return recurse(n - 1)
+    end
+    return recurse(10)
+end
+return kernel
+`,
 	}
 	for name, source := range tests {
 		t.Run(name, func(t *testing.T) {

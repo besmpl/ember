@@ -23,6 +23,7 @@ type backendGoScalarCoroutinePlan struct {
 	statuses       map[int32]bool
 	yields         map[int32]int
 	targetPlan     *backendGoNumericPlan
+	captures       []backendValueID
 }
 
 func backendGoNumericHasCoroutineYield(ir *backendProtoIR) bool {
@@ -85,6 +86,18 @@ func analyzeBackendGoScalarCoroutine(
 	if target.ir == nil || target.functionName == "" {
 		return plan, fmt.Errorf("emit backend Go numeric proof: coroutine target Proto %d is unavailable", targetProto)
 	}
+	closure := &ir.ops[ir.values[closureID-1].pc]
+	captures := make([]backendValueID, len(target.ir.upvalues))
+	for upvalue, descriptor := range target.ir.upvalues {
+		if descriptor.local == 0 || descriptor.copy == 0 || descriptor.index >= uint32(ir.registers) {
+			return plan, fmt.Errorf("emit backend Go numeric proof: coroutine target Proto %d has unsupported capture %d", targetProto, upvalue)
+		}
+		captured := backendValueBeforeOperation(ir, closure, int32(descriptor.index))
+		if !ir.validBackendValue(captured) {
+			return plan, fmt.Errorf("emit backend Go numeric proof: coroutine target Proto %d has unavailable capture %d", targetProto, upvalue)
+		}
+		captures[upvalue] = captured
+	}
 	targetOptions := backendGoNumericOptions{
 		functionName:    target.functionName,
 		directTargets:   options.directTargets,
@@ -112,6 +125,7 @@ func analyzeBackendGoScalarCoroutine(
 		statuses:       make(map[int32]bool),
 		yields:         yields,
 		targetPlan:     &targetPlan,
+		captures:       captures,
 	}
 	plan.closureValue[closureID-1] = true
 	plan.coroutineValue[create.defs[0].value-1] = true
@@ -190,9 +204,8 @@ func analyzeBackendGoCoroutineTarget(
 ) (map[int32]int, error) {
 	if ir == nil ||
 		ir.variadic ||
-		len(ir.upvalues) != 0 ||
 		ir.params != 1 {
-		return nil, fmt.Errorf("emit backend Go numeric proof: scalar coroutine target must be a capture-free one-parameter function")
+		return nil, fmt.Errorf("emit backend Go numeric proof: scalar coroutine target must be a fixed one-parameter function")
 	}
 	results, ok := backendGoNumericFixedResultCount(ir)
 	if !ok || results != 1 {
@@ -202,7 +215,7 @@ func analyzeBackendGoCoroutineTarget(
 	for pc := range ir.ops {
 		operation := &ir.ops[pc]
 		switch operation.op {
-		case opLoadConst, opMove,
+		case opLoadConst, opMove, opGetUpvalue,
 			opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow, opNeg,
 			opAddK, opSubK, opMulK, opDivK, opModK, opIDivK,
 			opEqual, opNotEqual, opLess, opLessEqual, opGreater, opGreaterEqual,
@@ -471,6 +484,9 @@ func emitBackendGoCoroutineTarget(
 	}
 	stateName := target.functionName + "State"
 	fmt.Fprintf(source, "type %s struct {\n\tstate uint32\n", stateName)
+	for upvalue := range target.ir.upvalues {
+		fmt.Fprintf(source, "\tu%d float64\n", upvalue)
+	}
 	for valueIndex, used := range plan.used {
 		if !used || plan.tags[valueIndex] == backendTagNil {
 			continue
@@ -484,6 +500,9 @@ func emitBackendGoCoroutineTarget(
 	source.WriteString("}\n\n")
 	fmt.Fprintf(source, "func %s(state *%s, p0 float64, first bool) (float64, bool, bool) {\n", target.functionName, stateName)
 	source.WriteString("\tif state == nil {\n\t\treturn 0, false, false\n\t}\n")
+	for upvalue := range target.ir.upvalues {
+		fmt.Fprintf(source, "\tu%d := &state.u%d\n", upvalue, upvalue)
+	}
 	for valueIndex, used := range plan.used {
 		if !used || plan.tags[valueIndex] == backendTagNil {
 			continue
