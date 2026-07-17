@@ -39,6 +39,7 @@ func emitBackendGoNumericProgram(
 	if err != nil {
 		return nil, err
 	}
+	upvalueTargets := inferBackendGoNumericProgramUpvalueTargets(irs, protoIDs, targets)
 
 	descriptorOnly := make(map[int32]bool)
 	embeddedCoroutine := make(map[int32]bool)
@@ -54,7 +55,7 @@ func emitBackendGoNumericProgram(
 		}
 		plan, err := buildBackendGoNumericPlan(
 			irs[protoID],
-			backendGoNumericProgramProtoOptions(protoID, targets, options),
+			backendGoNumericProgramProtoOptions(protoID, targets, upvalueTargets, options),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("emit backend Go numeric program: Proto %d: %w", protoID, err)
@@ -84,7 +85,7 @@ func emitBackendGoNumericProgram(
 		}
 		source, err := emitBackendGoNumericProof(
 			irs[protoID],
-			backendGoNumericProgramProtoOptions(protoID, targets, options),
+			backendGoNumericProgramProtoOptions(protoID, targets, upvalueTargets, options),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("emit backend Go numeric program: Proto %d: %w", protoID, err)
@@ -147,12 +148,17 @@ func verifyBackendGoNumericProgramNames(
 func backendGoNumericProgramProtoOptions(
 	protoID int32,
 	targets []backendGoNumericTarget,
+	upvalueTargets []map[int32]backendGoNumericTarget,
 	program backendGoNumericProgramOptions,
 ) backendGoNumericOptions {
 	options := backendGoNumericOptions{
-		packageName:         program.packageName,
-		directTargets:       targets,
-		coroutineDeadString: program.coroutineDeadString,
+		packageName:          program.packageName,
+		directTargets:        targets,
+		targetUpvalueTargets: upvalueTargets,
+		coroutineDeadString:  program.coroutineDeadString,
+	}
+	if int(protoID) < len(upvalueTargets) {
+		options.upvalueTargets = upvalueTargets[protoID]
 	}
 	if protoID == program.entryProto {
 		options.functionName = program.functionPrefix + "Entry"
@@ -167,6 +173,74 @@ func backendGoNumericProgramProtoOptions(
 	options.receiverTables = target.receiverTables
 	options.capturedTableFields = target.capturedTableFields
 	return options
+}
+
+func inferBackendGoNumericProgramUpvalueTargets(
+	irs []*backendProtoIR,
+	protoIDs []int32,
+	targets []backendGoNumericTarget,
+) []map[int32]backendGoNumericTarget {
+	result := make([]map[int32]backendGoNumericTarget, len(irs))
+	for _, protoID := range protoIDs {
+		ir := irs[protoID]
+		for pc := range ir.ops {
+			operation := &ir.ops[pc]
+			if operation.op != opCallUpvalueOne {
+				continue
+			}
+			targetProto, ok := backendGoNumericStaticUpvalueTargetProto(irs, protoID, operation.b)
+			if !ok || targetProto < 0 || int(targetProto) >= len(targets) || targets[targetProto].ir == nil {
+				continue
+			}
+			if result[protoID] == nil {
+				result[protoID] = make(map[int32]backendGoNumericTarget)
+			}
+			result[protoID][operation.b] = targets[targetProto]
+		}
+	}
+	return result
+}
+
+func backendGoNumericStaticUpvalueTargetProto(
+	irs []*backendProtoIR,
+	protoID int32,
+	upvalue int32,
+) (int32, bool) {
+	if protoID < 0 || int(protoID) >= len(irs) || irs[protoID] == nil ||
+		upvalue < 0 || int(upvalue) >= len(irs[protoID].upvalues) {
+		return -1, false
+	}
+	descriptor := irs[protoID].upvalues[upvalue]
+	if descriptor.local == 0 {
+		return -1, false
+	}
+	targetProto := int32(-1)
+	found := false
+	for _, caller := range irs {
+		if caller == nil || descriptor.index >= uint32(caller.registers) {
+			continue
+		}
+		for pc := range caller.ops {
+			closure := &caller.ops[pc]
+			if closure.op != opClosure || closure.targetProto != protoID {
+				continue
+			}
+			captured := backendValueBeforeOperation(caller, closure, int32(descriptor.index))
+			if !caller.validBackendValue(captured) {
+				return -1, false
+			}
+			value := &caller.values[captured-1]
+			if value.tags != backendTagFunction || value.targetUnknown || len(value.targetProtos) != 1 {
+				return -1, false
+			}
+			if found && targetProto != value.targetProtos[0] {
+				return -1, false
+			}
+			targetProto = value.targetProtos[0]
+			found = true
+		}
+	}
+	return targetProto, found
 }
 
 func backendGoNumericReachableProtoIDs(irs []*backendProtoIR, entryProto int32) ([]int32, error) {
@@ -186,6 +260,12 @@ func backendGoNumericReachableProtoIDs(irs []*backendProtoIR, entryProto int32) 
 			switch {
 			case operation.op == opClosure:
 				targetProto = operation.targetProto
+			case operation.op == opCallUpvalueOne:
+				var ok bool
+				targetProto, ok = backendGoNumericStaticUpvalueTargetProto(irs, protoID, operation.b)
+				if !ok {
+					continue
+				}
 			case operation.call.kind == backendCallDirectProto:
 				targetProto = operation.call.targetProto
 			}

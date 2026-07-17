@@ -7,12 +7,14 @@ import (
 	"testing"
 )
 
-func TestBackendGoExactBenchmarkCorporaCanGenerate(t *testing.T) {
-	groups := []struct {
-		name     string
-		variable string
-		cases    []string
-	}{
+type backendExactBenchmarkGroup struct {
+	name     string
+	variable string
+	cases    []string
+}
+
+func backendExactBenchmarkGroups() []backendExactBenchmarkGroup {
+	return []backendExactBenchmarkGroup{
 		{
 			name:     "scenario",
 			variable: "scenarioLuauCases",
@@ -42,11 +44,58 @@ func TestBackendGoExactBenchmarkCorporaCanGenerate(t *testing.T) {
 			cases:    []string{"recursive_fibonacci", "iterative_fibonacci"},
 		},
 	}
-	for _, group := range groups {
+}
+
+func TestBackendGoExactBenchmarkCorporaCanGenerate(t *testing.T) {
+	for _, group := range backendExactBenchmarkGroups() {
 		for _, tc := range loadLuauBenchmarkCases(t, group.variable, group.cases) {
 			t.Run(group.name+"/"+tc.name, func(t *testing.T) {
 				source := "local function kernel(seed)\n" + tc.source + "\nend\nreturn kernel\n"
 				backendExactProgramCanGenerate(t, source)
+			})
+		}
+	}
+}
+
+func TestBackendGoExactBenchmarkGuestBatchCanGenerate(t *testing.T) {
+	for _, group := range backendExactBenchmarkGroups() {
+		for _, tc := range loadLuauBenchmarkCases(t, group.variable, group.cases) {
+			t.Run(group.name+"/"+tc.name, func(t *testing.T) {
+				source := `
+local __case = function(__seed)
+local __seed_guard = __seed % 3
+` + tc.source + `
+end
+local __batch = function(__n, __seed)
+    local __checksum = 0
+    for __i = 1, __n do
+        local __value = __case(__seed + __i)
+        __checksum = __checksum + __value * (__i % 7 + 1)
+    end
+    return __checksum
+end
+return __batch
+`
+				irs, image := backendExactCorpusIRs(t, source)
+				entryProto := int32(-1)
+				for pc := range irs[0].ops {
+					operation := &irs[0].ops[pc]
+					if operation.op == opClosure {
+						entryProto = operation.targetProto
+					}
+				}
+				if entryProto < 0 {
+					t.Fatal("guest batch entry Proto is unavailable")
+				}
+				if _, err := emitBackendGoNumericProgram(irs, backendGoNumericProgramOptions{
+					packageName:          "ember",
+					functionPrefix:       "backendGeneratedGuestBatch",
+					preparedFunctionName: "backendGeneratedGuestBatchPrepared",
+					entryProto:           entryProto,
+					coroutineDeadString:  backendCoroutineDeadStringID(t, image),
+				}); err != nil {
+					t.Fatal(err)
+				}
 			})
 		}
 	}

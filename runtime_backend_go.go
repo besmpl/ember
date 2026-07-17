@@ -13,6 +13,8 @@ type backendGoNumericOptions struct {
 	functionName         string
 	preparedFunctionName string
 	directTargets        []backendGoNumericTarget
+	upvalueTargets       map[int32]backendGoNumericTarget
+	targetUpvalueTargets []map[int32]backendGoNumericTarget
 	selfRecursive        bool
 	fixedVarargCount     int
 	receiverTable        bool
@@ -20,6 +22,7 @@ type backendGoNumericOptions struct {
 	coroutineTarget      bool
 	coroutineDeadString  machineStringID
 	capturedTableFields  map[int32][]backendGoCapturedTableField
+	resultShapeStack     map[*backendProtoIR]bool
 }
 
 type backendGoNumericTarget struct {
@@ -98,8 +101,9 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		(!token.IsIdentifier(options.preparedFunctionName) || token.Lookup(options.preparedFunctionName).IsKeyword()) {
 		return nil, fmt.Errorf("emit backend Go numeric proof: invalid prepared function name %q", options.preparedFunctionName)
 	}
-	if options.preparedFunctionName != "" && len(ir.upvalues) != 0 {
-		return nil, fmt.Errorf("emit backend Go numeric proof: prepared entry has %d upvalues", len(ir.upvalues))
+	if options.preparedFunctionName != "" && len(ir.upvalues) != 0 &&
+		!backendGoNumericPreparedStaticUpvalues(ir, options) {
+		return nil, fmt.Errorf("emit backend Go numeric proof: prepared entry has %d unbound upvalues", len(ir.upvalues))
 	}
 	if options.preparedFunctionName != "" && ir.variadic {
 		return nil, fmt.Errorf("emit backend Go numeric proof: prepared entry is variadic")
@@ -137,7 +141,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	if options.selfRecursive && (resultCount != 1 || !backendGoNumericSelfRecursiveTarget(ir)) {
 		return nil, fmt.Errorf("emit backend Go numeric proof: function is not a bounded self-recursive target")
 	}
-	if err := verifyBackendGoNumericTargets(options.directTargets); err != nil {
+	if err := verifyBackendGoNumericTargets(options); err != nil {
 		return nil, err
 	}
 	plan, err := buildBackendGoNumericPlan(ir, options)
@@ -581,6 +585,25 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	return formatted, nil
 }
 
+func backendGoNumericPreparedStaticUpvalues(ir *backendProtoIR, options backendGoNumericOptions) bool {
+	if ir == nil || len(ir.upvalues) == 0 || len(options.upvalueTargets) != len(ir.upvalues) {
+		return false
+	}
+	for upvalue := range ir.upvalues {
+		target, ok := options.upvalueTargets[int32(upvalue)]
+		if !ok || target.ir == nil || target.functionName == "" {
+			return false
+		}
+	}
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op == opGetUpvalue || operation.op == opSetUpvalue {
+			return false
+		}
+	}
+	return true
+}
+
 func writeBackendGoNumericResultTypes(source *strings.Builder, resultTypes []string) {
 	for result, resultType := range resultTypes {
 		if result != 0 {
@@ -619,7 +642,8 @@ func backendGoNumericFailureReturn(resultTypes []string) string {
 	return result.String()
 }
 
-func verifyBackendGoNumericTargets(targets []backendGoNumericTarget) error {
+func verifyBackendGoNumericTargets(options backendGoNumericOptions) error {
+	targets := options.directTargets
 	for protoID, target := range targets {
 		if target.ir == nil && target.functionName == "" {
 			continue
@@ -638,19 +662,10 @@ func verifyBackendGoNumericTargets(targets []backendGoNumericTarget) error {
 		if _, ok := backendGoNumericParameterTags(target.ir, target.fixedVarargCount); !ok {
 			return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d has no bounded scalar parameter types", protoID)
 		}
-		resultCount, ok := backendGoNumericFixedResultCountFor(target.ir, target.fixedVarargCount)
+		targetOptions := backendGoNumericTargetOptions(options, target)
+		resultCount, ok := backendGoNumericFixedResultCountForOptions(target.ir, targetOptions)
 		if !ok {
 			return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d has no bounded fixed result shape", protoID)
-		}
-		targetOptions := backendGoNumericOptions{
-			functionName:        target.functionName,
-			directTargets:       targets,
-			selfRecursive:       target.selfRecursive,
-			fixedVarargCount:    target.fixedVarargCount,
-			receiverTable:       target.receiverTable,
-			receiverTables:      target.receiverTables,
-			coroutineTarget:     backendGoNumericHasCoroutineYield(target.ir),
-			capturedTableFields: target.capturedTableFields,
 		}
 		if target.selfRecursive && (resultCount != 1 || !backendGoNumericSelfRecursiveTarget(target.ir)) {
 			return fmt.Errorf("emit backend Go numeric proof: direct target Proto %d is not bounded self recursion", protoID)
@@ -1007,6 +1022,9 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 					}
 				case opCallUpvalueOne:
 					if options.selfRecursive && operation.b == 0 {
+						tags = backendTagNumber
+					} else if target, ok := backendGoNumericUpvalueTarget(options, operation); ok &&
+						backendGoNumericTargetResultTag(options, target, 0) == backendTagNumber {
 						tags = backendTagNumber
 					}
 				case opCallMethodOne:
@@ -1398,6 +1416,14 @@ func backendGoNumericDirectTarget(options backendGoNumericOptions, operation *ba
 	return target, target.ir != nil && target.functionName != ""
 }
 
+func backendGoNumericUpvalueTarget(options backendGoNumericOptions, operation *backendOperationIR) (backendGoNumericTarget, bool) {
+	if operation == nil || operation.op != opCallUpvalueOne || options.upvalueTargets == nil {
+		return backendGoNumericTarget{}, false
+	}
+	target, ok := options.upvalueTargets[operation.b]
+	return target, ok && target.ir != nil && target.functionName != ""
+}
+
 func backendGoNumericScalarReplacedCall(
 	ir *backendProtoIR,
 	options backendGoNumericOptions,
@@ -1427,7 +1453,7 @@ func backendGoNumericScalarReplacedCall(
 	if !ok || operation.callArgCount != int32(argumentCount) {
 		return false
 	}
-	resultCount, ok := backendGoNumericFixedResultCountFor(target.ir, target.fixedVarargCount)
+	resultCount, ok := backendGoNumericTargetFixedResultCount(options, target)
 	effectiveResultCount, effectiveOK := backendGoNumericEffectiveCallResultCount(ir, options, operation)
 	if !ok || !effectiveOK || effectiveResultCount != resultCount {
 		return false
@@ -2318,7 +2344,7 @@ func verifyBackendGoNumericOperation(
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no fixed-result numeric target", operation.pc)
 		}
 		argumentCount, argsOK := backendGoNumericArgumentCount(target.ir, target.fixedVarargCount)
-		resultCount, resultsOK := backendGoNumericFixedResultCountFor(target.ir, target.fixedVarargCount)
+		resultCount, resultsOK := backendGoNumericTargetFixedResultCount(options, target)
 		effectiveResultCount, effectiveOK := backendGoNumericEffectiveCallResultCount(ir, options, operation)
 		if !argsOK || !resultsOK ||
 			operation.callArgCount != int32(argumentCount) ||
@@ -2495,13 +2521,30 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opCallUpvalueOne:
-		if !options.selfRecursive ||
-			operation.b != 0 ||
-			operation.callArgCount != int32(ir.params) ||
-			operation.callArgCount != 1 {
-			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported recursive call shape", operation.pc)
+		if options.selfRecursive && operation.b == 0 {
+			if operation.callArgCount != int32(ir.params) || operation.callArgCount != 1 {
+				return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported recursive call shape", operation.pc)
+			}
+			return require(operation.callArgStart, backendTagNumber)
 		}
-		return require(operation.callArgStart, backendTagNumber)
+		target, ok := backendGoNumericUpvalueTarget(options, operation)
+		if !ok {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no static scalar upvalue target", operation.pc)
+		}
+		argumentCount, argumentsOK := backendGoNumericArgumentCount(target.ir, target.fixedVarargCount)
+		parameterTags, parametersOK := backendGoNumericParameterTags(target.ir, target.fixedVarargCount)
+		resultCount, resultsOK := backendGoNumericTargetFixedResultCount(options, target)
+		if !argumentsOK || !parametersOK || !resultsOK || resultCount != 1 ||
+			backendGoNumericTargetResultTag(options, target, 0) != backendTagNumber ||
+			len(target.ir.upvalues) != 0 || operation.callArgCount != int32(argumentCount) {
+			return fmt.Errorf("emit backend Go numeric proof: PC %d has no static scalar upvalue target", operation.pc)
+		}
+		for argument := int32(0); argument < operation.callArgCount; argument++ {
+			if err := require(operation.callArgStart+argument, parameterTags[argument]); err != nil {
+				return err
+			}
+		}
+		return nil
 	case opCallMethodOne:
 		call, ok := plan.methods.call(operation)
 		if !ok ||
@@ -2695,7 +2738,18 @@ func backendGoDirectTargetResultTag(
 	result int,
 ) backendTagMask {
 	target, ok := backendGoNumericDirectTarget(options, operation)
-	if !ok || target.ir == nil || result < 0 {
+	if !ok {
+		return 0
+	}
+	return backendGoNumericTargetResultTag(options, target, result)
+}
+
+func backendGoNumericTargetResultTag(
+	options backendGoNumericOptions,
+	target backendGoNumericTarget,
+	result int,
+) backendTagMask {
+	if target.ir == nil || result < 0 {
 		return 0
 	}
 	if backendGoStructuralKeyTarget(target.ir) {
@@ -2704,16 +2758,17 @@ func backendGoDirectTargetResultTag(
 		}
 		return 0
 	}
+	targetOptions := backendGoNumericTargetOptions(options, target)
 	for pc := range target.ir.ops {
 		returnOperation := &target.ir.ops[pc]
 		if returnOperation.op != opReturnOne && returnOperation.op != opReturn {
 			continue
 		}
-		count, countOK := backendGoNumericReturnCount(target.ir, target.fixedVarargCount, returnOperation)
+		count, countOK := backendGoNumericReturnCountForOptions(target.ir, targetOptions, returnOperation)
 		if !countOK || result >= count {
 			return 0
 		}
-		_, valueOK := backendGoNumericReturnValue(target.ir, target.fixedVarargCount, returnOperation, result)
+		_, valueOK := backendGoNumericReturnValueForOptions(target.ir, targetOptions, returnOperation, result)
 		if !valueOK {
 			return 0
 		}
@@ -3436,14 +3491,19 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		emitter.emitGoto(int32(block.id), emitter.ir.pcToBlock[operation.targetPC], 1)
 		return true, nil
 	case opCallUpvalueOne:
-		if !emitter.options.selfRecursive || operation.b != 0 {
-			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no recursive self target", operation.pc)
-		}
 		destination, err := definition(operation.a)
 		if err != nil {
 			return false, err
 		}
-		fmt.Fprintf(&emitter.body, "\tv%d = %sBody(", destination, emitter.options.functionName)
+		if emitter.options.selfRecursive && operation.b == 0 {
+			fmt.Fprintf(&emitter.body, "\tv%d = %sBody(", destination, emitter.options.functionName)
+		} else {
+			target, ok := backendGoNumericUpvalueTarget(emitter.options, operation)
+			if !ok {
+				return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no static scalar upvalue target", operation.pc)
+			}
+			fmt.Fprintf(&emitter.body, "\tv%d, ok%d = %s(", destination, operation.pc, target.functionName)
+		}
 		for argument := int32(0); argument < operation.callArgCount; argument++ {
 			if argument != 0 {
 				emitter.body.WriteString(", ")
@@ -3455,6 +3515,11 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			fmt.Fprintf(&emitter.body, "v%d", value)
 		}
 		emitter.body.WriteString(")\n")
+		if !emitter.options.selfRecursive || operation.b != 0 {
+			fmt.Fprintf(&emitter.body, "\tif !ok%d {\n", operation.pc)
+			emitter.emitReplayEntry(2)
+			emitter.body.WriteString("\t}\n")
+		}
 	case opCall:
 		target, ok := backendGoNumericDirectTarget(emitter.options, operation)
 		if !ok || !backendGoNumericScalarReplacedCall(emitter.ir, emitter.options, operation) {

@@ -90,7 +90,7 @@ func discoverBackendGoFiniteCallSets(
 				valid = false
 				break
 			}
-			resultCount, resultOK := backendGoNumericFixedResultCountFor(target.ir, target.fixedVarargCount)
+			resultCount, resultOK := backendGoNumericTargetFixedResultCount(options, target)
 			if !resultOK || resultCount != 1 {
 				valid = false
 				break

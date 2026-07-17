@@ -19,9 +19,15 @@ func backendGoNumericFixedResultCountForOptions(
 	ir *backendProtoIR,
 	options backendGoNumericOptions,
 ) (int, bool) {
-	if ir == nil {
+	if ir == nil || options.resultShapeStack[ir] {
 		return 0, false
 	}
+	stack := make(map[*backendProtoIR]bool, len(options.resultShapeStack)+1)
+	for active := range options.resultShapeStack {
+		stack[active] = true
+	}
+	stack[ir] = true
+	options.resultShapeStack = stack
 	resultCount := -1
 	for blockIndex := range ir.blocks {
 		block := &ir.blocks[blockIndex]
@@ -47,6 +53,40 @@ func backendGoNumericFixedResultCountForOptions(
 		}
 	}
 	return resultCount, resultCount >= 0
+}
+
+func backendGoNumericTargetFixedResultCount(
+	options backendGoNumericOptions,
+	target backendGoNumericTarget,
+) (int, bool) {
+	return backendGoNumericFixedResultCountForOptions(
+		target.ir,
+		backendGoNumericTargetOptions(options, target),
+	)
+}
+
+func backendGoNumericTargetOptions(
+	options backendGoNumericOptions,
+	target backendGoNumericTarget,
+) backendGoNumericOptions {
+	targetOptions := options
+	targetOptions.functionName = target.functionName
+	targetOptions.preparedFunctionName = ""
+	targetOptions.selfRecursive = target.selfRecursive
+	targetOptions.fixedVarargCount = target.fixedVarargCount
+	targetOptions.receiverTable = target.receiverTable
+	targetOptions.receiverTables = target.receiverTables
+	targetOptions.coroutineTarget = backendGoNumericHasCoroutineYield(target.ir)
+	targetOptions.capturedTableFields = target.capturedTableFields
+	targetOptions.upvalueTargets = nil
+	for protoID := range options.directTargets {
+		if options.directTargets[protoID].ir != target.ir || protoID >= len(options.targetUpvalueTargets) {
+			continue
+		}
+		targetOptions.upvalueTargets = options.targetUpvalueTargets[protoID]
+		break
+	}
+	return targetOptions
 }
 
 func backendGoNumericReturnCount(
@@ -188,7 +228,7 @@ func backendGoNumericOpenDirectTailCall(
 		return nil, false
 	}
 	argumentCount, argsOK := backendGoNumericArgumentCount(target.ir, target.fixedVarargCount)
-	resultCount, resultsOK := backendGoNumericFixedResultCountFor(target.ir, target.fixedVarargCount)
+	resultCount, resultsOK := backendGoNumericTargetFixedResultCount(options, target)
 	if !argsOK || !resultsOK || resultCount != 1 ||
 		producer.callArgCount != int32(argumentCount) {
 		return nil, false
