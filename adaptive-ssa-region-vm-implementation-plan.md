@@ -98,6 +98,7 @@ The unproved premise is that a finite typed region ISA can reach parity without 
 
 - **Trigger:** P3/P4 misses any D3 gate, needs identity tuning, exceeds caps, or loses to the faster current VM/Machine path for its family.
 - **Then:** Delete production regions/caches, retain only zero-cost audit fixtures, record the failed premise in ADR 0009, and reopen the bounded candidate cutoff. Do not relax gates or rescue it with JIT, assembly, or another simultaneous state rewrite.
+- **Proof:** Generic VM/prepared checks and baseline captures pass; production search finds no region executor/cache remnants; ADR 0009 binds the failed evidence.
 - **Else:** no work
 
 ## Deferred / external
