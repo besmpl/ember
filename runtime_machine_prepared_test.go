@@ -2448,6 +2448,124 @@ func TestMachinePreparedStateMachineAvoidsRuntimeTablesAndStrings(t *testing.T) 
 	}
 }
 
+func TestMachinePreparedCommandRouterOwnsCapturedStateAndReplaysExactly(t *testing.T) {
+	image := machinePreparedTestImageForSource(t, backendCommandRouterProofSource)
+	calls := 0
+	var observed machinePreparedExit
+	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
+		calls++
+		observed = backendGeneratedCommandRouterPreparedFixture(context)
+		return observed
+	})
+	prepared, err := newMachineOwnerWithPrepared(image, program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generic, err := newMachineOwner(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := prepared.close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := generic.close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	preparedArg, err := prepared.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericArg, err := generic.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tableCount := len(prepared.tables.tables)
+	stringCount := len(prepared.strings.records)
+	want, ok := backendGeneratedCommandRouter(29)
+	if !ok {
+		t.Fatal("generated command-router oracle exited")
+	}
+	runMachinePreparedTestProto(t, prepared, 1, []slot{preparedArg}, nil)
+	runMachinePreparedTestProto(t, generic, 1, []slot{genericArg}, nil)
+	assertMachineOwnerNumberResult(t, prepared, want)
+	assertMachineOwnerNumberResult(t, generic, want)
+	if calls != 1 || observed.kind != machinePreparedExitReturnOneNumber {
+		t.Fatalf("prepared command-router success = calls %d exit %#v", calls, observed)
+	}
+	if len(prepared.tables.tables) != tableCount || len(prepared.strings.records) != stringCount {
+		t.Fatalf(
+			"prepared command-router materialized owner objects: tables %d/%d strings %d/%d",
+			len(prepared.tables.tables), tableCount, len(prepared.strings.records), stringCount,
+		)
+	}
+
+	preparedController, err := newExecutionController(context.Background(), ExecutionLimits{MaxInstructions: 1_000_000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericController, err := newExecutionController(context.Background(), ExecutionLimits{MaxInstructions: 1_000_000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runMachinePreparedTestProto(t, prepared, 1, []slot{preparedArg}, preparedController)
+	runMachinePreparedTestProto(t, generic, 1, []slot{genericArg}, genericController)
+	if calls != 1 || preparedController.remaining != genericController.remaining {
+		t.Fatalf(
+			"controlled command-router fallback = calls %d remaining %d/%d",
+			calls, preparedController.remaining, genericController.remaining,
+		)
+	}
+
+	globals := map[string]Value{
+		"select": HostFuncValue(func([]Value) ([]Value, error) {
+			return nil, errors.New("command-router select override")
+		}),
+	}
+	if err := prepared.importGlobalsStopped(globals); err != nil {
+		t.Fatal(err)
+	}
+	if err := generic.importGlobalsStopped(globals); err != nil {
+		t.Fatal(err)
+	}
+	preparedOverrideErr := runMachinePreparedTestProtoError(t, prepared, 1, []slot{preparedArg}, nil)
+	genericOverrideErr := runMachinePreparedTestProtoError(t, generic, 1, []slot{genericArg}, nil)
+	if calls != 2 || observed.kind != machinePreparedExitReplayEntry {
+		t.Fatalf("prepared command-router intrinsic fallback = calls %d exit %#v", calls, observed)
+	}
+	if preparedOverrideErr == nil || genericOverrideErr == nil ||
+		preparedOverrideErr.Error() != genericOverrideErr.Error() ||
+		!strings.Contains(preparedOverrideErr.Error(), "command-router select override") {
+		t.Fatalf("prepared/generic command-router override errors = %v / %v", preparedOverrideErr, genericOverrideErr)
+	}
+	if err := prepared.importGlobalsStopped(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := generic.importGlobalsStopped(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if !checkptrInstrumentedTest() {
+		lease, err := prepared.beginRun()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var runErr error
+		allocations := testing.AllocsPerRun(1000, func() {
+			runErr = prepared.executeStopped(0, 1, machineClosureHandle{}, []slot{preparedArg}, nil, machineRunEffects{})
+		})
+		lease.end()
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if allocations != 0 {
+			t.Fatalf("prepared command-router owner allocations = %v, want 0", allocations)
+		}
+	}
+}
+
 func TestMachinePreparedPathRelaxationAvoidsRuntimeTables(t *testing.T) {
 	image := machinePreparedTestImageForSource(t, backendPathRelaxationProofSource)
 	calls := 0
@@ -4079,6 +4197,17 @@ func BenchmarkMachinePreparedStateMachineOwner(b *testing.B) {
 
 func BenchmarkMachineGenericStateMachineOwner(b *testing.B) {
 	image := machinePreparedBenchmarkImage(b, backendStateMachineProofSource)
+	benchmarkMachineNumericOwner(b, image, nil)
+}
+
+func BenchmarkMachinePreparedCommandRouterOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendCommandRouterProofSource)
+	program := machinePreparedBenchmarkProgram(b, image, backendGeneratedCommandRouterPreparedFixture)
+	benchmarkMachineNumericOwner(b, image, program)
+}
+
+func BenchmarkMachineGenericCommandRouterOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendCommandRouterProofSource)
 	benchmarkMachineNumericOwner(b, image, nil)
 }
 

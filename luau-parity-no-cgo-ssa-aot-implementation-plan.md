@@ -846,12 +846,45 @@ The retained path has moved beyond the original starting state:
   counted Scenario route, so coverage remains eighteen of 25 rather than
   double-counting the same state-machine case.
 
+- The command-vararg direct-call slice lowers the real nested-Proto
+  `command_vararg_router` pressure as one parameterized program. Direct target
+  parameters now carry verified scalar tags, so the finite command name is a
+  `uint32` string ID while its fixed three-value vararg pack remains numeric.
+  The target's open `return ..., select("#", ...)` is normalized to three
+  results only when the immediately preceding open producer is the exact
+  fixed-vararg `select`; arbitrary open producers fail closed. Four captured
+  numeric record fields become explicit pointer parameters, and the caller
+  copies those fields to scratch and commits them only after the direct target
+  returns successfully, preserving replay-entry ownership. The four positional
+  command tuples become one typed record array with no runtime table or string
+  materialization. Generated Go, prepared owner, generic Machine, and the
+  independent interpreter agree across negative, ordinary, and large seeds;
+  private-function renaming is byte-identical, while mixed captured fields,
+  captured-state escape, dynamic tuple positions, and arbitrary open returns
+  fail closed. Rebinding `select` replays canonical Machine before mutation,
+  controlled execution remains generic, owner table/string counts stay
+  unchanged, and direct/prepared paths allocate zero when warmed. The direct
+  kernel has a five-sample median of about 1.365 microseconds
+  (1.342-1.414 microseconds observed), while the prepared owner has a median
+  of about 1.434 microseconds (1.429-1.459 microseconds observed), versus about
+  314.8 microseconds through generic Machine. The pinned Luau `-O2 -g0` corpus
+  batch has a five-sample median of about 22.56 microseconds per call,
+  including its cold first process sample, making prepared about `0.064x`
+  Luau; this is exploratory evidence, not the required `guest_batch_v1`
+  capture. Deterministic generated source is 14,717 bytes across the caller
+  and target. Linked ARM64 is 656 bytes for the direct caller, 256 bytes for
+  the target, 704 bytes for the prepared body, and 192 bytes for the wrapper;
+  caller and prepared code contain one intentional direct target call plus
+  cold bounds/stack-growth helpers and no opcode, descriptor, Machine table,
+  runtime string, interning, closure, upvalue, or VM dispatch. Nineteen of the
+  25 Scenario kernels now emit through the compiler proof route.
+
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
 all-37 parity. General non-dense iteration, general table mutation, general
 generated strings, unbounded or polymorphic dynamic string-key maps,
 multi-payload unions, escaping strings,
-general closures/upvalues and dynamic call sets, open varargs/results,
+other general closures/upvalues and dynamic call sets, other open varargs/results,
 heterogeneous or dynamically shaped multiple results,
 general recursion and logical-frame/error cases, dynamic/callable metatables,
 general captured or polymorphic methods, host/effect exits, modules, and

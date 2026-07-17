@@ -31,7 +31,9 @@ func backendGoNumericFixedVarargSelect(
 		operation.op == opFastCall &&
 		nativeFuncID(operation.nativeID) == nativeFuncSelect &&
 		operation.c == 0 &&
-		operation.d == 1
+		(operation.d == 1 || operation.d < 0) &&
+		len(operation.defs) == 1 &&
+		operation.defs[0].register == operation.a
 }
 
 func backendGoNumericVarargIndex(

@@ -89,6 +89,11 @@ func analyzeBackendGoScalarTablesExcluding(
 		}
 		plan.externalRoot = ir.initial[0]
 		plan.roots[plan.externalRoot-1] = plan.externalRoot
+	} else if capturedRoots := backendGoCapturedRecordRoots(ir); len(capturedRoots) != 0 {
+		plan.externalRoot = capturedRoots[0]
+		for _, root := range capturedRoots {
+			plan.roots[root-1] = plan.externalRoot
+		}
 	}
 	setRoot := func(id, root backendValueID) (bool, bool) {
 		if !ir.validBackendValue(id) {
@@ -413,7 +418,16 @@ func analyzeBackendGoScalarTablesExcluding(
 				return backendGoScalarTablePlan{}, nil
 			}
 		default:
-			return backendGoScalarTablePlan{}, nil
+			usesScalarTable := false
+			for _, use := range operation.uses {
+				if plan.root(use.value) != invalidBackendValueID {
+					usesScalarTable = true
+					break
+				}
+			}
+			if usesScalarTable {
+				return backendGoScalarTablePlan{}, nil
+			}
 		}
 	}
 	if len(plan.fields) == 0 && len(plan.arrays) == 0 {
@@ -558,6 +572,26 @@ func analyzeBackendGoScalarTablesExcluding(
 		}
 	}
 	return plan, nil
+}
+
+func backendGoCapturedRecordRoots(ir *backendProtoIR) []backendValueID {
+	if ir == nil || len(ir.upvalues) != 1 {
+		return nil
+	}
+	roots := make([]backendValueID, 0)
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		switch operation.op {
+		case opSetUpvalue:
+			return nil
+		case opGetUpvalue:
+			if operation.b != 0 || len(operation.defs) != 1 {
+				return nil
+			}
+			roots = append(roots, operation.defs[0].value)
+		}
+	}
+	return roots
 }
 
 func backendGoScalarMethodClosure(ir *backendProtoIR, id backendValueID) (int32, bool) {
@@ -759,6 +793,14 @@ func backendGoLoopInitialNumber(
 func backendGoStaticNumberEquals(ir *backendProtoIR, id backendValueID, want float64) bool {
 	number, ok := backendGoStaticNumber(ir, id, nil)
 	return ok && number == want
+}
+
+func backendGoStaticArrayIndex(ir *backendProtoIR, id backendValueID) (uint32, bool) {
+	number, ok := backendGoStaticNumber(ir, id, nil)
+	if !ok || number < 1 || number > float64(^uint32(0)) || number != math.Trunc(number) {
+		return 0, false
+	}
+	return uint32(number), true
 }
 
 func backendGoStaticNumber(

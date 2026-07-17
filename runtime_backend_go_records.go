@@ -277,14 +277,35 @@ func analyzeBackendGoRecordTables(
 		plan.rejectReason = "root propagation"
 		return plan
 	}
+	positionalRecords := make(map[backendValueID]bool)
 	for pc := range ir.ops {
 		operation := &ir.ops[pc]
-		if operation.op != opSetStringField {
+		if operation.op != opSetField {
+			continue
+		}
+		container := plan.root(backendOperationUse(operation, operation.a))
+		element := plan.root(backendOperationUse(operation, operation.c))
+		if container != invalidBackendValueID && element != invalidBackendValueID && container != element {
+			positionalRecords[element] = true
+		}
+	}
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		if operation.op != opSetStringField && operation.op != opSetField {
 			continue
 		}
 		root := plan.root(backendOperationUse(operation, operation.a))
-		name, ok := backendGoStringFieldName(ir, operation.access.constant)
+		if operation.op == opSetField && !positionalRecords[root] {
+			continue
+		}
+		name, ok := backendGoRecordStaticFieldName(ir, operation)
 		if root == invalidBackendValueID || !ok {
+			continue
+		}
+		source := backendOperationUse(operation, operation.c)
+		if operation.op == opSetField && plan.root(source) != invalidBackendValueID {
+			// A positional child record is a container element, not a scalar
+			// field of its parent.
 			continue
 		}
 		recordIndex, exists := plan.recordByRoot[root]
@@ -308,7 +329,7 @@ func analyzeBackendGoRecordTables(
 		record.fieldNames = append(record.fieldNames, name)
 		record.fieldValues = append(
 			record.fieldValues,
-			backendOperationUse(operation, operation.c),
+			source,
 		)
 		record.fieldPresent = append(record.fieldPresent, true)
 		record.fieldOptional = append(record.fieldOptional, false)
@@ -1341,16 +1362,40 @@ func (plan *backendGoRecordTablePlan) recordInitializedBefore(
 func (plan *backendGoRecordTablePlan) classifyFields(ir *backendProtoIR) bool {
 	for pc := range ir.ops {
 		operation := &ir.ops[pc]
-		if operation.op != opGetStringField && operation.op != opSetStringField {
+		if operation.op != opGetStringField && operation.op != opSetStringField &&
+			operation.op != opGetIndex && operation.op != opSetField {
 			continue
 		}
+		if operation.op == opSetField {
+			if _, containerStore := plan.arraySetByPC[operation.pc]; containerStore {
+				continue
+			}
+		}
+		if operation.op == opGetIndex {
+			if _, mapGet := plan.mapGetByPC[operation.pc]; mapGet {
+				continue
+			}
+			if _, arrayGet := plan.arrayGetByPC[operation.pc]; arrayGet {
+				continue
+			}
+		}
 		baseRegister := operation.b
-		if operation.op == opSetStringField {
+		if operation.op == opSetStringField || operation.op == opSetField {
 			baseRegister = operation.a
 		}
 		base := backendOperationUse(operation, baseRegister)
-		name, ok := backendGoStringFieldName(ir, operation.access.constant)
+		if operation.op == opGetIndex || operation.op == opSetField {
+			_, directRecord := plan.recordByRoot[plan.root(base)]
+			_, referencedRecord := plan.refs[base]
+			if !directRecord && !referencedRecord {
+				continue
+			}
+		}
+		name, ok := backendGoRecordStaticFieldName(ir, operation)
 		if !ok {
+			if operation.op == opGetIndex {
+				continue
+			}
 			plan.rejectReason = "invalid field name at PC " + strconv.Itoa(int(operation.pc))
 			return false
 		}
@@ -1387,7 +1432,7 @@ func (plan *backendGoRecordTablePlan) classifyFields(ir *backendProtoIR) bool {
 			}
 			_, childArray := plan.childByScratch[key]
 			childRecordRef, childRecord := plan.childRecord[key]
-			if operation.op == opSetStringField && (childArray || childRecord) {
+			if (operation.op == opSetStringField || operation.op == opSetField) && (childArray || childRecord) {
 				if _, initial := plan.childSetByPC[operation.pc]; !initial {
 					if _, initial = plan.childRecordSet[operation.pc]; !initial {
 						plan.rejectReason = "child-table identity changes at PC " + strconv.Itoa(int(operation.pc))
@@ -1395,7 +1440,7 @@ func (plan *backendGoRecordTablePlan) classifyFields(ir *backendProtoIR) bool {
 					}
 				}
 			}
-			if operation.op == opGetStringField && childRecord {
+			if (operation.op == opGetStringField || operation.op == opGetIndex) && childRecord {
 				for _, definition := range operation.defs {
 					current, exists := plan.refs[definition.value]
 					if !exists || current.kind != backendGoRecordRefChildRecord ||
@@ -1406,7 +1451,7 @@ func (plan *backendGoRecordTablePlan) classifyFields(ir *backendProtoIR) bool {
 				}
 			}
 			source := invalidBackendValueID
-			if operation.op == opSetStringField {
+			if operation.op == opSetStringField || operation.op == opSetField {
 				source = backendOperationUse(operation, operation.c)
 			}
 			plan.fieldsByPC[operation.pc] = backendGoRecordFieldOperation{
@@ -1419,6 +1464,9 @@ func (plan *backendGoRecordTablePlan) classifyFields(ir *backendProtoIR) bool {
 		}
 		ref, exists := plan.refs[base]
 		if !exists {
+			if operation.op == opGetIndex {
+				continue
+			}
 			plan.rejectReason = "field base has no record reference at PC " + strconv.Itoa(int(operation.pc))
 			return false
 		}
@@ -1438,7 +1486,7 @@ func (plan *backendGoRecordTablePlan) classifyFields(ir *backendProtoIR) bool {
 			return false
 		}
 		source := invalidBackendValueID
-		if operation.op == opSetStringField {
+		if operation.op == opSetStringField || operation.op == opSetField {
 			source = backendOperationUse(operation, operation.c)
 		}
 		plan.fieldsByPC[operation.pc] = backendGoRecordFieldOperation{
@@ -1811,6 +1859,9 @@ func (plan *backendGoRecordTablePlan) classifyDynamicFields(ir *backendProtoIR) 
 		var base, key, source backendValueID
 		switch operation.op {
 		case opGetIndex:
+			if _, static := plan.fieldsByPC[operation.pc]; static {
+				continue
+			}
 			if len(operation.defs) != 1 {
 				continue
 			}
@@ -1854,6 +1905,46 @@ func (plan *backendGoRecordTablePlan) classifyDynamicFields(ir *backendProtoIR) 
 		}
 	}
 	return true
+}
+
+func backendGoRecordStaticFieldName(
+	ir *backendProtoIR,
+	operation *backendOperationIR,
+) (machineStringID, bool) {
+	if ir == nil || operation == nil {
+		return invalidMachineStringID, false
+	}
+	switch operation.op {
+	case opGetStringField, opSetStringField:
+		return backendGoStringFieldName(ir, operation.access.constant)
+	case opSetField:
+		index, ok := backendGoArrayIndexConstant(ir, operation.access.constant)
+		return backendGoRecordNumericFieldNameFor(ir, index, ok)
+	case opGetIndex:
+		index, ok := backendGoStaticArrayIndex(ir, backendOperationUse(operation, operation.c))
+		return backendGoRecordNumericFieldNameFor(ir, index, ok)
+	default:
+		return invalidMachineStringID, false
+	}
+}
+
+func backendGoRecordNumericFieldNameFor(
+	ir *backendProtoIR,
+	index uint32,
+	ok bool,
+) (machineStringID, bool) {
+	name, ok := backendGoRecordNumericFieldName(index, ok)
+	if !ok || ir == nil || uint64(name) <= uint64(len(ir.stringRecords)) {
+		return invalidMachineStringID, false
+	}
+	return name, true
+}
+
+func backendGoRecordNumericFieldName(index uint32, ok bool) (machineStringID, bool) {
+	if !ok || index == 0 || index > backendGoMaxScalarArrayCapacity {
+		return invalidMachineStringID, false
+	}
+	return machineStringID(^uint32(0) - index + 1), true
 }
 
 func (plan *backendGoRecordTablePlan) dynamicFieldTags(
@@ -2475,6 +2566,9 @@ func (plan *backendGoRecordTablePlan) validateUses(ir *backendProtoIR) bool {
 						return false
 					}
 				case opGetIndex:
+					if _, static := plan.fieldsByPC[operation.pc]; static {
+						break
+					}
 					if _, selector := plan.dynamicChildSelectByPC[operation.pc]; selector {
 						break
 					}
@@ -2489,6 +2583,9 @@ func (plan *backendGoRecordTablePlan) validateUses(ir *backendProtoIR) bool {
 						return false
 					}
 				case opSetField:
+					if _, static := plan.fieldsByPC[operation.pc]; static {
+						break
+					}
 					if _, ok := plan.arraySetByPC[operation.pc]; !ok {
 						plan.rejectReason = "unclassified record array set at PC " + strconv.Itoa(int(operation.pc))
 						return false
@@ -2518,6 +2615,9 @@ func (plan *backendGoRecordTablePlan) validateUses(ir *backendProtoIR) bool {
 				case opMove, opGetStringField, opGetStringFieldIndex, opSetStringField, opSetStringFieldIndex, opEqual, opNotEqual,
 					opJumpIfFalse, opJumpIfTableHasMetatable:
 				case opGetIndex:
+					if _, static := plan.fieldsByPC[operation.pc]; static {
+						break
+					}
 					if _, ok := plan.dynamicChildGetByPC[operation.pc]; !ok {
 						plan.rejectReason = "unclassified dynamic child-record lookup at PC " + strconv.Itoa(int(operation.pc))
 						return false
