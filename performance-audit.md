@@ -64,6 +64,27 @@ recursive Fibonacci about 6.2x, and the slowest table/array rows about
 about 9.7x, 15.8x-16.9x, and 18.0x. This evidence supersedes interpreter-only
 parity as the final architecture target; see ADR 0008.
 
+The private prepared-Go all-37 proof was acquired cleanly twice from exact
+commit `d3c51cc1d5ccce82f99bfe33aef18d980c979a62` on 2026-07-17. Both captures
+used the schema-v2 `prepared-parity1x` / `guest_batch_v1` contract, pinned Luau
+0.728, `CGO_ENABLED=0`, and `GOMAXPROCS=1`. Each contains 888 uncontaminated
+raw measurements plus 222 fitted slopes; every Ember result set matches Luau.
+
+| Capture | Directory | Capture ID | Bound directory hash |
+| --- | --- | --- | --- |
+| A | `tmp/runtime-parity/prepared-d3c51cc1-a` | `c100e41604666e64cdb9b1b182ac45fc30a3ad322a365a318a417c40e9ee91a3` | `fca3ba4ec23aef612ac3932c29f6d07ab391b864d8d104fbfe119ca175675305` |
+| B | `tmp/runtime-parity/prepared-d3c51cc1-b` | `20ffc5a6df51a8abdfa4df4bfa14ba4da0cce745e504c6bc7ed0c620a32c506e` | `775ee24264726b6f8019dd5d80156aa48233ad8c5e0ca198c72cafbf59f863b0` |
+
+The shared acceptance-environment SHA-256 is
+`7d7d8f68a17a5295d7401e234d8cd6630ef20ceeef6e8d97aaae1908187d1d19`.
+The strict cross-capture gate accepted all 74 case/capture rows at median
+`<=1.00` and nearest-rank p90 `<=1.05`. The worst observed median was
+`0.186646` (`scenario/cooldown_scheduler`, B); the worst p90 was `0.192705`
+(`scenario/economy_market_tick`, B). This clears the private guest-throughput
+gate only. Public prepared lifecycle, artifact generation API, mismatch
+surface, lifecycle allocations, and full semantic/effect exits remain
+independent production gates.
+
 ## No-CGO architecture selection evidence
 
 The reusable proof harness was retained at exact commit

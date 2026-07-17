@@ -96,10 +96,13 @@ their immutable manifest separately:
 The capture role selects the whole runtime before binding: `frozen-current`
 uses `EMBER_RUNTIME_ENGINE=vm`, while dynamic `candidate` uses
 `EMBER_RUNTIME_ENGINE=machine`. `prepared-parity1x` accepts only `candidate`
-and selects `EMBER_RUNTIME_ENGINE=prepared`; it therefore fails closed until a
-real prepared backend exists and cannot relabel Machine evidence. The phase and
-execution mode are recorded in schema-v2 artifacts and `command.txt`; workload
-identity never participates in engine selection.
+and selects `EMBER_RUNTIME_ENGINE=prepared`. In test builds, that phase binds
+the checked-in generated all-37 bundle by verified Program hash and Proto
+inventory; an unknown or stale Program fails before owner creation. The bridge
+remains test-only until the public prepared lifecycle is proved, so the phase
+cannot relabel Machine evidence or silently route a production runtime.
+The phase and execution mode are recorded in schema-v2 artifacts and
+`command.txt`; workload identity never participates in engine selection.
 
 On the pinned eight-logical-CPU M1, acquisition starts after three one-second
 samples with aggregate CPU at most 300%. One-minute load remains diagnostic but
