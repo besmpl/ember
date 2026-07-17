@@ -445,6 +445,7 @@ func (machine *scalarMachine) callHostStopped(operation machineOperation, callab
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = machine.contextWithHostScriptFrames(ctx, int(operation.line))
 	if machine.window.controller != nil {
 		if err := machine.window.controller.enterCall(); err != nil {
 			return err
@@ -677,6 +678,11 @@ func (machine *scalarMachine) callFastHostStopped(callable slot, arguments []slo
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	line := 0
+	if proto := machine.currentProto(); proto != nil && returnPC > 0 && returnPC-1 < len(proto.operations) {
+		line = int(proto.operations[returnPC-1].line)
+	}
+	ctx = machine.contextWithHostScriptFrames(ctx, line)
 	if machine.window.controller != nil {
 		if err := machine.window.controller.enterCall(); err != nil {
 			return err
@@ -729,6 +735,24 @@ func (machine *scalarMachine) callFastHostStopped(callable slot, arguments []slo
 		}
 	}
 	return nil
+}
+
+func (machine *scalarMachine) contextWithHostScriptFrames(ctx context.Context, line int) context.Context {
+	scope, ok := invocationScopeFromContext(ctx)
+	if !ok || !scope.resumable {
+		return ctx
+	}
+	frame := ScriptFrame{Line: line}
+	if proto := machine.currentProto(); proto != nil {
+		frame.Source = proto.sourceName
+		frame.Function = proto.functionName
+	}
+	frames := []ScriptFrame{frame}
+	if machine.window.controller != nil {
+		frames = append(frames, machine.window.controller.inheritedScriptFrames...)
+	}
+	scope.inheritedScriptFrames = frames
+	return contextWithInvocationScope(ctx, scope)
 }
 
 func (machine *scalarMachine) suspendHostCallStopped(token any, destination, resultCount, returnPC int) error {

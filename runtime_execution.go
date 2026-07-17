@@ -71,6 +71,7 @@ func (vmRuntimeExecution) initialize(r *Runtime) error {
 	r.entrypoints = make(map[moduleKey]Value)
 	r.loaded = make(map[moduleKey]Value)
 	r.requireAdapters = make(map[moduleKey]Value)
+	r.moduleInitializers = make(map[moduleKey]*runtimeModuleInitialization)
 	r.active = make(map[moduleKey]bool)
 	return nil
 }

@@ -146,20 +146,21 @@ type HostCall struct {
 // captured Callback calls must not overlap. Close may run concurrently; it
 // reports an active runtime without tearing down the in-flight call.
 type Runtime struct {
-	closeMu         sync.Mutex
-	suspensionMu    sync.Mutex
-	execution       runtimeExecution
-	owner           *runtimeOwner
-	program         *Program
-	host            RuntimeHost
-	entrypoints     map[moduleKey]Value
-	loaded          map[moduleKey]Value
-	requireAdapters map[moduleKey]Value
-	active          map[moduleKey]bool
-	limits          ExecutionLimits
-	stack           []moduleKey
-	closed          bool
-	suspensions     map[*suspensionState]struct{}
+	closeMu            sync.Mutex
+	suspensionMu       sync.Mutex
+	execution          runtimeExecution
+	owner              *runtimeOwner
+	program            *Program
+	host               RuntimeHost
+	entrypoints        map[moduleKey]Value
+	loaded             map[moduleKey]Value
+	requireAdapters    map[moduleKey]Value
+	moduleInitializers map[moduleKey]*runtimeModuleInitialization
+	active             map[moduleKey]bool
+	limits             ExecutionLimits
+	stack              []moduleKey
+	closed             bool
+	suspensions        map[*suspensionState]struct{}
 }
 
 // HookReport describes one RunHook call.
@@ -469,6 +470,7 @@ func (r *Runtime) closeVM() error {
 	r.entrypoints = nil
 	r.loaded = nil
 	r.requireAdapters = nil
+	r.moduleInitializers = nil
 	r.active = nil
 	r.stack = nil
 	return nil

@@ -158,15 +158,30 @@ testable seam.
   `HostReturn`, `HostError`, or `HostSuspend`. A suspension carries an opaque
   host-owned token and creates no goroutine, timer, channel, retry, or
   scheduler.
-- `Runtime.RunHookResumable` and `Callback.CallResumable` run until completion
-  or suspension and return `ExecutionResult`. `Suspension.Token` exposes the
-  host token; single-use `Resume` supplies call results and `Fail` injects an
-  ordinary error at the original call site. A resumed script may return a
-  successor suspension.
+- `Runtime.RunHookResumable` and `Callback.CallResumable` run to a quiescent
+  execution snapshot. `ExecutionResult.Suspensions` contains every
+  host-visible wait still pending; hook waits are ordered by declared
+  entrypoint order. `ExecutionResult.Suspension` remains an alias for the first
+  pending wait for single-chain callers. Completed and skipped hook calls are
+  reported in declared order even when the host resumes waits in another
+  order.
+- `Suspension.Token` exposes only the host-owned token. `Entrypoint`, `Module`,
+  and `Hook` identify a hook wait; retained callback waits have empty
+  attribution. Single-use `Resume` supplies call results, `Fail` injects an
+  ordinary error at the original call site, and `Cancel` abandons only that
+  pending invocation. A resumed script may expose zero, one, or several
+  successor suspensions.
+- Entrypoint top-level code and newly required module initializers participate
+  in the same resumable operation as their hook or callback. One in-flight
+  initializer and cache result is shared by unrelated waiters; internal module
+  waits are not exposed as host tokens, while recursive require paths still
+  report an active-loading cycle.
 - Every resumable step uses normal runtime serialization and receives a fresh
-  context and execution budget. Several idle suspended invocations may coexist.
-  `Runtime.Close` releases their retained execution state and tokens; later
-  handle use reports `ErrSuspensionStale`.
+  context and execution budget. A context already canceled or a runtime
+  already busy fails preflight without consuming the handle, so the host may
+  retry it. Several idle suspended invocations may coexist. `Runtime.Close`
+  releases their retained execution state and tokens; later handle use reports
+  `ErrSuspensionStale`.
 - Existing `RunHook` and `Callback.Call` remain completion-only for hosts that
   do not suspend.
 - Seeded base globals are `type`, which returns Luau-style kind names for the

@@ -27,11 +27,45 @@ func (execution *machineRuntimeExecution) initialize(runtime *Runtime) error {
 	}
 	execution.owner = owner
 	owner.coroutines.arena.limit = runtime.limits.MaxCoroutines
+	runtime.moduleInitializers = make(map[moduleKey]*runtimeModuleInitialization)
 	return nil
 }
 
 func (execution *machineRuntimeExecution) runHook(runtime *Runtime, ctx context.Context, hook string, args []Value, report *HookReport) error {
-	return execution.runMachineHook(runtime, ctx, hook, args, report)
+	if !execution.usesResumableRequire() {
+		return execution.runMachineHook(runtime, ctx, hook, args, report)
+	}
+	outcome, err := execution.runHookResumable(runtime, ctx, hook, args)
+	if err != nil {
+		return err
+	}
+	if len(outcome.pending) != 0 || outcome.target != nil {
+		for _, pending := range outcome.pending {
+			if pending.target != nil {
+				pending.target.close()
+			}
+		}
+		if outcome.target != nil {
+			outcome.target.close()
+		}
+		return fmt.Errorf("runtime: hook %s suspended in completion-only RunHook", hook)
+	}
+	if report != nil && outcome.hook != nil {
+		*report = *outcome.hook
+	}
+	return nil
+}
+
+func (execution *machineRuntimeExecution) usesResumableRequire() bool {
+	if execution == nil || execution.image == nil {
+		return false
+	}
+	for _, name := range execution.image.globalNames {
+		if name == "require" {
+			return true
+		}
+	}
+	return false
 }
 
 func (execution *machineRuntimeExecution) captureCallback(call invocationScope, value Value) (callbackTarget, error) {
@@ -53,6 +87,7 @@ func (execution *machineRuntimeExecution) close(runtime *Runtime) error {
 		runtime.closed = true
 		runtime.program = nil
 		runtime.host = nil
+		runtime.moduleInitializers = nil
 		runtime.closeMu.Unlock()
 	}
 	return nil

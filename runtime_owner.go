@@ -79,6 +79,21 @@ func (owner *runtimeOwner) beginRun() (*runtimeRunLease, error) {
 	return &runtimeRunLease{owner: owner}, nil
 }
 
+func (owner *runtimeOwner) preflightRun() error {
+	if owner == nil {
+		return errRuntimeOwnerReleased
+	}
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if owner.state == runtimeOwnerClosed {
+		return errRuntimeOwnerClosed
+	}
+	if owner.activeRuns != 0 {
+		return errRuntimeOwnerBusy
+	}
+	return nil
+}
+
 func (owner *runtimeOwner) checkOpen() error {
 	if owner == nil {
 		return errRuntimeOwnerReleased

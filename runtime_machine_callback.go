@@ -81,6 +81,28 @@ func (target *machineCallbackTarget) call(ctx context.Context, args []Value) ([]
 	if target == nil || target.execution == nil || target.execution.owner == nil || target.runtime == nil || target.state == nil {
 		return nil, fmt.Errorf("callback: not retained")
 	}
+	if !target.execution.usesResumableRequire() {
+		return target.callCompletionStopped(ctx, args)
+	}
+	outcome, err := target.callResumable(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	if outcome.target != nil || len(outcome.pending) != 0 {
+		if outcome.target != nil {
+			outcome.target.close()
+		}
+		for _, pending := range outcome.pending {
+			if pending.target != nil {
+				pending.target.close()
+			}
+		}
+		return nil, fmt.Errorf("callback: suspended in completion-only Call")
+	}
+	return outcome.values, nil
+}
+
+func (target *machineCallbackTarget) callCompletionStopped(ctx context.Context, args []Value) ([]Value, error) {
 	lease, err := target.execution.owner.beginRun()
 	if errors.Is(err, errMachineOwnerClosed) {
 		return nil, fmt.Errorf("callback: runtime is closed")

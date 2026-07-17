@@ -10,11 +10,14 @@ import (
 // a context wrapper.  ContextHostFuncValue adds the compatibility wrapper at
 // the host boundary only when it actually needs to expose this scope.
 type invocationScope struct {
-	runtime    *Runtime
-	ctx        context.Context
-	from       moduleKey
-	globals    map[string]Value
-	controller *executionController
+	runtime               *Runtime
+	ctx                   context.Context
+	from                  moduleKey
+	globals               map[string]Value
+	controller            *executionController
+	modulePath            []moduleKey
+	resumable             bool
+	inheritedScriptFrames []ScriptFrame
 }
 
 // runtimeRequireAdapter is the stable per-runtime/module identity behind a
@@ -48,6 +51,46 @@ func (adapter *runtimeRequireAdapter) call(globals *globalEnv, args []Value) ([]
 	return scope.require(globals, args)
 }
 
+func (adapter *runtimeRequireAdapter) callResumable(ctx context.Context, args []Value) HostResult {
+	if adapter == nil || adapter.runtime == nil {
+		return HostError(fmt.Errorf("require: nil runtime"))
+	}
+	adapter.runtime.closeMu.Lock()
+	closed := adapter.runtime.closed
+	adapter.runtime.closeMu.Unlock()
+	if closed {
+		return HostError(fmt.Errorf("require: runtime is closed"))
+	}
+	scope, ok := invocationScopeFromContext(ctx)
+	if !ok {
+		return HostError(fmt.Errorf("require: missing invocation scope"))
+	}
+	if scope.runtime != nil && scope.runtime != adapter.runtime {
+		return HostError(fmt.Errorf("require: runtime mismatch"))
+	}
+	scope.runtime = adapter.runtime
+	scope.from = adapter.from
+	if !scope.resumable {
+		if len(args) == 0 {
+			return HostError(fmt.Errorf("require: missing module path"))
+		}
+		request, ok := args[0].String()
+		if !ok {
+			return HostError(fmt.Errorf("require: module path is %s, want string", args[0].Kind()))
+		}
+		required, err := normalizeRequireKey(scope.from, request)
+		if err != nil {
+			return HostError(err)
+		}
+		export, err := adapter.runtime.requireCompletion(scope, required)
+		if err != nil {
+			return HostError(err)
+		}
+		return HostReturn(export)
+	}
+	return adapter.runtime.requireResumable(scope, args)
+}
+
 func (r *Runtime) requireAdapter(from moduleKey) Value {
 	if r == nil {
 		return Value{}
@@ -59,9 +102,64 @@ func (r *Runtime) requireAdapter(from moduleKey) Value {
 		return value
 	}
 	adapter := &runtimeRequireAdapter{runtime: r, from: from}
-	value := nativeFuncValue(adapter.call)
+	var value Value
+	if _, ok := r.execution.(vmRuntimeExecution); ok {
+		value = yieldableHostFuncValue(func(globals *globalEnv, args []Value) vmHostCallResult {
+			scope, resumable := invocationScopeFromGlobalEnv(globals)
+			if !resumable || !scope.resumable {
+				values, err := adapter.call(globals, args)
+				return vmHostCallResult{values: values, err: err}
+			}
+			if globals != nil && globals.thread != nil && len(globals.thread.frames) != 0 {
+				thread := globals.thread
+				current := *thread.frames[len(thread.frames)-1]
+				current.pc = previousWordcodeInstruction(current.proto, current.pc)
+				frames := thread.captureScriptFrames(&current, 0)
+				inherited := thread.inheritedScriptFrames
+				if len(inherited) == 0 && thread.controller != nil {
+					inherited = thread.controller.inheritedScriptFrames
+				}
+				scope.inheritedScriptFrames = append(frames, inherited...)
+			}
+			ctx := contextFromGlobalEnv(globals)
+			ctx = contextWithInvocationScope(ctx, scope)
+			return vmHostResult(adapter.callResumable(ctx, args))
+		})
+	} else {
+		value = ResumableHostFuncValue(adapter.callResumable)
+	}
 	r.requireAdapters[from] = value
 	return value
+}
+
+func (r *Runtime) requireCompletion(scope invocationScope, key moduleKey) (Value, error) {
+	switch execution := r.execution.(type) {
+	case vmRuntimeExecution:
+		results, err := scope.runModule(key)
+		return firstRuntimeResult(results), err
+	case *machineRuntimeExecution:
+		moduleID, ok := execution.image.moduleIDs[key]
+		if !ok {
+			return NilValue(), fmt.Errorf("module runtime: missing module %s", key.String())
+		}
+		childScope := scope
+		childScope.from = key
+		export, _, err := execution.owner.loadModuleStopped(
+			moduleID,
+			scope.controller,
+			machineRunEffects{ctx: contextWithInvocationScope(scope.ctx, childScope)},
+		)
+		if err != nil {
+			return NilValue(), err
+		}
+		exporter := machineTableExporter{
+			machine: &execution.owner.scalarMachine,
+			tables:  make(map[machineTableID]machineExportedTable),
+		}
+		return exporter.value(export)
+	default:
+		return NilValue(), fmt.Errorf("module runtime: execution is unavailable")
+	}
 }
 
 func missingRuntimeRequire(*globalEnv, []Value) ([]Value, error) {

@@ -397,8 +397,12 @@ func TestCanceledSuspensionStepDoesNotPoisonRuntime(t *testing.T) {
 			if _, err := step.Suspension.Resume(ctx); !errors.Is(err, context.Canceled) {
 				t.Fatalf("canceled resume error = %v", err)
 			}
-			if _, err := step.Suspension.Resume(context.Background()); !errors.Is(err, ember.ErrSuspensionStale) {
-				t.Fatalf("reused canceled suspension error = %v", err)
+			done, err := step.Suspension.Resume(context.Background())
+			if err != nil {
+				t.Fatalf("retry after canceled resume: %v", err)
+			}
+			if done.Hook == nil || done.Suspension != nil {
+				t.Fatalf("retry completion = %#v", done)
 			}
 			next, err := runtime.RunHookResumable(context.Background(), "update")
 			if err != nil {
@@ -453,13 +457,16 @@ func TestSuspensionResumeRejectsBusyRuntime(t *testing.T) {
 				close(release)
 				t.Fatalf("busy resume error = %v", err)
 			}
-			if _, err := step.Suspension.Resume(context.Background()); !errors.Is(err, ember.ErrSuspensionStale) {
-				close(release)
-				t.Fatalf("reused busy suspension error = %v", err)
-			}
 			close(release)
 			if err := <-activeDone; err != nil {
 				t.Fatalf("active hook returned error: %v", err)
+			}
+			done, err := step.Suspension.Resume(context.Background())
+			if err != nil {
+				t.Fatalf("retry after busy resume: %v", err)
+			}
+			if done.Hook == nil || done.Suspension != nil {
+				t.Fatalf("retry completion = %#v", done)
 			}
 		})
 	}

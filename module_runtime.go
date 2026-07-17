@@ -61,3 +61,15 @@ func runtimeModuleCyclePath(stack []moduleKey, key moduleKey) string {
 	path = append(path, key.String())
 	return strings.Join(path, " -> ")
 }
+
+func removeRuntimeModuleStackKey(stack []moduleKey, key moduleKey) []moduleKey {
+	for index := len(stack) - 1; index >= 0; index-- {
+		if stack[index] != key {
+			continue
+		}
+		copy(stack[index:], stack[index+1:])
+		stack[len(stack)-1] = moduleKey{}
+		return stack[:len(stack)-1]
+	}
+	return stack
+}

@@ -367,6 +367,21 @@ func (owner *machineOwner) beginRun() (*machineRunLease, error) {
 	return &machineRunLease{owner: owner}, nil
 }
 
+func (owner *machineOwner) preflightRun() error {
+	if owner == nil {
+		return errMachineOwnerReleased
+	}
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if owner.state == machineOwnerClosed {
+		return errMachineOwnerClosed
+	}
+	if owner.activeRuns != 0 {
+		return errMachineOwnerBusy
+	}
+	return nil
+}
+
 func (owner *machineOwner) executeRoot(moduleID programModuleID, controller *executionController, effects ...machineRunEffects) error {
 	lease, err := owner.beginRun()
 	if err != nil {
