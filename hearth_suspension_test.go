@@ -155,6 +155,83 @@ func TestCapturedCallbackCanSuspendAndResumeOnBothEngines(t *testing.T) {
 	}
 }
 
+func TestCapturedCallbackCanRequireSuspendedModuleOnBothEngines(t *testing.T) {
+	for _, engine := range []string{"vm", "machine"} {
+		t.Run(engine, func(t *testing.T) {
+			t.Setenv("EMBER_RUNTIME_ENGINE", engine)
+			loader := &programTestLoader{sources: map[string]string{
+				"logical:game/main": `return {
+    startup = function()
+        capture(function() return require("./dependency") end)
+    end,
+}`,
+				"logical:game/dependency": `return wait("callback-module")`,
+			}}
+			program, _, err := ember.LoadProgram(context.Background(), loader, ember.ProgramOptions{
+				Entrypoints: []ember.Entrypoint{{Name: "main", Module: ember.LogicalModule("game/main")}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var callback ember.Callback
+			runtime, err := program.NewRuntime(ember.RuntimeOptions{
+				Host: ember.RuntimeHostFunc(func(context.Context, ember.HostCall) (map[string]ember.Value, error) {
+					return map[string]ember.Value{
+						"capture": ember.ContextHostFuncValue(func(ctx context.Context, args []ember.Value) ([]ember.Value, error) {
+							captured, err := ember.CaptureCallback(ctx, args[0])
+							if err == nil {
+								callback = captured
+							}
+							return nil, err
+						}),
+						"wait": ember.ResumableHostFuncValue(func(_ context.Context, args []ember.Value) ember.HostResult {
+							token, _ := args[0].String()
+							return ember.HostSuspend(token)
+						}),
+					}, nil
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close()
+			defer callback.Close()
+			if _, err := runtime.RunHook(context.Background(), "startup"); err != nil {
+				t.Fatal(err)
+			}
+
+			step, err := callback.CallResumable(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertSuspensionToken(t, step, "callback-module")
+			done, err := step.Suspension.Resume(context.Background(), ember.StringValue("ready"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(done.Values) != 1 || done.Suspension != nil {
+				t.Fatalf("callback completion = %#v", done)
+			}
+			value, _ := done.Values[0].String()
+			if value != "ready" {
+				t.Fatalf("callback value = %q, want ready", value)
+			}
+
+			cached, err := callback.CallResumable(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cached.Values) != 1 || cached.Suspension != nil {
+				t.Fatalf("cached callback = %#v", cached)
+			}
+			cachedValue, _ := cached.Values[0].String()
+			if cachedValue != "ready" {
+				t.Fatalf("cached callback value = %q, want ready", cachedValue)
+			}
+		})
+	}
+}
+
 func TestSuspensionFailPreservesProtectedCallAndRuntimeErrorSemantics(t *testing.T) {
 	for _, engine := range []string{"vm", "machine"} {
 		t.Run("pcall "+engine, func(t *testing.T) {
@@ -467,6 +544,89 @@ func TestSuspensionResumeRejectsBusyRuntime(t *testing.T) {
 			}
 			if done.Hook == nil || done.Suspension != nil {
 				t.Fatalf("retry completion = %#v", done)
+			}
+		})
+	}
+}
+
+func TestSuspensionAdmissionKeepsBusyLoserRetryable(t *testing.T) {
+	for _, engine := range []string{"vm", "machine"} {
+		t.Run(engine, func(t *testing.T) {
+			t.Setenv("EMBER_RUNTIME_ENGINE", engine)
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			program := loadSingleProgram(t, `return {
+    update = function(id)
+        wait(id)
+        block(id)
+    end,
+}`)
+			runtime, err := program.NewRuntime(ember.RuntimeOptions{
+				Host: ember.RuntimeHostFunc(func(context.Context, ember.HostCall) (map[string]ember.Value, error) {
+					return map[string]ember.Value{
+						"wait": ember.ResumableHostFuncValue(func(_ context.Context, args []ember.Value) ember.HostResult {
+							token, _ := args[0].String()
+							return ember.HostSuspend(token)
+						}),
+						"block": ember.ContextHostFuncValue(func(_ context.Context, args []ember.Value) ([]ember.Value, error) {
+							id, _ := args[0].String()
+							if id == "A" {
+								close(entered)
+								<-release
+							}
+							return nil, nil
+						}),
+					}, nil
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close()
+
+			first, err := runtime.RunHookResumable(context.Background(), "update", ember.StringValue("A"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := runtime.RunHookResumable(context.Background(), "update", ember.StringValue("B"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertSuspensionToken(t, first, "A")
+			assertSuspensionToken(t, second, "B")
+
+			firstDone := make(chan error, 1)
+			go func() {
+				result, err := first.Suspension.Resume(context.Background())
+				if err == nil && (result.Hook == nil || result.Suspension != nil) {
+					err = fmt.Errorf("first completion = %#v", result)
+				}
+				firstDone <- err
+			}()
+			<-entered
+
+			if _, err := second.Suspension.Resume(context.Background()); !errors.Is(err, ember.ErrRuntimeBusy) {
+				close(release)
+				t.Fatalf("second resume error = %v, want busy", err)
+			}
+			if _, err := runtime.RunHook(context.Background(), "update", ember.StringValue("C")); !errors.Is(err, ember.ErrRuntimeBusy) {
+				close(release)
+				t.Fatalf("normal hook error = %v, want busy", err)
+			}
+
+			close(release)
+			if err := <-firstDone; err != nil {
+				t.Fatal(err)
+			}
+			if _, err := first.Suspension.Resume(context.Background()); !errors.Is(err, ember.ErrSuspensionStale) {
+				t.Fatalf("first reused error = %v, want stale", err)
+			}
+			done, err := second.Suspension.Resume(context.Background())
+			if err != nil {
+				t.Fatalf("second retry: %v", err)
+			}
+			if done.Hook == nil || done.Suspension != nil {
+				t.Fatalf("second completion = %#v", done)
 			}
 		})
 	}

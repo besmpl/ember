@@ -167,21 +167,27 @@ testable seam.
   order.
 - `Suspension.Token` exposes only the host-owned token. `Entrypoint`, `Module`,
   and `Hook` identify a hook wait; retained callback waits have empty
-  attribution. Single-use `Resume` supplies call results, `Fail` injects an
-  ordinary error at the original call site, and `Cancel` abandons only that
-  pending invocation. A resumed script may expose zero, one, or several
-  successor suspensions.
+  attribution. Single-use `Resume` supplies call results and `Fail` injects an
+  ordinary error at the original call site. `Cancel` is idempotent; after it,
+  `Resume` and `Fail` report `ErrSuspensionStale`. A resumed script may expose
+  zero, one, or several successor suspensions.
 - Entrypoint top-level code and newly required module initializers participate
-  in the same resumable operation as their hook or callback. One in-flight
-  initializer and cache result is shared by unrelated waiters; internal module
-  waits are not exposed as host tokens, while recursive require paths still
-  report an active-loading cycle.
+  in the same resumable operation as their hook or callback. Every module,
+  including an entrypoint root, has at most one in-flight initializer and one
+  cache result. Independent initializers may remain suspended together and
+  finish in host-selected order. Internal dependency waits are not exposed as
+  host tokens, ready dependents are pumped in declared entrypoint order, and
+  recursive require paths still report the complete active-loading cycle.
 - Every resumable step uses normal runtime serialization and receives a fresh
-  context and execution budget. A context already canceled or a runtime
-  already busy fails preflight without consuming the handle, so the host may
-  retry it. Several idle suspended invocations may coexist. `Runtime.Close`
-  releases their retained execution state and tokens; later handle use reports
-  `ErrSuspensionStale`.
+  context and execution budget. Context validation and VM/Machine run admission
+  occur before the handle is consumed under the same serialization decision.
+  A context already canceled or a runtime already busy therefore leaves the
+  exact handle retryable. Several idle suspended invocations may coexist.
+  Canceling the public owner of a module initializer aborts that initializer
+  and its private dependents without guest execution, while unrelated public
+  waits remain valid and later initialization retries cleanly. `Runtime.Close`
+  applies the same cleanup to all retained execution state and tokens; later
+  handle use reports `ErrSuspensionStale`.
 - Existing `RunHook` and `Callback.Call` remain completion-only for hosts that
   do not suspend.
 - Seeded base globals are `type`, which returns Luau-style kind names for the

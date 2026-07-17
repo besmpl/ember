@@ -17,6 +17,7 @@ type runtimeModuleInitialization struct {
 	done    bool
 	commit  func([]Value) (Value, error)
 	abort   func()
+	waiters map[*runtimeModuleWait]struct{}
 }
 
 // runtimeModuleWait is an internal coroutine handoff. owner is true only for
@@ -25,6 +26,38 @@ type runtimeModuleInitialization struct {
 type runtimeModuleWait struct {
 	initialization *runtimeModuleInitialization
 	owner          bool
+	onCancel       func()
+}
+
+func (initialization *runtimeModuleInitialization) newWait(owner bool) *runtimeModuleWait {
+	wait := &runtimeModuleWait{initialization: initialization, owner: owner}
+	if initialization != nil && !initialization.done {
+		if initialization.waiters == nil {
+			initialization.waiters = make(map[*runtimeModuleWait]struct{})
+		}
+		initialization.waiters[wait] = struct{}{}
+	}
+	return wait
+}
+
+func (wait *runtimeModuleWait) bind(onCancel func()) {
+	if wait == nil || wait.initialization == nil || wait.initialization.done {
+		return
+	}
+	wait.onCancel = onCancel
+}
+
+func (wait *runtimeModuleWait) close() {
+	if wait == nil || wait.initialization == nil {
+		return
+	}
+	initialization := wait.initialization
+	if wait.owner {
+		initialization.cancel(wait)
+		return
+	}
+	delete(initialization.waiters, wait)
+	wait.onCancel = nil
 }
 
 func (wait *runtimeModuleWait) visibleToken() (any, bool) {
@@ -49,12 +82,23 @@ type moduleCallTarget struct {
 }
 
 func (target *moduleCallTarget) resume(ctx context.Context, values []Value, failure error) (resumableOutcome, error) {
+	return target.resumeRun(ctx, values, failure, false)
+}
+
+func (target *moduleCallTarget) resumeStopped(ctx context.Context, values []Value, failure error) (resumableOutcome, error) {
+	return target.resumeRun(ctx, values, failure, true)
+}
+
+func (target *moduleCallTarget) resumeRun(ctx context.Context, values []Value, failure error, stopped bool) (resumableOutcome, error) {
 	if target == nil || target.closed || target.runtime == nil || target.target == nil {
 		return resumableOutcome{}, ErrSuspensionStale
 	}
 	if target.wait != nil {
 		initialization := target.wait.initialization
-		_ = initialization.resumeHost(ctx, values, failure)
+		if err := initialization.resumeHost(ctx, values, failure, stopped); err != nil {
+			target.close()
+			return resumableOutcome{}, err
+		}
 		if !initialization.done {
 			token, _ := target.wait.visibleToken()
 			return resumableOutcome{target: target, token: token}, nil
@@ -63,15 +107,15 @@ func (target *moduleCallTarget) resume(ctx context.Context, values []Value, fail
 		values = []Value{initialization.export}
 		failure = initialization.err
 	}
-	outcome, err := target.target.resume(ctx, values, failure)
+	outcome, err := resumeResumableTarget(target.target, ctx, values, failure, stopped)
 	if err != nil {
 		target.close()
 		return resumableOutcome{}, err
 	}
-	return target.accept(ctx, outcome)
+	return target.accept(ctx, outcome, stopped)
 }
 
-func (target *moduleCallTarget) accept(ctx context.Context, outcome resumableOutcome) (resumableOutcome, error) {
+func (target *moduleCallTarget) accept(ctx context.Context, outcome resumableOutcome, stopped bool) (resumableOutcome, error) {
 	if outcome.target == nil {
 		target.closed = true
 		target.target = nil
@@ -80,28 +124,35 @@ func (target *moduleCallTarget) accept(ctx context.Context, outcome resumableOut
 	}
 	target.target = outcome.target
 	if request, ok := outcome.token.(*runtimeModuleRequest); ok {
-		export, wait, err := target.runtime.startModuleInitialization(request.scope, request.key)
+		export, wait, _, err := target.runtime.startModuleInitialization(request.scope, request.key, stopped)
 		if err != nil {
-			outcome, err = target.target.resume(ctx, nil, err)
+			outcome, err = resumeResumableTarget(target.target, ctx, nil, err, stopped)
 		} else if wait != nil {
-			target.wait = wait
+			target.setWait(wait)
 			token, _ := wait.visibleToken()
 			return resumableOutcome{target: target, token: token}, nil
 		} else {
-			outcome, err = target.target.resume(ctx, []Value{export}, nil)
+			outcome, err = resumeResumableTarget(target.target, ctx, []Value{export}, nil, stopped)
 		}
 		if err != nil {
 			target.close()
 			return resumableOutcome{}, err
 		}
-		return target.accept(ctx, outcome)
+		return target.accept(ctx, outcome, stopped)
 	}
 	if wait, ok := outcome.token.(*runtimeModuleWait); ok {
-		target.wait = wait
+		target.setWait(wait)
 		token, _ := wait.visibleToken()
 		return resumableOutcome{target: target, token: token}, nil
 	}
 	return resumableOutcome{target: target, token: outcome.token}, nil
+}
+
+func (target *moduleCallTarget) setWait(wait *runtimeModuleWait) {
+	target.wait = wait
+	if wait != nil {
+		wait.bind(target.close)
+	}
 }
 
 func (target *moduleCallTarget) close() {
@@ -112,9 +163,13 @@ func (target *moduleCallTarget) close() {
 	if target.target != nil {
 		target.target.close()
 	}
+	if target.wait != nil {
+		wait := target.wait
+		target.wait = nil
+		wait.close()
+	}
 	target.target = nil
 	target.runtime = nil
-	target.wait = nil
 }
 
 func (r *Runtime) requireResumable(scope invocationScope, args []Value) HostResult {
@@ -138,46 +193,46 @@ func (r *Runtime) requireResumable(scope invocationScope, args []Value) HostResu
 		return HostError(fmt.Errorf("module runtime: active-loading cycle %s", runtimeModuleCyclePath(scope.modulePath, required)))
 	}
 	if initialization := r.moduleInitializers[required]; initialization != nil {
-		return HostSuspend(&runtimeModuleWait{initialization: initialization})
+		return HostSuspend(initialization.newWait(false))
 	}
 	return HostSuspend(&runtimeModuleRequest{scope: scope, key: required})
 }
 
-func (r *Runtime) startModuleInitialization(scope invocationScope, key moduleKey) (Value, *runtimeModuleWait, error) {
+func (r *Runtime) startModuleInitialization(scope invocationScope, key moduleKey, stopped bool) (Value, *runtimeModuleWait, bool, error) {
 	if r == nil {
-		return NilValue(), nil, fmt.Errorf("module runtime: nil runtime")
+		return NilValue(), nil, false, fmt.Errorf("module runtime: nil runtime")
 	}
 	if export, ok, err := r.cachedResumableModule(key); err != nil {
-		return NilValue(), nil, err
+		return NilValue(), nil, false, err
 	} else if ok {
-		return export, nil, nil
+		return export, nil, false, nil
 	}
 	if modulePathContains(scope.modulePath, key) {
-		return NilValue(), nil, fmt.Errorf("module runtime: active-loading cycle %s", runtimeModuleCyclePath(scope.modulePath, key))
+		return NilValue(), nil, false, fmt.Errorf("module runtime: active-loading cycle %s", runtimeModuleCyclePath(scope.modulePath, key))
 	}
 	if initialization := r.moduleInitializers[key]; initialization != nil {
-		return NilValue(), &runtimeModuleWait{initialization: initialization}, nil
+		return NilValue(), initialization.newWait(false), false, nil
 	}
 	initialization, err := r.newModuleInitialization(scope, key)
 	if err != nil {
-		return NilValue(), nil, err
+		return NilValue(), nil, false, err
 	}
 	if r.moduleInitializers == nil {
 		r.moduleInitializers = make(map[moduleKey]*runtimeModuleInitialization)
 	}
 	r.moduleInitializers[key] = initialization
-	outcome, err := initialization.target.resume(scope.ctx, nil, nil)
+	outcome, err := resumeResumableTarget(initialization.target, scope.ctx, nil, nil, stopped)
 	if err != nil {
 		initialization.fail(err)
-		return NilValue(), nil, err
+		return NilValue(), nil, true, err
 	}
-	if err := initialization.accept(scope.ctx, outcome); err != nil {
-		return NilValue(), nil, err
+	if err := initialization.accept(scope.ctx, outcome, stopped); err != nil {
+		return NilValue(), nil, true, err
 	}
 	if initialization.done {
-		return initialization.export, nil, initialization.err
+		return initialization.export, nil, true, initialization.err
 	}
-	return NilValue(), &runtimeModuleWait{initialization: initialization, owner: true}, nil
+	return NilValue(), initialization.newWait(true), true, nil
 }
 
 func (r *Runtime) cachedResumableModule(key moduleKey) (Value, bool, error) {
@@ -320,7 +375,7 @@ func (initialization *runtimeModuleInitialization) visibleToken() (any, bool) {
 	return initialization.token, true
 }
 
-func (initialization *runtimeModuleInitialization) resumeHost(ctx context.Context, values []Value, failure error) error {
+func (initialization *runtimeModuleInitialization) resumeHost(ctx context.Context, values []Value, failure error, stopped bool) error {
 	if initialization == nil || initialization.done || initialization.target == nil {
 		return ErrSuspensionStale
 	}
@@ -330,43 +385,63 @@ func (initialization *runtimeModuleInitialization) resumeHost(ctx context.Contex
 		if !wait.owner || wait.initialization == nil {
 			return fmt.Errorf("module runtime: initializer is waiting for unrelated module %s", initialization.key.String())
 		}
-		if err := wait.initialization.resumeHost(ctx, values, failure); err != nil {
+		if err := wait.initialization.resumeHost(ctx, values, failure, stopped); err != nil {
 			return err
 		}
 		if !wait.initialization.done {
 			return nil
 		}
-		outcome, err = initialization.target.resume(ctx, []Value{wait.initialization.export}, wait.initialization.err)
+		outcome, err = resumeResumableTarget(initialization.target, ctx, []Value{wait.initialization.export}, wait.initialization.err, stopped)
 	} else {
-		outcome, err = initialization.target.resume(ctx, values, failure)
+		outcome, err = resumeResumableTarget(initialization.target, ctx, values, failure, stopped)
 	}
 	if err != nil {
 		initialization.fail(err)
 		return err
 	}
-	return initialization.accept(ctx, outcome)
+	return initialization.accept(ctx, outcome, stopped)
 }
 
-func (initialization *runtimeModuleInitialization) accept(ctx context.Context, outcome resumableOutcome) error {
+func (initialization *runtimeModuleInitialization) pump(ctx context.Context, stopped bool) (bool, error) {
+	if initialization == nil || initialization.done || initialization.target == nil {
+		return false, nil
+	}
+	wait, ok := initialization.token.(*runtimeModuleWait)
+	if !ok || wait.initialization == nil || !wait.initialization.done {
+		return false, nil
+	}
+	outcome, err := resumeResumableTarget(initialization.target, ctx, []Value{wait.initialization.export}, wait.initialization.err, stopped)
+	if err != nil {
+		initialization.fail(err)
+		return true, err
+	}
+	return true, initialization.accept(ctx, outcome, stopped)
+}
+
+func (initialization *runtimeModuleInitialization) accept(ctx context.Context, outcome resumableOutcome, stopped bool) error {
 	if outcome.target != nil {
 		initialization.target = outcome.target
 		if request, ok := outcome.token.(*runtimeModuleRequest); ok {
-			export, wait, err := initialization.runtime.startModuleInitialization(request.scope, request.key)
+			export, wait, _, err := initialization.runtime.startModuleInitialization(request.scope, request.key, stopped)
 			if err != nil {
-				outcome, err = initialization.target.resume(ctx, nil, err)
+				outcome, err = resumeResumableTarget(initialization.target, ctx, nil, err, stopped)
 			} else if wait != nil {
 				initialization.token = wait
+				wait.bind(func() { initialization.cancel(nil) })
 				return nil
 			} else {
-				outcome, err = initialization.target.resume(ctx, []Value{export}, nil)
+				outcome, err = resumeResumableTarget(initialization.target, ctx, []Value{export}, nil, stopped)
 			}
 			if err != nil {
 				initialization.fail(err)
 				return err
 			}
-			return initialization.accept(ctx, outcome)
+			return initialization.accept(ctx, outcome, stopped)
 		}
 		initialization.token = outcome.token
+		if wait, ok := outcome.token.(*runtimeModuleWait); ok {
+			wait.bind(func() { initialization.cancel(nil) })
+		}
 		return nil
 	}
 	export, err := initialization.commit(outcome.values)
@@ -378,6 +453,7 @@ func (initialization *runtimeModuleInitialization) accept(ctx context.Context, o
 	initialization.done = true
 	initialization.target = nil
 	initialization.token = nil
+	initialization.releaseWaiters()
 	if initialization.runtime != nil {
 		delete(initialization.runtime.moduleInitializers, initialization.key)
 	}
@@ -398,9 +474,54 @@ func (initialization *runtimeModuleInitialization) fail(err error) {
 	initialization.done = true
 	initialization.target = nil
 	initialization.token = nil
+	initialization.releaseWaiters()
 	if initialization.runtime != nil {
 		delete(initialization.runtime.moduleInitializers, initialization.key)
 	}
+}
+
+func (initialization *runtimeModuleInitialization) cancel(origin *runtimeModuleWait) {
+	if initialization == nil || initialization.done {
+		return
+	}
+	target := initialization.target
+	child, _ := initialization.token.(*runtimeModuleWait)
+	abort := initialization.abort
+	waiters := initialization.waiters
+	initialization.err = ErrSuspensionStale
+	initialization.done = true
+	initialization.target = nil
+	initialization.token = nil
+	initialization.waiters = nil
+	if initialization.runtime != nil {
+		delete(initialization.runtime.moduleInitializers, initialization.key)
+	}
+	if child != nil {
+		child.close()
+	}
+	if target != nil {
+		target.close()
+	}
+	if abort != nil {
+		abort()
+	}
+	for wait := range waiters {
+		onCancel := wait.onCancel
+		wait.onCancel = nil
+		if wait != origin && onCancel != nil {
+			onCancel()
+		}
+	}
+}
+
+func (initialization *runtimeModuleInitialization) releaseWaiters() {
+	if initialization == nil {
+		return
+	}
+	for wait := range initialization.waiters {
+		wait.onCancel = nil
+	}
+	initialization.waiters = nil
 }
 
 func modulePathContains(path []moduleKey, key moduleKey) bool {

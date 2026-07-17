@@ -49,29 +49,38 @@ order. `ExecutionResult.Suspension` aliases the first wait for compatibility
 with hosts that drive one continuation at a time.
 
 Top-level entrypoint code and newly required module initializers can wait too.
-Unrelated scripts requiring the same in-flight module share one initializer
-and one cached export; their dependency handoff stays internal to Ember rather
-than becoming a duplicate Hearth token. Recursive require paths remain cycle
-errors. Resuming the initializer pumps ready dependents before Ember returns
-the next quiescent snapshot.
+Entrypoint roots and `require` use the same initialize-once record, so a later
+entrypoint requiring a suspended earlier entrypoint observes one initializer,
+one side-effect sequence, and one cached export. Independent initializers may
+remain suspended together and finish in Hearth-selected order. Dependency
+handoffs stay internal to Ember rather than becoming duplicate Hearth tokens;
+recursive require paths still report the complete cycle. Resuming an
+initializer pumps ready dependents in declared entrypoint order before Ember
+returns the next quiescent snapshot.
 
 Hearth updates its world or observes another event, then calls `Resume` with
-values or `Fail` with an ordinary error. `Cancel` abandons one pending
-invocation without canceling independent waits. Each step gets a fresh context
-and execution budget, can suspend again, and uses the runtime's normal
-serialization gate. A pre-canceled context or busy runtime leaves the handle
-valid for retry.
+values or `Fail` with an ordinary error. `Cancel` is idempotent. Canceling a
+plain hook or callback wait abandons that invocation; canceling the public
+owner of a module initializer also aborts private continuations blocked on that
+initializer, without running guest code. Independent public waits stay valid,
+and a later call may initialize the canceled module cleanly. Each step gets a
+fresh context and execution budget and can suspend again. Context validation
+and runtime admission precede consumption under one serialization decision, so
+a pre-canceled context or busy runtime leaves the exact handle valid for retry.
 
-Successfully resumed, failed, or canceled suspension handles are single-use.
+Successfully resumed or failed suspension handles are single-use. Repeated
+`Cancel` succeeds, while `Resume` or `Fail` after cancellation is stale.
 `Runtime.Close` invalidates pending handles and releases their frames, roots,
 callback references, module initialization state, and host tokens. Runtime
 errors still report script frames after resume; protected calls receive a
 failed resume as an ordinary protected error on both execution engines.
 
 `TestHearthShapedEmbeddingContract` is the host-neutral public proof. It loads
-a strict factory catalog, obtains a precise class-like value, suspends a
-`WaitForChild`-shaped call, updates host state, and resumes under both runtime
-engines with cgo disabled.
+a strict factory catalog and, on both runtime engines, combines simultaneous
+top-level and required-module waits, an independently completing entrypoint, a
+shared initializer, host-selected resume order, initializer cancellation and
+retry, a typed `WaitForChild`-shaped hook wait, a repeated hook wait, and close
+invalidation. The named check is run with cgo disabled.
 
 ## Non-Goals For Early Integration
 

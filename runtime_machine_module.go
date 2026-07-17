@@ -95,19 +95,18 @@ func (arena *machineModuleArena) begin(id programModuleID) (export slot, cached 
 	}
 }
 
-// finish commits an export, including slotNil, and returns the module to the
-// loaded state. Finishes must follow the loading stack's LIFO order.
+// finish commits an export, including slotNil, and returns the named module to
+// the loaded state. Independent resumable initializers may finish in any order.
 func (arena *machineModuleArena) finish(id programModuleID, export slot) error {
 	index, err := arena.check(id)
 	if err != nil {
 		return err
 	}
-	if arena.states[index] != machineModuleLoading || !arena.topIs(id) {
+	if arena.states[index] != machineModuleLoading || !arena.removeLoading(id) {
 		return errMachineModuleTransition
 	}
 	arena.exports[index] = export
 	arena.states[index] = machineModuleLoaded
-	arena.loading = arena.loading[:len(arena.loading)-1]
 	return nil
 }
 
@@ -117,12 +116,11 @@ func (arena *machineModuleArena) abort(id programModuleID) error {
 	if err != nil {
 		return err
 	}
-	if arena.states[index] != machineModuleLoading || !arena.topIs(id) {
+	if arena.states[index] != machineModuleLoading || !arena.removeLoading(id) {
 		return errMachineModuleTransition
 	}
 	arena.states[index] = machineModuleUnloaded
 	arena.exports[index] = slotNil
-	arena.loading = arena.loading[:len(arena.loading)-1]
 	return nil
 }
 
@@ -152,8 +150,17 @@ func (arena *machineModuleArena) loadingDepth() int {
 	return len(arena.loading)
 }
 
-func (arena *machineModuleArena) topIs(id programModuleID) bool {
-	return len(arena.loading) != 0 && arena.loading[len(arena.loading)-1] == id
+func (arena *machineModuleArena) removeLoading(id programModuleID) bool {
+	for index := len(arena.loading) - 1; index >= 0; index-- {
+		if arena.loading[index] != id {
+			continue
+		}
+		copy(arena.loading[index:], arena.loading[index+1:])
+		arena.loading[len(arena.loading)-1] = 0
+		arena.loading = arena.loading[:len(arena.loading)-1]
+		return true
+	}
+	return false
 }
 
 func (arena *machineModuleArena) check(id programModuleID) (int, error) {

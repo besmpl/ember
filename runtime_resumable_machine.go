@@ -333,41 +333,50 @@ type machineEntrypointTarget struct {
 	moduleWait *runtimeModuleWait
 	stage      machineEntrypointStage
 	started    bool
-	loadActive bool
 	closed     bool
 }
 
 func (target *machineEntrypointTarget) resume(ctx context.Context, values []Value, failure error) (resumableOutcome, error) {
+	return target.resumeRun(ctx, values, failure, false)
+}
+
+func (target *machineEntrypointTarget) resumeStopped(ctx context.Context, values []Value, failure error) (resumableOutcome, error) {
+	return target.resumeRun(ctx, values, failure, true)
+}
+
+func (target *machineEntrypointTarget) resumeRun(ctx context.Context, values []Value, failure error, stopped bool) (resumableOutcome, error) {
 	if target == nil || target.closed || target.execution == nil || target.execution.owner == nil || target.runtime == nil || target.call == nil {
 		return resumableOutcome{}, ErrSuspensionStale
 	}
 	if !target.started {
 		target.started = true
-		return target.startLoad(ctx)
-	}
-	if target.inner == nil {
-		return resumableOutcome{}, ErrSuspensionStale
+		return target.startLoad(ctx, stopped)
 	}
 	if target.moduleWait != nil {
 		initialization := target.moduleWait.initialization
-		_ = initialization.resumeHost(ctx, values, failure)
+		if err := initialization.resumeHost(ctx, values, failure, stopped); err != nil {
+			target.close()
+			return resumableOutcome{}, target.wrapError(err)
+		}
 		if !initialization.done {
 			token, _ := target.moduleWait.visibleToken()
 			return resumableOutcome{target: target, token: token}, nil
 		}
 		target.moduleWait = nil
-		values = []Value{initialization.export}
-		failure = initialization.err
+		return target.continueAfterModuleWait(ctx, initialization, stopped)
 	}
-	outcome, err := target.inner.resume(ctx, values, failure)
+	if target.inner == nil {
+		return resumableOutcome{}, ErrSuspensionStale
+	}
+	outcome, err := resumeResumableTarget(target.inner, ctx, values, failure, stopped)
 	if err != nil {
 		target.close()
 		return resumableOutcome{}, target.wrapError(err)
 	}
-	return target.acceptInner(ctx, outcome)
+	return target.acceptInner(ctx, outcome, stopped)
 }
 
-func (target *machineEntrypointTarget) startLoad(ctx context.Context) (resumableOutcome, error) {
+func (target *machineEntrypointTarget) startLoad(ctx context.Context, stopped bool) (resumableOutcome, error) {
 	if target.hook == "" {
 		target.close()
 		return resumableOutcome{}, fmt.Errorf("runtime: empty hook")
@@ -379,23 +388,11 @@ func (target *machineEntrypointTarget) startLoad(ctx context.Context) (resumable
 		target.close()
 		return resumableOutcome{}, err
 	}
-	export, cached, err := target.execution.owner.modules.begin(target.entrypoint.moduleID)
-	if err != nil {
+	if _, cached, err := target.runtime.cachedResumableModule(target.execution.image.modules[target.entrypoint.moduleID].key); err != nil {
 		target.close()
 		return resumableOutcome{}, fmt.Errorf("runtime: load entrypoint %s: %w", target.entrypoint.name, err)
-	}
-	if cached {
-		return target.startHook(ctx, export)
-	}
-	target.loadActive = true
-	controller, err := newExecutionPolicy(ctx, target.runtime.limits)
-	if err != nil {
-		target.close()
-		return resumableOutcome{}, err
-	}
-	if err := controller.chargeModuleInitialization(); err != nil {
-		target.close()
-		return resumableOutcome{}, err
+	} else if cached {
+		return target.startLoadedHook(ctx, stopped)
 	}
 	loadGlobals, err := target.runtime.hostGlobals(ctx, HostCall{
 		Entrypoint: target.entrypoint.name,
@@ -406,49 +403,44 @@ func (target *machineEntrypointTarget) startLoad(ctx context.Context) (resumable
 		return resumableOutcome{}, fmt.Errorf("runtime: host globals for %s load: %w", target.entrypoint.name, err)
 	}
 	module := target.execution.image.modules[target.entrypoint.moduleID]
-	target.inner, err = newMachineModuleResumableTarget(
-		target.execution,
-		target.runtime,
-		target.entrypoint.moduleID,
-		module.key,
-		loadGlobals,
-	)
+	scope := target.runtime.newInvocationScope(ctx, module.key, loadGlobals, nil)
+	_, wait, started, err := target.runtime.startModuleInitialization(scope, module.key, stopped)
 	if err != nil {
 		target.close()
 		return resumableOutcome{}, fmt.Errorf("runtime: load entrypoint %s: %w", target.entrypoint.name, err)
 	}
-	target.inner.modulePath = []moduleKey{module.key}
-	outcome, err := target.inner.resume(ctx, nil, nil)
-	if err != nil {
-		target.close()
-		return resumableOutcome{}, fmt.Errorf("runtime: load entrypoint %s: %w", target.entrypoint.name, err)
+	target.call.Loaded = started
+	if wait != nil {
+		target.setModuleWait(wait)
+		token, _ := wait.visibleToken()
+		return resumableOutcome{target: target, token: token}, nil
 	}
-	return target.acceptInner(ctx, outcome)
+	return target.startLoadedHook(ctx, stopped)
 }
 
-func (target *machineEntrypointTarget) acceptInner(ctx context.Context, outcome resumableOutcome) (resumableOutcome, error) {
+func (target *machineEntrypointTarget) acceptInner(ctx context.Context, outcome resumableOutcome, stopped bool) (resumableOutcome, error) {
 	if outcome.target != nil {
 		target.inner = outcome.target.(*machineResumableTarget)
 		token := outcome.token
 		if request, ok := token.(*runtimeModuleRequest); ok {
-			export, wait, err := target.runtime.startModuleInitialization(request.scope, request.key)
+			export, wait, _, err := target.runtime.startModuleInitialization(request.scope, request.key, stopped)
 			if err != nil {
-				outcome, err = target.inner.resume(ctx, nil, err)
+				outcome, err = resumeResumableTarget(target.inner, ctx, nil, err, stopped)
 			} else if wait != nil {
-				target.moduleWait = wait
+				target.setModuleWait(wait)
 				token, _ = wait.visibleToken()
 				return resumableOutcome{target: target, token: token}, nil
 			} else {
-				outcome, err = target.inner.resume(ctx, []Value{export}, nil)
+				outcome, err = resumeResumableTarget(target.inner, ctx, []Value{export}, nil, stopped)
 			}
 			if err != nil {
 				target.close()
 				return resumableOutcome{}, target.wrapError(err)
 			}
-			return target.acceptInner(ctx, outcome)
+			return target.acceptInner(ctx, outcome, stopped)
 		}
 		if wait, ok := token.(*runtimeModuleWait); ok {
-			target.moduleWait = wait
+			target.setModuleWait(wait)
 			token, _ = wait.visibleToken()
 		}
 		return resumableOutcome{target: target, token: token}, nil
@@ -458,59 +450,77 @@ func (target *machineEntrypointTarget) acceptInner(ctx context.Context, outcome 
 		target.finish()
 		return resumableOutcome{}, nil
 	}
-	export, err := target.finishLoad(outcome.values)
-	if err != nil {
-		target.close()
-		return resumableOutcome{}, fmt.Errorf("runtime: load entrypoint %s: %w", target.entrypoint.name, err)
-	}
-	return target.startHook(ctx, export)
+	return resumableOutcome{}, fmt.Errorf("runtime: entrypoint load completed outside module initializer")
 }
 
 func (target *machineEntrypointTarget) hostVisible() bool {
-	if target == nil || target.moduleWait == nil {
+	if target == nil || target.closed {
+		return false
+	}
+	if target.moduleWait == nil {
 		return true
 	}
 	_, visible := target.moduleWait.visibleToken()
 	return visible
 }
 
-func (target *machineEntrypointTarget) pump(ctx context.Context) (resumableOutcome, bool, error) {
-	if target == nil || target.moduleWait == nil || target.moduleWait.initialization == nil || !target.moduleWait.initialization.done {
+func (target *machineEntrypointTarget) setModuleWait(wait *runtimeModuleWait) {
+	target.moduleWait = wait
+	if wait != nil {
+		wait.bind(target.close)
+	}
+}
+
+func (target *machineEntrypointTarget) pump(ctx context.Context, stopped bool) (resumableOutcome, bool, error) {
+	if target == nil || target.moduleWait == nil || target.moduleWait.initialization == nil {
 		return resumableOutcome{}, false, nil
 	}
 	initialization := target.moduleWait.initialization
-	target.moduleWait = nil
-	outcome, err := target.inner.resume(ctx, []Value{initialization.export}, initialization.err)
-	if err != nil {
-		target.close()
-		return resumableOutcome{}, true, target.wrapError(err)
+	if !initialization.done {
+		advanced, err := initialization.pump(ctx, stopped)
+		if err != nil {
+			target.close()
+			return resumableOutcome{}, true, target.wrapError(err)
+		}
+		if !advanced || !initialization.done {
+			return resumableOutcome{}, advanced, nil
+		}
 	}
-	outcome, err = target.acceptInner(ctx, outcome)
+	target.moduleWait = nil
+	outcome, err := target.continueAfterModuleWait(ctx, initialization, stopped)
 	return outcome, true, err
 }
 
-func (target *machineEntrypointTarget) finishLoad(values []Value) (slot, error) {
-	export := slotNil
-	if len(values) != 0 {
-		imported, err := importMachineValuesStopped(target.execution.owner, values[:1])
-		if err != nil {
-			return slotNil, err
+func (target *machineEntrypointTarget) continueAfterModuleWait(ctx context.Context, initialization *runtimeModuleInitialization, stopped bool) (resumableOutcome, error) {
+	if target.stage == machineEntrypointLoading {
+		if initialization.err != nil {
+			target.close()
+			return resumableOutcome{}, target.wrapError(initialization.err)
 		}
-		export, err = target.execution.owner.stableMachineValueStopped(imported[0])
-		if err != nil {
-			return slotNil, err
-		}
+		return target.startLoadedHook(ctx, stopped)
 	}
-	if err := target.execution.owner.modules.finish(target.entrypoint.moduleID, export); err != nil {
-		return slotNil, err
+	outcome, err := resumeResumableTarget(target.inner, ctx, []Value{initialization.export}, initialization.err, stopped)
+	if err != nil {
+		target.close()
+		return resumableOutcome{}, target.wrapError(err)
 	}
-	target.loadActive = false
-	target.call.Loaded = true
-	target.inner = nil
-	return export, nil
+	return target.acceptInner(ctx, outcome, stopped)
 }
 
-func (target *machineEntrypointTarget) startHook(ctx context.Context, export slot) (resumableOutcome, error) {
+func (target *machineEntrypointTarget) startLoadedHook(ctx context.Context, stopped bool) (resumableOutcome, error) {
+	export, ok, err := target.execution.owner.modules.export(target.entrypoint.moduleID)
+	if err != nil {
+		target.close()
+		return resumableOutcome{}, fmt.Errorf("runtime: load entrypoint %s: %w", target.entrypoint.name, err)
+	}
+	if !ok {
+		target.close()
+		return resumableOutcome{}, fmt.Errorf("runtime: load entrypoint %s: module is not loaded", target.entrypoint.name)
+	}
+	return target.startHook(ctx, export, stopped)
+}
+
+func (target *machineEntrypointTarget) startHook(ctx context.Context, export slot, stopped bool) (resumableOutcome, error) {
 	target.stage = machineEntrypointCallingHook
 	hookGlobals, err := target.runtime.hostGlobals(ctx, HostCall{
 		Entrypoint: target.entrypoint.name,
@@ -541,12 +551,12 @@ func (target *machineEntrypointTarget) startHook(ctx context.Context, export slo
 		target.close()
 		return resumableOutcome{}, err
 	}
-	outcome, err := target.inner.resume(ctx, target.args, nil)
+	outcome, err := resumeResumableTarget(target.inner, ctx, target.args, nil, stopped)
 	if err != nil {
 		target.close()
 		return resumableOutcome{}, target.wrapError(err)
 	}
-	return target.acceptInner(ctx, outcome)
+	return target.acceptInner(ctx, outcome, stopped)
 }
 
 func (target *machineEntrypointTarget) wrapError(err error) error {
@@ -571,10 +581,11 @@ func (target *machineEntrypointTarget) close() {
 	if target.inner != nil {
 		target.inner.close()
 	}
-	if target.loadActive && target.execution != nil && target.execution.owner != nil {
-		_ = target.execution.owner.modules.abort(target.entrypoint.moduleID)
+	if target.moduleWait != nil {
+		wait := target.moduleWait
+		target.moduleWait = nil
+		wait.close()
 	}
-	target.loadActive = false
 	target.finish()
 }
 
@@ -646,7 +657,7 @@ func (run *machineHookRun) start(ctx context.Context) (resumableOutcome, error) 
 		entry.target = nil
 		entry.terminal = true
 	}
-	if err := run.pump(ctx); err != nil {
+	if err := run.pump(ctx, false); err != nil {
 		run.close()
 		return resumableOutcome{}, err
 	}
@@ -654,10 +665,18 @@ func (run *machineHookRun) start(ctx context.Context) (resumableOutcome, error) 
 }
 
 func (target *machineHookSuspensionTarget) resume(ctx context.Context, values []Value, failure error) (resumableOutcome, error) {
+	return target.resumeRun(ctx, values, failure, false)
+}
+
+func (target *machineHookSuspensionTarget) resumeStopped(ctx context.Context, values []Value, failure error) (resumableOutcome, error) {
+	return target.resumeRun(ctx, values, failure, true)
+}
+
+func (target *machineHookSuspensionTarget) resumeRun(ctx context.Context, values []Value, failure error, stopped bool) (resumableOutcome, error) {
 	if target == nil || target.run == nil {
 		return resumableOutcome{}, ErrSuspensionStale
 	}
-	return target.run.resumeEntry(ctx, target.index, target.target, values, failure)
+	return target.run.resumeEntry(ctx, target.index, target.target, values, failure, stopped)
 }
 
 func (target *machineHookSuspensionTarget) close() {
@@ -675,6 +694,7 @@ func (run *machineHookRun) resumeEntry(
 	target resumableTarget,
 	values []Value,
 	failure error,
+	stopped bool,
 ) (resumableOutcome, error) {
 	if run == nil || run.closed || index < 0 || index >= len(run.entries) {
 		return resumableOutcome{}, ErrSuspensionStale
@@ -684,13 +704,13 @@ func (run *machineHookRun) resumeEntry(
 		return resumableOutcome{}, ErrSuspensionStale
 	}
 	entry.state = nil
-	outcome, err := entry.target.resume(ctx, values, failure)
+	outcome, err := resumeResumableTarget(entry.target, ctx, values, failure, stopped)
 	if err != nil {
 		run.close()
 		return resumableOutcome{}, fmt.Errorf("runtime: call hook %s.%s: %w", entry.call.Entrypoint, run.hook, err)
 	}
 	run.applyEntryOutcome(index, outcome)
-	if err := run.pump(ctx); err != nil {
+	if err := run.pump(ctx, stopped); err != nil {
 		run.close()
 		return resumableOutcome{}, err
 	}
@@ -709,7 +729,7 @@ func (run *machineHookRun) applyEntryOutcome(index int, outcome resumableOutcome
 	entry.terminal = true
 }
 
-func (run *machineHookRun) pump(ctx context.Context) error {
+func (run *machineHookRun) pump(ctx context.Context, stopped bool) error {
 	for {
 		progressed := false
 		for index := range run.entries {
@@ -718,7 +738,7 @@ func (run *machineHookRun) pump(ctx context.Context) error {
 			if !ok {
 				continue
 			}
-			outcome, advanced, err := target.pump(ctx)
+			outcome, advanced, err := target.pump(ctx, stopped)
 			if err != nil {
 				return err
 			}

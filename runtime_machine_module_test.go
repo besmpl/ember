@@ -59,7 +59,7 @@ func TestMachineModuleArenaTransitionsAndCachedNilExport(t *testing.T) {
 	}
 }
 
-func TestMachineModuleArenaDetectsCyclesAndEnforcesLIFO(t *testing.T) {
+func TestMachineModuleArenaDetectsCyclesAndCompletesIndependentLoadsByName(t *testing.T) {
 	var arena machineModuleArena
 	if err := arena.bindStopped(3); err != nil {
 		t.Fatal(err)
@@ -73,20 +73,23 @@ func TestMachineModuleArenaDetectsCyclesAndEnforcesLIFO(t *testing.T) {
 	if _, _, err := arena.begin(0); !errors.Is(err, errMachineModuleCycle) {
 		t.Fatalf("cycle begin err=%v, want cycle error", err)
 	}
-	if err := arena.finish(0, slotNil); !errors.Is(err, errMachineModuleTransition) {
-		t.Fatalf("out-of-order finish err=%v, want transition error", err)
+	if err := arena.finish(0, slotNil); err != nil {
+		t.Fatalf("finish independent load 0: %v", err)
+	}
+	if depth := arena.loadingDepth(); depth != 1 {
+		t.Fatalf("loading depth after finish = %d, want 1", depth)
 	}
 	if err := arena.abort(1); err != nil {
 		t.Fatal(err)
 	}
-	if err := arena.abort(0); err != nil {
-		t.Fatal(err)
+	if state, err := arena.state(0); err != nil || state != machineModuleLoaded {
+		t.Fatalf("finished state=%v err=%v, want loaded", state, err)
 	}
-	if state, err := arena.state(0); err != nil || state != machineModuleUnloaded {
+	if export, present, err := arena.export(0); err != nil || !present || export != slotNil {
+		t.Fatalf("finished export=%v present=%t err=%v, want cached nil", export, present, err)
+	}
+	if state, err := arena.state(1); err != nil || state != machineModuleUnloaded {
 		t.Fatalf("aborted state=%v err=%v, want unloaded", state, err)
-	}
-	if _, present, err := arena.export(0); err != nil || present {
-		t.Fatalf("aborted export present=%t err=%v, want absent", present, err)
 	}
 }
 

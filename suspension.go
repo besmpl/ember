@@ -56,10 +56,25 @@ type resumableTarget interface {
 	close()
 }
 
+type stoppedResumableTarget interface {
+	resumeStopped(context.Context, []Value, error) (resumableOutcome, error)
+}
+
+func resumeResumableTarget(target resumableTarget, ctx context.Context, values []Value, failure error, stopped bool) (resumableOutcome, error) {
+	if !stopped {
+		return target.resume(ctx, values, failure)
+	}
+	stoppedTarget, ok := target.(stoppedResumableTarget)
+	if !ok {
+		return resumableOutcome{}, fmt.Errorf("runtime: resumable target cannot use admitted run")
+	}
+	return stoppedTarget.resumeStopped(ctx, values, failure)
+}
+
 type quiescentResumableTarget interface {
 	resumableTarget
 	hostVisible() bool
-	pump(context.Context) (resumableOutcome, bool, error)
+	pump(context.Context, bool) (resumableOutcome, bool, error)
 }
 
 type suspensionState struct {
@@ -71,6 +86,7 @@ type suspensionState struct {
 	module     ModuleID
 	hook       string
 	used       bool
+	canceled   bool
 }
 
 // Token returns the opaque token supplied by the host callback.
@@ -141,11 +157,16 @@ func (s *Suspension) Cancel() error {
 	}
 	state := s.state
 	state.mu.Lock()
+	if state.canceled {
+		state.mu.Unlock()
+		return nil
+	}
 	if state.used || state.target == nil {
 		state.mu.Unlock()
 		return ErrSuspensionStale
 	}
 	state.used = true
+	state.canceled = true
 	target := state.target
 	runtime := state.runtime
 	state.target = nil
@@ -168,27 +189,29 @@ func (s *Suspension) consume(ctx context.Context, values []Value, failure error)
 		state.mu.Unlock()
 		return ExecutionResult{}, ErrSuspensionStale
 	}
-	runtime := state.runtime
-	state.mu.Unlock()
-	if runtime != nil {
-		if err := runtime.preflightSuspension(ctx); err != nil {
-			return ExecutionResult{}, err
-		}
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	state.mu.Lock()
-	if state.used || state.target == nil {
+	if err := ctx.Err(); err != nil {
 		state.mu.Unlock()
-		return ExecutionResult{}, ErrSuspensionStale
+		return ExecutionResult{}, err
+	}
+	runtime := state.runtime
+	admission, err := runtime.beginSuspensionRun()
+	if err != nil {
+		state.mu.Unlock()
+		return ExecutionResult{}, err
 	}
 	state.used = true
 	target := state.target
 	state.target = nil
 	state.token = nil
 	state.mu.Unlock()
+	defer admission.end()
 	if runtime != nil {
 		runtime.unregisterSuspension(state)
 	}
-	outcome, err := target.resume(ctx, values, failure)
+	outcome, err := resumeResumableTarget(target, ctx, values, failure, true)
 	if err != nil {
 		target.close()
 		return ExecutionResult{}, err
@@ -196,43 +219,55 @@ func (s *Suspension) consume(ctx context.Context, values []Value, failure error)
 	return runtime.executionResult(outcome), nil
 }
 
-func (r *Runtime) preflightSuspension(ctx context.Context) error {
-	if ctx != nil {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
+type suspensionRunAdmission struct {
+	endRun func()
+}
+
+func (admission *suspensionRunAdmission) end() {
+	if admission != nil && admission.endRun != nil {
+		admission.endRun()
+		admission.endRun = nil
 	}
+}
+
+func (r *Runtime) beginSuspensionRun() (*suspensionRunAdmission, error) {
 	if r == nil {
-		return fmt.Errorf("runtime: closed")
+		return nil, fmt.Errorf("runtime: closed")
 	}
 	r.closeMu.Lock()
 	closed := r.closed
 	execution := r.execution
 	r.closeMu.Unlock()
 	if closed || execution == nil {
-		return fmt.Errorf("runtime: closed")
+		return nil, fmt.Errorf("runtime: closed")
 	}
 	switch current := execution.(type) {
 	case vmRuntimeExecution:
-		err := r.owner.preflightRun()
+		lease, err := r.beginRun()
 		if err == errRuntimeOwnerBusy {
-			return fmt.Errorf("runtime: begin run: %w", ErrRuntimeBusy)
+			return nil, fmt.Errorf("runtime: begin run: %w", ErrRuntimeBusy)
 		}
 		if err == errRuntimeOwnerClosed {
-			return fmt.Errorf("runtime: closed")
+			return nil, fmt.Errorf("runtime: closed")
 		}
-		return err
+		if err != nil {
+			return nil, err
+		}
+		return &suspensionRunAdmission{endRun: lease.end}, nil
 	case *machineRuntimeExecution:
-		err := current.owner.preflightRun()
+		lease, err := current.owner.beginRun()
 		if errors.Is(err, errMachineOwnerBusy) {
-			return fmt.Errorf("runtime: begin run: %w", ErrRuntimeBusy)
+			return nil, fmt.Errorf("runtime: begin run: %w", ErrRuntimeBusy)
 		}
 		if errors.Is(err, errMachineOwnerClosed) {
-			return fmt.Errorf("runtime: closed")
+			return nil, fmt.Errorf("runtime: closed")
 		}
-		return err
+		if err != nil {
+			return nil, err
+		}
+		return &suspensionRunAdmission{endRun: lease.end}, nil
 	default:
-		return nil
+		return nil, fmt.Errorf("runtime: resumable execution is unavailable")
 	}
 }
 
