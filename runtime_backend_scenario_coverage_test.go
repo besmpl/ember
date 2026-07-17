@@ -46,49 +46,27 @@ func TestBackendGoExactBenchmarkCorporaCanGenerate(t *testing.T) {
 		for _, tc := range loadLuauBenchmarkCases(t, group.variable, group.cases) {
 			t.Run(group.name+"/"+tc.name, func(t *testing.T) {
 				source := "local function kernel(seed)\n" + tc.source + "\nend\nreturn kernel\n"
-				switch tc.name {
-				case "event_dispatch":
-					backendExactEventDispatchCanGenerate(t, source)
-				case "prototype_fallback":
-					backendExactPrototypeFallbackCanGenerate(t, source)
-				case "signal_bus_callbacks":
-					backendExactSignalBusCanGenerate(t, source)
-				case "sparse_grid_neighbors":
-					backendScenarioSparseGridCanGenerate(t, source)
-				case "dirty_metatable_writes":
-					backendExactDirtyMetatableCanGenerate(t, source)
-				case "command_vararg_router":
-					backendScenarioCommandRouterCanGenerate(t, source)
-				case "closures_upvalues":
-					backendExactClosureCanGenerate(t, source)
-				case "method_calls":
-					backendExactMethodCanGenerate(t, source)
-				case "varargs_select":
-					backendExactVarargCanGenerate(t, source)
-				case "coroutine_yield":
-					backendExactCoroutineCanGenerate(t, source)
-				case "recursive_fibonacci":
-					backendExactRecursiveCanGenerate(t, source)
-				default:
-					backendExactSingleProtoCanGenerate(t, source)
-				}
+				backendExactProgramCanGenerate(t, source)
 			})
 		}
 	}
 }
 
-func backendExactSingleProtoCanGenerate(t *testing.T, source string) {
+func backendExactProgramCanGenerate(t *testing.T, source string) {
 	t.Helper()
-	irs, _ := backendExactCorpusIRs(t, source)
-	if len(irs) != 2 {
-		t.Fatalf("exact corpus Proto count = %d, want 2", len(irs))
-	}
-	if _, err := emitBackendGoNumericProof(irs[1], backendGoNumericOptions{
+	irs, image := backendExactCorpusIRs(t, source)
+	files, err := emitBackendGoNumericProgram(irs, backendGoNumericProgramOptions{
 		packageName:          "ember",
-		functionName:         "backendGeneratedExactCorpusCoverage",
-		preparedFunctionName: "backendGeneratedExactCorpusCoveragePrepared",
-	}); err != nil {
+		functionPrefix:       "backendGeneratedExactProgram",
+		preparedFunctionName: "backendGeneratedExactProgramPrepared",
+		entryProto:           1,
+		coroutineDeadString:  backendCoroutineDeadStringID(t, image),
+	})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(files) == 0 || files[0].protoID != 1 {
+		t.Fatalf("exact program files = %#v", files)
 	}
 }
 
@@ -112,106 +90,6 @@ func backendExactCorpusIRs(t *testing.T, source string) ([]*backendProtoIR, *cod
 		}
 	}
 	return irs, image
-}
-
-func backendExactClosureCanGenerate(t *testing.T, source string) {
-	t.Helper()
-	irs, _ := backendExactCorpusIRs(t, source)
-	if len(irs) != 4 {
-		t.Fatalf("exact closure Proto count = %d, want 4", len(irs))
-	}
-	targets := backendExactInferredTargets(t, irs, 2, 3)
-	if _, err := emitBackendGoNumericProof(irs[3], backendGoNumericOptions{
-		packageName: "ember", functionName: targets[3].functionName,
-		receiverTable: targets[3].receiverTable, receiverTables: targets[3].receiverTables,
-		fixedVarargCount:    targets[3].fixedVarargCount,
-		capturedTableFields: targets[3].capturedTableFields,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	backendExactCallerCanGenerate(t, irs[1], targets)
-}
-
-func backendExactEventDispatchCanGenerate(t *testing.T, source string) {
-	t.Helper()
-	irs := backendEventDispatchProofIRs(t, source)
-	targets := backendExactInferredTargets(t, irs, 2, 3, 4)
-	for _, protoID := range []int32{2, 3, 4} {
-		backendExactTargetCanGenerate(t, targets[protoID], targets)
-	}
-	backendExactCallerCanGenerate(t, irs[1], targets)
-}
-
-func backendExactPrototypeFallbackCanGenerate(t *testing.T, source string) {
-	t.Helper()
-	irs := backendPrototypeFallbackProofIRs(t, source)
-	targets := backendExactInferredTargets(t, irs, 2)
-	backendExactTargetCanGenerate(t, targets[2], targets)
-	backendExactCallerCanGenerate(t, irs[1], targets)
-}
-
-func backendExactSignalBusCanGenerate(t *testing.T, source string) {
-	t.Helper()
-	irs := backendSignalBusProofIRs(t, source)
-	targets := backendExactInferredTargets(t, irs, 2, 3)
-	backendExactTargetCanGenerate(t, targets[3], targets)
-	backendExactCallerCanGenerate(t, irs[1], targets)
-}
-
-func backendExactDirtyMetatableCanGenerate(t *testing.T, source string) {
-	t.Helper()
-	irs := backendDirtyMetatableProofIRs(t, source)
-	targets := backendExactInferredTargets(t, irs, 2, 3)
-	backendExactTargetCanGenerate(t, targets[2], targets)
-	backendExactTargetCanGenerate(t, targets[3], targets)
-	backendExactCallerCanGenerate(t, irs[1], targets)
-}
-
-func backendExactMethodCanGenerate(t *testing.T, source string) {
-	t.Helper()
-	irs, _ := backendExactCorpusIRs(t, source)
-	if len(irs) != 3 {
-		t.Fatalf("exact method Proto count = %d, want 3", len(irs))
-	}
-	targets := backendExactInferredTargets(t, irs, 2)
-	if _, err := emitBackendGoNumericProof(irs[2], backendGoNumericOptions{
-		packageName: "ember", functionName: targets[2].functionName,
-		receiverTable: targets[2].receiverTable, receiverTables: targets[2].receiverTables,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	backendExactCallerCanGenerate(t, irs[1], targets)
-}
-
-func backendExactVarargCanGenerate(t *testing.T, source string) {
-	t.Helper()
-	irs, _ := backendExactCorpusIRs(t, source)
-	if len(irs) != 3 {
-		t.Fatalf("exact vararg Proto count = %d, want 3", len(irs))
-	}
-	targets := backendExactInferredTargets(t, irs, 2)
-	if _, err := emitBackendGoNumericProof(irs[2], backendGoNumericOptions{
-		packageName: "ember", functionName: targets[2].functionName,
-		fixedVarargCount: targets[2].fixedVarargCount,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	backendExactCallerCanGenerate(t, irs[1], targets)
-}
-
-func backendExactRecursiveCanGenerate(t *testing.T, source string) {
-	t.Helper()
-	irs, _ := backendExactCorpusIRs(t, source)
-	if len(irs) != 3 {
-		t.Fatalf("exact recursive Proto count = %d, want 3", len(irs))
-	}
-	targets := backendExactInferredTargets(t, irs, 2)
-	if _, err := emitBackendGoNumericProof(irs[2], backendGoNumericOptions{
-		packageName: "ember", functionName: targets[2].functionName, selfRecursive: true,
-	}); err != nil {
-		t.Fatalf("emit exact recursive target: %v", err)
-	}
-	backendExactCallerCanGenerate(t, irs[1], targets)
 }
 
 func TestBackendGoOpenDirectTailReturnIsExactAndFailClosed(t *testing.T) {
@@ -281,33 +159,6 @@ func TestBackendGoOpenDirectTailReturnIsExactAndFailClosed(t *testing.T) {
 	}
 }
 
-func backendExactCoroutineCanGenerate(t *testing.T, source string) {
-	t.Helper()
-	irs, image := backendExactCorpusIRs(t, source)
-	if len(irs) != 3 {
-		t.Fatalf("exact coroutine Proto count = %d, want 3", len(irs))
-	}
-	targets := backendExactInferredTargets(t, irs, 2)
-	if _, err := emitBackendGoNumericProof(irs[1], backendGoNumericOptions{
-		packageName: "ember", functionName: "backendGeneratedExactCoroutine",
-		preparedFunctionName: "backendGeneratedExactCoroutinePrepared",
-		directTargets:        targets,
-		coroutineDeadString:  backendCoroutineDeadStringID(t, image),
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func backendExactCallerCanGenerate(t *testing.T, ir *backendProtoIR, targets []backendGoNumericTarget) {
-	t.Helper()
-	if _, err := emitBackendGoNumericProof(ir, backendGoNumericOptions{
-		packageName: "ember", functionName: "backendGeneratedExactNestedCorpus",
-		preparedFunctionName: "backendGeneratedExactNestedCorpusPrepared", directTargets: targets,
-	}); err != nil {
-		t.Fatalf("emit exact nested caller: %v", err)
-	}
-}
-
 func backendExactInferredTargets(t *testing.T, irs []*backendProtoIR, protoIDs ...int32) []backendGoNumericTarget {
 	t.Helper()
 	targets, err := inferBackendGoNumericTargets(irs, protoIDs, "backendGeneratedExactTarget")
@@ -315,60 +166,4 @@ func backendExactInferredTargets(t *testing.T, irs []*backendProtoIR, protoIDs .
 		t.Fatal(err)
 	}
 	return targets
-}
-
-func backendExactTargetCanGenerate(
-	t *testing.T,
-	target backendGoNumericTarget,
-	targets []backendGoNumericTarget,
-) {
-	t.Helper()
-	if _, err := emitBackendGoNumericProof(target.ir, backendGoNumericOptions{
-		packageName:         "ember",
-		functionName:        target.functionName,
-		directTargets:       targets,
-		selfRecursive:       target.selfRecursive,
-		fixedVarargCount:    target.fixedVarargCount,
-		receiverTable:       target.receiverTable,
-		receiverTables:      target.receiverTables,
-		coroutineTarget:     backendGoNumericHasCoroutineYield(target.ir),
-		capturedTableFields: target.capturedTableFields,
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func backendScenarioSparseGridCanGenerate(t *testing.T, source string) {
-	t.Helper()
-	irs := backendStructuralStringKeyProofIRs(t, source)
-	targets := backendExactInferredTargets(t, irs, 2)
-	if _, err := emitBackendGoNumericProof(irs[2], backendGoNumericOptions{
-		packageName: "ember", functionName: targets[2].functionName,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := emitBackendGoNumericProof(irs[1], backendGoNumericOptions{
-		packageName: "ember", functionName: "backendGeneratedScenarioSparseGrid",
-		preparedFunctionName: "backendGeneratedScenarioSparseGridPrepared", directTargets: targets,
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func backendScenarioCommandRouterCanGenerate(t *testing.T, source string) {
-	t.Helper()
-	irs := backendCommandRouterProofIRsForSource(t, source)
-	targets := backendExactInferredTargets(t, irs, 2)
-	if _, err := emitBackendGoNumericProof(irs[2], backendGoNumericOptions{
-		packageName: "ember", functionName: targets[2].functionName,
-		fixedVarargCount: targets[2].fixedVarargCount,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := emitBackendGoNumericProof(irs[1], backendGoNumericOptions{
-		packageName: "ember", functionName: "backendGeneratedScenarioCommandRouter",
-		preparedFunctionName: "backendGeneratedScenarioCommandRouterPrepared", directTargets: targets,
-	}); err != nil {
-		t.Fatal(err)
-	}
 }
