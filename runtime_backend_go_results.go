@@ -223,7 +223,7 @@ func backendGoNumericOpenDirectTailCall(
 		producer.callResults != -1 || producer.a != operation.a {
 		return nil, false
 	}
-	target, ok := backendGoNumericDirectTarget(options, producer)
+	target, ok := backendGoNumericDirectTarget(ir, options, producer)
 	if !ok {
 		return nil, false
 	}

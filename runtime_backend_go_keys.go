@@ -105,7 +105,7 @@ func analyzeBackendGoStructuralKeys(
 		if operation.op != opCallLocalOne || len(operation.defs) == 0 {
 			continue
 		}
-		target, ok := backendGoNumericDirectTarget(options, operation)
+		target, ok := backendGoNumericDirectTarget(ir, options, operation)
 		targetKey, ok := backendGoStructuralKeyTargetKey(target.ir)
 		if !ok || !backendGoStructuralKeyTarget(target.ir) {
 			continue

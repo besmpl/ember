@@ -140,6 +140,17 @@ testable seam.
   caches, and reusable closure values, so warming one runtime does not mutate
   or contaminate another runtime's state. Host-provided globals and tables
   remain caller-owned and still require ordinary synchronization when shared.
+- `(*Program).WritePreparedGo` writes one deterministic Go source file for the
+  exact loaded Program. `PreparedGoOptions.Package` supplies the generated
+  package name; `MaxBytes` rejects oversized output before writing and defaults
+  to a conservative bound. The generated package exports one immutable
+  `PreparedBundle`, which a host supplies explicitly through
+  `RuntimeOptions.Prepared`. A nil bundle preserves the ordinary dynamic
+  Machine path. An ABI, semantic-version, Program-hash, or Proto-inventory
+  mismatch returns `*PreparedBundleError` before runtime-owner mutation and
+  never silently falls back. Generated bundles are trusted build artifacts,
+  not an untrusted-code sandbox; Ember does not use `init` registration,
+  plugins, helper processes, or runtime Go compilation.
 - Scripts can read and assign globals as expression values, call host global
   functions, access fields or indexes on host global tables, and pass opaque
   host userdata values through script code. Local and upvalue names take

@@ -103,7 +103,7 @@ func analyzeBackendGoScalarClosures(
 			operation.call.kind != backendCallDirectProto {
 			continue
 		}
-		target, ok := backendGoNumericDirectTarget(options, operation)
+		target, ok := backendGoNumericDirectTarget(ir, options, operation)
 		if !ok {
 			continue
 		}

@@ -281,25 +281,21 @@ Machine without partially applying the operation.
 
 ### Generated artifact and lifecycle
 
-The first implementation remains private and test-only. No public prepared API
-is retained until a real generated compiler proof passes representative
-semantic, performance, allocation, code-size, and side-exit gates.
-
-After that proof, the narrow public lifecycle may change:
+The lowering began private and test-only. The generated compiler proof now
+retains this narrow public lifecycle:
 
 - `Program.WritePreparedGo` emits a deterministic application-owned package;
 - the package exposes one immutable `PreparedBundle`;
-- `RuntimeOptions.Prepared` or an equivalent explicit constructor dependency
-  binds that bundle;
+- `RuntimeOptions.Prepared` binds that bundle;
 - mismatches fail before owner mutation and never silently fall back;
 - nil preserves the ordinary dynamic Machine path;
 - no registration through `init`, package globals, plugins, helper processes,
   or source-name routing is allowed.
 
-The generated package receives an opaque prepared context. The proof must show
-that cross-package inlining or coarse block entry keeps the context ABI out of
-hot per-operation paths. If it does not, the public shape is rejected before
-retention rather than exposing Machine internals.
+The generated package receives an opaque prepared context. Generated code
+enters it at coarse prepared-function boundaries and does not expose Machine
+registers, arenas, or owner state. Retaining this lifecycle does not itself
+satisfy the separate all-37 performance and allocation acceptance gates below.
 
 ### Performance claim
 

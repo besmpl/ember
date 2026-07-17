@@ -7,7 +7,7 @@ import (
 	"math"
 )
 
-func externalUpdate() (float64, bool) {
+func emberPreparedM0Proto1() (float64, bool) {
 	var v6 float64
 	var v7 float64
 	var v8 float64
@@ -55,7 +55,7 @@ b3:
 	return v6, true
 }
 
-func externalUpdatePreparedBody(context emberapi.PreparedContext) emberapi.PreparedExit {
+func emberPreparedM0PreparedProto1Body(context emberapi.PreparedContext) emberapi.PreparedExit {
 	var v6 float64
 	var v7 float64
 	var v8 float64
@@ -118,8 +118,8 @@ b3:
 	return emberapi.PreparedReturnOneNumber(v6)
 }
 
-func externalUpdatePrepared(context emberapi.PreparedContext) emberapi.PreparedExit {
-	return externalUpdatePreparedBody(context)
+func emberPreparedM0PreparedProto1(context emberapi.PreparedContext) emberapi.PreparedExit {
+	return emberPreparedM0PreparedProto1Body(context)
 }
 
-var Bundle = emberapi.NewPreparedBundle(1, 1, [32]byte{0x91, 0xf5, 0xd7, 0x5e, 0x90, 0x25, 0xf3, 0xb9, 0x2d, 0x12, 0x8a, 0xd4, 0x1b, 0xd8, 0x81, 0x82, 0x19, 0x39, 0xf1, 0x6e, 0x22, 0xc1, 0x20, 0xff, 0x69, 0x8f, 0xe3, 0xef, 0x98, 0xdd, 0x7a, 0x12}, [][]emberapi.PreparedFunction{{nil, externalUpdatePrepared}})
+var Bundle = emberapi.NewPreparedBundle(1, 1, [32]byte{0x91, 0xf5, 0xd7, 0x5e, 0x90, 0x25, 0xf3, 0xb9, 0x2d, 0x12, 0x8a, 0xd4, 0x1b, 0xd8, 0x81, 0x82, 0x19, 0x39, 0xf1, 0x6e, 0x22, 0xc1, 0x20, 0xff, 0x69, 0x8f, 0xe3, 0xef, 0x98, 0xdd, 0x7a, 0x12}, [][]emberapi.PreparedFunction{{nil, emberPreparedM0PreparedProto1}})

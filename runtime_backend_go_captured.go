@@ -132,7 +132,7 @@ func backendGoCapturedRecordCallShape(
 	if ir == nil || operation == nil || operation.op != opCall {
 		return backendGoNumericTarget{}, invalidBackendValueID, invalidBackendValueID, false
 	}
-	target, ok := backendGoNumericDirectTarget(options, operation)
+	target, ok := backendGoNumericDirectTarget(ir, options, operation)
 	if !ok || len(target.ir.upvalues) != 1 || len(backendGoCapturedRecordRoots(target.ir)) == 0 {
 		return backendGoNumericTarget{}, invalidBackendValueID, invalidBackendValueID, false
 	}

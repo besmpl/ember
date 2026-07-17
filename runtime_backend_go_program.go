@@ -183,19 +183,15 @@ func inferBackendGoNumericProgramUpvalueTargets(
 	result := make([]map[int32]backendGoNumericTarget, len(irs))
 	for _, protoID := range protoIDs {
 		ir := irs[protoID]
-		for pc := range ir.ops {
-			operation := &ir.ops[pc]
-			if operation.op != opCallUpvalueOne {
-				continue
-			}
-			targetProto, ok := backendGoNumericStaticUpvalueTargetProto(irs, protoID, operation.b)
+		for upvalue := range ir.upvalues {
+			targetProto, ok := backendGoNumericStaticUpvalueTargetProto(irs, protoID, int32(upvalue))
 			if !ok || targetProto < 0 || int(targetProto) >= len(targets) || targets[targetProto].ir == nil {
 				continue
 			}
 			if result[protoID] == nil {
 				result[protoID] = make(map[int32]backendGoNumericTarget)
 			}
-			result[protoID][operation.b] = targets[targetProto]
+			result[protoID][int32(upvalue)] = targets[targetProto]
 		}
 	}
 	return result

@@ -717,9 +717,41 @@ func backendGoNumericPreparedStaticUpvalues(ir *backendProtoIR, options backendG
 			return false
 		}
 	}
+	calleeTargets := make(map[backendValueID]backendGoNumericTarget)
 	for pc := range ir.ops {
 		operation := &ir.ops[pc]
-		if operation.op == opGetUpvalue || operation.op == opSetUpvalue {
+		if operation.op == opSetUpvalue {
+			return false
+		}
+		if operation.op != opGetUpvalue {
+			continue
+		}
+		target, ok := options.upvalueTargets[operation.b]
+		if !ok || target.ir == nil || target.functionName == "" ||
+			len(target.ir.upvalues) != 0 || len(operation.defs) == 0 {
+			return false
+		}
+		for _, definition := range operation.defs {
+			calleeTargets[definition.value] = target
+		}
+	}
+	used := make(map[backendValueID]bool, len(calleeTargets))
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		for _, use := range operation.uses {
+			target, static := calleeTargets[use.value]
+			if !static {
+				continue
+			}
+			used[use.value] = true
+			if use.register != operation.b ||
+				!backendGoNumericStaticUpvalueCallMatches(ir, operation, use.value, target) {
+				return false
+			}
+		}
+	}
+	for callee := range calleeTargets {
+		if !used[callee] {
 			return false
 		}
 	}
@@ -1122,7 +1154,7 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						if value.register >= operation.a &&
 							value.register < operation.a+int32(resultCount) {
 							tags = backendGoDirectTargetResultTag(
-								options,
+								ir, options,
 								operation,
 								int(value.register-operation.a),
 							)
@@ -1139,8 +1171,8 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 						tags = backendTagFunction
 					} else if _, ok := plan.closures.call(operation); ok {
 						tags = backendTagNumber
-					} else if _, ok := backendGoNumericDirectTarget(options, operation); ok {
-						tags = backendGoDirectTargetResultTag(options, operation, 0)
+					} else if _, ok := backendGoNumericDirectTarget(ir, options, operation); ok {
+						tags = backendGoDirectTargetResultTag(ir, options, operation, 0)
 					}
 				case opCallUpvalueOne:
 					if backendGoNumericSelfRecursiveCall(ir, options, operation) {
@@ -1537,15 +1569,62 @@ func backendGoPhiInputComesFromTruthyEdge(
 	return falseBlock != pathBlock
 }
 
-func backendGoNumericDirectTarget(options backendGoNumericOptions, operation *backendOperationIR) (backendGoNumericTarget, bool) {
-	if operation == nil ||
-		operation.call.kind != backendCallDirectProto ||
-		operation.call.targetProto < 0 ||
-		int(operation.call.targetProto) >= len(options.directTargets) {
+func backendGoNumericDirectTarget(
+	ir *backendProtoIR,
+	options backendGoNumericOptions,
+	operation *backendOperationIR,
+) (backendGoNumericTarget, bool) {
+	if operation != nil &&
+		operation.call.kind == backendCallDirectProto &&
+		operation.call.targetProto >= 0 &&
+		int(operation.call.targetProto) < len(options.directTargets) {
+		target := options.directTargets[operation.call.targetProto]
+		return target, target.ir != nil && target.functionName != ""
+	}
+	return backendGoNumericStaticUpvalueCallTarget(ir, options, operation)
+}
+
+func backendGoNumericStaticUpvalueCallTarget(
+	ir *backendProtoIR,
+	options backendGoNumericOptions,
+	operation *backendOperationIR,
+) (backendGoNumericTarget, bool) {
+	if ir == nil || operation == nil ||
+		(operation.op != opCall && operation.op != opCallLocalOne) ||
+		options.upvalueTargets == nil {
 		return backendGoNumericTarget{}, false
 	}
-	target := options.directTargets[operation.call.targetProto]
-	return target, target.ir != nil && target.functionName != ""
+	callee := backendOperationUse(operation, operation.b)
+	if !ir.validBackendValue(callee) {
+		return backendGoNumericTarget{}, false
+	}
+	value := &ir.values[callee-1]
+	if value.kind != backendValueOperation || value.pc < 0 || int(value.pc) >= len(ir.ops) || value.escapes {
+		return backendGoNumericTarget{}, false
+	}
+	read := &ir.ops[value.pc]
+	if read.op != opGetUpvalue {
+		return backendGoNumericTarget{}, false
+	}
+	target, ok := options.upvalueTargets[read.b]
+	if !ok || !backendGoNumericStaticUpvalueCallMatches(ir, operation, callee, target) {
+		return backendGoNumericTarget{}, false
+	}
+	return target, true
+}
+
+func backendGoNumericStaticUpvalueCallMatches(
+	ir *backendProtoIR,
+	operation *backendOperationIR,
+	callee backendValueID,
+	target backendGoNumericTarget,
+) bool {
+	if ir == nil || operation == nil ||
+		(operation.op != opCall && operation.op != opCallLocalOne) ||
+		target.ir == nil || target.functionName == "" || len(target.ir.upvalues) != 0 {
+		return false
+	}
+	return backendOperationUse(operation, operation.b) == callee
 }
 
 func backendGoNumericUpvalueTarget(options backendGoNumericOptions, operation *backendOperationIR) (backendGoNumericTarget, bool) {
@@ -1577,7 +1656,7 @@ func backendGoNumericScalarReplacedCall(
 	default:
 		return false
 	}
-	target, ok := backendGoNumericDirectTarget(options, operation)
+	target, ok := backendGoNumericDirectTarget(ir, options, operation)
 	if !ok {
 		return false
 	}
@@ -1595,11 +1674,13 @@ func backendGoNumericScalarReplacedCall(
 		return false
 	}
 	value := &ir.values[valueID-1]
-	if value.object != backendObjectClosure ||
-		value.targetUnknown ||
-		len(value.targetProtos) != 1 ||
-		value.targetProtos[0] != operation.call.targetProto {
-		return false
+	if _, static := backendGoNumericStaticUpvalueCallTarget(ir, options, operation); !static {
+		if value.object != backendObjectClosure ||
+			value.targetUnknown ||
+			len(value.targetProtos) != 1 ||
+			value.targetProtos[0] != operation.call.targetProto {
+			return false
+		}
 	}
 	if target.selfRecursive {
 		if value.escapes {
@@ -2487,7 +2568,7 @@ func verifyBackendGoNumericOperation(
 	case opJump:
 		return nil
 	case opCall:
-		target, ok := backendGoNumericDirectTarget(options, operation)
+		target, ok := backendGoNumericDirectTarget(ir, options, operation)
 		if !ok || !backendGoNumericScalarReplacedCall(ir, options, operation) {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no fixed-result numeric target", operation.pc)
 		}
@@ -2526,7 +2607,7 @@ func verifyBackendGoNumericOperation(
 					continue
 				}
 				found = true
-				want := backendGoDirectTargetResultTag(options, operation, int(register-operation.a))
+				want := backendGoDirectTargetResultTag(ir, options, operation, int(register-operation.a))
 				if want == 0 || plan.tags[definition.value-1] != want {
 					return fmt.Errorf(
 						"emit backend Go numeric proof: PC %d result register %d has tags %x, want %x",
@@ -2633,7 +2714,7 @@ func verifyBackendGoNumericOperation(
 			}
 			return nil
 		}
-		target, ok := backendGoNumericDirectTarget(options, operation)
+		target, ok := backendGoNumericDirectTarget(ir, options, operation)
 		if !ok || !backendGoNumericScalarReplacedCall(ir, options, operation) {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has no direct numeric target", operation.pc)
 		}
@@ -2653,7 +2734,7 @@ func verifyBackendGoNumericOperation(
 				return err
 			}
 		}
-		want := backendGoDirectTargetResultTag(options, operation, 0)
+		want := backendGoDirectTargetResultTag(ir, options, operation, 0)
 		if want == 0 {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d direct target has no scalar result", operation.pc)
 		}
@@ -2881,11 +2962,12 @@ func backendGoNumericResultTypes(
 }
 
 func backendGoDirectTargetResultTag(
+	ir *backendProtoIR,
 	options backendGoNumericOptions,
 	operation *backendOperationIR,
 	result int,
 ) backendTagMask {
-	target, ok := backendGoNumericDirectTarget(options, operation)
+	target, ok := backendGoNumericDirectTarget(ir, options, operation)
 	if !ok {
 		return 0
 	}
@@ -3689,7 +3771,7 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			emitter.body.WriteString("\t}\n")
 		}
 	case opCall:
-		target, ok := backendGoNumericDirectTarget(emitter.options, operation)
+		target, ok := backendGoNumericDirectTarget(emitter.ir, emitter.options, operation)
 		if !ok || !backendGoNumericScalarReplacedCall(emitter.ir, emitter.options, operation) {
 			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar-replaced fixed-result target", operation.pc)
 		}
@@ -3904,7 +3986,7 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			}
 			return false, nil
 		}
-		target, ok := backendGoNumericDirectTarget(emitter.options, operation)
+		target, ok := backendGoNumericDirectTarget(emitter.ir, emitter.options, operation)
 		if !ok || !backendGoNumericScalarReplacedCall(emitter.ir, emitter.options, operation) {
 			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no scalar-replaced direct target", operation.pc)
 		}
