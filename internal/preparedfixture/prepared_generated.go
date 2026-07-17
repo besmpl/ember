@@ -7,119 +7,32 @@ import (
 	"math"
 )
 
-func emberPreparedM0Proto1() (float64, bool) {
-	var v6 float64
-	var v7 float64
-	var v8 float64
-	var v9 float64
-	var v11 float64
-	var v12 float64
-	var v13 float64
-	var v14 float64
-	var v15 float64
-	var v16 float64
-	var v17 float64
-	v11 = math.Float64frombits(0x0000000000000000)
-	v12 = math.Float64frombits(0x3ff0000000000000)
-	v13 = math.Float64frombits(0x4050000000000000)
-	v14 = math.Float64frombits(0x3ff0000000000000)
-	v6 = v11
-	v7 = v12
-	v8 = v13
-	v9 = v14
-	goto b1
-b1:
-	if math.IsNaN(v7) {
-		return 0, false
-	}
-	if math.IsNaN(v8) {
-		return 0, false
-	}
-	if math.IsNaN(v9) {
-		return 0, false
-	}
-	if (v9 > 0 && v7 > v8) || (v9 <= 0 && v7 < v8) {
-		goto b3
-	}
-	goto b2
-b2:
-	v15 = v7
-	v16 = v6 + v15
-	v17 = v7 + v9
-	v6 = v16
-	v7 = v17
-	v8 = v8
-	v9 = v9
-	goto b1
-b3:
-	return v6, true
+func emberPreparedM0Proto1(p0 float64) (float64, bool) {
+	var v1 float64
+	var v3 float64
+	var v4 float64
+	v1 = p0
+	v3 = v1
+	v4 = v3 + math.Float64frombits(0x3ff0000000000000)
+	return v4, true
 }
 
-func emberPreparedM0PreparedProto1Body(context emberapi.PreparedContext) emberapi.PreparedExit {
-	var v6 float64
-	var v7 float64
-	var v8 float64
-	var v9 float64
-	var v11 float64
-	var v12 float64
-	var v13 float64
-	var v14 float64
-	var v15 float64
-	var v16 float64
-	var v17 float64
-	v11 = math.Float64frombits(0x0000000000000000)
-	v12 = math.Float64frombits(0x3ff0000000000000)
-	v13 = math.Float64frombits(0x4050000000000000)
-	v14 = math.Float64frombits(0x3ff0000000000000)
-	v6 = v11
-	v7 = v12
-	v8 = v13
-	v9 = v14
-	goto b1
-b1:
-	if math.IsNaN(v7) {
-		exit := context.ReplayBeforeOperation(4, 4)
-		context.SpillNumber(0, 0, v6)
-		context.SpillNumber(1, 1, v7)
-		context.SpillNumber(2, 2, v8)
-		context.SpillNumber(3, 3, v9)
-		return exit
-	}
-	if math.IsNaN(v8) {
-		exit := context.ReplayBeforeOperation(4, 4)
-		context.SpillNumber(0, 0, v6)
-		context.SpillNumber(1, 1, v7)
-		context.SpillNumber(2, 2, v8)
-		context.SpillNumber(3, 3, v9)
-		return exit
-	}
-	if math.IsNaN(v9) {
-		exit := context.ReplayBeforeOperation(4, 4)
-		context.SpillNumber(0, 0, v6)
-		context.SpillNumber(1, 1, v7)
-		context.SpillNumber(2, 2, v8)
-		context.SpillNumber(3, 3, v9)
-		return exit
-	}
-	if (v9 > 0 && v7 > v8) || (v9 <= 0 && v7 < v8) {
-		goto b3
-	}
-	goto b2
-b2:
-	v15 = v7
-	v16 = v6 + v15
-	v17 = v7 + v9
-	v6 = v16
-	v7 = v17
-	v8 = v8
-	v9 = v9
-	goto b1
-b3:
-	return emberapi.PreparedReturnOneNumber(v6)
+func emberPreparedM0PreparedProto1Body(context emberapi.PreparedContext, p0 float64) emberapi.PreparedExit {
+	var v1 float64
+	var v3 float64
+	var v4 float64
+	v1 = p0
+	v3 = v1
+	v4 = v3 + math.Float64frombits(0x3ff0000000000000)
+	return emberapi.PreparedReturnOneNumber(v4)
 }
 
 func emberPreparedM0PreparedProto1(context emberapi.PreparedContext) emberapi.PreparedExit {
-	return emberPreparedM0PreparedProto1Body(context)
+	p0, ok := context.NumberParameter(0)
+	if !ok {
+		return emberapi.PreparedReplayEntry()
+	}
+	return emberPreparedM0PreparedProto1Body(context, p0)
 }
 
-var Bundle = emberapi.NewPreparedBundle(1, 1, [32]byte{0x91, 0xf5, 0xd7, 0x5e, 0x90, 0x25, 0xf3, 0xb9, 0x2d, 0x12, 0x8a, 0xd4, 0x1b, 0xd8, 0x81, 0x82, 0x19, 0x39, 0xf1, 0x6e, 0x22, 0xc1, 0x20, 0xff, 0x69, 0x8f, 0xe3, 0xef, 0x98, 0xdd, 0x7a, 0x12}, [][]emberapi.PreparedFunction{{nil, emberPreparedM0PreparedProto1}})
+var Bundle = emberapi.NewPreparedBundle(1, 1, [32]byte{0x7f, 0xa4, 0x6c, 0x68, 0x08, 0x37, 0x28, 0x61, 0x64, 0x21, 0xcf, 0xd9, 0x89, 0x07, 0x00, 0x7d, 0x2d, 0x48, 0x0f, 0x3b, 0xec, 0x09, 0xd9, 0xcc, 0x9f, 0xf8, 0x55, 0xe4, 0xa0, 0x39, 0x5e, 0xf6}, [][]emberapi.PreparedFunction{{nil, emberPreparedM0PreparedProto1}})

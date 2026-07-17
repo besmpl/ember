@@ -9,18 +9,21 @@ import (
 
 const externalPreparedFixtureSource = `
 return {
-    update = function()
-        local total = 0
-        for index = 1, 64 do
-            total = total + index
-        end
-        return total
+    update = function(value)
+        return value + 1
     end,
 }
 `
 
+const externalPreparedFixtureUpdateEnvironment = "EMBER_UPDATE_EXTERNAL_PREPARED_FIXTURE"
+
 func TestExternalPreparedFixtureIsFresh(t *testing.T) {
 	generated := externalPreparedFixtureGeneratedSource(t)
+	if os.Getenv(externalPreparedFixtureUpdateEnvironment) == "1" {
+		if err := os.WriteFile("internal/preparedfixture/prepared_generated.go", generated, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	onDisk, err := os.ReadFile("internal/preparedfixture/prepared_generated.go")
 	if err != nil {
 		t.Fatalf("read external prepared fixture: %v\nexpected source:\n%s", err, generated)
