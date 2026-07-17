@@ -7168,6 +7168,11 @@ type scenarioBenchmarkCase struct {
 
 func loadScenarioBenchmarkCases(t *testing.T, names []string) []scenarioBenchmarkCase {
 	t.Helper()
+	return loadLuauBenchmarkCases(t, "scenarioLuauCases", names)
+}
+
+func loadLuauBenchmarkCases(t *testing.T, variable string, names []string) []scenarioBenchmarkCase {
+	t.Helper()
 	wanted := make(map[string]bool, len(names))
 	for _, name := range names {
 		wanted[name] = true
@@ -7185,17 +7190,17 @@ func loadScenarioBenchmarkCases(t *testing.T, names []string) []scenarioBenchmar
 		}
 		for _, spec := range gen.Specs {
 			valueSpec, ok := spec.(*ast.ValueSpec)
-			if !ok || len(valueSpec.Names) != 1 || valueSpec.Names[0].Name != "scenarioLuauCases" || len(valueSpec.Values) != 1 {
+			if !ok || len(valueSpec.Names) != 1 || valueSpec.Names[0].Name != variable || len(valueSpec.Values) != 1 {
 				continue
 			}
 			lit, ok := valueSpec.Values[0].(*ast.CompositeLit)
 			if !ok {
-				t.Fatalf("scenarioLuauCases is %T, want composite literal", valueSpec.Values[0])
+				t.Fatalf("%s is %T, want composite literal", variable, valueSpec.Values[0])
 			}
 			for _, element := range lit.Elts {
 				caseLit, ok := element.(*ast.CompositeLit)
 				if !ok {
-					t.Fatalf("scenario case is %T, want composite literal", element)
+					t.Fatalf("%s case is %T, want composite literal", variable, element)
 				}
 				tc := parseScenarioBenchmarkCase(t, caseLit)
 				if wanted[tc.name] {
@@ -7210,7 +7215,7 @@ func loadScenarioBenchmarkCases(t *testing.T, names []string) []scenarioBenchmar
 		for name := range wanted {
 			missing = append(missing, name)
 		}
-		t.Fatalf("missing scenario benchmark cases: %s", strings.Join(missing, ", "))
+		t.Fatalf("missing %s benchmark cases: %s", variable, strings.Join(missing, ", "))
 	}
 	return cases
 }

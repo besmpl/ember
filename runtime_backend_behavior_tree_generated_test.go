@@ -314,7 +314,7 @@ b1:
 	v219 = uint32(12)
 	v221 = math.Float64frombits(0x3ff0000000000000)
 	v222 = 0
-	if v221 >= 1 && v221 <= 5 && v221 == math.Trunc(v221) {
+	if v221 >= 1 && v221 <= float64(5) && v221 == math.Trunc(v221) {
 		v222 = v221
 	}
 	if v222 < 1 || v222 > 5 {
@@ -391,7 +391,7 @@ b7:
 		return 0, false
 	}
 	v230 = 0
-	if v229 >= 1 && v229 <= 5 && v229 == math.Trunc(v229) {
+	if v229 >= 1 && v229 <= float64(5) && v229 == math.Trunc(v229) {
 		v230 = v229
 	}
 	if v230 < 1 || v230 > 5 {
@@ -933,7 +933,7 @@ b1:
 	v219 = uint32(12)
 	v221 = math.Float64frombits(0x3ff0000000000000)
 	v222 = 0
-	if v221 >= 1 && v221 <= 5 && v221 == math.Trunc(v221) {
+	if v221 >= 1 && v221 <= float64(5) && v221 == math.Trunc(v221) {
 		v222 = v221
 	}
 	if v222 < 1 || v222 > 5 {
@@ -1010,7 +1010,7 @@ b7:
 		return machinePreparedReplayEntry()
 	}
 	v230 = 0
-	if v229 >= 1 && v229 <= 5 && v229 == math.Trunc(v229) {
+	if v229 >= 1 && v229 <= float64(5) && v229 == math.Trunc(v229) {
 		v230 = v229
 	}
 	if v230 < 1 || v230 > 5 {

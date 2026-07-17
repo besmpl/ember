@@ -95,17 +95,18 @@ func discoverBackendGoFiniteCallSets(
 				valid = false
 				break
 			}
-			targetPlan, targetErr := buildBackendGoNumericPlan(target.ir, backendGoNumericOptions{
+			targetOptions := backendGoNumericOptions{
 				functionName:     target.functionName,
 				directTargets:    options.directTargets,
 				fixedVarargCount: target.fixedVarargCount,
 				receiverTable:    true,
-			})
+			}
+			targetPlan, targetErr := buildBackendGoNumericPlan(target.ir, targetOptions)
 			if targetErr != nil || targetPlan.tables.externalRoot == invalidBackendValueID {
 				valid = false
 				break
 			}
-			resultTypes, resultErr := backendGoNumericResultTypes(target.ir, targetPlan, target.fixedVarargCount)
+			resultTypes, resultErr := backendGoNumericResultTypes(target.ir, targetPlan, targetOptions)
 			if resultErr != nil || len(resultTypes) != 1 || resultTypes[0] != "float64" {
 				valid = false
 				break

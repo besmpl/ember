@@ -10,6 +10,15 @@ func backendGoNumericFixedResultCountFor(
 	ir *backendProtoIR,
 	fixedVarargCount int,
 ) (int, bool) {
+	return backendGoNumericFixedResultCountForOptions(ir, backendGoNumericOptions{
+		fixedVarargCount: fixedVarargCount,
+	})
+}
+
+func backendGoNumericFixedResultCountForOptions(
+	ir *backendProtoIR,
+	options backendGoNumericOptions,
+) (int, bool) {
 	if ir == nil {
 		return 0, false
 	}
@@ -24,7 +33,7 @@ func backendGoNumericFixedResultCountFor(
 			if operation.op != opReturnOne && operation.op != opReturn {
 				continue
 			}
-			count, ok := backendGoNumericReturnCount(ir, fixedVarargCount, operation)
+			count, ok := backendGoNumericReturnCountForOptions(ir, options, operation)
 			if !ok {
 				return 0, false
 			}
@@ -45,6 +54,16 @@ func backendGoNumericReturnCount(
 	fixedVarargCount int,
 	operation *backendOperationIR,
 ) (int, bool) {
+	return backendGoNumericReturnCountForOptions(ir, backendGoNumericOptions{
+		fixedVarargCount: fixedVarargCount,
+	}, operation)
+}
+
+func backendGoNumericReturnCountForOptions(
+	ir *backendProtoIR,
+	options backendGoNumericOptions,
+	operation *backendOperationIR,
+) (int, bool) {
 	if ir == nil || operation == nil {
 		return 0, false
 	}
@@ -60,6 +79,9 @@ func backendGoNumericReturnCount(
 		}
 	default:
 		return 0, false
+	}
+	if _, ok := backendGoNumericOpenDirectTailCall(ir, options, operation); ok {
+		return 1, true
 	}
 
 	// Luau represents `return prefix, select("#", ...)` with an open tail.
@@ -92,7 +114,7 @@ func backendGoNumericReturnCount(
 		}
 	}
 	if producer.d >= 0 ||
-		!backendGoNumericFixedVarargSelect(ir, fixedVarargCount, producer) {
+		!backendGoNumericFixedVarargSelect(ir, options.fixedVarargCount, producer) {
 		return 0, false
 	}
 	return count, true
@@ -104,7 +126,18 @@ func backendGoNumericReturnValue(
 	operation *backendOperationIR,
 	result int,
 ) (backendValueID, bool) {
-	count, ok := backendGoNumericReturnCount(ir, fixedVarargCount, operation)
+	return backendGoNumericReturnValueForOptions(ir, backendGoNumericOptions{
+		fixedVarargCount: fixedVarargCount,
+	}, operation, result)
+}
+
+func backendGoNumericReturnValueForOptions(
+	ir *backendProtoIR,
+	options backendGoNumericOptions,
+	operation *backendOperationIR,
+	result int,
+) (backendValueID, bool) {
+	count, ok := backendGoNumericReturnCountForOptions(ir, options, operation)
 	if !ok || result < 0 || result >= count {
 		return invalidBackendValueID, false
 	}
@@ -112,15 +145,80 @@ func backendGoNumericReturnValue(
 	if id := backendOperationUse(operation, register); ir.validBackendValue(id) {
 		return id, true
 	}
+	if producer, direct := backendGoNumericOpenDirectTailCall(ir, options, operation); direct {
+		for _, definition := range producer.defs {
+			if definition.register == register {
+				return definition.value, ir.validBackendValue(definition.value)
+			}
+		}
+		return invalidBackendValueID, false
+	}
 	if operation.op != opReturn || operation.returnCount >= 0 || result != count-1 || operation.pc <= 0 {
 		return invalidBackendValueID, false
 	}
 	producer := &ir.ops[operation.pc-1]
-	if !backendGoNumericFixedVarargSelect(ir, fixedVarargCount, producer) ||
+	if !backendGoNumericFixedVarargSelect(ir, options.fixedVarargCount, producer) ||
 		producer.d >= 0 ||
 		len(producer.defs) != 1 ||
 		producer.defs[0].register != register {
 		return invalidBackendValueID, false
 	}
 	return producer.defs[0].value, true
+}
+
+// backendGoNumericOpenDirectTailCall recognizes only the bounded form
+// `return directTarget(...)`. Luau encodes its CALL and RETURN with open-result
+// markers even when the statically bound target has exactly one result.
+func backendGoNumericOpenDirectTailCall(
+	ir *backendProtoIR,
+	options backendGoNumericOptions,
+	operation *backendOperationIR,
+) (*backendOperationIR, bool) {
+	if ir == nil || operation == nil || operation.op != opReturn ||
+		operation.returnCount != -1 || operation.pc <= 0 || int(operation.pc) >= len(ir.ops) {
+		return nil, false
+	}
+	producer := &ir.ops[operation.pc-1]
+	if producer.op != opCall || producer.pc+1 != operation.pc ||
+		producer.callResults != -1 || producer.a != operation.a {
+		return nil, false
+	}
+	target, ok := backendGoNumericDirectTarget(options, producer)
+	if !ok {
+		return nil, false
+	}
+	argumentCount, argsOK := backendGoNumericArgumentCount(target.ir, target.fixedVarargCount)
+	resultCount, resultsOK := backendGoNumericFixedResultCountFor(target.ir, target.fixedVarargCount)
+	if !argsOK || !resultsOK || resultCount != 1 ||
+		producer.callArgCount != int32(argumentCount) {
+		return nil, false
+	}
+	definitions := 0
+	for _, definition := range producer.defs {
+		if definition.register == producer.a && ir.validBackendValue(definition.value) {
+			definitions++
+		}
+	}
+	return producer, definitions == 1
+}
+
+func backendGoNumericEffectiveCallResultCount(
+	ir *backendProtoIR,
+	options backendGoNumericOptions,
+	operation *backendOperationIR,
+) (int, bool) {
+	if ir == nil || operation == nil || (operation.op != opCall && operation.op != opCallLocalOne) {
+		return 0, false
+	}
+	if operation.callResults >= 0 {
+		return int(operation.callResults), true
+	}
+	if operation.op != opCall {
+		return 0, false
+	}
+	if operation.pc < 0 || int(operation.pc+1) >= len(ir.ops) {
+		return 0, false
+	}
+	producer, ok := backendGoNumericOpenDirectTailCall(ir, options, &ir.ops[operation.pc+1])
+	return 1, ok && producer == operation
 }

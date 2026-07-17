@@ -44,24 +44,12 @@ func backendGeneratedComponentChurn(p0 float64) (float64, bool) {
 	var v291 float64
 	var v295 float64
 	var v323 float64
-	var vp323 bool
-	_ = v323
-	_ = vp323
 	var v356 float64
 	var v363 float64
-	var vp363 bool
-	_ = v363
-	_ = vp363
 	var v396 float64
 	var v403 float64
-	var vp403 bool
-	_ = v403
-	_ = vp403
 	var v436 float64
 	var v443 float64
-	var vp443 bool
-	_ = v443
-	_ = vp443
 	var v476 float64
 	var v483 float64
 	var v485 float64
@@ -1426,7 +1414,7 @@ b19:
 	v601 = v48
 	v602 = math.Float64frombits(0x3ff0000000000000)
 	v603 = 0
-	if v602 >= 1 && v602 <= 4 && v602 == math.Trunc(v602) {
+	if v602 >= 1 && v602 <= float64(4) && v602 == math.Trunc(v602) {
 		v603 = v602
 	}
 	if v603 < 1 || v603 > 4 {
@@ -1458,23 +1446,18 @@ b19:
 	goto b20
 b20:
 	v323 = v605
-	vp323 = vp605
 	v356 = v601
 	goto b22
 b21:
 	v606 = math.Float64frombits(0x0000000000000000)
 	v323 = v606
-	vp323 = true
 	v356 = v601
 	goto b22
 b22:
-	if !vp323 {
-		return 0, false
-	}
 	v607 = v356 + v323
 	v608 = math.Float64frombits(0x4000000000000000)
 	v609 = 0
-	if v608 >= 1 && v608 <= 4 && v608 == math.Trunc(v608) {
+	if v608 >= 1 && v608 <= float64(4) && v608 == math.Trunc(v608) {
 		v609 = v608
 	}
 	if v609 < 1 || v609 > 4 {
@@ -1506,23 +1489,18 @@ b22:
 	goto b23
 b23:
 	v363 = v611
-	vp363 = vp611
 	v396 = v607
 	goto b25
 b24:
 	v612 = math.Float64frombits(0x0000000000000000)
 	v363 = v612
-	vp363 = true
 	v396 = v607
 	goto b25
 b25:
-	if !vp363 {
-		return 0, false
-	}
 	v613 = v396 + v363
 	v614 = math.Float64frombits(0x4008000000000000)
 	v615 = 0
-	if v614 >= 1 && v614 <= 4 && v614 == math.Trunc(v614) {
+	if v614 >= 1 && v614 <= float64(4) && v614 == math.Trunc(v614) {
 		v615 = v614
 	}
 	if v615 < 1 || v615 > 4 {
@@ -1554,23 +1532,18 @@ b25:
 	goto b26
 b26:
 	v403 = v617
-	vp403 = vp617
 	v436 = v613
 	goto b28
 b27:
 	v618 = math.Float64frombits(0x0000000000000000)
 	v403 = v618
-	vp403 = true
 	v436 = v613
 	goto b28
 b28:
-	if !vp403 {
-		return 0, false
-	}
 	v619 = v436 + v403
 	v620 = math.Float64frombits(0x4010000000000000)
 	v621 = 0
-	if v620 >= 1 && v620 <= 4 && v620 == math.Trunc(v620) {
+	if v620 >= 1 && v620 <= float64(4) && v620 == math.Trunc(v620) {
 		v621 = v620
 	}
 	if v621 < 1 || v621 > 4 {
@@ -1602,19 +1575,14 @@ b28:
 	goto b29
 b29:
 	v443 = v623
-	vp443 = vp623
 	v476 = v619
 	goto b31
 b30:
 	v624 = math.Float64frombits(0x0000000000000000)
 	v443 = v624
-	vp443 = true
 	v476 = v619
 	goto b31
 b31:
-	if !vp443 {
-		return 0, false
-	}
 	v625 = v476 + v443
 	return v625, true
 }
@@ -1659,24 +1627,12 @@ func backendGeneratedComponentChurnPreparedFixtureBody(context machinePreparedCo
 	var v291 float64
 	var v295 float64
 	var v323 float64
-	var vp323 bool
-	_ = v323
-	_ = vp323
 	var v356 float64
 	var v363 float64
-	var vp363 bool
-	_ = v363
-	_ = vp363
 	var v396 float64
 	var v403 float64
-	var vp403 bool
-	_ = v403
-	_ = vp403
 	var v436 float64
 	var v443 float64
-	var vp443 bool
-	_ = v443
-	_ = vp443
 	var v476 float64
 	var v483 float64
 	var v485 float64
@@ -3041,7 +2997,7 @@ b19:
 	v601 = v48
 	v602 = math.Float64frombits(0x3ff0000000000000)
 	v603 = 0
-	if v602 >= 1 && v602 <= 4 && v602 == math.Trunc(v602) {
+	if v602 >= 1 && v602 <= float64(4) && v602 == math.Trunc(v602) {
 		v603 = v602
 	}
 	if v603 < 1 || v603 > 4 {
@@ -3073,23 +3029,18 @@ b19:
 	goto b20
 b20:
 	v323 = v605
-	vp323 = vp605
 	v356 = v601
 	goto b22
 b21:
 	v606 = math.Float64frombits(0x0000000000000000)
 	v323 = v606
-	vp323 = true
 	v356 = v601
 	goto b22
 b22:
-	if !vp323 {
-		return machinePreparedReplayEntry()
-	}
 	v607 = v356 + v323
 	v608 = math.Float64frombits(0x4000000000000000)
 	v609 = 0
-	if v608 >= 1 && v608 <= 4 && v608 == math.Trunc(v608) {
+	if v608 >= 1 && v608 <= float64(4) && v608 == math.Trunc(v608) {
 		v609 = v608
 	}
 	if v609 < 1 || v609 > 4 {
@@ -3121,23 +3072,18 @@ b22:
 	goto b23
 b23:
 	v363 = v611
-	vp363 = vp611
 	v396 = v607
 	goto b25
 b24:
 	v612 = math.Float64frombits(0x0000000000000000)
 	v363 = v612
-	vp363 = true
 	v396 = v607
 	goto b25
 b25:
-	if !vp363 {
-		return machinePreparedReplayEntry()
-	}
 	v613 = v396 + v363
 	v614 = math.Float64frombits(0x4008000000000000)
 	v615 = 0
-	if v614 >= 1 && v614 <= 4 && v614 == math.Trunc(v614) {
+	if v614 >= 1 && v614 <= float64(4) && v614 == math.Trunc(v614) {
 		v615 = v614
 	}
 	if v615 < 1 || v615 > 4 {
@@ -3169,23 +3115,18 @@ b25:
 	goto b26
 b26:
 	v403 = v617
-	vp403 = vp617
 	v436 = v613
 	goto b28
 b27:
 	v618 = math.Float64frombits(0x0000000000000000)
 	v403 = v618
-	vp403 = true
 	v436 = v613
 	goto b28
 b28:
-	if !vp403 {
-		return machinePreparedReplayEntry()
-	}
 	v619 = v436 + v403
 	v620 = math.Float64frombits(0x4010000000000000)
 	v621 = 0
-	if v620 >= 1 && v620 <= 4 && v620 == math.Trunc(v620) {
+	if v620 >= 1 && v620 <= float64(4) && v620 == math.Trunc(v620) {
 		v621 = v620
 	}
 	if v621 < 1 || v621 > 4 {
@@ -3217,26 +3158,14 @@ b28:
 	goto b29
 b29:
 	v443 = v623
-	vp443 = vp623
 	v476 = v619
 	goto b31
 b30:
 	v624 = math.Float64frombits(0x0000000000000000)
 	v443 = v624
-	vp443 = true
 	v476 = v619
 	goto b31
 b31:
-	if !vp443 {
-		exit := context.replayBeforeOperation(199, 2)
-		if vp443 {
-			context.spillNumber(0, 2, v443)
-		} else {
-			context.spillNil(0, 2)
-		}
-		context.spillNumber(1, 35, v476)
-		return exit
-	}
 	v625 = v476 + v443
 	return machinePreparedReturnOneNumber(v625)
 }

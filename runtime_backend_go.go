@@ -112,7 +112,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	if options.coroutineTarget && options.preparedFunctionName != "" {
 		return nil, fmt.Errorf("emit backend Go numeric proof: coroutine target cannot be a prepared entry")
 	}
-	resultCount, ok := backendGoNumericFixedResultCountFor(ir, options.fixedVarargCount)
+	resultCount, ok := backendGoNumericFixedResultCountForOptions(ir, options)
 	if !ok {
 		return nil, fmt.Errorf("emit backend Go numeric proof: function has no bounded fixed result shape")
 	}
@@ -144,7 +144,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 	if err != nil {
 		return nil, err
 	}
-	resultTypes, err := backendGoNumericResultTypes(ir, plan, options.fixedVarargCount)
+	resultTypes, err := backendGoNumericResultTypes(ir, plan, options)
 	if err != nil {
 		return nil, err
 	}
@@ -981,14 +981,15 @@ func buildBackendGoNumericPlan(ir *backendProtoIR, options backendGoNumericOptio
 					}
 				case opCall:
 					if backendGoNumericScalarReplacedCall(ir, options, operation) {
+						resultCount, _ := backendGoNumericEffectiveCallResultCount(ir, options, operation)
 						if value.register >= operation.a &&
-							value.register < operation.a+operation.callResults {
+							value.register < operation.a+int32(resultCount) {
 							tags = backendGoDirectTargetResultTag(
 								options,
 								operation,
 								int(value.register-operation.a),
 							)
-						} else if source, ok := backendGoBorrowedCallSource(ir, operation, value.register); ok {
+						} else if source, ok := backendGoBorrowedCallSource(ir, operation, int32(resultCount), value.register); ok {
 							tags = plan.tags[source-1]
 						}
 					}
@@ -1407,7 +1408,8 @@ func backendGoNumericScalarReplacedCall(
 	}
 	switch operation.op {
 	case opCall:
-		if operation.callArgCount < 0 || operation.callResults < 2 {
+		if operation.callArgCount < 0 ||
+			operation.callResults >= 0 && operation.callResults < 2 {
 			return false
 		}
 	case opCallLocalOne:
@@ -1426,7 +1428,8 @@ func backendGoNumericScalarReplacedCall(
 		return false
 	}
 	resultCount, ok := backendGoNumericFixedResultCountFor(target.ir, target.fixedVarargCount)
-	if !ok || operation.callResults != int32(resultCount) {
+	effectiveResultCount, effectiveOK := backendGoNumericEffectiveCallResultCount(ir, options, operation)
+	if !ok || !effectiveOK || effectiveResultCount != resultCount {
 		return false
 	}
 	valueID := backendOperationUse(operation, operation.b)
@@ -1456,10 +1459,11 @@ func backendGoNumericScalarReplacedCall(
 func backendGoBorrowedCallSource(
 	ir *backendProtoIR,
 	operation *backendOperationIR,
+	resultCount int32,
 	register int32,
 ) (backendValueID, bool) {
 	if ir == nil || operation == nil ||
-		register < operation.a+operation.callResults ||
+		register < operation.a+resultCount ||
 		register < 0 || register >= int32(ir.registers) {
 		return invalidBackendValueID, false
 	}
@@ -2315,9 +2319,10 @@ func verifyBackendGoNumericOperation(
 		}
 		argumentCount, argsOK := backendGoNumericArgumentCount(target.ir, target.fixedVarargCount)
 		resultCount, resultsOK := backendGoNumericFixedResultCountFor(target.ir, target.fixedVarargCount)
+		effectiveResultCount, effectiveOK := backendGoNumericEffectiveCallResultCount(ir, options, operation)
 		if !argsOK || !resultsOK ||
 			operation.callArgCount != int32(argumentCount) ||
-			operation.callResults != int32(resultCount) {
+			!effectiveOK || effectiveResultCount != resultCount {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has unsupported fixed-result call shape", operation.pc)
 		}
 		parameterTags, parametersOK := backendGoNumericParameterTags(target.ir, target.fixedVarargCount)
@@ -2329,7 +2334,7 @@ func verifyBackendGoNumericOperation(
 				return err
 			}
 		}
-		if len(target.ir.upvalues) != 0 {
+		if len(target.ir.upvalues) != 0 && !target.selfRecursive {
 			captured, capturedOK := plan.captured.call(operation)
 			if !capturedOK || len(captured.callerFields) == 0 {
 				return fmt.Errorf("emit backend Go numeric proof: PC %d has no explicit captured-record ownership", operation.pc)
@@ -2340,7 +2345,7 @@ func verifyBackendGoNumericOperation(
 				}
 			}
 		}
-		for register := operation.a; register < operation.a+operation.callResults; register++ {
+		for register := operation.a; register < operation.a+int32(effectiveResultCount); register++ {
 			found := false
 			for _, definition := range operation.defs {
 				if definition.register != register {
@@ -2365,13 +2370,13 @@ func verifyBackendGoNumericOperation(
 		}
 		for _, definition := range operation.defs {
 			if definition.register >= operation.a &&
-				definition.register < operation.a+operation.callResults {
+				definition.register < operation.a+int32(effectiveResultCount) {
 				continue
 			}
 			if !plan.used[definition.value-1] {
 				continue
 			}
-			source, sourceOK := backendGoBorrowedCallSource(ir, operation, definition.register)
+			source, sourceOK := backendGoBorrowedCallSource(ir, operation, int32(effectiveResultCount), definition.register)
 			if !sourceOK || plan.tags[definition.value-1] != plan.tags[source-1] {
 				return fmt.Errorf("emit backend Go numeric proof: PC %d uses unsupported borrowed call suffix register %d", operation.pc, definition.register)
 			}
@@ -2542,13 +2547,13 @@ func verifyBackendGoNumericOperation(
 		}
 		return nil
 	case opReturn:
-		resultCount, ok := backendGoNumericFixedResultCountFor(ir, options.fixedVarargCount)
-		operationResultCount, operationOK := backendGoNumericReturnCount(ir, options.fixedVarargCount, operation)
+		resultCount, ok := backendGoNumericFixedResultCountForOptions(ir, options)
+		operationResultCount, operationOK := backendGoNumericReturnCountForOptions(ir, options, operation)
 		if !ok || !operationOK || operationResultCount != resultCount {
 			return fmt.Errorf("emit backend Go numeric proof: PC %d has inconsistent fixed result count %d", operation.pc, operation.returnCount)
 		}
 		for result := 0; result < operationResultCount; result++ {
-			id, valueOK := backendGoNumericReturnValue(ir, options.fixedVarargCount, operation, result)
+			id, valueOK := backendGoNumericReturnValueForOptions(ir, options, operation, result)
 			if !valueOK {
 				return fmt.Errorf("emit backend Go numeric proof: PC %d has no return result %d", operation.pc, result)
 			}
@@ -2638,9 +2643,9 @@ func backendGoNumericTypeForValue(plan backendGoNumericPlan, id backendValueID) 
 func backendGoNumericResultTypes(
 	ir *backendProtoIR,
 	plan backendGoNumericPlan,
-	fixedVarargCount int,
+	options backendGoNumericOptions,
 ) ([]string, error) {
-	resultCount, ok := backendGoNumericFixedResultCountFor(ir, fixedVarargCount)
+	resultCount, ok := backendGoNumericFixedResultCountForOptions(ir, options)
 	if !ok {
 		return nil, fmt.Errorf("emit backend Go numeric proof: function has no fixed result types")
 	}
@@ -2651,12 +2656,12 @@ func backendGoNumericResultTypes(
 		if operation.op != opReturnOne && operation.op != opReturn {
 			continue
 		}
-		count, countOK := backendGoNumericReturnCount(ir, fixedVarargCount, operation)
+		count, countOK := backendGoNumericReturnCountForOptions(ir, options, operation)
 		if !countOK || count != resultCount {
 			return nil, fmt.Errorf("emit backend Go numeric proof: PC %d changes fixed result count", operation.pc)
 		}
 		for result := 0; result < resultCount; result++ {
-			id, valueOK := backendGoNumericReturnValue(ir, fixedVarargCount, operation, result)
+			id, valueOK := backendGoNumericReturnValueForOptions(ir, options, operation, result)
 			if !valueOK {
 				return nil, fmt.Errorf("emit backend Go numeric proof: PC %d has no result %d value", operation.pc, result)
 			}
@@ -3471,7 +3476,13 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 				)
 			}
 		}
-		for result := int32(0); result < operation.callResults; result++ {
+		resultCount, resultCountOK := backendGoNumericEffectiveCallResultCount(
+			emitter.ir, emitter.options, operation,
+		)
+		if !resultCountOK {
+			return false, fmt.Errorf("emit backend Go numeric proof: PC %d has no bounded call result shape", operation.pc)
+		}
+		for result := int32(0); result < int32(resultCount); result++ {
 			if result != 0 {
 				emitter.body.WriteString(", ")
 			}
@@ -3516,7 +3527,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			if !emitter.plan.used[borrowed.value-1] {
 				continue
 			}
-			source, sourceOK := backendGoBorrowedCallSource(emitter.ir, operation, borrowed.register)
+			source, sourceOK := backendGoBorrowedCallSource(
+				emitter.ir, operation, int32(resultCount), borrowed.register,
+			)
 			if !sourceOK {
 				continue
 			}
@@ -3708,9 +3721,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			)
 		}
 	case opReturnOne, opReturn:
-		resultCount, ok := backendGoNumericReturnCount(
+		resultCount, ok := backendGoNumericReturnCountForOptions(
 			emitter.ir,
-			emitter.options.fixedVarargCount,
+			emitter.options,
 			operation,
 		)
 		if !ok {
@@ -3718,9 +3731,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		}
 		results := make([]backendValueID, resultCount)
 		for result := 0; result < resultCount; result++ {
-			value, valueOK := backendGoNumericReturnValue(
+			value, valueOK := backendGoNumericReturnValueForOptions(
 				emitter.ir,
-				emitter.options.fixedVarargCount,
+				emitter.options,
 				operation,
 				result,
 			)

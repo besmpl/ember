@@ -710,7 +710,7 @@ b10:
 		}
 	}
 	v490 = 0
-	if v489 >= 1 && v489 <= 9 && v489 == math.Trunc(v489) {
+	if v489 >= 1 && v489 <= float64(9) && v489 == math.Trunc(v489) {
 		v490 = v489
 	}
 	if v490 < 1 || v490 > 9 {
@@ -889,7 +889,7 @@ b17:
 b18:
 	v510 = math.Float64frombits(0x4008000000000000)
 	v511 = 0
-	if v510 >= 1 && v510 <= 9 && v510 == math.Trunc(v510) {
+	if v510 >= 1 && v510 <= float64(9) && v510 == math.Trunc(v510) {
 		v511 = v510
 	}
 	if v511 < 1 || v511 > 9 {
@@ -899,7 +899,7 @@ b18:
 	v513 = v512 + math.Float64frombits(0x4010000000000000)
 	v515 = math.Float64frombits(0x4008000000000000)
 	v516 = 0
-	if v515 >= 1 && v515 <= 9 && v515 == math.Trunc(v515) {
+	if v515 >= 1 && v515 <= float64(9) && v515 == math.Trunc(v515) {
 		v516 = v515
 	}
 	if v516 < 1 || v516 > 9 {
@@ -908,7 +908,7 @@ b18:
 	ra1_1[int(v516)-1] = v513
 	v517 = math.Float64frombits(0x4014000000000000)
 	v518 = 0
-	if v517 >= 1 && v517 <= 9 && v517 == math.Trunc(v517) {
+	if v517 >= 1 && v517 <= float64(9) && v517 == math.Trunc(v517) {
 		v518 = v517
 	}
 	if v518 < 1 || v518 > 9 {
@@ -918,7 +918,7 @@ b18:
 	v520 = v519 + math.Float64frombits(0x4000000000000000)
 	v522 = math.Float64frombits(0x4014000000000000)
 	v523 = 0
-	if v522 >= 1 && v522 <= 9 && v522 == math.Trunc(v522) {
+	if v522 >= 1 && v522 <= float64(9) && v522 == math.Trunc(v522) {
 		v523 = v522
 	}
 	if v523 < 1 || v523 > 9 {
@@ -1686,7 +1686,7 @@ b10:
 		}
 	}
 	v490 = 0
-	if v489 >= 1 && v489 <= 9 && v489 == math.Trunc(v489) {
+	if v489 >= 1 && v489 <= float64(9) && v489 == math.Trunc(v489) {
 		v490 = v489
 	}
 	if v490 < 1 || v490 > 9 {
@@ -1865,7 +1865,7 @@ b17:
 b18:
 	v510 = math.Float64frombits(0x4008000000000000)
 	v511 = 0
-	if v510 >= 1 && v510 <= 9 && v510 == math.Trunc(v510) {
+	if v510 >= 1 && v510 <= float64(9) && v510 == math.Trunc(v510) {
 		v511 = v510
 	}
 	if v511 < 1 || v511 > 9 {
@@ -1875,7 +1875,7 @@ b18:
 	v513 = v512 + math.Float64frombits(0x4010000000000000)
 	v515 = math.Float64frombits(0x4008000000000000)
 	v516 = 0
-	if v515 >= 1 && v515 <= 9 && v515 == math.Trunc(v515) {
+	if v515 >= 1 && v515 <= float64(9) && v515 == math.Trunc(v515) {
 		v516 = v515
 	}
 	if v516 < 1 || v516 > 9 {
@@ -1884,7 +1884,7 @@ b18:
 	ra1_1[int(v516)-1] = v513
 	v517 = math.Float64frombits(0x4014000000000000)
 	v518 = 0
-	if v517 >= 1 && v517 <= 9 && v517 == math.Trunc(v517) {
+	if v517 >= 1 && v517 <= float64(9) && v517 == math.Trunc(v517) {
 		v518 = v517
 	}
 	if v518 < 1 || v518 > 9 {
@@ -1894,7 +1894,7 @@ b18:
 	v520 = v519 + math.Float64frombits(0x4000000000000000)
 	v522 = math.Float64frombits(0x4014000000000000)
 	v523 = 0
-	if v522 >= 1 && v522 <= 9 && v522 == math.Trunc(v522) {
+	if v522 >= 1 && v522 <= float64(9) && v522 == math.Trunc(v522) {
 		v523 = v522
 	}
 	if v523 < 1 || v523 > 9 {
