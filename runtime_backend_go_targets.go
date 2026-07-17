@@ -1,10 +1,13 @@
 package ember
 
 import (
+	"errors"
 	"fmt"
 	"go/token"
 	"strconv"
 )
+
+var errBackendGoUnboundedCapturedTableFields = errors.New("unbounded captured table fields")
 
 // inferBackendGoNumericTargets derives the target ABI facts needed by the Go
 // lowerer from verified module IR. Callers choose the candidate Proto IDs; this
@@ -24,6 +27,7 @@ func inferBackendGoNumericTargets(
 	}
 	targets := make([]backendGoNumericTarget, len(irs))
 	seen := make([]bool, len(irs))
+	captureErrors := make([]error, len(irs))
 	for _, protoID := range protoIDs {
 		if protoID < 0 || int(protoID) >= len(irs) || irs[protoID] == nil {
 			return nil, fmt.Errorf("infer backend Go targets: invalid Proto %d", protoID)
@@ -39,15 +43,10 @@ func inferBackendGoNumericTargets(
 			return nil, err
 		}
 		capturedTableFields, err := inferBackendGoCapturedTableFields(irs, protoID, ir)
-		if err != nil {
+		if err != nil && !errors.Is(err, errBackendGoUnboundedCapturedTableFields) {
 			return nil, err
 		}
-		receiverTables, err := inferBackendGoReceiverTableCount(
-			irs, protoID, ir, fixedVarargCount, capturedTableFields,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("infer backend Go targets: Proto %d: %w", protoID, err)
-		}
+		captureErrors[protoID] = err
 
 		target := backendGoNumericTarget{
 			ir:                  ir,
@@ -56,14 +55,104 @@ func inferBackendGoNumericTargets(
 			fixedVarargCount:    fixedVarargCount,
 			capturedTableFields: capturedTableFields,
 		}
+		targets[protoID] = target
+	}
+	for _, protoID := range protoIDs {
+		if captureErrors[protoID] == nil {
+			continue
+		}
+		fields, ok := inferBackendGoMutationMetatableFields(irs, protoIDs, targets, protoID)
+		if !ok {
+			return nil, captureErrors[protoID]
+		}
+		targets[protoID].capturedTableFields = fields
+	}
+	for _, protoID := range protoIDs {
+		target := &targets[protoID]
+		receiverTables, err := inferBackendGoReceiverTableCount(
+			irs, protoID, target.ir, target.fixedVarargCount, target.capturedTableFields,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("infer backend Go targets: Proto %d: %w", protoID, err)
+		}
 		if receiverTables == 1 {
 			target.receiverTable = true
 		} else if receiverTables > 1 {
 			target.receiverTables = receiverTables
 		}
-		targets[protoID] = target
 	}
 	return targets, nil
+}
+
+func inferBackendGoMutationMetatableFields(
+	irs []*backendProtoIR,
+	protoIDs []int32,
+	targets []backendGoNumericTarget,
+	protoID int32,
+) (map[int32][]backendGoCapturedTableField, bool) {
+	target := targets[protoID]
+	upvalues := backendGoCapturedRecordUpvalues(target.ir)
+	if len(upvalues) == 0 || inferBackendGoProtocolReceiverTableCount(irs, protoID) != 1 {
+		return nil, false
+	}
+	candidates := make([][]backendGoCapturedTableField, 0)
+	for _, candidateID := range protoIDs {
+		candidate := targets[candidateID]
+		for upvalue := 0; upvalue < len(candidate.ir.upvalues); upvalue++ {
+			fields := candidate.capturedTableFields[int32(upvalue)]
+			if len(fields) == 0 || backendGoCapturedFieldSlicePresent(candidates, fields) {
+				continue
+			}
+			candidates = append(candidates, append([]backendGoCapturedTableField(nil), fields...))
+		}
+	}
+	var resolved map[int32][]backendGoCapturedTableField
+	for _, candidate := range candidates {
+		hypothesis := make(map[int32][]backendGoCapturedTableField, len(upvalues))
+		for upvalue := 0; upvalue < len(target.ir.upvalues); upvalue++ {
+			if len(upvalues[int32(upvalue)]) != 0 {
+				hypothesis[int32(upvalue)] = append([]backendGoCapturedTableField(nil), candidate...)
+			}
+		}
+		provisional := append([]backendGoNumericTarget(nil), targets...)
+		provisional[protoID].capturedTableFields = hypothesis
+		for _, candidateID := range protoIDs {
+			if inferBackendGoProtocolReceiverTableCount(irs, candidateID) == 1 {
+				provisional[candidateID].receiverTable = true
+			}
+		}
+		proved := false
+		for _, caller := range irs {
+			plan := discoverBackendGoMutationMetatable(caller, backendGoNumericOptions{
+				directTargets: provisional,
+			})
+			if plan.enabled && plan.newIndexTarget.ir == target.ir &&
+				backendGoCapturedFieldSlicesEqual(plan.fields, candidate) {
+				proved = true
+				break
+			}
+		}
+		if !proved {
+			continue
+		}
+		if resolved != nil {
+			return nil, false
+		}
+		resolved = hypothesis
+	}
+	return resolved, resolved != nil
+}
+
+func backendGoCapturedFieldSlicePresent(
+	candidates [][]backendGoCapturedTableField,
+	fields []backendGoCapturedTableField,
+) bool {
+	for _, candidate := range candidates {
+		if backendGoCapturedFieldSlicesEqual(candidate, fields) {
+			return true
+		}
+	}
+	return false
 }
 
 func inferBackendGoReceiverTableCount(
@@ -182,7 +271,10 @@ func inferBackendGoCapturedTableFields(
 			}
 			candidate, ok := backendGoCapturedTableFieldsForClosure(caller, target, closure)
 			if !ok {
-				return nil, fmt.Errorf("infer backend Go targets: Proto %d closure at PC %d has unbounded captured table fields", protoID, closure.pc)
+				return nil, fmt.Errorf(
+					"infer backend Go targets: Proto %d closure at PC %d: %w",
+					protoID, closure.pc, errBackendGoUnboundedCapturedTableFields,
+				)
 			}
 			if len(candidate) == 0 {
 				continue

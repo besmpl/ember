@@ -2,6 +2,7 @@ package ember
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -73,10 +74,35 @@ func TestInferBackendGoNumericTargetsRejectsAmbiguousVarargArity(t *testing.T) {
 	}
 }
 
-func TestInferBackendGoNumericTargetsRejectsUnboundedCapturedFields(t *testing.T) {
+func TestInferBackendGoNumericTargetsInfersMutationMetatableSharedFields(t *testing.T) {
 	irs := backendDirtyMetatableProofIRs(t, backendDirtyMetatableProofSource)
-	if _, err := inferBackendGoNumericTargets(irs, []int32{3}, "backendGeneratedModule0"); err == nil {
-		t.Fatal("inferred captured fields for a dirty table without a proved shared field domain")
+	targets, err := inferBackendGoNumericTargets(irs, []int32{2, 3}, "backendGeneratedModule0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := backendDirtyMetatableProofTargets(irs)
+	for _, protoID := range []int32{2, 3} {
+		if !backendGoCapturedTableFieldsEqual(targets[protoID].capturedTableFields, want[protoID].capturedTableFields) {
+			t.Fatalf("Proto %d captured fields = %#v, want %#v", protoID, targets[protoID].capturedTableFields, want[protoID].capturedTableFields)
+		}
+	}
+}
+
+func TestInferBackendGoNumericTargetsRejectsUnprovedMutationFieldDomain(t *testing.T) {
+	for name, source := range map[string]string{
+		"mixed sibling domain": strings.Replace(
+			backendDirtyMetatableProofSource, "flags = 1", "flags = true", 1,
+		),
+		"broken protocol link": strings.Replace(
+			backendDirtyMetatableProofSource, "__newindex =", "__call =", 1,
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			irs := backendDirtyMetatableProofIRs(t, source)
+			if _, err := inferBackendGoNumericTargets(irs, []int32{2, 3}, "backendGeneratedModule0"); err == nil {
+				t.Fatal("inferred dirty mutation fields without a proved shared domain")
+			}
+		})
 	}
 }
 

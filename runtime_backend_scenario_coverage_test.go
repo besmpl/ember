@@ -56,7 +56,7 @@ func TestBackendGoExactBenchmarkCorporaCanGenerate(t *testing.T) {
 				case "sparse_grid_neighbors":
 					backendScenarioSparseGridCanGenerate(t, source)
 				case "dirty_metatable_writes":
-					backendDirtyMetatableGeneratedSources(t, source)
+					backendExactDirtyMetatableCanGenerate(t, source)
 				case "command_vararg_router":
 					backendScenarioCommandRouterCanGenerate(t, source)
 				case "closures_upvalues":
@@ -154,6 +154,15 @@ func backendExactSignalBusCanGenerate(t *testing.T, source string) {
 	t.Helper()
 	irs := backendSignalBusProofIRs(t, source)
 	targets := backendExactInferredTargets(t, irs, 2, 3)
+	backendExactTargetCanGenerate(t, targets[3], targets)
+	backendExactCallerCanGenerate(t, irs[1], targets)
+}
+
+func backendExactDirtyMetatableCanGenerate(t *testing.T, source string) {
+	t.Helper()
+	irs := backendDirtyMetatableProofIRs(t, source)
+	targets := backendExactInferredTargets(t, irs, 2, 3)
+	backendExactTargetCanGenerate(t, targets[2], targets)
 	backendExactTargetCanGenerate(t, targets[3], targets)
 	backendExactCallerCanGenerate(t, irs[1], targets)
 }
