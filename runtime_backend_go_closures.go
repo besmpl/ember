@@ -1,18 +1,27 @@
 package ember
 
+import "math"
+
 type backendGoScalarClosureFactory struct {
-	closureProto    int32
-	captureArgument int32
+	closureProto int32
+	captures     []backendGoScalarClosureCapture
+}
+
+type backendGoScalarClosureCapture struct {
+	argument int32
+	constant float64
 }
 
 type backendGoScalarClosureValue struct {
-	cell        int
+	cellStart   int
+	cellCount   int
 	targetProto int32
 }
 
 type backendGoScalarClosureCall struct {
-	cell   int
-	target backendGoNumericTarget
+	cellStart int
+	cellCount int
+	target    backendGoNumericTarget
 }
 
 type backendGoScalarClosurePlan struct {
@@ -36,7 +45,7 @@ func analyzeBackendGoScalarClosures(
 		scalarClosures: make([]bool, len(ir.values)),
 	}
 	for valueIndex := range plan.values {
-		plan.values[valueIndex].cell = -1
+		plan.values[valueIndex].cellStart = -1
 		plan.values[valueIndex].targetProto = -1
 	}
 	for pc := range ir.ops {
@@ -52,29 +61,39 @@ func analyzeBackendGoScalarClosures(
 		factory, ok := backendGoNumericClosureFactory(target.ir, options.directTargets)
 		if !ok ||
 			operation.callArgCount != int32(target.ir.params) ||
-			factory.captureArgument < 0 ||
-			factory.captureArgument >= operation.callArgCount ||
+			len(factory.captures) == 0 ||
 			len(operation.defs) != 1 {
 			continue
 		}
+		capturesValid := true
+		for _, capture := range factory.captures {
+			if capture.argument >= operation.callArgCount {
+				capturesValid = false
+				break
+			}
+		}
+		if !capturesValid {
+			continue
+		}
 		cell := plan.cellCount
-		plan.cellCount++
+		plan.cellCount += len(factory.captures)
 		plan.factoriesByPC[operation.pc] = factory
 		plan.factoryCells[operation.pc] = cell
 		definition := operation.defs[0].value
 		plan.values[definition-1] = backendGoScalarClosureValue{
-			cell:        cell,
+			cellStart:   cell,
+			cellCount:   len(factory.captures),
 			targetProto: factory.closureProto,
 		}
 	}
 	for {
 		changed := false
 		for valueIndex := range ir.values {
-			if plan.values[valueIndex].cell >= 0 {
+			if plan.values[valueIndex].cellStart >= 0 {
 				continue
 			}
 			value := &ir.values[valueIndex]
-			candidate := backendGoScalarClosureValue{cell: -1, targetProto: -1}
+			candidate := backendGoScalarClosureValue{cellStart: -1, targetProto: -1}
 			switch value.kind {
 			case backendValueOperation:
 				operation := &ir.ops[value.pc]
@@ -95,10 +114,10 @@ func analyzeBackendGoScalarClosures(
 						continue
 					}
 					current := plan.values[input-1]
-					if current.cell < 0 {
+					if current.cellStart < 0 {
 						continue
 					}
-					if candidate.cell >= 0 && candidate != current {
+					if candidate.cellStart >= 0 && candidate != current {
 						return backendGoScalarClosurePlan{}, nil
 					}
 					candidate = current
@@ -106,7 +125,7 @@ func analyzeBackendGoScalarClosures(
 			default:
 				continue
 			}
-			if candidate.cell >= 0 {
+			if candidate.cellStart >= 0 {
 				plan.values[valueIndex] = candidate
 				changed = true
 			}
@@ -117,7 +136,7 @@ func analyzeBackendGoScalarClosures(
 	}
 	for valueIndex := range ir.values {
 		value := &ir.values[valueIndex]
-		if value.kind != backendValuePhi || plan.values[valueIndex].cell < 0 {
+		if value.kind != backendValuePhi || plan.values[valueIndex].cellStart < 0 {
 			continue
 		}
 		block := &ir.blocks[value.block]
@@ -125,7 +144,7 @@ func analyzeBackendGoScalarClosures(
 		for inputIndex, input := range phi.inputs {
 			if !ir.blocks[block.predecessors[inputIndex]].reachable ||
 				!ir.validBackendValue(input) ||
-				plan.values[input-1].cell < 0 {
+				plan.values[input-1].cellStart < 0 {
 				continue
 			}
 			if plan.values[input-1] != plan.values[valueIndex] {
@@ -134,7 +153,7 @@ func analyzeBackendGoScalarClosures(
 		}
 	}
 	for valueIndex, closure := range plan.values {
-		if closure.cell >= 0 {
+		if closure.cellStart >= 0 {
 			plan.scalarClosures[valueIndex] = true
 		}
 	}
@@ -148,7 +167,7 @@ func analyzeBackendGoScalarClosures(
 			continue
 		}
 		closure := plan.values[callee-1]
-		if closure.cell < 0 ||
+		if closure.cellStart < 0 ||
 			closure.targetProto < 0 ||
 			int(closure.targetProto) >= len(options.directTargets) {
 			continue
@@ -157,14 +176,15 @@ func analyzeBackendGoScalarClosures(
 		if target.ir == nil ||
 			target.functionName == "" ||
 			target.ir.variadic ||
-			len(target.ir.upvalues) != 1 ||
+			len(target.ir.upvalues) != closure.cellCount ||
 			operation.callArgCount != int32(target.ir.params) ||
 			operation.callArgCount < 0 {
 			continue
 		}
 		plan.closureCalls[operation.pc] = backendGoScalarClosureCall{
-			cell:   closure.cell,
-			target: target,
+			cellStart: closure.cellStart,
+			cellCount: closure.cellCount,
+			target:    target,
 		}
 	}
 	return plan, nil
@@ -182,7 +202,7 @@ func backendGoNumericClosureFactory(
 	for pc := range ir.ops {
 		operation := &ir.ops[pc]
 		switch operation.op {
-		case opMove:
+		case opMove, opLoadConst:
 		case opClosure:
 			if closure != nil || len(operation.defs) != 1 {
 				return backendGoScalarClosureFactory{}, false
@@ -208,23 +228,51 @@ func backendGoNumericClosureFactory(
 	if target.ir == nil ||
 		target.functionName == "" ||
 		target.ir.variadic ||
-		len(target.ir.upvalues) != 1 {
+		len(target.ir.upvalues) == 0 {
 		return backendGoScalarClosureFactory{}, false
 	}
-	upvalue := target.ir.upvalues[0]
-	if upvalue.local == 0 || upvalue.copy != 0 ||
-		upvalue.index >= uint32(ir.registers) {
-		return backendGoScalarClosureFactory{}, false
-	}
-	captured := backendValueBeforeOperation(ir, closure, int32(upvalue.index))
-	parameter, ok := backendGoNumericParameterSource(ir, captured, nil)
-	if !ok {
-		return backendGoScalarClosureFactory{}, false
+	captures := make([]backendGoScalarClosureCapture, 0, len(target.ir.upvalues))
+	for _, upvalue := range target.ir.upvalues {
+		if upvalue.local == 0 || upvalue.index >= uint32(ir.registers) {
+			return backendGoScalarClosureFactory{}, false
+		}
+		captured := backendValueBeforeOperation(ir, closure, int32(upvalue.index))
+		if parameter, ok := backendGoNumericParameterSource(ir, captured, nil); ok {
+			captures = append(captures, backendGoScalarClosureCapture{argument: int32(parameter)})
+			continue
+		}
+		constant, ok := backendGoNumericStaticValue(ir, captured)
+		if !ok {
+			return backendGoScalarClosureFactory{}, false
+		}
+		captures = append(captures, backendGoScalarClosureCapture{argument: -1, constant: constant})
 	}
 	return backendGoScalarClosureFactory{
-		closureProto:    closure.targetProto,
-		captureArgument: int32(parameter),
+		closureProto: closure.targetProto,
+		captures:     captures,
 	}, true
+}
+
+func backendGoNumericStaticValue(ir *backendProtoIR, id backendValueID) (float64, bool) {
+	if !ir.validBackendValue(id) {
+		return 0, false
+	}
+	value := &ir.values[id-1]
+	if value.kind != backendValueOperation || value.pc < 0 || int(value.pc) >= len(ir.ops) {
+		return 0, false
+	}
+	operation := &ir.ops[value.pc]
+	if operation.op == opMove {
+		return backendGoNumericStaticValue(ir, backendOperationUse(operation, operation.b))
+	}
+	if operation.op != opLoadConst || operation.b < 0 || int(operation.b) >= len(ir.constants) {
+		return 0, false
+	}
+	constant := ir.constants[operation.b]
+	if constant.kind != NumberKind {
+		return 0, false
+	}
+	return math.Float64frombits(constant.bits), true
 }
 
 func backendGoNumericParameterSource(
@@ -292,4 +340,12 @@ func (plan backendGoScalarClosurePlan) scalarValue(id backendValueID) bool {
 	return id != invalidBackendValueID &&
 		int(id) <= len(plan.scalarClosures) &&
 		plan.scalarClosures[id-1]
+}
+
+func (plan backendGoScalarClosurePlan) value(id backendValueID) (backendGoScalarClosureValue, bool) {
+	if id == invalidBackendValueID || int(id) > len(plan.values) {
+		return backendGoScalarClosureValue{}, false
+	}
+	value := plan.values[id-1]
+	return value, value.cellStart >= 0
 }

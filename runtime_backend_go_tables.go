@@ -46,16 +46,33 @@ type backendGoScalarTablePlan struct {
 	iteratorValues []bool
 	iteratorByPC   map[int32]int
 	externalRoot   backendValueID
+	externalRoots  []backendValueID
 	partial        bool
 }
 
 func analyzeBackendGoScalarTables(ir *backendProtoIR, receiverTable bool) (backendGoScalarTablePlan, error) {
-	return analyzeBackendGoScalarTablesExcluding(ir, receiverTable, nil)
+	return analyzeBackendGoScalarTablesExcludingCount(
+		ir,
+		backendGoNumericReceiverTableCount(receiverTable, 0),
+		nil,
+	)
 }
 
 func analyzeBackendGoScalarTablesExcluding(
 	ir *backendProtoIR,
 	receiverTable bool,
+	excluded map[backendValueID]bool,
+) (backendGoScalarTablePlan, error) {
+	return analyzeBackendGoScalarTablesExcludingCount(
+		ir,
+		backendGoNumericReceiverTableCount(receiverTable, 0),
+		excluded,
+	)
+}
+
+func analyzeBackendGoScalarTablesExcludingCount(
+	ir *backendProtoIR,
+	receiverTables int,
 	excluded map[backendValueID]bool,
 ) (backendGoScalarTablePlan, error) {
 	if ir == nil {
@@ -83,14 +100,19 @@ func analyzeBackendGoScalarTablesExcluding(
 		}
 		plan.roots[valueIndex] = root
 	}
-	if receiverTable {
-		if ir.params == 0 || len(ir.initial) == 0 {
+	if receiverTables > 0 {
+		if receiverTables > ir.params || receiverTables > len(ir.initial) {
 			return backendGoScalarTablePlan{}, nil
 		}
 		plan.externalRoot = ir.initial[0]
-		plan.roots[plan.externalRoot-1] = plan.externalRoot
+		for parameter := 0; parameter < receiverTables; parameter++ {
+			root := ir.initial[parameter]
+			plan.externalRoots = append(plan.externalRoots, root)
+			plan.roots[root-1] = root
+		}
 	} else if capturedRoots := backendGoCapturedRecordRoots(ir); len(capturedRoots) != 0 {
 		plan.externalRoot = capturedRoots[0]
+		plan.externalRoots = append(plan.externalRoots, plan.externalRoot)
 		for _, root := range capturedRoots {
 			plan.roots[root-1] = plan.externalRoot
 		}
@@ -272,9 +294,23 @@ func analyzeBackendGoScalarTablesExcluding(
 				if !ok {
 					return backendGoScalarTablePlan{}, nil
 				}
-				fieldIndex, exists := plan.index[backendGoScalarFieldKey{table: table, name: name}]
+				key := backendGoScalarFieldKey{table: table, name: name}
+				fieldIndex, exists := plan.index[key]
 				if !exists {
-					continue
+					if receiverTables == 0 || !plan.isExternalRoot(table) || len(operation.defs) != 1 {
+						continue
+					}
+					tags := backendGoScalarRequiredTags(ir, operation.defs[0].value, nil)
+					if tags == 0 || tags&^(backendTagNumber|backendTagBool|backendTagString) != 0 {
+						return backendGoScalarTablePlan{}, nil
+					}
+					fieldIndex = len(plan.fields)
+					plan.index[key] = fieldIndex
+					plan.fields = append(plan.fields, backendGoScalarField{
+						key: key, isIndex: backendGoStringFieldIsIndex(ir, operation.access.constant),
+						tags: tags, methodProto: -1,
+					})
+					changed = true
 				}
 				child := plan.fields[fieldIndex].child
 				if child == invalidBackendValueID {
@@ -572,6 +608,62 @@ func analyzeBackendGoScalarTablesExcluding(
 		}
 	}
 	return plan, nil
+}
+
+func (plan backendGoScalarTablePlan) isExternalRoot(root backendValueID) bool {
+	for _, external := range plan.externalRoots {
+		if root == external {
+			return true
+		}
+	}
+	return false
+}
+
+func backendGoScalarRequiredTags(
+	ir *backendProtoIR,
+	id backendValueID,
+	seen map[backendValueID]bool,
+) backendTagMask {
+	if !ir.validBackendValue(id) {
+		return 0
+	}
+	if seen == nil {
+		seen = make(map[backendValueID]bool)
+	}
+	if seen[id] {
+		return 0
+	}
+	seen[id] = true
+	var tags backendTagMask
+	for pc := range ir.ops {
+		operation := &ir.ops[pc]
+		for _, use := range operation.uses {
+			if use.value != id {
+				continue
+			}
+			switch operation.op {
+			case opMove:
+				for _, definition := range operation.defs {
+					tags |= backendGoScalarRequiredTags(ir, definition.value, seen)
+				}
+			case opAdd, opSub, opMul, opDiv, opMod, opIDiv, opPow,
+				opAddK, opSubK, opMulK, opDivK, opModK, opIDivK,
+				opNeg, opLess, opLessEqual, opGreater, opGreaterEqual,
+				opJumpIfNotLess, opJumpIfNotGreater, opJumpIfLess, opJumpIfGreater,
+				opJumpIfNotLessK, opJumpIfNotGreaterK, opJumpIfLessK, opJumpIfGreaterK,
+				opNumericForCheck, opNumericForLoop:
+				tags |= backendTagNumber
+			case opJumpIfNotEqualK:
+				if operation.b >= 0 && int(operation.b) < len(ir.constants) {
+					tags |= backendTagForValueKind(ir.constants[operation.b].kind)
+				}
+			}
+		}
+	}
+	if tags&(tags-1) != 0 {
+		return 0
+	}
+	return tags
 }
 
 func backendGoCapturedRecordRoots(ir *backendProtoIR) []backendValueID {

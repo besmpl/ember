@@ -910,6 +910,36 @@ The retained path has moved beyond the original starting state:
   dynamic call, or VM dispatch. Twenty of the 25 Scenario kernels now emit
   through the compiler proof route.
 
+- The finite closure-environment slice lowers the real nested-Proto
+  `signal_bus_callbacks` pressure as one parameterized program. Five closure
+  instances retain ten independent numeric environment cells across three
+  fixed callback buckets. Dynamic string bucket selection, bucket iteration,
+  and callback selection become verified numeric switches and one fixed
+  iterator counter; an observed callback index, bucket mutation, closure
+  escape, or mixed callback target fails closed. Each callback copies its two
+  upvalues and five reachable receiver fields to typed scratch, calls one
+  generated handler, and commits both environment and receiver mutations only
+  after success. Generated Go, prepared owner, generic Machine, and the
+  independent interpreter agree across negative, ordinary, and large seeds;
+  private-function renaming is byte-identical, controlled execution remains
+  generic, invalid prepared arguments replay canonical entry with the same
+  error, owner table/string counts stay unchanged, and direct/prepared paths
+  allocate zero when warmed. The direct kernel has a five-sample median of
+  about 2.434 microseconds (2.407-2.535 microseconds observed), while the
+  prepared owner has a median of about 2.539 microseconds (2.536-2.548
+  microseconds observed), versus about 368.5 microseconds through generic
+  Machine. The pinned Luau `-O2 -g0` corpus batch has a five-sample median of
+  about 29.21 microseconds per call, including its cold first process sample,
+  making prepared about `0.087x` Luau; this is exploratory evidence, not the
+  required `guest_batch_v1` capture. Deterministic generated source is 17,080
+  bytes across caller and target. Linked ARM64 is 1,952 bytes for the direct
+  caller, 2,064 bytes for the prepared body, 128 bytes for the wrapper, and 256
+  bytes for the shared handler. Caller and prepared code contain five static
+  handler call sites plus cold bounds/stack-growth helpers and no opcode,
+  descriptor, Machine table, runtime string, closure allocation, upvalue
+  lookup, dynamic call, or VM dispatch. Twenty-one of the 25 Scenario kernels
+  now emit through the compiler proof route.
+
 This is proof of the selected architecture and one required call shape, not
 proof of P2 coverage, the representative private gate, a public API, or final
 all-37 parity. General non-dense iteration, general table mutation, general

@@ -2692,6 +2692,113 @@ func TestMachinePreparedEventDispatchOwnsFiniteCallSetAndReplaysExactly(t *testi
 	}
 }
 
+func TestMachinePreparedSignalBusOwnsClosureEnvironmentsAndReplaysEntry(t *testing.T) {
+	image := machinePreparedTestImageForSource(t, backendSignalBusProofSource)
+	calls := 0
+	var observed machinePreparedExit
+	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
+		calls++
+		observed = backendGeneratedSignalBusPreparedFixture(context)
+		return observed
+	})
+	prepared, err := newMachineOwnerWithPrepared(image, program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generic, err := newMachineOwner(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := prepared.close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := generic.close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	preparedArg, err := prepared.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericArg, err := generic.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tableCount := len(prepared.tables.tables)
+	stringCount := len(prepared.strings.records)
+	want, ok := backendGeneratedSignalBus(29)
+	if !ok {
+		t.Fatal("generated signal-bus oracle exited")
+	}
+	runMachinePreparedTestProto(t, prepared, 1, []slot{preparedArg}, nil)
+	runMachinePreparedTestProto(t, generic, 1, []slot{genericArg}, nil)
+	assertMachineOwnerNumberResult(t, prepared, want)
+	assertMachineOwnerNumberResult(t, generic, want)
+	if calls != 1 || observed.kind != machinePreparedExitReturnOneNumber {
+		t.Fatalf("prepared signal-bus success = calls %d exit %#v", calls, observed)
+	}
+	if len(prepared.tables.tables) != tableCount || len(prepared.strings.records) != stringCount {
+		t.Fatalf(
+			"prepared signal bus materialized owner objects: tables %d/%d strings %d/%d",
+			len(prepared.tables.tables), tableCount, len(prepared.strings.records), stringCount,
+		)
+	}
+
+	preparedController, err := newExecutionController(context.Background(), ExecutionLimits{MaxInstructions: 10_000_000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericController, err := newExecutionController(context.Background(), ExecutionLimits{MaxInstructions: 10_000_000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runMachinePreparedTestProto(t, prepared, 1, []slot{preparedArg}, preparedController)
+	runMachinePreparedTestProto(t, generic, 1, []slot{genericArg}, genericController)
+	if calls != 1 || preparedController.remaining != genericController.remaining {
+		t.Fatalf(
+			"controlled signal-bus fallback = calls %d remaining %d/%d",
+			calls, preparedController.remaining, genericController.remaining,
+		)
+	}
+
+	preparedText, err := prepared.importValueStopped(StringValue("not a number"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericText, err := generic.importValueStopped(StringValue("not a number"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedErr := runMachinePreparedTestProtoError(t, prepared, 1, []slot{preparedText}, nil)
+	genericErr := runMachinePreparedTestProtoError(t, generic, 1, []slot{genericText}, nil)
+	if calls != 2 || observed.kind != machinePreparedExitReplayEntry {
+		t.Fatalf("prepared signal-bus entry fallback = calls %d exit %#v", calls, observed)
+	}
+	if preparedErr == nil || genericErr == nil || preparedErr.Error() != genericErr.Error() {
+		t.Fatalf("prepared/generic signal-bus replay errors = %v / %v", preparedErr, genericErr)
+	}
+
+	if !checkptrInstrumentedTest() {
+		lease, err := prepared.beginRun()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var runErr error
+		allocations := testing.AllocsPerRun(1000, func() {
+			runErr = prepared.executeStopped(0, 1, machineClosureHandle{}, []slot{preparedArg}, nil, machineRunEffects{})
+		})
+		lease.end()
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if allocations != 0 {
+			t.Fatalf("prepared signal-bus owner allocations = %v, want 0", allocations)
+		}
+	}
+}
+
 func TestMachinePreparedPathRelaxationAvoidsRuntimeTables(t *testing.T) {
 	image := machinePreparedTestImageForSource(t, backendPathRelaxationProofSource)
 	calls := 0
@@ -4345,6 +4452,17 @@ func BenchmarkMachinePreparedEventDispatchOwner(b *testing.B) {
 
 func BenchmarkMachineGenericEventDispatchOwner(b *testing.B) {
 	image := machinePreparedBenchmarkImage(b, backendEventDispatchProofSource)
+	benchmarkMachineNumericOwner(b, image, nil)
+}
+
+func BenchmarkMachinePreparedSignalBusOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendSignalBusProofSource)
+	program := machinePreparedBenchmarkProgram(b, image, backendGeneratedSignalBusPreparedFixture)
+	benchmarkMachineNumericOwner(b, image, program)
+}
+
+func BenchmarkMachineGenericSignalBusOwner(b *testing.B) {
+	image := machinePreparedBenchmarkImage(b, backendSignalBusProofSource)
 	benchmarkMachineNumericOwner(b, image, nil)
 }
 
