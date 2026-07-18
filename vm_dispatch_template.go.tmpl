@@ -22,7 +22,6 @@ func runDirectFrameProductionLoop(thread *vmThread, frameRef **vmFrame, instrume
 	}
 	rootDepth := len(thread.frames) - 1
 	rootRecordDepth := len(thread.frameRecords)
-	rootFixedSelfDepth := len(thread.fixedSelfContinuations)
 	if frame.recordBaseDepth >= 0 {
 		rootRecordDepth = frame.recordBaseDepth
 	}
@@ -36,7 +35,6 @@ func runDirectFrameProductionLoop(thread *vmThread, frameRef **vmFrame, instrume
 		constantNumbers   []float64
 		constantNumberOK  []bool
 		registers         []Value
-		shadowWords       []directShadowWord
 		picCounts         *directFramePICCounts
 		runLineHook       bool
 		runCountHook      bool
@@ -45,11 +43,9 @@ func runDirectFrameProductionLoop(thread *vmThread, frameRef **vmFrame, instrume
 
 reload:
 	*frameRef = frame
-	directChildActive = len(thread.frames)-1 > rootDepth || len(thread.frameRecords) > rootRecordDepth || len(thread.fixedSelfContinuations) > rootFixedSelfDepth
-	if proto != frame.proto {
-		functionInstance = nil
-	}
+	directChildActive = len(thread.frames)-1 > rootDepth || len(thread.frameRecords) > rootRecordDepth
 	proto = frame.proto
+	functionInstance = nil
 	if proto.verifyErr != nil {
 		return directFrameExitAt(frame, frame.pc, directFrameFail(fmt.Errorf("run: invalid prototype: %w", proto.verifyErr)))
 	}
@@ -60,21 +56,6 @@ reload:
 	constantNumbers = proto.constantNumbers
 	constantNumberOK = proto.constantNumberOK
 	registers = frame.registers
-	if !instrumented {
-		shadowWords = nil
-		if functionInstance == nil || functionInstance.shadow.words == nil {
-			shadowInstance, shadowErr := thread.executionShadowFunctionInstance(proto)
-			if shadowErr != nil {
-				return directFrameExitAt(frame, frame.pc, directFrameFail(shadowErr))
-			}
-			if shadowInstance != nil {
-				functionInstance = shadowInstance
-			}
-		}
-		if functionInstance != nil && functionInstance.shadow.words != nil {
-			shadowWords = functionInstance.shadow.words
-		}
-	}
 	pc = frame.pc
 	picCounts = nil
 	if instrumented {
@@ -92,13 +73,6 @@ reload:
 		}
 		raw := words[pc]
 		op := opcode(uint8(raw) & uint8(wordcodeOpcodeMask))
-		if !instrumented {
-			if shadowWords != nil {
-				shadowWord := shadowWords[pc]
-				raw = shadowWord.raw()
-				op = opcode(shadowWord.handler())
-			}
-		}
 		// Verified wordcode lets the production loop decode the common primary
 		// fields directly. Opcode-specific wide, signed, AUX, and jump operands
 		// are decoded in their cases below, avoiding metadata dispatch on every
@@ -130,7 +104,6 @@ reload:
 				}
 			}
 		}
-	adaptiveDispatch:
 		switch op {
 		case opLoadConst:
 			b = int(uint16(raw >> 16))
@@ -1363,142 +1336,6 @@ reload:
 			}
 			registers[a] = BoolValue(valueNumber(left) >= valueNumber(right))
 
-		case directHandlerNumericForTraceOpcode:
-			adaptiveWord := functionInstance.shadow.words[pc]
-			cacheIndex, cacheOK := adaptiveWord.cacheIndex()
-			if !cacheOK || cacheIndex < 0 || cacheIndex >= len(functionInstance.shadow.caches) {
-				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("numeric trace at word %d has no cache cell", pc)))
-			}
-			tracePlan, planOK := functionInstance.shadow.numericTraceAt(pc)
-			if !planOK {
-				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("numeric trace at word %d has no execution plan", pc)))
-			}
-			tracePC, errorPC, traceErr, guardOK := runDirectNumericTrace(
-				registers,
-				constantNumbers,
-				functionInstance.shadow.caches[cacheIndex],
-				tracePlan,
-				window,
-			)
-			if !guardOK {
-				functionInstance.shadow.words[pc] = adaptiveWord.withHandler(directHandlerID(opNumericForCheck))
-				op = opNumericForCheck
-				goto adaptiveDispatch
-			}
-			functionInstance.shadow.words[pc] = adaptiveWord.incrementCounter()
-			if traceErr != nil {
-				return directFrameExitAt(frame, errorPC, directFrameFail(traceErr))
-			}
-			pc = tracePC
-			continue
-
-		case directHandlerFixedSelfCallOpcode:
-			adaptiveWord := functionInstance.shadow.words[pc]
-			d := int(int32(words[nextWord]))
-			returnPC := nextWord + 1
-			callee, err := frame.upvalue(b)
-			if err != nil {
-				return directFrameExitAt(frame, pc, directFrameFail(err))
-			}
-			closure, closureOK := callee.scriptFunction()
-			argCount, borrowHint := decodeFixedCallCount(d)
-			if !closureOK || !borrowHint || closure != frame.currentClosure {
-				functionInstance.shadow.words[pc] = adaptiveWord.withHandler(directHandlerID(opCallUpvalueOne))
-				op = opCallUpvalueOne
-				goto adaptiveDispatch
-			}
-			if record, entered := thread.enterRecordOnlyFixedSelfCallOne(closure, frame, returnPC, c, argCount, a); entered {
-				functionInstance.shadow.words[pc] = adaptiveWord.incrementCounter()
-				thread.pushFrameRecord(record)
-				directChildActive = true
-				goto reload
-			}
-			functionInstance.shadow.words[pc] = adaptiveWord.withHandler(directHandlerID(opCallUpvalueOne))
-			op = opCallUpvalueOne
-			goto adaptiveDispatch
-
-		case directHandlerFixedSelfCallTraceOpcode:
-			adaptiveWord := functionInstance.shadow.words[pc]
-			cacheIndex, cacheOK := adaptiveWord.cacheIndex()
-			if !cacheOK || cacheIndex < 0 || cacheIndex >= len(functionInstance.shadow.caches) {
-				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("fixed self-call trace at word %d has no cache cell", pc)))
-			}
-			tracePlan, planOK := functionInstance.shadow.fixedSelfCallTraceAt(pc, functionInstance.shadow.caches[cacheIndex])
-			if !planOK {
-				return directFrameExitAt(frame, pc, directFrameFail(fmt.Errorf("fixed self-call trace at word %d has no execution plan", pc)))
-			}
-			entered := thread.enterDirectFixedSelfCallTrace(frame, tracePlan, constantNumbers)
-			if !entered {
-				functionInstance.shadow.words[pc] = adaptiveWord.withHandler(directHandlerID(opMove))
-				op = opMove
-				goto adaptiveDispatch
-			}
-			functionInstance.shadow.words[pc] = adaptiveWord.incrementCounter()
-			directChildActive = true
-			goto reload
-
-		case directHandlerCompactSelfFunctionOpcode:
-			compactPC := pc
-			adaptiveWord := functionInstance.shadow.words[compactPC]
-			plan, planOK := functionInstance.shadow.compactSelfFunctionAt(compactPC)
-			if !planOK {
-				return directFrameExitAt(frame, compactPC, directFrameFail(fmt.Errorf("compact self-function at word %d has no execution plan", compactPC)))
-			}
-			value, returnPC, guardOK := thread.runDirectCompactSelfFunction(frame, plan, constantNumbers)
-			if !guardOK {
-				op = opcode(uint8(adaptiveWord.raw()) & uint8(wordcodeOpcodeMask))
-				functionInstance.shadow.words[compactPC] = adaptiveWord.withHandler(directHandlerID(op))
-				raw = adaptiveWord.raw()
-				goto adaptiveDispatch
-			}
-			functionInstance.shadow.words[compactPC] = adaptiveWord.incrementCounter()
-			registers = frame.registers
-			registers[0] = value
-			a = 0
-			pc = returnPC
-			frame.pc = returnPC
-			op = opReturnOne
-			goto adaptiveDispatch
-
-		case directHandlerCompactLeafCallOpcode:
-			adaptiveWord := functionInstance.shadow.words[pc]
-			aux := words[nextWord]
-			c = int(int16(uint16(aux)))
-			nextWord++
-			argCount, borrowHint := decodeFixedCallCount(c)
-			if borrowHint {
-				callee := registers[b]
-				if value, ok := thread.runDirectCompactLeafCall(frame, callee, registers[b+1:b+1+argCount]); ok {
-					directFrameApplySingleCallIslandResult(frame, registers, a, 1, value)
-					functionInstance.shadow.words[pc] = adaptiveWord.incrementCounter()
-					break
-				}
-			}
-			functionInstance.shadow.words[pc] = adaptiveWord.withHandler(directHandlerID(opCallOne))
-			op = opCallOne
-			goto adaptiveDispatch
-
-		case directHandlerCompactLoopOpcode:
-			compactPC := pc
-			adaptiveWord := functionInstance.shadow.words[compactPC]
-			plan, planOK := functionInstance.shadow.compactLoopAt(compactPC)
-			if !planOK {
-				return directFrameExitAt(frame, compactPC, directFrameFail(fmt.Errorf("compact loop at word %d has no execution plan", compactPC)))
-			}
-			nextPC, errorPC, loopErr, guardOK := thread.runDirectCompactLoop(frame, functionInstance, plan)
-			if !guardOK {
-				generic := opcode(uint8(adaptiveWord.raw()) & uint8(wordcodeOpcodeMask))
-				functionInstance.shadow.words[compactPC] = adaptiveWord.withHandler(directHandlerID(generic))
-				pc = nextPC
-				continue
-			}
-			functionInstance.shadow.words[compactPC] = adaptiveWord.incrementCounter()
-			if loopErr != nil {
-				return directFrameExitAt(frame, errorPC, directFrameFail(loopErr))
-			}
-			pc = nextPC
-			continue
-
 		case opNumericForCheck:
 			d := int(int32(words[nextWord]))
 			nextWord++
@@ -1884,15 +1721,6 @@ reload:
 				registers[a] = result
 				break
 			}
-			if !instrumented {
-				if borrowHint {
-					if value, ok := thread.runDirectCompactLeafCall(frame, callee, registers[b+1:b+1+argCount]); ok {
-						directFrameApplySingleCallIslandResult(frame, registers, a, 1, value)
-						observeDirectCompactLeafCall(functionInstance, pc)
-						break
-					}
-				}
-			}
 			if borrowHint {
 				if closure, ok := callee.scriptFunction(); ok {
 					if record, entered := thread.maybeEnterRecordOnlyFixedCall(closure, frame, nextWord, b+1, argCount, vmResultDestination{register: a, count: 1}); entered {
@@ -1972,7 +1800,6 @@ reload:
 			continue
 
 		case opCallUpvalueOne:
-			callPC := pc
 			d := int(int32(words[nextWord]))
 			nextWord++
 			callee, err := frame.upvalue(b)
@@ -1989,11 +1816,7 @@ reload:
 			var value Value
 			var callErr error
 			if borrowHint {
-				selfCall := closure == frame.currentClosure
 				if record, entered := thread.maybeEnterRecordOnlyFixedCall(closure, frame, nextWord, c, argCount, vmResultDestination{register: a, count: 1}); entered {
-					if selfCall {
-						observeDirectFixedSelfCall(functionInstance, callPC)
-					}
 					thread.pushFrameRecord(record)
 					directChildActive = true
 					goto reload
@@ -2131,18 +1954,6 @@ reload:
 			return exit
 
 		case opReturnOne:
-			if directChildActive && len(thread.fixedSelfContinuations) > rootFixedSelfDepth && thread.resumeDirectCompactSelfCall(frame, registers[a]) {
-				goto reload
-			}
-			if directChildActive && len(thread.frameRecords) > rootRecordDepth {
-				record := thread.frameRecords[len(thread.frameRecords)-1]
-				if record.flags&vmFrameRecordFlagFixedSelfCallTrace != 0 && thread.resumeDirectFixedSelfCallTrace(frame, record, registers[a]) {
-					goto reload
-				}
-				if record.flags&vmFrameRecordFlagFixedSelfCall != 0 && thread.resumeRecordOnlyFixedSelfCallOne(&frame, record, registers[a]) {
-					goto reload
-				}
-			}
 			if directChildActive && thread.resumeRecordOnlyFixedCall(rootRecordDepth, &frame, a, 1, nil) {
 				goto reload
 			}

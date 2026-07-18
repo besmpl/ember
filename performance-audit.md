@@ -64,6 +64,65 @@ specialization and bounded fusion for the first proof; it rejects another
 cache-only campaign. ADR 0009 records the candidate cutoff, semantic seam,
 sealed holdout, and mandatory deletion gate.
 
+## Generated adaptive-superword reversal
+
+The bounded candidate reached exact commit
+`d6b984eb0964d5385bdb779222d42722183c4cca`. Its two schema-v2 all-37
+captures share the baseline environment hash above and preserve exact result,
+workload, and program hashes.
+
+| Capture | Capture ID | Bound directory hash | `slopes.tsv` SHA-256 |
+| --- | --- | --- | --- |
+| P4 A | `c95bac9df569e808ef67e721fb930573afa9f9dbaf47c3b80ac869f9ec22346a` | `30478eacdf097472c19f2b762e26be28afbc57046dac800cfe2e793c40587337` | `c0e7fdb90f432f1680af6655f56060fb3ec8dcf7635d364c2604a84ea93a8a0e` |
+| P4 B | `7727c35163b1cf6c8db5b00516730434478c57d005df80f68a3ed8e73980b53f` | `c50a6931be9751d96c171894ef109e9d05a4bd203c0e37617a70820c57942a6b` | `ccd4f46898a54eab47d736c073446181c8a17781bfeeb59612ffe2b3d2bf8652` |
+
+The strict early-gate rows are:
+
+| Family | P4 A median / p90 | P4 B median / p90 | D3 decision |
+| --- | ---: | ---: | --- |
+| arithmetic | 1.669x / 1.684x | 1.671x / 1.684x | pass |
+| recursion | 1.600x / 1.602x | 1.598x / 1.605x | pass |
+| arrays | 2.836x / 3.006x | 1.827x / 1.908x | fail A |
+| event dispatch | 2.265x / 3.378x | 2.050x / 2.131x | fail A and B |
+
+The pair therefore fails the fixed `<=2.00x` four-family requirement. It
+also fails the transfer guard: a comparable P4-B-to-baseline-B comparison has
+26 of 37 rows more than 5% slower, led by `while_branching` at +22.5% and
+`inventory_value` at +20.5%. The candidate all-37 ratio geomeans remain
+5.441x and 5.392x. Targeted fusion moved scalar winners dramatically without
+becoming a generally faster dynamic VM.
+
+The lifecycle mismatch explains the misleading early proxy. A warmed public
+benchmark measures one guest call at a time; the acceptance slope measures up
+to 1,000 guest invocations inside one owner-bound dynamic program. A
+test-only guest-batch benchmark on the candidate measured:
+
+| Workload / batch | ns/op range (five 2-second samples) | B/op | allocs/op |
+| --- | ---: | ---: | ---: |
+| `array_ops`, 1,000 guests | 5,732,354-5,785,337 | 2,000,178 | 2,004 |
+| `event_dispatch`, 1,000 guests | 17,731,759-21,359,275 | 2,464,183-2,464,190 | 14,004 |
+
+The retained `BenchmarkRuntimeParityGuestBatchVM` makes this lifecycle visible
+for future candidates without adding production code. The allocation counts
+scale with guest invocations: canonical tables, closures, and backing storage
+still materialize even when dispatch, guards, PIC reads, calls, and loop
+control are fused. GC placement then changes fitted long-batch slopes.
+
+This is the architecture cutoff, not an invitation to tune the corpus.
+Superwords were proven good for scalar dispatch and direct recursion; compact
+pointer-free plans, semantic tiling, owner isolation, and same-PC guard exits
+are transferable. A second semantic switch, generic shadow tax, canonical
+heap-object construction, and increasingly large source-shaped functionlets
+were proven bad. Escape analysis, scalar replacement, typed banks, and
+materializing deoptimization belong to the distinct adaptive-region
+architecture and were outside this candidate by design.
+
+The sealed holdout was not opened because the standard gate had already
+failed. Conditional C1 removed the production shadow wordcode, caches,
+handlers, tilers, and executors. The exact captures remain external evidence;
+the normalized observer and guest-batch benchmark remain test-only. Generic VM
+and prepared-Go behavior are again the only production execution paths.
+
 ## Current baseline
 
 The compact-Machine migration baseline was captured on 2026-07-14 from commit
@@ -246,53 +305,6 @@ sampling, so their low-percentage rankings are directional rather than exact.
 
 This ledger records completed slices only; it is not a final-completion claim.
 The authoritative baseline above remains the implementation-start reference.
-
-### Generated adaptive VM evidence (2026-07-18)
-
-The dynamic experiment now has one generated, workload-independent semantic
-catalog and one owner-local shadow representation. The catalog covers all 64
-generic opcodes, declares 53 per-op specialization slots and one fused numeric
-trace handler under the 96-handler cap, and rejects unknown families, cache
-layouts, fusion names, duplicate entries, and instruction caps outside
-`[1,64]`. Immutable `Proto.words` remains the diagnostic oracle. Mutable
-handler words, six-register guard cells, and fixed-size numeric plans are
-owner-local and contain no semantic object references.
-
-The first numeric slice exposed three distinct results rather than one broad
-"dispatch" conclusion:
-
-| Shape | `arithmetic_for/warm_call`, Apple M1 | Decision |
-| --- | ---: | --- |
-| Generic shadow fetch before specialization | 14.614-15.368 us | Honest 16%-22% substrate tax; specialization must repay it. |
-| Raw-word whole-loop trace | 6.805-7.127 us | Retain the semantic boundary, but repeated decode and safety calls still cost too much. |
-| Unrestricted trace with accounting branched once | 5.207-5.451 us | Retain: an absent controller must remove all per-source accounting calls. |
-| Inline Move+numeric peephole expansion | 8.481-8.833 us | Delete: enlarging the Go interpreter damaged code generation/register pressure despite fewer semantic operations. |
-| Compact load-time micro-op plan with Move+numeric superwords | 4.287-4.896 us, median 4.493 us | Retain provisionally; this is the first shape near the frozen 2x arithmetic cutoff. |
-
-These are exploratory warmed-call samples, not D3 evidence. In particular,
-the exact acceptance environment fixes `GOMAXPROCS=1` and judges fitted
-`guest_batch_v1` slopes; a single-P warmed call still measured
-7.310-7.788 us because it includes the callback boundary. No `<=2x` claim is
-made until clean slope captures pass. The frozen Luau arithmetic slope remains
-about 2.33 us per guest call.
-
-The winning architectural distinction is now evidence-backed: loader work may
-decode and legally tile once into a bounded 184-byte, pointer-free plan, while
-the executor stays small and canonical `Value` registers remain authoritative.
-The losing shape put more recognition and cases inside the hot Go function.
-The retained plan folds only semantic `Move` plus in-place numeric
-constant/unary pairs; it has no source, hash, literal-identity, benchmark, or
-result selector.
-
-Exact-boundary tests compare production and immutable instrumented execution
-at every instruction budget from 1 through 80. They also prove cancellation
-polling inside a fused loop, NaN and nonnumber same-PC dequickening before
-mutation, effectful-loop rejection, owner isolation, pool/collection cleanup,
-and the `4x wordcode + 64 KiB` retained-state cap. The linked production loop
-is 64,064 bytes and the outlined numeric executor is 3,472 bytes in the
-current test binary, below the 96 KiB production-loop ceiling. Arithmetic
-still needs a clean fitted capture; calls, arrays, and event dispatch remain
-unproved, so the four-family retention gate remains open.
 
 | Slice | Commit/evidence | Decision and result |
 | --- | --- | --- |

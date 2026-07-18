@@ -123,111 +123,6 @@ func TestGeneratedDispatchMatchesSemanticSource(t *testing.T) {
 	}
 }
 
-func TestGeneratedDirectSemanticCatalogCoversOpcodeMetadata(t *testing.T) {
-	if directGeneratedHandlerCount > directAdaptiveHandlerCap {
-		t.Fatalf("generated handler count = %d, cap = %d", directGeneratedHandlerCount, directAdaptiveHandlerCap)
-	}
-	if directFusedHandlerCount != 6 ||
-		directHandlerNumericForTrace < directHandlerID(opcodeLimit+directAdaptiveHandlerCount) ||
-		directHandlerFixedSelfCall <= directHandlerNumericForTrace ||
-		directHandlerFixedSelfCallTrace <= directHandlerFixedSelfCall ||
-		directHandlerCompactSelfFunction <= directHandlerFixedSelfCallTrace ||
-		directHandlerCompactLeafCall <= directHandlerCompactSelfFunction ||
-		directHandlerCompactLoop <= directHandlerCompactLeafCall {
-		t.Fatalf("fused handler inventory = numeric:%d self-call:%d call-trace:%d compact-self:%d compact-leaf:%d compact-loop:%d count:%d", directHandlerNumericForTrace, directHandlerFixedSelfCall, directHandlerFixedSelfCallTrace, directHandlerCompactSelfFunction, directHandlerCompactLeafCall, directHandlerCompactLoop, directFusedHandlerCount)
-	}
-	seenSpecialized := make(map[directHandlerID]opcode)
-	for _, op := range allOpcodes {
-		semantic, ok := directSemanticMetadataFor(op)
-		if !ok {
-			t.Fatalf("missing generated semantic metadata for %s", opcodeName(op))
-		}
-		base, _ := opcodeMetadata(op)
-		if semantic.source != op || semantic.genericHandler != directHandlerID(op) {
-			t.Fatalf("%s source/handler = %d/%d", opcodeName(op), semantic.source, semantic.genericHandler)
-		}
-		if semantic.guestCharge != base.machine.guestCharge || semantic.errorClass != base.machine.errorClass {
-			t.Fatalf("%s charge/error metadata drifted", opcodeName(op))
-		}
-		if semantic.effects != base.effects || semantic.wordcode != base.wordcode {
-			t.Fatalf("%s effect/encoding metadata drifted", opcodeName(op))
-		}
-		if semantic.family == directSpecializationNone {
-			if semantic.specializedHandler != directHandlerInvalid {
-				t.Fatalf("%s has no family but handler %d", opcodeName(op), semantic.specializedHandler)
-			}
-			continue
-		}
-		if semantic.specializedHandler < directHandlerID(opcodeLimit) {
-			t.Fatalf("%s specialized handler %d overlaps generic opcode space", opcodeName(op), semantic.specializedHandler)
-		}
-		if previous, duplicate := seenSpecialized[semantic.specializedHandler]; duplicate {
-			t.Fatalf("%s and %s share specialized handler %d", opcodeName(previous), opcodeName(op), semantic.specializedHandler)
-		}
-		seenSpecialized[semantic.specializedHandler] = op
-	}
-	if len(seenSpecialized) != directAdaptiveHandlerCount {
-		t.Fatalf("specialized handlers = %d, declared %d", len(seenSpecialized), directAdaptiveHandlerCount)
-	}
-	if _, ok := directSemanticMetadataFor(opcodeLimit); ok {
-		t.Fatal("semantic metadata accepted opcodeLimit")
-	}
-}
-
-func TestGeneratedDirectSemanticCatalogRejectsMalformedMetadata(t *testing.T) {
-	tests := []struct {
-		name   string
-		mutate func(*[opcodeLimit]directSemanticMetadata)
-		want   string
-	}{
-		{
-			name: "missing entry",
-			mutate: func(table *[opcodeLimit]directSemanticMetadata) {
-				table[opAdd] = directSemanticMetadata{}
-			},
-			want: "is unclassified",
-		},
-		{
-			name: "base metadata drift",
-			mutate: func(table *[opcodeLimit]directSemanticMetadata) {
-				table[opAdd].guestCharge++
-			},
-			want: "charge metadata drifted",
-		},
-		{
-			name: "generic handler drift",
-			mutate: func(table *[opcodeLimit]directSemanticMetadata) {
-				table[opAdd].genericHandler = directHandlerID(opSub)
-			},
-			want: "generic handler",
-		},
-		{
-			name: "duplicate specialized handler",
-			mutate: func(table *[opcodeLimit]directSemanticMetadata) {
-				table[opSub].specializedHandler = table[opAdd].specializedHandler
-			},
-			want: "duplicate specialized handler",
-		},
-		{
-			name: "pure control transfer",
-			mutate: func(table *[opcodeLimit]directSemanticMetadata) {
-				table[opJump].tiling = directTilingPure
-			},
-			want: "pure tiling transfers control",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			table := generatedDirectSemanticMetadata
-			test.mutate(&table)
-			err := validateDirectSemanticMetadata(table)
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("validateDirectSemanticMetadata error = %v, want %q", err, test.want)
-			}
-		})
-	}
-}
-
 func TestVMExecutionDoesNotMaterializePackedInstructions(t *testing.T) {
 	_, testFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -372,7 +267,7 @@ return i
 	}
 }
 
-func TestDirectFrameFunctionInstanceLookupMatchesGeneratedPolicy(t *testing.T) {
+func TestDirectFrameDefersRuntimeFunctionInstanceLookupUntilCacheUse(t *testing.T) {
 	_, testFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
@@ -383,7 +278,6 @@ func TestDirectFrameFunctionInstanceLookupMatchesGeneratedPolicy(t *testing.T) {
 	}
 	text := string(source)
 	for _, name := range []string{"runGeneratedDirectFrameProductionLoop", "runGeneratedDirectFrameInstrumentedLoop"} {
-		production := name == "runGeneratedDirectFrameProductionLoop"
 		start := strings.Index(text, "func "+name)
 		if start < 0 {
 			t.Fatalf("generated dispatch is missing %s", name)
@@ -404,23 +298,11 @@ func TestDirectFrameFunctionInstanceLookupMatchesGeneratedPolicy(t *testing.T) {
 			t.Fatalf("%s is missing reload/dispatch markers", name)
 		}
 		setup := loop[reload : reload+dispatch]
+		if strings.Contains(setup, "thread.functionInstance(proto)") {
+			t.Fatalf("%s eagerly looks up runtime function state on every frame reload", name)
+		}
 		if !strings.Contains(setup, "functionInstance = nil") {
 			t.Fatalf("%s does not reset its lazy runtime function state", name)
-		}
-		if production {
-			if got := strings.Count(setup, "thread.executionShadowFunctionInstance(proto)"); got != 1 {
-				t.Fatalf("%s has %d owner-shadow lookups, want one per reload", name, got)
-			}
-			if !strings.Contains(setup, "shadowWords = nil") || !strings.Contains(loop, "if shadowWords != nil {") {
-				t.Fatalf("%s does not preserve the zero-allocation immutable-wordcode fallback", name)
-			}
-		} else {
-			if strings.Contains(loop, "shadowFunctionInstance") || strings.Contains(loop, "shadowWords") {
-				t.Fatalf("%s retained production shadow policy", name)
-			}
-			if strings.Contains(setup, "thread.functionInstance(proto)") {
-				t.Fatalf("%s eagerly looks up runtime function state on every frame reload", name)
-			}
 		}
 		if got, want := strings.Count(loop, "functionInstance = thread.functionInstance(proto)"), 6; got != want {
 			t.Fatalf("%s has %d lazy runtime function lookups, want %d cache paths", name, got, want)
@@ -435,13 +317,6 @@ func TestDirectFrameFunctionInstanceLookupMatchesGeneratedPolicy(t *testing.T) {
 		}
 		if strings.Contains(dispatchLoop[:opSwitch], "cacheSiteAt(pc)") {
 			t.Fatalf("%s resolves cache metadata before opcode dispatch", name)
-		}
-		if production {
-			for _, marker := range []string{"shadowWord := shadowWords[pc]", "raw = shadowWord.raw()", "op = opcode(shadowWord.handler())"} {
-				if !strings.Contains(dispatchLoop[:opSwitch], marker) {
-					t.Fatalf("%s fetch is missing %q", name, marker)
-				}
-			}
 		}
 		if got, want := strings.Count(loop, "cacheSiteAt(pc)"), 6; got != want {
 			t.Fatalf("%s has %d cache metadata lookups, want %d cache opcode handlers", name, got, want)

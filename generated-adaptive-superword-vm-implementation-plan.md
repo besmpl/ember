@@ -27,7 +27,24 @@ This is not the SSA-region plan: it has no SSA IR/banks, scalar replacement, hot
 ## Outcome
 
 - **Eventual goal:** Dynamic scripts unavailable at Go build time match or beat pinned Luau across all 37 cases while retaining exact Ember production behavior and boundaries.
-- **Current run:** Prove and deliver the generated adaptive superword VM as the strongest genuinely distinct alternative, or delete it when bounded evidence disproves its performance premise.
+- **Current run:** Completed by the C1 deletion path after the bounded P4 evidence disproved the generated-superword performance premise.
+
+### Run result (2026-07-18)
+
+Candidate `d6b984eb` passed exact semantic and lifecycle differentials and
+moved arithmetic and recursion to about 1.60x-1.67x Luau. The two required
+all-37 captures still measured arrays at 2.836x/1.827x and event dispatch at
+2.265x/2.050x. P4-B also regressed 26 of 37 rows by more than 5% against the
+comparable frozen baseline. Guest-batch allocation scaled to about 2.0 MB for
+1,000 array guests and 2.46 MB for 1,000 event guests.
+
+The holdout remained sealed because the standard gate failed first. P5 and P6
+were not run. C1 removed all production adaptive machinery and retained only
+zero-cost audit fixtures. Compact pointer-free plans, semantic tiling,
+owner-local feedback, and pre-mutation same-PC exits are proven transferable;
+generic shadow tax and canonical heap-object construction are the decisive
+limits. Crossing that limit requires escape analysis, scalar replacement, and
+materializing exits—a distinct architecture, not another superword family.
 
 ### Done when
 
@@ -87,6 +104,7 @@ This is not the SSA-region plan: it has no SSA IR/banks, scalar replacement, hot
 - **Trigger:** P3/P4 misses D3, needs identity tuning, exceeds D6, disagrees with holdout, or loses over 5% to an existing eligible path.
 - **Then:** Delete production shadow code/caches, retain only zero-cost audit fixtures, record the failed Go-dispatch premise in the ADR, and compare the still-admissible cutoff without weakening any gate.
 - **Proof:** VM/prepared checks and baseline captures pass; production search finds no adaptive executor/cache remnants; ADR binds the failure.
+- **Result:** Triggered at P4 and executed; ADR 0009 and the performance audit bind the rejected candidate and exact capture pair.
 - **Else:** no work
 
 ## Risks and assumptions

@@ -14,7 +14,6 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
-	"strconv"
 	"strings"
 )
 
@@ -118,20 +117,12 @@ func render() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	semanticSpec, err := parseDispatchSpec(specText, semanticNames)
-	if err != nil {
-		return nil, err
-	}
-	fusionSpec, err := parseFusionSpec(specText)
-	if err != nil {
-		return nil, err
-	}
 	template, err := os.ReadFile(templateFile)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", templateFile, err)
 	}
 	template = bytes.TrimPrefix(template, []byte("package ember\n\n"))
-	if err := verifyTemplateCases(append([]byte("package ember\n\n"), template...), semanticNames, fusionSpec); err != nil {
+	if err := verifyTemplateCases(append([]byte("package ember\n\n"), template...), semanticNames); err != nil {
 		return nil, err
 	}
 
@@ -170,12 +161,6 @@ func render() ([]byte, error) {
 	}
 	output = append(output, importsBlock...)
 	output = append(output, '\n')
-	catalog, err := renderSemanticCatalog(semanticSpec, fusionSpec)
-	if err != nil {
-		return nil, err
-	}
-	output = append(output, catalog...)
-	output = append(output, '\n', '\n')
 	if bytes.Count(production, []byte("func runDirectFrameProductionLoop")) != 1 || bytes.Count(instrumented, []byte("func runDirectFrameProductionLoop")) != 1 {
 		return nil, fmt.Errorf("rendered variants must each contain one canonical loop function")
 	}
@@ -191,425 +176,13 @@ func render() ([]byte, error) {
 	return formatted, nil
 }
 
-type dispatchSpecEntry struct {
-	opcode string
-	family string
-	tiling string
-	cache  string
-}
-
-type fusionSpecEntry struct {
-	name           string
-	family         string
-	instructionCap int
-}
-
-var dispatchSpecializationFamilyNames = []string{
-	"none",
-	"global-read",
-	"field-read",
-	"field-write",
-	"index-read",
-	"index-write",
-	"iteration",
-	"number-binary",
-	"number-constant",
-	"number-unary",
-	"length",
-	"concat",
-	"compare",
-	"numeric-loop",
-	"table-shape",
-	"builtin-call",
-	"truth-branch",
-	"direct-call",
-}
-
-var dispatchTilingPolicyNames = []string{"pure", "guarded", "terminal", "barrier"}
-
-var dispatchCacheLayoutNames = []string{"none", "type", "global", "field", "index", "iteration", "shape", "call"}
-
-var dispatchSpecializationFamilies = dispatchStringSet(dispatchSpecializationFamilyNames)
-
-var dispatchTilingPolicies = dispatchStringSet(dispatchTilingPolicyNames)
-
-var dispatchCacheLayouts = dispatchStringSet(dispatchCacheLayoutNames)
-
-func dispatchStringSet(values []string) map[string]struct{} {
-	set := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		set[value] = struct{}{}
-	}
-	return set
-}
-
-func parseDispatchSpec(source []byte, want []string) ([]dispatchSpecEntry, error) {
-	text, err := rawStringDeclaration(source, "directFrameSemanticSpec")
-	if err != nil {
-		return nil, err
-	}
-	wantSet := make(map[string]struct{}, len(want))
-	for _, opcode := range want {
-		wantSet[opcode] = struct{}{}
-	}
-	seen := make(map[string]struct{}, len(want))
-	entries := make([]dispatchSpecEntry, 0, len(want))
-	for lineNumber, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) != 4 {
-			return nil, fmt.Errorf("%s semantic spec line %d: want opcode family tiling cache", specFile, lineNumber+1)
-		}
-		entry := dispatchSpecEntry{opcode: fields[0], family: fields[1], tiling: fields[2], cache: fields[3]}
-		if _, ok := wantSet[entry.opcode]; !ok {
-			return nil, fmt.Errorf("%s semantic spec line %d: unknown opcode %s", specFile, lineNumber+1, entry.opcode)
-		}
-		if _, ok := seen[entry.opcode]; ok {
-			return nil, fmt.Errorf("%s semantic spec line %d: duplicate %s", specFile, lineNumber+1, entry.opcode)
-		}
-		if _, ok := dispatchSpecializationFamilies[entry.family]; !ok {
-			return nil, fmt.Errorf("%s semantic spec line %d: unknown specialization family %q", specFile, lineNumber+1, entry.family)
-		}
-		if _, ok := dispatchTilingPolicies[entry.tiling]; !ok {
-			return nil, fmt.Errorf("%s semantic spec line %d: unknown tiling policy %q", specFile, lineNumber+1, entry.tiling)
-		}
-		if _, ok := dispatchCacheLayouts[entry.cache]; !ok {
-			return nil, fmt.Errorf("%s semantic spec line %d: unknown cache layout %q", specFile, lineNumber+1, entry.cache)
-		}
-		if (entry.family == "none") != (entry.cache == "none") {
-			return nil, fmt.Errorf("%s semantic spec line %d: specialization family %q and cache layout %q disagree", specFile, lineNumber+1, entry.family, entry.cache)
-		}
-		seen[entry.opcode] = struct{}{}
-		entries = append(entries, entry)
-	}
-	for _, opcode := range want {
-		if _, ok := seen[opcode]; !ok {
-			return nil, fmt.Errorf("%s semantic spec is missing %s", specFile, opcode)
-		}
-	}
-	return entries, nil
-}
-
-var fusionNames = dispatchStringSet([]string{"numeric-for-trace", "fixed-self-call", "fixed-self-call-trace", "compact-self-function", "compact-leaf-call", "compact-loop"})
-
-var fusionFamilyNames = dispatchStringSet([]string{"numeric-loop", "direct-call", "iteration"})
-
-func parseFusionSpec(source []byte) ([]fusionSpecEntry, error) {
-	text, err := rawStringDeclaration(source, "directFrameFusionSpec")
-	if err != nil {
-		return nil, err
-	}
-	seen := make(map[string]struct{})
-	var entries []fusionSpecEntry
-	for lineNumber, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) != 3 {
-			return nil, fmt.Errorf("%s fusion spec line %d: want name family instruction-cap", specFile, lineNumber+1)
-		}
-		entry := fusionSpecEntry{name: fields[0], family: fields[1]}
-		if _, ok := fusionNames[entry.name]; !ok {
-			return nil, fmt.Errorf("%s fusion spec line %d: unknown fusion %q", specFile, lineNumber+1, entry.name)
-		}
-		if _, ok := seen[entry.name]; ok {
-			return nil, fmt.Errorf("%s fusion spec line %d: duplicate fusion %q", specFile, lineNumber+1, entry.name)
-		}
-		if _, ok := fusionFamilyNames[entry.family]; !ok {
-			return nil, fmt.Errorf("%s fusion spec line %d: unknown fusion family %q", specFile, lineNumber+1, entry.family)
-		}
-		entry.instructionCap, err = strconv.Atoi(fields[2])
-		if err != nil || entry.instructionCap < 1 || entry.instructionCap > 64 {
-			return nil, fmt.Errorf("%s fusion spec line %d: instruction cap must be in [1,64]", specFile, lineNumber+1)
-		}
-		seen[entry.name] = struct{}{}
-		entries = append(entries, entry)
-	}
-	return entries, nil
-}
-
-func rawStringDeclaration(source []byte, name string) (string, error) {
-	file, err := parser.ParseFile(token.NewFileSet(), specFile, source, 0)
-	if err != nil {
-		return "", fmt.Errorf("parse %s: %w", specFile, err)
-	}
-	declarations := 0
-	var literal *ast.BasicLit
-	for _, declaration := range file.Decls {
-		gen, ok := declaration.(*ast.GenDecl)
-		if !ok || gen.Tok != token.CONST {
-			continue
-		}
-		for _, node := range gen.Specs {
-			value, ok := node.(*ast.ValueSpec)
-			if !ok || len(value.Names) != 1 || value.Names[0].Name != name {
-				continue
-			}
-			declarations++
-			if len(value.Values) == 1 {
-				literal, _ = value.Values[0].(*ast.BasicLit)
-			}
-		}
-	}
-	if declarations != 1 {
-		return "", fmt.Errorf("%s must declare %s exactly once, found %d", specFile, name, declarations)
-	}
-	if literal == nil || literal.Kind != token.STRING || !strings.HasPrefix(literal.Value, "`") {
-		return "", fmt.Errorf("%s %s must be one raw string literal", specFile, name)
-	}
-	text, err := strconv.Unquote(literal.Value)
-	if err != nil {
-		return "", fmt.Errorf("decode %s %s: %w", specFile, name, err)
-	}
-	return text, nil
-}
-
-func renderSemanticCatalog(entries []dispatchSpecEntry, fusions []fusionSpecEntry) ([]byte, error) {
-	adaptiveCount := 0
-	for _, entry := range entries {
-		if entry.family != "none" {
-			adaptiveCount++
-		}
-	}
-	const adaptiveHandlerCap = 96
-	generatedCount := adaptiveCount + len(fusions)
-	if generatedCount > adaptiveHandlerCap {
-		return nil, fmt.Errorf("semantic spec declares %d generated handlers, cap is %d", generatedCount, adaptiveHandlerCap)
-	}
-
-	var output bytes.Buffer
-	output.WriteString(`type directHandlerID uint8
-
-const (
-	directHandlerInvalid directHandlerID = 0
-	directAdaptiveHandlerCap = 96
-`)
-	fmt.Fprintf(&output, "\tdirectAdaptiveHandlerCount = %d\n", adaptiveCount)
-	fmt.Fprintf(&output, "\tdirectFusedHandlerCount = %d\n", len(fusions))
-	output.WriteString("\tdirectGeneratedHandlerCount = directAdaptiveHandlerCount + directFusedHandlerCount\n")
-	for index, fusion := range fusions {
-		fmt.Fprintf(&output, "\t%s directHandlerID = directHandlerID(opcodeLimit + directAdaptiveHandlerCount + %d)\n", dispatchGoIdentifier("directHandler", fusion.name), index)
-		fmt.Fprintf(&output, "\t%s opcode = opcode(%s)\n", dispatchGoIdentifier("directHandler", fusion.name+"-opcode"), dispatchGoIdentifier("directHandler", fusion.name))
-		fmt.Fprintf(&output, "\t%s = %d\n", dispatchGoIdentifier("direct", fusion.name+"-instruction-cap"), fusion.instructionCap)
-	}
-	output.WriteString(`)
-
-type directSpecializationFamily uint8
-
-const (
-`)
-	for index, family := range dispatchSpecializationFamilyNames {
-		name := dispatchGoIdentifier("directSpecialization", family)
-		if index == 0 {
-			fmt.Fprintf(&output, "\t%s directSpecializationFamily = iota\n", name)
-		} else {
-			fmt.Fprintf(&output, "\t%s\n", name)
-		}
-	}
-	output.WriteString(`)
-
-type directCacheLayout uint8
-
-const (
-`)
-	for index, layout := range dispatchCacheLayoutNames {
-		name := dispatchGoIdentifier("directCache", layout)
-		if index == 0 {
-			fmt.Fprintf(&output, "\t%s directCacheLayout = iota\n", name)
-		} else {
-			fmt.Fprintf(&output, "\t%s\n", name)
-		}
-	}
-	output.WriteString(`)
-
-type directTilingPolicy uint8
-
-const (
-`)
-	for index, policy := range dispatchTilingPolicyNames {
-		name := dispatchGoIdentifier("directTiling", policy)
-		if index == 0 {
-			fmt.Fprintf(&output, "\t%s directTilingPolicy = iota + 1\n", name)
-		} else {
-			fmt.Fprintf(&output, "\t%s\n", name)
-		}
-	}
-	output.WriteString(`)
-
-type directSemanticMetadata struct {
-	classified        bool
-	source            opcode
-	genericHandler    directHandlerID
-	specializedHandler directHandlerID
-	family            directSpecializationFamily
-	tiling            directTilingPolicy
-	cache             directCacheLayout
-	guestCharge       uint8
-	errorClass        opcodeMachineErrorClass
-	effects           opcodeEffects
-	wordcode          wordcodeEncodingMetadata
-}
-
-func newDirectSemanticMetadata(op opcode, specializedHandler directHandlerID, family directSpecializationFamily, tiling directTilingPolicy, cache directCacheLayout) directSemanticMetadata {
-	base := opcodeMetadataTable[op]
-	return directSemanticMetadata{
-		classified:         true,
-		source:             op,
-		genericHandler:     directHandlerID(op),
-		specializedHandler: specializedHandler,
-		family:             family,
-		tiling:             tiling,
-		cache:              cache,
-		guestCharge:        base.machine.guestCharge,
-		errorClass:         base.machine.errorClass,
-		effects:            base.effects,
-		wordcode:           base.wordcode,
-	}
-}
-
-var generatedDirectSemanticMetadata = func() [opcodeLimit]directSemanticMetadata {
-	var table [opcodeLimit]directSemanticMetadata
-`)
-	adaptiveIndex := 0
-	for _, entry := range entries {
-		handler := "directHandlerInvalid"
-		if entry.family != "none" {
-			handler = fmt.Sprintf("directHandlerID(opcodeLimit + %d)", adaptiveIndex)
-			adaptiveIndex++
-		}
-		fmt.Fprintf(
-			&output,
-			"\ttable[%s] = newDirectSemanticMetadata(%s, %s, %s, %s, %s)\n",
-			entry.opcode,
-			entry.opcode,
-			handler,
-			dispatchGoIdentifier("directSpecialization", entry.family),
-			dispatchGoIdentifier("directTiling", entry.tiling),
-			dispatchGoIdentifier("directCache", entry.cache),
-		)
-	}
-	output.WriteString(`	return table
-}()
-
-func directSemanticMetadataFor(op opcode) (directSemanticMetadata, bool) {
-	if op >= opcodeLimit {
-		return directSemanticMetadata{}, false
-	}
-	metadata := generatedDirectSemanticMetadata[op]
-	return metadata, metadata.classified
-}
-
-func validateDirectSemanticMetadata(table [opcodeLimit]directSemanticMetadata) error {
-	var specializedSeen [1 << 8]bool
-	adaptiveCount := 0
-	for _, op := range allOpcodes {
-		metadata := table[op]
-		if !metadata.classified {
-			return fmt.Errorf("%s direct semantic metadata is unclassified", opcodeName(op))
-		}
-		if metadata.source != op {
-			return fmt.Errorf("%s direct semantic source is %s", opcodeName(op), opcodeName(metadata.source))
-		}
-		if metadata.genericHandler != directHandlerID(op) {
-			return fmt.Errorf("%s generic handler is %d, want %d", opcodeName(op), metadata.genericHandler, op)
-		}
-		base := opcodeMetadataTable[op]
-		if metadata.guestCharge != base.machine.guestCharge {
-			return fmt.Errorf("%s charge metadata drifted", opcodeName(op))
-		}
-		if metadata.errorClass != base.machine.errorClass {
-			return fmt.Errorf("%s error metadata drifted", opcodeName(op))
-		}
-		if metadata.effects != base.effects {
-			return fmt.Errorf("%s effect metadata drifted", opcodeName(op))
-		}
-		if metadata.wordcode != base.wordcode {
-			return fmt.Errorf("%s wordcode metadata drifted", opcodeName(op))
-		}
-		if metadata.family == directSpecializationNone {
-			if metadata.specializedHandler != directHandlerInvalid {
-				return fmt.Errorf("%s has no specialization family but handler %d", opcodeName(op), metadata.specializedHandler)
-			}
-			if metadata.cache != directCacheNone {
-				return fmt.Errorf("%s has no specialization family but cache layout %d", opcodeName(op), metadata.cache)
-			}
-		} else {
-			if metadata.specializedHandler < directHandlerID(opcodeLimit) {
-				return fmt.Errorf("%s specialized handler %d overlaps generic handlers", opcodeName(op), metadata.specializedHandler)
-			}
-			if specializedSeen[metadata.specializedHandler] {
-				return fmt.Errorf("%s has duplicate specialized handler %d", opcodeName(op), metadata.specializedHandler)
-			}
-			specializedSeen[metadata.specializedHandler] = true
-			adaptiveCount++
-			if metadata.cache == directCacheNone {
-				return fmt.Errorf("%s specialization has no cache layout", opcodeName(op))
-			}
-		}
-		if metadata.cache > directCacheCall {
-			return fmt.Errorf("%s has invalid cache layout %d", opcodeName(op), metadata.cache)
-		}
-		switch metadata.tiling {
-		case directTilingPure:
-			if base.controlFlow != opcodeControlNone {
-				return fmt.Errorf("%s pure tiling transfers control", opcodeName(op))
-			}
-			effects := metadata.effects
-			if effects.invokesScriptOrHostCode || effects.mayYield || effects.mayError || effects.allocatesOrObservesIdentity ||
-				effects.writesGlobals || effects.writesUpvalues || effects.writesTables || effects.writesUnknownHeap {
-				return fmt.Errorf("%s pure tiling has observable effects", opcodeName(op))
-			}
-		case directTilingGuarded, directTilingTerminal, directTilingBarrier:
-		default:
-			return fmt.Errorf("%s has invalid tiling policy %d", opcodeName(op), metadata.tiling)
-		}
-	}
-	if adaptiveCount != directAdaptiveHandlerCount {
-		return fmt.Errorf("adaptive handler count is %d, want %d", adaptiveCount, directAdaptiveHandlerCount)
-	}
-	if adaptiveCount > directAdaptiveHandlerCap {
-		return fmt.Errorf("adaptive handler count is %d, cap is %d", adaptiveCount, directAdaptiveHandlerCap)
-	}
-	if directGeneratedHandlerCount > directAdaptiveHandlerCap {
-		return fmt.Errorf("generated handler count is %d, cap is %d", directGeneratedHandlerCount, directAdaptiveHandlerCap)
-	}
-	return nil
-}
-
-func init() {
-	if err := validateDirectSemanticMetadata(generatedDirectSemanticMetadata); err != nil {
-		panic(err)
-	}
-}
-`)
-	return output.Bytes(), nil
-}
-
-func dispatchGoIdentifier(prefix string, value string) string {
-	var identifier strings.Builder
-	identifier.WriteString(prefix)
-	for _, part := range strings.Split(value, "-") {
-		if part == "" {
-			continue
-		}
-		identifier.WriteString(strings.ToUpper(part[:1]))
-		identifier.WriteString(part[1:])
-	}
-	return identifier.String()
-}
-
 func renderVariant(template []byte, instrumented bool) ([]byte, error) {
 	text := string(template)
 	if got := strings.Count(text, ", instrumented bool"); got != 1 {
 		return nil, fmt.Errorf("canonical loop parameter marker occurs %d times, want one", got)
 	}
 	text = strings.ReplaceAll(text, ", instrumented bool", "")
-	const policyMarkerCount = 40
+	const policyMarkerCount = 37
 	if instrumented {
 		var err error
 		text, err = replaceAllExact(text, "instrumented", "true", policyMarkerCount)
@@ -627,20 +200,12 @@ func renderVariant(template []byte, instrumented bool) ([]byte, error) {
 			{"fieldCache.resolve(table, keyText, key.stringBox())", "fieldCache.resolveCounted(table, keyText, key.stringBox(), picCounts)", 1},
 			{"cache.getValue(table, key)", "cache.getValueCounted(table, key, picCounts)", 2},
 			{"cache.getValue(nextTable, key)", "cache.getValueCounted(nextTable, key, picCounts)", 1},
-			{"thread.pushFrameRecord(record)\n", "thread.pushFrameRecord(record)\n\t\t\t\t\tthread.directFramePICCounts.addFixedCallTrampolineEntry()\n", 11},
-			{"\t\tshadowWords       []directShadowWord\n", "", 1},
+			{"thread.pushFrameRecord(record)\n", "thread.pushFrameRecord(record)\n\t\t\t\t\tthread.directFramePICCounts.addFixedCallTrampolineEntry()\n", 10},
 		} {
 			text, err = replaceAllExact(text, rewrite.old, rewrite.new, rewrite.count)
 			if err != nil {
 				return nil, err
 			}
-		}
-		if got := strings.Count(text, "if !true {"); got != 3 {
-			return nil, fmt.Errorf("instrumented shadow marker occurs %d times, want 3", got)
-		}
-		text, err = stripGoBlock(text, "if !true {")
-		if err != nil {
-			return nil, err
 		}
 	} else {
 		var err error
@@ -692,13 +257,6 @@ func renderVariant(template []byte, instrumented bool) ([]byte, error) {
 				return nil, err
 			}
 		}
-		if got := strings.Count(text, "if !false {"); got != 3 {
-			return nil, fmt.Errorf("production shadow marker occurs %d times, want 3", got)
-		}
-		text, err = unwrapGoBlock(text, "if !false {")
-		if err != nil {
-			return nil, err
-		}
 	}
 	if strings.Contains(text, "instrumented") {
 		return nil, fmt.Errorf("variant still contains instrumented marker")
@@ -714,31 +272,13 @@ func renderVariant(template []byte, instrumented bool) ([]byte, error) {
 			}
 		}
 	} else {
-		for _, marker := range []string{"picCounts", "runLineHook", "runCountHook", "Counted", "addFixedCallTrampolineEntry", "if false", "if true", "if !false"} {
+		for _, marker := range []string{"picCounts", "runLineHook", "runCountHook", "Counted", "addFixedCallTrampolineEntry", "if false", "if true"} {
 			if strings.Contains(text, marker) {
 				return nil, fmt.Errorf("production variant retains instrumentation marker %s", marker)
 			}
 		}
 	}
 	return variant, nil
-}
-
-func unwrapGoBlock(source string, marker string) (string, error) {
-	for {
-		start := findCodeMarker(source, marker)
-		if start < 0 {
-			return source, nil
-		}
-		open := strings.Index(source[start:], "{") + start
-		if open < start {
-			return source, fmt.Errorf("marker %q has no opening brace", marker)
-		}
-		end, ok := matchingBrace(source, open)
-		if !ok {
-			return source, fmt.Errorf("marker %q has unbalanced braces", marker)
-		}
-		source = source[:start] + source[open+1:end-1] + source[end:]
-	}
 }
 
 func replaceAllExact(source, old, replacement string, want int) (string, error) {
@@ -968,7 +508,7 @@ func verifyMachineTemplateCases(template []byte, want []string) error {
 	return nil
 }
 
-func verifyTemplateCases(template []byte, want []string, fusions []fusionSpecEntry) error {
+func verifyTemplateCases(template []byte, want []string) error {
 	file, err := parser.ParseFile(token.NewFileSet(), templateFile, template, 0)
 	if err != nil {
 		return fmt.Errorf("parse %s: %w", templateFile, err)
@@ -976,9 +516,6 @@ func verifyTemplateCases(template []byte, want []string, fusions []fusionSpecEnt
 	wantSet := make(map[string]struct{}, len(want))
 	for _, name := range want {
 		wantSet[name] = struct{}{}
-	}
-	for _, fusion := range fusions {
-		wantSet[dispatchGoIdentifier("directHandler", fusion.name+"-opcode")] = struct{}{}
 	}
 	seen := make(map[string]int, len(want))
 	functions := 0
@@ -1030,13 +567,13 @@ func verifyTemplateCases(template []byte, want []string, fusions []fusionSpecEnt
 	if invalidCase {
 		return fmt.Errorf("template direct opcode switch contains a non-identifier case")
 	}
-	for name := range wantSet {
+	for _, name := range want {
 		if seen[name] != 1 {
 			return fmt.Errorf("template has %d semantic cases for %s, want one", seen[name], name)
 		}
 	}
-	if len(seen) != len(wantSet) {
-		return fmt.Errorf("template has %d opcode cases, want %d", len(seen), len(wantSet))
+	if len(seen) != len(want) {
+		return fmt.Errorf("template has %d opcode cases, want %d", len(seen), len(want))
 	}
 	return nil
 }

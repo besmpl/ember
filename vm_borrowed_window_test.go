@@ -292,47 +292,6 @@ func TestMarkedUpvalueFixedCallBorrowsRegisterWindow(t *testing.T) {
 	}
 }
 
-func TestFixedSelfCallFastRecordSlidesAndRestoresRegisterWindow(t *testing.T) {
-	proto := newProto(nil, []instruction{{op: opReturnOne, a: 0}}, nil, nil, 4, 1, false)
-	thread := newVMThread(runtimeGlobals(nil))
-	frame := thread.newFrame(proto, []Value{NumberValue(10)}, nil)
-	thread.pushFrame(frame)
-	frame.setRegister(1, NumberValue(9))
-	originalBase := frame.registerBase
-
-	record, entered := thread.enterRecordOnlyFixedSelfCallOne(
-		frame.currentClosure,
-		frame,
-		1,
-		1,
-		1,
-		0,
-	)
-	if !entered {
-		t.Fatal("fixed self-call fast record was rejected")
-	}
-	if record.flags&vmFrameRecordFlagFixedSelfCall == 0 {
-		t.Fatalf("record flags = %#x, want fixed-self-call marker", record.flags)
-	}
-	if frame.registerBase != originalBase+1 {
-		t.Fatalf("callee base = %d, want %d", frame.registerBase, originalBase+1)
-	}
-	if got, ok := frame.register(0).Number(); !ok || got != 9 {
-		t.Fatalf("borrowed argument = %v (%t), want 9", frame.register(0), ok)
-	}
-
-	thread.pushFrameRecord(record)
-	if !thread.resumeRecordOnlyFixedCallOne(0, &frame, NumberValue(11)) {
-		t.Fatal("fixed self-call record did not resume")
-	}
-	if frame.registerBase != originalBase || frame.pc != 1 {
-		t.Fatalf("resumed base/pc = %d/%d, want %d/1", frame.registerBase, frame.pc, originalBase)
-	}
-	if got, ok := frame.register(0).Number(); !ok || got != 11 {
-		t.Fatalf("resumed result = %v (%t), want 11", frame.register(0), ok)
-	}
-}
-
 func TestMarkedFixedCallOneRuntimeNativeUsesDecodedCount(t *testing.T) {
 	proto := newProto(
 		[]Value{StringValue("rawlen")},

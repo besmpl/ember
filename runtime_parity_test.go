@@ -1556,6 +1556,52 @@ func TestRuntimeParityGuestBatchAll37MatchLuau(t *testing.T) {
 	}
 }
 
+// BenchmarkRuntimeParityGuestBatchVM exposes the allocation and GC pressure
+// hidden by one-call warmed benchmarks. It uses the same dynamically compiled,
+// owner-bound guest batch as the slope capture, but does not invoke Luau.
+func BenchmarkRuntimeParityGuestBatchVM(b *testing.B) {
+	for _, entry := range parityCaseManifest() {
+		entry := entry
+		b.Run(entry.Corpus+"/"+entry.Name, func(b *testing.B) {
+			source, err := parityGuestBatchSource(entry.Case.source, parityDefaultFixtureVariant)
+			if err != nil {
+				b.Fatal(err)
+			}
+			callable, err := prepareParityEmberRuntimeNamed(source, "parity-benchmark/"+entry.Corpus+"/"+entry.Name)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.Cleanup(func() {
+				if err := callable.close(); err != nil {
+					b.Errorf("close guest batch: %v", err)
+				}
+			})
+
+			for _, guestIterations := range []int{1, 100, 1000} {
+				guestIterations := guestIterations
+				b.Run("n="+strconv.Itoa(guestIterations), func(b *testing.B) {
+					arguments := []ember.Value{
+						ember.NumberValue(float64(guestIterations)),
+						ember.NumberValue(float64(parityCaptureSeed)),
+					}
+					if _, err := callable.callback.Call(context.Background(), arguments...); err != nil {
+						b.Fatal(err)
+					}
+					b.ReportAllocs()
+					b.ResetTimer()
+					for b.Loop() {
+						result, err := callable.callback.Call(context.Background(), arguments...)
+						if err != nil {
+							b.Fatal(err)
+						}
+						benchmarkEmberResultsSink = result
+					}
+				})
+			}
+		})
+	}
+}
+
 func parityIterationString() string {
 	values := make([]string, len(parityIterations))
 	for i, n := range parityIterations {
