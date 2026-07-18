@@ -140,11 +140,16 @@ emitter defect or hardware execution fault may still terminate the process.
 - Native coverage is deliberately partial. Performance is a property of the
   qualified numeric region plus the host's real fallback mix, not a blanket
   claim about arbitrary Luau.
-- The accepted four-row production-path capture measures median/worst ratios of
-  0.688620/0.692415 for arithmetic `for`, 0.280739/0.286104 for branching,
-  0.167772/0.176960 for captured recursion, and 1.268322/1.290334 for iterative
-  Fibonacci against pinned Luau 0.728 on the certified Darwin ARM64 host.
-  Linux and Windows execution coverage is not a wall-time ratio claim.
+- Exact production-path captures certify both emitted ISA bodies against
+  pinned Luau 0.728. Darwin ARM64 records 0.681820/0.691079 for arithmetic
+  `for`, 0.294280/0.296317 for branching, 0.167200/0.171297 for captured
+  recursion, and 1.150250/1.218300 for iterative Fibonacci. Linux x86-64
+  records 0.513470/0.717228, 0.585633/0.589150, 0.237191/0.237788, and
+  0.673680/0.728353 respectively. The fitted slope is repeated work inside one
+  guest batch, so the OS-independent per-ISA body carries as a faithful
+  equivalent after each target's separate adapter/ABI/executable-lifecycle
+  execution proof. This does not generalize to arbitrary fallback mixes,
+  different CPUs, or one-shot boundary latency.
 - One thousand twenty-four repeated generation swaps reclaim each prior
   mapping, and old handles reject calls after every retirement and final slot
   close.

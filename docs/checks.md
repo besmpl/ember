@@ -118,11 +118,12 @@ iterative Fibonacci. The measured path is the public unknown-source
 `LoadProgram -> Prepare -> Activate -> Use -> Runtime.Invoke` path. Every
 median and worst paired Ember/Luau ratio must be at most 1.50. The phase fails
 when native execution is unavailable; exact Machine fallback is correct but is
-not native-performance evidence. The accepted ratio receipt is currently
-certified only on the pinned Darwin ARM64 environment below. Native Linux and
-Windows CI proves execution, ABI, mapping protection, and lifecycle behavior;
-it does not silently promote noisy hosted-runner timings into performance
-claims.
+not native-performance evidence. Accepted ratio receipts now cover both
+emitted instruction sets: the pinned Darwin ARM64 environment below and the
+explicit Linux x86-64 profile. Native CI on every supported OS/ISA separately
+proves execution, ABI, mapping protection, and lifecycle behavior; a platform
+job never promotes a missing or contaminated timing acquisition into
+performance evidence.
 
 The explicit `linux-amd64` acceptance profile extends this same four-row gate
 to physical x86-64 without weakening the Darwin pin. It requires Go 1.26.4,
@@ -146,14 +147,39 @@ digests before running this profile, then uploads the complete capture. A green
 job is an exact x86-64 receipt; a timing failure remains visible rather than
 being converted to semantic-only success.
 
-On the pinned eight-logical-CPU M1, acquisition starts after three one-second
-samples with aggregate CPU at most 300%. One-minute load remains diagnostic but
-is not an admission gate: it is lagging, core-count-blind, and includes blocked
-work that may not compete with this single-threaded benchmark. Live before/after
-probes cap external processes at three cores while excluding the measuring Go
-process. A live point whose before or after probe is contaminated is discarded
-and retried after one second, up to 60 attempts; only clean paired rows are
-emitted, and exhaustion still fails the capture.
+Exact commit `6bd26873b09aadbfe473098ae20dde2bc978703d`, CI run
+`29651961727`, and capture
+`afeaee0a2f8cc43c8fc367195d5e8cf6333b161c670bdea8e07819c290dfa534`
+record Linux `6.17.0-1020-azure` on an AMD EPYC 9V74, with environment hash
+`28a72d89a5d48af3851b647979595791be357e2f9b50c1386b479d41c883bceb`.
+All 96 raw rows are uncontaminated. The paired median/worst ratios are:
+
+| Frozen row | Darwin ARM64 | Linux x86-64 |
+| --- | ---: | ---: |
+| arithmetic `for` | 0.681820 / 0.691079 | 0.513470 / 0.717228 |
+| `while` plus branch | 0.294280 / 0.296317 | 0.585633 / 0.589150 |
+| recursive Fibonacci | 0.167200 / 0.171297 | 0.237191 / 0.237788 |
+| iterative Fibonacci | 1.150250 / 1.218300 | 0.673680 / 0.728353 |
+
+The fit is `T(N)=entry+N*inner`, and `N` repetitions execute inside one
+qualified guest batch. The ratio therefore measures the private repeated
+native body while placing the one-per-batch Go/OS adapter in the intercept.
+That body is OS-independent for a given ISA; platform-specific mapping and the
+Windows x86-64 calling-convention adapter remain outside it and have their own
+native execution/ABI/lifecycle tests. This makes the ARM64 and x86-64 receipts
+faithful performance equivalents for the qualified repeated body on the other
+supported OSes. It is not a claim about a different CPU model, one-shot entry
+latency, an arbitrary native/fallback mix, or all Luau programs.
+
+Acquisition starts after three one-second samples with aggregate CPU at most
+300%. One-minute load remains diagnostic but is not an admission gate: it is
+lagging, core-count-blind, and includes blocked work that may not compete with
+this single-threaded benchmark. Live before/after probes cap external processes
+at three cores while excluding the measuring Go process. A live point whose
+before or after probe is contaminated is discarded and retried after one
+second, up to 60 attempts; only clean paired rows are emitted, and exhaustion
+still fails the capture. A failed sampling command is a distinct observer
+error, not runner contention.
 
 ```sh
 scripts/runtime-ratio-gate --derive \

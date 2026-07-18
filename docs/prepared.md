@@ -179,11 +179,16 @@ rerun race/checkptr plus the focused native tests. Native execution remains
 trusted in-process code, not a fault-containment boundary: an emitter defect or
 hardware execution fault may terminate the process rather than replaying.
 
-Darwin ARM64 is the currently performance-certified host for the pinned
-four-row Luau 0.728 comparison. Linux and Windows ARM64/x86-64 have native
-semantic, ABI, executable-memory, and generation-lifecycle coverage, but that
-coverage is not a cross-host wall-time ratio claim. See `checks.md` for the
-exact evidence contract.
+Pinned four-row Luau 0.728 receipts certify both emitted ISA bodies: Darwin
+ARM64's worst row is 1.218300 and Linux x86-64's is 0.728353. Each target OS
+also executes its real adapter, executable-memory policy, and generation
+lifecycle in CI. The ratio fit runs repeated guest work inside one public
+batch, so the private OS-independent body determines the slope and the fixed
+outer adapter remains in the intercept. The same-ISA receipts are therefore
+faithful performance equivalents for qualified repeated bodies on the other
+supported OSes. They do not certify arbitrary fallback mixes, different CPU
+models, one-shot boundary latency, or all Luau source. See `checks.md` for the
+exact captures and evidence contract.
 
 ## Choosing a deployment path
 
