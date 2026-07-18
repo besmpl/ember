@@ -124,7 +124,7 @@ func TestProgramWritePreparedGoValidatesPublicBoundary(t *testing.T) {
 	}
 }
 
-func TestProgramWritePreparedGoRejectsMutableFunctionUpvalueBeforeWrite(t *testing.T) {
+func TestProgramWritePreparedGoUsesCanonicalFallbackForMutableFunctionUpvalue(t *testing.T) {
 	program := loadPreparedGoProgram(t, `
 local add = function(value) return value + 1 end
 return {
@@ -135,12 +135,32 @@ return {
 }
 `)
 	var output bytes.Buffer
-	output.WriteString("unchanged")
-	if err := program.WritePreparedGo(&output, ember.PreparedGoOptions{Package: "mutablefixture"}); err == nil {
-		t.Fatal("mutable function upvalue generation succeeded")
+	if err := program.WritePreparedGo(&output, ember.PreparedGoOptions{Package: "mutablefixture"}); err != nil {
+		t.Fatalf("write prepared Go: %v", err)
 	}
-	if output.String() != "unchanged" {
-		t.Fatalf("rejected generation mutated writer: %q", output.String())
+	if source := output.String(); !strings.Contains(source, "var Bundle = emberapi.NewPreparedBundle(") || !strings.Contains(source, "nil") {
+		t.Fatalf("generated source lacks canonical fallback:\n%s", source)
+	}
+}
+
+func TestProgramWritePreparedGoUsesCanonicalFallbackForUnsupportedProto(t *testing.T) {
+	program := loadPreparedGoProgram(t, `
+return {
+    update = function(value)
+        return hostAdd(value)
+    end,
+}
+`)
+	var output bytes.Buffer
+	if err := program.WritePreparedGo(&output, ember.PreparedGoOptions{Package: "fallbackfixture"}); err != nil {
+		t.Fatalf("write prepared Go with unsupported Proto: %v", err)
+	}
+	source := output.String()
+	if !strings.Contains(source, "var Bundle = emberapi.NewPreparedBundle(") {
+		t.Fatalf("generated source lacks exact bundle:\n%s", source)
+	}
+	if !strings.Contains(source, "[][]emberapi.PreparedFunction{{nil, nil}}") {
+		t.Fatalf("generated source lacks canonical fallback inventory:\n%s", source)
 	}
 }
 

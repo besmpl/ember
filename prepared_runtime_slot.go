@@ -26,11 +26,13 @@ var (
 // replacing a generation during Use. Runtime references passed to Use must not
 // escape the callback.
 type PreparedRuntimeSlot struct {
-	mu         sync.Mutex
-	active     *Runtime
-	generation uint64
-	running    bool
-	closed     bool
+	mu            sync.Mutex
+	active        *Runtime
+	activeNative  *preparedNativeGeneration
+	retiredNative []*preparedNativeGeneration
+	generation    uint64
+	running       bool
+	closed        bool
 }
 
 // PreparedRuntimeCandidate is one fully bound, inert Runtime generation. A
@@ -40,20 +42,19 @@ type PreparedRuntimeCandidate struct {
 	mu             sync.Mutex
 	slot           *PreparedRuntimeSlot
 	runtime        *Runtime
+	native         *preparedNativeGeneration
 	baseGeneration uint64
 	used           bool
 }
 
-// Prepare binds program to an exact generated bundle without changing or
-// executing the active generation. options.Prepared must be non-nil.
+// Prepare binds program to an exact prepared bundle without changing or
+// executing the active generation. When options.Prepared is nil, Prepare
+// generates and installs a reload-time native bundle off the active path;
+// unsupported functions and hosts retain the canonical Machine path.
 func (slot *PreparedRuntimeSlot) Prepare(program *Program, options RuntimeOptions) (*PreparedRuntimeCandidate, error) {
 	if slot == nil {
 		return nil, fmt.Errorf("prepare runtime generation: %w", ErrPreparedRuntimeUnavailable)
 	}
-	if options.Prepared == nil {
-		return nil, fmt.Errorf("prepare runtime generation: RuntimeOptions.Prepared is required")
-	}
-
 	slot.mu.Lock()
 	if slot.closed {
 		slot.mu.Unlock()
@@ -62,8 +63,21 @@ func (slot *PreparedRuntimeSlot) Prepare(program *Program, options RuntimeOption
 	baseGeneration := slot.generation
 	slot.mu.Unlock()
 
+	var native *preparedNativeGeneration
+	if options.Prepared == nil {
+		var err error
+		native, err = prepareNativeGeneration(program)
+		if err != nil {
+			return nil, fmt.Errorf("prepare runtime generation: %w", err)
+		}
+		options.Prepared = native.bundle
+	}
+
 	runtime, err := program.NewRuntime(options)
 	if err != nil {
+		if native != nil {
+			err = errors.Join(err, native.Close())
+		}
 		return nil, fmt.Errorf("prepare runtime generation: %w", err)
 	}
 
@@ -71,15 +85,18 @@ func (slot *PreparedRuntimeSlot) Prepare(program *Program, options RuntimeOption
 	defer slot.mu.Unlock()
 	if slot.closed {
 		_ = runtime.Close()
+		_ = native.Close()
 		return nil, fmt.Errorf("prepare runtime generation: %w", ErrPreparedRuntimeUnavailable)
 	}
 	if slot.generation != baseGeneration {
 		_ = runtime.Close()
+		_ = native.Close()
 		return nil, fmt.Errorf("prepare runtime generation: %w", ErrPreparedRuntimeCandidateStale)
 	}
 	return &PreparedRuntimeCandidate{
 		slot:           slot,
 		runtime:        runtime,
+		native:         native,
 		baseGeneration: baseGeneration,
 	}, nil
 }
@@ -114,6 +131,7 @@ func (slot *PreparedRuntimeSlot) Activate(candidate *PreparedRuntimeCandidate) e
 	if slot.running {
 		return fmt.Errorf("activate runtime generation: %w", ErrRuntimeBusy)
 	}
+	oldNative := slot.activeNative
 	if slot.active != nil {
 		if err := slot.active.Close(); err != nil {
 			return fmt.Errorf("activate runtime generation: retire active generation: %w", err)
@@ -121,9 +139,14 @@ func (slot *PreparedRuntimeSlot) Activate(candidate *PreparedRuntimeCandidate) e
 	}
 
 	slot.active = candidate.runtime
+	slot.activeNative = candidate.native
 	slot.generation++
 	candidate.runtime = nil
+	candidate.native = nil
 	candidate.used = true
+	if err := oldNative.Close(); err != nil {
+		slot.retiredNative = append(slot.retiredNative, oldNative)
+	}
 	return nil
 }
 
@@ -167,7 +190,7 @@ func (slot *PreparedRuntimeSlot) Close() error {
 	slot.mu.Lock()
 	defer slot.mu.Unlock()
 	if slot.closed {
-		return nil
+		return slot.closeNativeStopped()
 	}
 	if slot.running {
 		return fmt.Errorf("close prepared runtime: %w", ErrRuntimeBusy)
@@ -179,7 +202,27 @@ func (slot *PreparedRuntimeSlot) Close() error {
 	}
 	slot.active = nil
 	slot.closed = true
-	return nil
+	return slot.closeNativeStopped()
+}
+
+func (slot *PreparedRuntimeSlot) closeNativeStopped() error {
+	var closeErrors []error
+	if slot.activeNative != nil {
+		if err := slot.activeNative.Close(); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("close active native generation: %w", err))
+		} else {
+			slot.activeNative = nil
+		}
+	}
+	retired := slot.retiredNative[:0]
+	for _, generation := range slot.retiredNative {
+		if err := generation.Close(); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("close retired native generation: %w", err))
+			retired = append(retired, generation)
+		}
+	}
+	slot.retiredNative = retired
+	return errors.Join(closeErrors...)
 }
 
 // Close releases an unactivated candidate. It is safe to call repeatedly and
@@ -198,7 +241,11 @@ func (candidate *PreparedRuntimeCandidate) Close() error {
 			return fmt.Errorf("close prepared runtime candidate: %w", err)
 		}
 	}
+	if err := candidate.native.Close(); err != nil {
+		return fmt.Errorf("close prepared runtime candidate: %w", err)
+	}
 	candidate.runtime = nil
+	candidate.native = nil
 	candidate.used = true
 	return nil
 }

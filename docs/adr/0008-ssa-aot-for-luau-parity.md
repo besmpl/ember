@@ -2,11 +2,14 @@
 
 Status: Accepted
 
-ADR 0010 supersedes only this ADR's blanket plugin prohibition: the root
-runtime and portable release path remain static/no-cgo, while an optional
-platform-isolated editor adapter may load content-addressed generated Go
-plugins. The selected SSA AOT backend, exact binding, side exits, and
-performance gates are unchanged.
+ADR 0010 supersedes this ADR's blanket plugin, runtime-compiler, and native-JIT
+prohibitions only at the explicit prepared-generation seam. Static generated
+Go remains the portable release path; supported Darwin hosts may also compile a
+proved numeric subset before hot-reload activation, with exact Machine replay.
+The selected SSA backend IR, exact binding, side exits, and static prepared
+performance evidence remain unchanged. This ADR's native leaf rejection is
+historical evidence for why the later tier needed its own complete lifetime,
+cross-ISA, and performance proof.
 
 ## Context
 

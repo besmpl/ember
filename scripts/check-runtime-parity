@@ -71,6 +71,10 @@ gate_single_capture() {
 			median_max=${RUNTIME_MEDIAN_MAX:-1.00}
 			p90_max=${RUNTIME_P90_MAX:-1.05}
 			;;
+		prepared-native-parity15)
+			median_max=${RUNTIME_MEDIAN_MAX:-1.50}
+			p90_max=${RUNTIME_P90_MAX:-1.50}
+			;;
 		*)
 			median_max=${RUNTIME_MEDIAN_MAX:-1.85}
 			p90_max=${RUNTIME_P90_MAX:-2.00}
@@ -141,7 +145,7 @@ apply_capture_policy() {
 	policy_capture_only=$2
 	slopes=$3
 	policy_mode=$4
-	[ "$policy_phase" = speed2x ] || [ "$policy_phase" = prepared-parity1x ] || return 0
+	[ "$policy_phase" = speed2x ] || [ "$policy_phase" = prepared-parity1x ] || [ "$policy_phase" = prepared-native-parity15 ] || return 0
 	[ "$policy_capture_only" -eq 0 ] || return 0
 	gate_single_capture "$policy_phase" "$policy_mode" "$slopes"
 }
@@ -152,6 +156,7 @@ phase_cases() {
 		calls) printf '%s\n' 'scenario/event_dispatch,scenario/signal_bus_callbacks,scenario/command_vararg_router' ;;
 		data) printf '%s\n' 'scenario/dirty_metatable_writes,scenario/array_hole_compaction' ;;
 		canaries) printf '%s\n' 'scenario/combat_tick,scenario/inventory_value,scenario/event_dispatch,scenario/buff_stack_tick,scenario/ability_resolution,scenario/dirty_metatable_writes,scenario/array_hole_compaction,scenario/command_vararg_router' ;;
+		prepared-native-parity15) printf '%s\n' 'top10/arithmetic_for,top10/while_branching,classic/recursive_fibonacci,classic/iterative_fibonacci' ;;
 		full|speed2x|prepared-parity1x) printf '\n' ;;
 		*) return 1 ;;
 	esac
@@ -163,6 +168,11 @@ capture_engine() {
 	if [ "$phase" = prepared-parity1x ]; then
 		[ "$role" = candidate ] || return 1
 		printf '%s\n' prepared
+		return
+	fi
+	if [ "$phase" = prepared-native-parity15 ]; then
+		[ "$role" = candidate ] || return 1
+		printf '%s\n' prepared-native
 		return
 	fi
 	case "$role" in
@@ -183,12 +193,16 @@ self_test() {
 	[ -z "$(phase_cases full)" ] || die 'full is not all-37'
 	[ -z "$(phase_cases speed2x)" ] || die 'speed2x is not all-37'
 	[ -z "$(phase_cases prepared-parity1x)" ] || die 'prepared-parity1x is not all-37'
+	[ "$(phase_cases prepared-native-parity15)" = 'top10/arithmetic_for,top10/while_branching,classic/recursive_fibonacci,classic/iterative_fibonacci' ] || die 'prepared-native-parity15 case changed'
 	[ "$(phase_cases dispatch)" = top10/arithmetic_for ] || die 'dispatch case changed'
 	[ "$(capture_engine full frozen-current)" = vm ] || die 'frozen-current engine changed'
 	[ "$(capture_engine full candidate)" = machine ] || die 'candidate engine changed'
 	[ "$(capture_engine prepared-parity1x candidate)" = prepared ] || die 'prepared engine changed'
 	[ "$(capture_execution_mode prepared-parity1x candidate)" = prepared ] || die 'prepared execution mode changed'
+	[ "$(capture_engine prepared-native-parity15 candidate)" = prepared-native ] || die 'prepared native engine changed'
+	[ "$(capture_execution_mode prepared-native-parity15 candidate)" = prepared-native ] || die 'prepared native execution mode changed'
 	if capture_execution_mode prepared-parity1x frozen-current >/dev/null 2>&1; then die 'prepared phase accepted frozen-current role'; fi
+	if capture_execution_mode prepared-native-parity15 frozen-current >/dev/null 2>&1; then die 'prepared native phase accepted frozen-current role'; fi
 	if capture_engine full invalid >/dev/null 2>&1; then die 'invalid capture role selected an engine'; fi
 	q=$(mktemp -d "${TMPDIR:-/tmp}/runtime-parity.XXXXXX")
 	trap 'rm -rf "$q"' EXIT HUP INT TERM
@@ -216,6 +230,9 @@ EOF
 	sed 's/speed2x/prepared-parity1x/g; s/	guest_batch	machine	/	guest_batch	prepared	/g; s/	210	/	101	/g' "$q/failing-slopes.tsv" >"$q/prepared-slopes.tsv"
 	if apply_capture_policy prepared-parity1x 0 "$q/prepared-slopes.tsv" prepared >/dev/null 2>&1; then die 'prepared 1.01x fixture passed'; fi
 	if gate_single_capture prepared-parity1x prepared "$q/failing-slopes.tsv" >/dev/null 2>&1; then die 'prepared policy accepted dynamic evidence'; fi
+	sed 's/speed2x/prepared-native-parity15/g; s/	guest_batch	machine	/	guest_batch	prepared-native	/g; s/	210	/	151	/g' "$q/failing-slopes.tsv" >"$q/prepared-native-slopes.tsv"
+	if apply_capture_policy prepared-native-parity15 0 "$q/prepared-native-slopes.tsv" prepared-native >/dev/null 2>&1; then die 'prepared native 1.51x fixture passed'; fi
+	if gate_single_capture prepared-native-parity15 prepared-native "$q/failing-slopes.tsv" >/dev/null 2>&1; then die 'prepared native policy accepted dynamic evidence'; fi
 	printf '%s\n' 'runtime parity self-test: PASS'
 }
 
@@ -234,7 +251,7 @@ while [ "$#" -gt 0 ]; do
 		--output) [ "$#" -ge 2 ] || die '--output needs a path'; output=$2; shift 2 ;;
 		--self-test) self_test_requested=1; shift ;;
 		-h|--help)
-			printf '%s\n' 'usage: scripts/check-runtime-parity --phase dispatch|calls|data|canaries|full|speed2x|prepared-parity1x --output DIR [--capture-only] [--capture-role frozen-current|candidate] [--capture-pair a|b]'
+			printf '%s\n' 'usage: scripts/check-runtime-parity --phase dispatch|calls|data|canaries|full|speed2x|prepared-parity1x|prepared-native-parity15 --output DIR [--capture-only] [--capture-role frozen-current|candidate] [--capture-pair a|b]'
 			exit 0
 			;;
 		*) die "unknown argument: $1" ;;

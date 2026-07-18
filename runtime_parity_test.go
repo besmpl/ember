@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/besmpl/ember"
+	"github.com/besmpl/ember/internal/preparednative"
 )
 
 const (
@@ -55,7 +56,7 @@ type parityCaptureContract struct {
 
 func parityContractForPhase(phase string) (parityCaptureContract, error) {
 	switch phase {
-	case "full", "speed2x", "prepared-parity1x":
+	case "full", "speed2x", "prepared-parity1x", "prepared-native-parity15":
 		return parityCaptureContract{
 			Phase:         phase,
 			Lifecycle:     "guest_batch",
@@ -622,6 +623,7 @@ func (loader paritySourceLoader) LoadModule(ctx context.Context, id ember.Module
 type parityPreparedCallable struct {
 	owner     *ember.Runtime
 	callback  ember.Callback
+	batchFunc parityTimedBatch
 	closeFunc func() error
 }
 
@@ -676,12 +678,135 @@ func (callable *parityPreparedCallable) close() error {
 	return errors.Join(callable.callback.Close(), callable.owner.Close())
 }
 
+func (callable *parityPreparedCallable) callBatch(iterations int, seed int64) ([]ember.Value, error) {
+	if callable.batchFunc != nil {
+		return callable.batchFunc(iterations, seed)
+	}
+	return callable.callback.Call(
+		context.Background(),
+		ember.NumberValue(float64(iterations)),
+		ember.NumberValue(float64(seed)),
+	)
+}
+
 func prepareParityExactGuestBatch(source string) (*parityPreparedCallable, error) {
 	callback, err := ember.PrepareExactGuestBatchThroughputForParityTest(source)
 	if err != nil {
 		return nil, err
 	}
 	return &parityPreparedCallable{callback: callback, closeFunc: callback.Close}, nil
+}
+
+func prepareParityNativeGuestBatch(source, moduleName string) (*parityPreparedCallable, error) {
+	if err := preparednative.Available(); err != nil {
+		return nil, fmt.Errorf("prepare native parity execution: %w", err)
+	}
+	ctx := context.Background()
+	module := ember.LogicalModule(moduleName)
+	program, _, err := ember.LoadProgram(ctx, paritySourceLoader{module.String(): {
+		Name: module.String(), Text: source,
+	}}, ember.ProgramOptions{
+		Entrypoints: []ember.Entrypoint{{Name: "parity", Module: module}},
+		Parallelism: 1,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("load prepared native parity Program: %w", err)
+	}
+	var slot ember.PreparedRuntimeSlot
+	candidate, err := slot.Prepare(program, ember.RuntimeOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("prepare native parity generation: %w", err)
+	}
+	if err := slot.Activate(candidate); err != nil {
+		_ = candidate.Close()
+		return nil, fmt.Errorf("activate native parity generation: %w", err)
+	}
+	callable := &parityPreparedCallable{}
+	callable.batchFunc = func(iterations int, seed int64) ([]ember.Value, error) {
+		var values []ember.Value
+		err := slot.Use(func(runtime *ember.Runtime) error {
+			var invokeErr error
+			values, invokeErr = runtime.Invoke(
+				ctx,
+				ember.Invocation{Module: module},
+				ember.NumberValue(float64(iterations)),
+				ember.NumberValue(float64(seed)),
+			)
+			return invokeErr
+		})
+		return values, err
+	}
+	callable.closeFunc = slot.Close
+	return callable, nil
+}
+
+func TestPreparedNativeGeneralRowsUseNativeBatchOnBothArchitectures(t *testing.T) {
+	selected, err := parityManifestSelection(
+		"top10/arithmetic_for,top10/while_branching,classic/recursive_fibonacci,classic/iterative_fibonacci",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range selected {
+		t.Run(entry.Corpus+"/"+entry.Name, func(t *testing.T) {
+			programSource, _, err := runtimeParityGuestBatchProgram(entry.Case.source, parityDefaultFixtureVariant)
+			if err != nil {
+				t.Fatal(err)
+			}
+			module := ember.LogicalModule("prepared-native-parity15/" + entry.Corpus + "/" + entry.Name)
+			program, _, err := ember.LoadProgram(context.Background(), paritySourceLoader{module.String(): {
+				Name: module.String(), Text: programSource + "return " + parityDefaultFixtureVariant.batchName + "\n",
+			}}, ember.ProgramOptions{
+				Entrypoints: []ember.Entrypoint{{Name: "main", Module: module}},
+				Parallelism: 1,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			arm64, err := ember.EmitPreparedNativeARM64ForTest(program)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(arm64.Modules) != 1 || len(arm64.Modules[0].RootClosures) < 2 {
+				t.Fatalf("ARM64 module inventory = %#v", arm64.Modules)
+			}
+			arm64Batch := arm64.Modules[0].RootClosures[len(arm64.Modules[0].RootClosures)-1]
+			if arm64Batch < 0 || int(arm64Batch) >= len(arm64.Modules[0].Functions) ||
+				!arm64.Modules[0].Functions[arm64Batch].Prepared {
+				t.Fatalf("ARM64 batch Proto %d is not native: %#v", arm64Batch, arm64.Modules[0].Functions)
+			}
+			arm64Function := arm64.Modules[0].Functions[arm64Batch]
+			if arm64Function.BodyOffset >= arm64Function.Offset {
+				t.Fatalf(
+					"ARM64 batch body/adapter offsets = %d/%d, want a private body before its boundary adapter",
+					arm64Function.BodyOffset,
+					arm64Function.Offset,
+				)
+			}
+
+			x8664, err := ember.EmitPreparedNativeX8664ForTest(program)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(x8664.Modules) != 1 || len(x8664.Modules[0].RootClosures) < 2 {
+				t.Fatalf("x86-64 module inventory = %#v", x8664.Modules)
+			}
+			x8664Batch := x8664.Modules[0].RootClosures[len(x8664.Modules[0].RootClosures)-1]
+			if x8664Batch < 0 || int(x8664Batch) >= len(x8664.Modules[0].Functions) ||
+				!x8664.Modules[0].Functions[x8664Batch].Prepared {
+				t.Fatalf("x86-64 batch Proto %d is not native: %#v", x8664Batch, x8664.Modules[0].Functions)
+			}
+			x8664Function := x8664.Modules[0].Functions[x8664Batch]
+			if x8664Function.BodyOffset >= x8664Function.Offset {
+				t.Fatalf(
+					"x86-64 batch body/adapter offsets = %d/%d, want a private body before its boundary adapter",
+					x8664Function.BodyOffset,
+					x8664Function.Offset,
+				)
+			}
+		})
+	}
 }
 
 type parityTimedCall func() ([]ember.Value, error)
@@ -731,11 +856,7 @@ func measureParityEmberPublicCall(callable *parityPreparedCallable, iterations i
 
 func measureParityEmberGuestBatch(callable *parityPreparedCallable, iterations int, seed int64) (float64, string, error) {
 	elapsed, values, err := measureParityTimedBatch(iterations, seed, func(iterations int, seed int64) ([]ember.Value, error) {
-		return callable.callback.Call(
-			context.Background(),
-			ember.NumberValue(float64(iterations)),
-			ember.NumberValue(float64(seed)),
-		)
+		return callable.callBatch(iterations, seed)
 	}, time.Now, time.Since)
 	if err != nil {
 		return float64(elapsed.Nanoseconds()), "", err
@@ -1089,7 +1210,7 @@ func TestRuntimeParityLive(t *testing.T) {
 	executionMode := os.Getenv("RUNTIME_PARITY_EXECUTION_MODE")
 	if (role != "frozen-current" && role != "candidate") ||
 		(pair != "a" && pair != "b") ||
-		(executionMode != "vm" && executionMode != "machine" && executionMode != "prepared") ||
+		(executionMode != "vm" && executionMode != "machine" && executionMode != "prepared" && executionMode != "prepared-native") ||
 		captureID == "" ||
 		!parityHexDigest(sourceCommit, 40, 64) ||
 		!parityHexDigest(environmentHash, 64) {
@@ -1100,6 +1221,12 @@ func TestRuntimeParityLive(t *testing.T) {
 	}
 	if contract.Phase != "prepared-parity1x" && executionMode == "prepared" {
 		t.Fatal("dynamic parity phase cannot emit prepared evidence")
+	}
+	if contract.Phase == "prepared-native-parity15" && executionMode != "prepared-native" {
+		t.Fatal("prepared-native-parity15 requires prepared-native execution")
+	}
+	if contract.Phase != "prepared-native-parity15" && executionMode == "prepared-native" {
+		t.Fatal("non-native parity phase cannot emit prepared-native evidence")
 	}
 	rawPath, err := parityRawPath(os.Getenv("RUNTIME_PARITY_RAW"))
 	if err != nil {
@@ -1156,17 +1283,18 @@ func TestRuntimeParityLive(t *testing.T) {
 		var owner *parityPreparedCallable
 		if executionMode == "prepared" {
 			owner, err = prepareParityExactGuestBatch(programSource + "return " + parityDefaultFixtureVariant.batchName + "\n")
+		} else if executionMode == "prepared-native" {
+			owner, err = prepareParityNativeGuestBatch(
+				programSource+"return "+parityDefaultFixtureVariant.batchName+"\n",
+				"parity/"+entry.Corpus+"/"+entry.Name,
+			)
 		} else {
 			owner, err = prepareParityEmberRuntimeNamed(emberSource, "parity/"+entry.Corpus+"/"+entry.Name)
 		}
 		if err != nil {
 			t.Fatalf("%s prepare Ember guest runtime: %v", tc.name, err)
 		}
-		warm, err := owner.callback.Call(
-			context.Background(),
-			ember.NumberValue(1),
-			ember.NumberValue(float64(parityCaptureSeed)),
-		)
+		warm, err := owner.callBatch(1, parityCaptureSeed)
 		if err != nil {
 			_ = owner.close()
 			t.Fatalf("%s warm Ember guest batch: %v", tc.name, err)

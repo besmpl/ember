@@ -86,6 +86,11 @@ CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau \
   scripts/check-runtime-parity --phase speed2x --capture-only \
   --capture-role frozen-current --capture-pair a \
   --output /tmp/ember-speed2x-a
+
+CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau \
+  scripts/check-runtime-parity --phase prepared-native-parity15 \
+  --capture-role candidate --capture-pair a \
+  --output /tmp/ember-prepared-native-a
 ```
 
 `--capture-only` preserves correct, uncontaminated evidence even when the
@@ -105,6 +110,15 @@ verified bundle executes through `Runtime.Invoke`, owns and detaches results
 correctly, and closes independently. The phase and execution mode are recorded
 in schema-v2 artifacts and `command.txt`; workload identity never participates
 in engine selection.
+
+`prepared-native-parity15` accepts only `candidate` and selects
+`prepared-native`. It freezes four materially different general numeric rows:
+arithmetic `for`, `while` plus branching, captured recursive Fibonacci, and
+iterative Fibonacci. The measured path is the public unknown-source
+`LoadProgram -> Prepare -> Activate -> Use -> Runtime.Invoke` path. Every
+median and worst paired Ember/Luau ratio must be at most 1.50. The phase fails
+when native execution is unavailable; exact Machine fallback is correct but is
+not native-performance evidence.
 
 On the pinned eight-logical-CPU M1, acquisition starts after three one-second
 samples with aggregate CPU at most 300%. One-minute load remains diagnostic but
@@ -132,8 +146,10 @@ mismatched, workload-mismatched, or provenance-mismatched row. It recomputes
 every slope result-set hash from raw integer checksums and independently checks
 all 37 cases in both captures. Dynamic acceptance defaults to per-row median at
 most 1.85 and p90 at most 2.0. Prepared final evidence uses median at most 1.0
-and p90 at most 1.05. Candidate/current comparisons bind the manifest and both
-baseline directories and require each paired median to stay at or below 1.05.
+and p90 at most 1.05. Reload-time native evidence uses median and worst at most
+1.50 for its frozen four-row subset. Candidate/current comparisons bind the
+manifest and both baseline directories and require each paired median to stay
+at or below 1.05.
 
 Allocation evidence is separate. Capture two baselines with explicit pairs,
 derive the exact 56-row ceiling manifest, then compare candidate evidence:

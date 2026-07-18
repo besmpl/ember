@@ -96,10 +96,10 @@ func emitBackendGoNumericModule(
 			protoOptions.preparedQualifier = ""
 			source, err = emitBackendGoNumericProof(irs[protoIndex], protoOptions)
 			if err != nil {
-				if protoID == 0 {
-					continue
-				}
-				return backendGoNumericModule{}, fmt.Errorf("emit backend Go numeric module: Proto %d: prepared: %v; direct: %w", protoID, preparedErr, err)
+				// A nil bundle entry is an exact, explicit request for the
+				// canonical Machine implementation. Unsupported Protos must not
+				// prevent supported siblings from being prepared.
+				continue
 			}
 		} else {
 			result.functions[protoIndex] = preparedName
@@ -109,9 +109,6 @@ func emitBackendGoNumericModule(
 			protoID: protoID,
 			source:  source,
 		})
-	}
-	if len(result.files) == 0 {
-		return backendGoNumericModule{}, fmt.Errorf("emit backend Go numeric module: no supported Proto bodies")
 	}
 	return result, nil
 }

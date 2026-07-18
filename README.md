@@ -51,7 +51,11 @@ Ember currently has a tiny root-package vertical slice:
    `table.insert`, `table.remove`, `table.concat`, `table.find`, `table.clear`,
    and `table.sort`;
 7. source-to-result tests such as `return 1 + 2`, scalar literals, and local
-   references.
+   references;
+8. exact prepared execution through static generated Go, plus same-process
+   reload-time ARM64/x86-64 native preparation for a proved numeric subset on
+   supported Darwin hosts. Unsupported functions, values, and platforms replay
+   through the canonical Machine before effects.
 
 This is only a seed. Full Luau grammar, full function syntax, broader standard
 libraries, and analyzer behavior remain future slices.

@@ -42,7 +42,10 @@ See `docs/adr/0001-go-native-runtime-mapping.md` for the full decision.
 
 The root package should not own game worlds, request routing, job scheduling,
 rendering, audio, assets, editor tooling, network transports, background
-workers, native executable memory, or external process lifecycle.
+workers, or external process lifecycle. ADR 0010 records the narrow exception
+for generation-owned executable memory: only the explicit
+`PreparedRuntimeSlot.Prepare` operation may install the proved reload-time
+numeric tier, behind one private boundary and exact Machine replay.
 
 This is not a permanent ban. It keeps the runtime small while the VM proves
 itself. Outer packages can attach these capabilities later if real examples

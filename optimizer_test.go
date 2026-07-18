@@ -174,6 +174,48 @@ return value + 1
 	}
 }
 
+func TestDeadCodeRemovalPreservesConditionalCapturedLocalWrite(t *testing.T) {
+	proto, err := Compile(`
+local bias = 1
+local function read()
+	return bias
+end
+if input > 0 then
+	bias = 2
+end
+return read()
+`)
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	disassembly := strings.Join(disassembleProto(proto), "\n")
+	if !strings.Contains(disassembly, "number 2") {
+		t.Fatalf("captured local write was removed:\n%s", disassembly)
+	}
+
+	for _, test := range []struct {
+		name  string
+		input float64
+		want  float64
+	}{
+		{name: "write", input: 4, want: 2},
+		{name: "skip", input: -4, want: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			results, err := RunWithGlobals(proto, map[string]Value{"input": NumberValue(test.input)})
+			if err != nil {
+				t.Fatalf("RunWithGlobals returned error: %v", err)
+			}
+			if len(results) != 1 {
+				t.Fatalf("RunWithGlobals returned %d results, want 1: %#v", len(results), results)
+			}
+			if number, ok := results[0].Number(); !ok || number != test.want {
+				t.Fatalf("RunWithGlobals result is %#v, want number %v", results[0], test.want)
+			}
+		})
+	}
+}
+
 func TestScalarConstantPropagationExcludesTablesAndFunctions(t *testing.T) {
 	proto, err := Compile(`
 local object = {}

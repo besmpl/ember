@@ -30,8 +30,8 @@ and retire or delete it when the slice lands or is abandoned.
 - `public-surface.md`: initial import and API surface rules.
 - `embedding.md`: generic host invocation, dispatch, typed catalogs, and
   cooperative suspension; Hearth appears only as a first-host case study.
-- `prepared.md`: deterministic prepared-Go generation, the `emberc` manifest,
-  freshness checking, and explicit runtime binding.
+- `prepared.md`: static prepared-Go generation, reload-time native
+  ARM64/x86-64 generations, exact Machine replay, and explicit runtime binding.
 - `golang-rules.md`: Go coding rules for this repository.
 - `checks.md`: local verification commands.
 - `adr/0001-go-native-runtime-mapping.md`: public Go ownership decision; ADR 0007
@@ -50,9 +50,9 @@ and retire or delete it when the slice lands or is abandoned.
 - `adr/0009-generated-adaptive-superword-vm.md`: rejected bounded dynamic-VM
   experiment, exact four-family failure evidence, transferable mechanisms,
   and completed deletion gate.
-- `adr/0010-hybrid-aot-generation-reload.md`: prepared-only generation slots,
-  static release bundles, opt-in same-process Go-plugin editor reload, and
-  explicit generation/state lifetime constraints.
+- `adr/0010-hybrid-aot-generation-reload.md`: static prepared releases,
+  no-cgo reload-time native generations, exact Machine replay, and explicit
+  executable/state lifetime constraints.
 
 ## Workflow Documents
 
@@ -65,6 +65,9 @@ and retire or delete it when the slice lands or is abandoned.
 - `../runtime-speed-2x-no-cgo-production-migration-implementation-plan.md`:
   retained background for the compact Machine migration. ADR 0008 and the
   prepared parity plan supersede its final-backend and final-target direction.
+- `../no-cgo-aot-reload-architecture-plan.md`: implementation audit for the
+  measured native hot-reload architecture, rejected experiments, proof, and
+  remaining platform limits. ADR 0010 is the durable decision.
 
 Historical performance execution plans are intentionally not part of the
 navigation. Their durable decisions remain in the performance audit and ADRs;

@@ -385,6 +385,9 @@ func instructionWritesOnlyDeadRegisters(ins instruction, liveRegisters registerS
 }
 
 func instructionCanRemoveWhenResultDead(ins instruction, numberFacts registerSet, facts bytecodeIROptimizationFacts) bool {
+	if instructionWritesCapturedRegister(ins, facts.capturedRegisters) {
+		return false
+	}
 	effect := opcodeEffect(ins.op)
 	if !effect.classified ||
 		opcodeTransfersControl(ins.op) ||
@@ -410,6 +413,16 @@ func instructionCanRemoveWhenResultDead(ins instruction, numberFacts registerSet
 	default:
 		return false
 	}
+}
+
+func instructionWritesCapturedRegister(ins instruction, capturedRegisters []bool) bool {
+	writes := instructionRegisters(ins, instructionRegisterWrite)
+	for register, ok := writes.next(); ok; register, ok = writes.next() {
+		if register >= 0 && register < len(capturedRegisters) && capturedRegisters[register] {
+			return true
+		}
+	}
+	return false
 }
 
 func bytecodeIRNumberFactsBeforeCompact(ir []bytecodeIRInstruction, facts bytecodeIROptimizationFacts, blocks []bytecodeIRBlock) []registerSet {

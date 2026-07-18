@@ -319,6 +319,9 @@ func scanPureGoAssembly(path, relative string) []pureGoBoundaryIssue {
 			if index+1 < len(fields) && pureGoAssemblyTarget(fields[index+1], labels) {
 				break
 			}
+			if index+1 < len(fields) && reviewedPreparedNativeAssemblyCall(relative, opcode, fields[index+1]) {
+				break
+			}
 			issues = append(issues, pureGoBoundaryIssue{Path: relative, Detail: fmt.Sprintf("assembly call-like instruction %s has non-Go target at line %d", opcode, lineNumber+1)})
 			break
 		}
@@ -354,6 +357,9 @@ func scanPureGoFile(path, relative string, allowlist map[string]pureGoExecAllowE
 		for _, comment := range group.List {
 			text := strings.TrimSpace(comment.Text)
 			if strings.HasPrefix(text, "//go:linkname") || strings.HasPrefix(text, "/*go:linkname") {
+				if reviewedPreparedNativeLinkname(relative, text) {
+					continue
+				}
 				result.Issues = append(result.Issues, pureGoBoundaryIssue{Path: relative, Detail: "private go:linkname directive"})
 			}
 		}
@@ -479,12 +485,15 @@ func scanPureGoPackageUse(relative, owner, importPath, name string, called bool,
 	if reviewedPreparedPluginAPI(relative, owner, importPath, name, called) {
 		return
 	}
+	if reviewedPreparedNativeAPI(relative, owner, importPath, name, called) {
+		return
+	}
 	if pureGoForeignAPI(importPath, name) {
 		result.Issues = append(result.Issues, pureGoBoundaryIssue{Path: relative, Detail: fmt.Sprintf("forbidden foreign or executable-memory API %s.%s", importPath, name)})
 	}
 }
 
-// reviewedPreparedPluginAPI is the one explicit native edge in the repository.
+// reviewedPreparedPluginAPI is one explicit native edge in the repository.
 // Keep this path, owner, and direct-call check exact: the package is an opt-in
 // editor adapter with a cgo-disabled stub, not part of Ember's portable runtime.
 func reviewedPreparedPluginAPI(relative, owner, importPath, name string, called bool) bool {
@@ -493,6 +502,43 @@ func reviewedPreparedPluginAPI(relative, owner, importPath, name string, called 
 		owner == "openPreparedBundle" &&
 		importPath == "plugin" &&
 		name == "Open"
+}
+
+// reviewedPreparedNativeAPI contains Ember's no-cgo executable-memory seam in
+// one implementation file. Keep every owner and symbol exact so moving or
+// widening this edge requires an explicit review.
+func reviewedPreparedNativeAPI(relative, owner, importPath, name string, called bool) bool {
+	if relative != "internal/preparednative/executable_darwin.go" {
+		return false
+	}
+	switch owner {
+	case "mapExecutable":
+		if importPath == "syscall" {
+			return name == "Mmap" && called || name == "PROT_EXEC" || name == "MAP_JIT"
+		}
+		return importPath == "github.com/ebitengine/purego" && name == "SyscallN" && called
+	case "resolveJITSymbols":
+		if importPath != "github.com/ebitengine/purego" {
+			return false
+		}
+		return name == "Dlsym" && called || name == "RTLD_DEFAULT"
+	default:
+		return false
+	}
+}
+
+func reviewedPreparedNativeLinkname(relative, directive string) bool {
+	return relative == "internal/preparednative/call_darwin.go" &&
+		directive == "//go:linkname runtimeCGOCall runtime.cgocall"
+}
+
+func reviewedPreparedNativeAssemblyCall(relative, opcode, target string) bool {
+	if opcode != "CALL" {
+		return false
+	}
+	target = strings.Trim(target, " \t,")
+	return relative == "internal/preparednative/call_darwin_arm64.s" && target == "(R9)" ||
+		relative == "internal/preparednative/call_darwin_amd64.s" && target == "AX"
 }
 
 func pureGoProcessAPI(importPath, name string) bool {

@@ -3,6 +3,10 @@
 Status: Rejected after the bounded P4 experiment; production implementation
 deleted.
 
+ADR 0010 later supersedes this experiment's blanket private-ABI/executable-
+memory prohibition only for the isolated prepared-generation native tier. It
+does not revive shadow wordcode or change this VM experiment's rejection.
+
 ## Context
 
 ADR 0008 makes generated Go the prepared path for scripts known before

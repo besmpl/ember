@@ -1,18 +1,22 @@
-# Prepared Go Bundles
+# Prepared execution
 
-Prepared bundles are an optional AOT acceleration path. Ember compiles the
-exact loaded Program into deterministic Go source; the application builds that
-source and supplies its exported `Bundle` explicitly. A missing bundle keeps
-the ordinary dynamic Machine path.
+Prepared execution accelerates an exact loaded Program while preserving the
+canonical Machine as its semantic fallback. Ember has two main preparation
+times:
 
-Generated code is a trusted application build artifact, not a sandbox for
-untrusted Go. Ember's root runtime does not invoke the Go toolchain, load native
-code, register bundles through `init`, or expose Machine registers and arenas.
-Static linking is the portable release path. The optional `preparedplugin`
-subpackage is an explicit editor adapter for hosts that accept Go's plugin
-constraints.
+- **Static prepared Go:** generate deterministic Go, compile it with the
+  application, and pass its bundle explicitly. This is the portable release
+  path and the broadest prepared tier.
+- **Reload-time native:** give changed source to `PreparedRuntimeSlot.Prepare`
+  before activation. On supported processes Ember lowers qualified numeric
+  functions directly to ARM64 or x86-64 code without the Go toolchain or cgo.
 
-## Manifest
+Prepared artifacts are trusted application code, not a sandbox. Neither path
+runs hidden file watchers or source loaders. Static preparation keeps all build
+effects in the host toolchain; reload-time preparation is an explicit expensive
+slot operation.
+
+## Static manifest
 
 `emberc` is the standard-library-only file/manifest wrapper around
 `Program.WritePreparedGo`. Paths are relative to the manifest file, not the
@@ -53,11 +57,13 @@ CI can verify byte-for-byte freshness without changing the file:
 go run github.com/besmpl/ember/cmd/emberc -check ./ember-prepared.json
 ```
 
-Malformed manifests, undeclared modules, bounded-input violations, unsupported
-Programs, and oversized generated output fail before the destination changes.
-`-check` reports missing or stale output and never rewrites it.
+Malformed manifests, undeclared modules, bounded-input violations, and
+oversized generated output fail before the destination changes. Unsupported
+individual Protos produce exact nil bundle entries and use canonical replay;
+they do not prevent supported siblings from being generated. `-check` reports
+missing or stale output and never rewrites it.
 
-## Runtime Binding
+## Static runtime binding
 
 Import the generated application package and pass its bundle explicitly:
 
@@ -70,19 +76,21 @@ runtime, err := program.NewRuntime(ember.RuntimeOptions{
 The bundle is bound to the exact prepared ABI, semantic version, Program hash,
 and module/Proto inventory. A mismatch returns `*ember.PreparedBundleError`
 before runtime-owner mutation and never silently falls back. Passing no bundle
-preserves the ordinary runtime selection path.
+to `Program.NewRuntime` preserves the ordinary runtime selection path.
 
-## Prepared Generations
+## Prepared generations and hot reload
 
-`PreparedRuntimeSlot` keeps reload transactionality outside guest execution. A
-host builds and loads the next bundle while the current generation keeps
-running, then binds an inert candidate before reaching its safe point:
+`PreparedRuntimeSlot` keeps compilation and reload transactionality outside
+guest execution. Load changed source into a new Program, prepare it while the
+current generation remains active, and publish only at the host's safe point:
 
 ```go
 candidate, err := scripts.Prepare(nextProgram, ember.RuntimeOptions{
-    Host:     gameHost,
-    Limits:   limits,
-    Prepared: nextBundle,
+    Host:   gameHost,
+    Limits: limits,
+    // Prepared may be a static/plugin bundle. When nil, Ember attempts
+    // reload-time native preparation and builds an exact replay bundle for
+    // everything that cannot be native.
 })
 if err != nil {
     return err // the active generation is unchanged
@@ -95,67 +103,79 @@ if err := scripts.Activate(candidate); err != nil {
 }
 ```
 
-Call active script behavior through `scripts.Use`. One `Use` should cover a
-whole frame or host operation; the supplied `*Runtime` must not escape it.
-Activation while `Use` is running returns `ErrRuntimeBusy`. A candidate becomes
-stale if another candidate wins first. Bundle mismatch is still reported as a
-wrapped `*PreparedBundleError` before the active generation changes.
+`Prepare` builds backend IR, emits and validates code, installs executable
+images, exact-binds the bundle, and creates an inert Runtime. It executes no
+guest code. `Activate` performs no compilation, mapping, I/O, source loading,
+or guest work.
 
-Successful activation closes the old Runtime. Old callbacks and suspensions
-therefore remain generation-bound and fail closed/stale; Ember does not
-transplant closures, stacks, tables, or module state. Keep game/world state in
-the Host Adapter. If script state must survive, transfer only application-owned
-detached data through an explicit schema before activation.
+Call active behavior through `scripts.Use`. One `Use` should cover a complete
+frame or host operation; the supplied `*Runtime` must not escape it. Activation
+while `Use` is running returns `ErrRuntimeBusy`. A candidate becomes stale if
+another candidate wins first.
 
-`PreparedRuntimeSlot.Use` adds one host-boundary admission per batch, not per
-guest operation. Generated functions, side exits, and the Machine execution
-path are unchanged.
+Successful activation closes the old Runtime and native images. Old callbacks
+and suspensions therefore remain generation-bound and fail closed or stale;
+Ember does not transplant closures, stacks, tables, or module state. Keep
+game/world state in the Host Adapter. Transfer surviving state only as
+application-owned detached data through an explicit schema.
 
-## Same-Process Editor Reload
+## Reload-time native tier
 
-For source not known at the host's original `go build`, generate a `package
-main`, put it under a unique content-derived package path, build an immutable
-plugin, and open its exported bundle. An editor builder follows this shape:
+The native tier currently qualifies pure numeric functions containing numeric
+arithmetic, comparisons, branches, loops, direct static calls, bounded
+self-recursion, and immutable module-private numeric captures. It supports at
+most eight explicit plus hidden numeric arguments and one numeric result.
 
-```sh
-# digest covers generated Go plus Go version, target, tags, and module identity.
-generation="internal/emberprepared/${digest}"
-# Write Program.WritePreparedGo(..., Package: "main") to:
-#   ${generation}/prepared_generated.go
-go build -buildmode=plugin \
-  -o ".ember/prepared/${digest}.so" "./${generation}"
-```
+The following remain canonical Machine execution:
 
-With `emberc`, set the manifest's `package` to `main` and generate a staging
-file first. Compute the complete build identity, then copy those unchanged bytes
-into the identity-named generation directory before building. The output and
-cache directories are application owned. Both the Go package import path and
-artifact path must change when the build identity changes; Go rejects a second
-body for an already loaded plugin package path. Identical identities reuse the
-original artifact path. Build from the same module graph, Go toolchain, build
-tags, and shared dependency sources as the running host. Then use an absolute
-path:
+- tables and host effects;
+- mutable or escaping closures;
+- varargs and coroutines;
+- unsupported operations or static-call dependencies;
+- qualified functions called with nonnumeric values.
 
-```go
-bundle, err := preparedplugin.Open(artifactPath)
-if err != nil {
-    return err // the active slot is untouched
-}
-candidate, err := scripts.Prepare(nextProgram, ember.RuntimeOptions{
-    Host: gameHost, Limits: limits, Prepared: bundle,
-})
-```
+Replay begins at the function entry before any effect. Qualification is based
+only on Program semantics, never source names, benchmark names, or workload
+hashes.
 
-Go plugins require cgo and are supported only where the standard library's
-plugin loader is available (currently Darwin, FreeBSD, and Linux). They cannot
-be unloaded, so every distinct loaded generation consumes process-lifetime
-code memory. Editor hosts must use unique content-derived package and artifact
-paths, deduplicate identical build identities, cap reload generations, and
-periodically restart. A plugin is trusted native code, not a script sandbox. On
-unsupported builds, `preparedplugin.Open` returns
-`preparedplugin.ErrUnsupported`; Ember never silently falls back to the dynamic
-VM.
+| Host process | Reload-time result |
+| --- | --- |
+| Darwin ARM64 | Native qualified subset plus exact Machine replay |
+| Darwin x86-64 with SSE4.1 | Native qualified subset plus exact Machine replay |
+| Other OS/ISA or denied executable-memory policy | Exact all-Machine bundle |
 
-Use rebuild/re-exec when same-process plugins are unavailable. That keeps AOT
-speed and reclaims old code, but process-local state survives only through an
-explicit application handoff.
+ARM64 and x86-64 use separate emitters behind one target-independent semantic
+candidate. Native-to-native calls use a private register ABI; only the outer
+adapter accepts argument/result pointers from Go.
+
+The Darwin installer uses generation-owned `MAP_JIT` memory, serialized JIT
+write protection, instruction-cache invalidation, and an architecture-specific
+system-stack trampoline. Calls hold a lease so retirement cannot unmap active
+code. The implementation passes with `CGO_ENABLED=0`, but uses `purego` and one
+audited private `runtime.cgocall` boundary. Hosts must treat Go toolchain and OS
+security-policy upgrades as compatibility events and rerun race/checkptr plus
+the focused native tests.
+
+Native installation on Linux and Windows is not implemented yet. The x86-64
+emitter cross-builds there, but the runtime deliberately selects exact Machine
+fallback rather than claiming native speed.
+
+## Choosing a deployment path
+
+| Need | Recommended path |
+| --- | --- |
+| Shipping release; source known at build | Static generated Go |
+| Same-process editor reload on supported Darwin | Nil-bundle `PreparedRuntimeSlot.Prepare` |
+| Complete behavior outside the native subset | Automatic canonical Machine replay |
+| Same-process generated Go under accepted cgo/plugin limits | Optional `preparedplugin` adapter |
+| Compiled reload where no native installer exists | Rebuild/re-exec or an application-owned worker |
+
+The optional plugin adapter still loads a generated `package main` bundle from
+an absolute path. Go plugins require cgo on their supported platforms, bind to
+the exact Go toolchain/module graph, and cannot unload. Use unique
+content-derived package and artifact paths, deduplicate identical identities,
+cap generations, and restart periodically. `preparedplugin.Open` returns
+`preparedplugin.ErrUnsupported` rather than selecting another mode.
+
+Rebuild/re-exec preserves static prepared speed and reclaims old code, but
+process-local state survives only through an explicit application handoff.

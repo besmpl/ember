@@ -38,5 +38,6 @@ Current runtime decisions:
   adaptive shadow-wordcode experiment, its exact P4 gate failure, and deletion
   from production after scalar wins failed to transfer to object workloads.
 - `0010-hybrid-aot-generation-reload.md`: selects static prepared bundles for
-  releases, a prepared-generation safe-point transaction, and an explicit
-  content-addressed Go-plugin adapter for supported editor hosts.
+  releases, reload-time no-cgo ARM64/x86-64 native generations on supported
+  Darwin hosts, exact Machine replay, and a prepared-generation safe-point
+  transaction. The Go-plugin adapter remains an optional separate host choice.

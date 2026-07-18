@@ -3,10 +3,452 @@ package ember
 import (
 	"context"
 	"errors"
+	"math"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+func TestPreparedRuntimeSlotPreparesSourceUnknownAtHostBuild(t *testing.T) {
+	program := preparedRuntimeSlotTestProgram(t, 41)
+	var slot PreparedRuntimeSlot
+
+	candidate, err := slot.Prepare(program, RuntimeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.Close()
+	if err := slot.Use(preparedRuntimeSlotNoop); !errors.Is(err, ErrPreparedRuntimeUnavailable) {
+		t.Fatalf("Use before activation error = %v, want ErrPreparedRuntimeUnavailable", err)
+	}
+	if err := slot.Activate(candidate); err != nil {
+		t.Fatal(err)
+	}
+	if got := preparedRuntimeSlotResult(t, &slot); got != 41 {
+		t.Fatalf("reload-time prepared generation result = %v, want 41", got)
+	}
+	if err := slot.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPreparedRuntimeSlotRetiresReloadTimeNativeImages(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" && runtime.GOARCH != "amd64" {
+		t.Skip("reload-time native execution is currently available on Darwin ARM64 and x86-64")
+	}
+	firstProgram := preparedRuntimeSlotTestProgram(t, 41)
+	secondProgram := preparedRuntimeSlotTestProgram(t, 42)
+	var slot PreparedRuntimeSlot
+
+	first, err := slot.Prepare(firstProgram, RuntimeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	var firstExecutable interface {
+		Call(...float64) (float64, bool, error)
+	}
+	for _, executable := range first.native.executables {
+		if executable != nil {
+			firstExecutable = executable
+			break
+		}
+	}
+	if firstExecutable == nil {
+		t.Skip("current CPU or process policy selected canonical fallback")
+	}
+	if err := slot.Activate(first); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := slot.Prepare(secondProgram, RuntimeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if got := preparedRuntimeSlotResult(t, &slot); got != 41 {
+		t.Fatalf("result before activation = %v, want 41", got)
+	}
+	if err := slot.Activate(second); err != nil {
+		t.Fatal(err)
+	}
+	if got := preparedRuntimeSlotResult(t, &slot); got != 42 {
+		t.Fatalf("result after activation = %v, want 42", got)
+	}
+	if _, _, err := firstExecutable.Call(); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("retired native image call error = %v, want closed", err)
+	}
+	if err := slot.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPreparedRuntimeSlotRepeatedReloadsReclaimNativeImages(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" && runtime.GOARCH != "amd64" {
+		t.Skip("reload-time native execution is currently available on Darwin ARM64 and x86-64")
+	}
+	var slot PreparedRuntimeSlot
+	var active interface {
+		Call(...float64) (float64, bool, error)
+	}
+
+	for generation := 0; generation < 32; generation++ {
+		want := 100 + generation
+		program := preparedRuntimeSlotTestProgram(t, want)
+		candidate, err := slot.Prepare(program, RuntimeOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var next interface {
+			Call(...float64) (float64, bool, error)
+		}
+		for _, executable := range candidate.native.executables {
+			if executable != nil {
+				next = executable
+				break
+			}
+		}
+		if next == nil {
+			_ = candidate.Close()
+			t.Skip("current CPU or process policy selected canonical fallback")
+		}
+		if err := slot.Activate(candidate); err != nil {
+			_ = candidate.Close()
+			t.Fatal(err)
+		}
+		if active != nil {
+			if _, _, err := active.Call(); err == nil || !strings.Contains(err.Error(), "closed") {
+				t.Fatalf("generation %d retained old native image: %v", generation, err)
+			}
+		}
+		active = next
+		if got := preparedRuntimeSlotResult(t, &slot); got != float64(want) {
+			t.Fatalf("generation %d result = %v, want %d", generation, got, want)
+		}
+	}
+
+	if err := slot.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := active.Call(); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("last native image after slot close error = %v, want closed", err)
+	}
+}
+
+func TestPreparedRuntimeSlotReloadTimeNativeReplaysBeforeEffects(t *testing.T) {
+	module := LogicalModule("prepared/reload-native-replay")
+	program := preparedRuntimeSlotSourceProgram(t, module, `
+return {
+    numeric = function(x) return x % 3 end,
+    effectful = function(x)
+        record(x)
+        return x + 1
+    end,
+}
+`)
+	var slot PreparedRuntimeSlot
+	candidate, err := slot.Prepare(program, RuntimeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.Close()
+	if err := slot.Activate(candidate); err != nil {
+		t.Fatal(err)
+	}
+
+	var numeric []Value
+	err = slot.Use(func(runtime *Runtime) error {
+		var invokeErr error
+		numeric, invokeErr = runtime.Invoke(
+			context.Background(),
+			Invocation{Module: module, Export: "numeric"},
+			NumberValue(math.NaN()),
+		)
+		return invokeErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(numeric) != 1 {
+		t.Fatalf("numeric replay values = %v, want one NaN", numeric)
+	}
+	number, ok := numeric[0].Number()
+	if !ok || !math.IsNaN(number) {
+		t.Fatalf("numeric replay value = %v, want NaN", numeric[0])
+	}
+
+	recorded := 0
+	var effectful []Value
+	err = slot.Use(func(runtime *Runtime) error {
+		var invokeErr error
+		effectful, invokeErr = runtime.Invoke(
+			context.Background(),
+			Invocation{
+				Module: module,
+				Export: "effectful",
+				Globals: map[string]Value{
+					"record": HostFuncValue(func(arguments []Value) ([]Value, error) {
+						recorded++
+						return nil, nil
+					}),
+				},
+			},
+			NumberValue(41),
+		)
+		return invokeErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorded != 1 {
+		t.Fatalf("effectful fallback calls = %d, want 1", recorded)
+	}
+	if len(effectful) != 1 {
+		t.Fatalf("effectful fallback values = %v, want one result", effectful)
+	}
+	result, ok := effectful[0].Number()
+	if !ok || result != 42 {
+		t.Fatalf("effectful fallback value = %v, want 42", effectful[0])
+	}
+	if err := slot.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPreparedRuntimeSlotReloadTimeNativeExecutesBoundedSelfRecursion(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" && runtime.GOARCH != "amd64" {
+		t.Skip("reload-time native execution is currently available on Darwin ARM64 and x86-64")
+	}
+	module := LogicalModule("prepared/reload-native-recursion")
+	program := preparedRuntimeSlotSourceProgram(t, module, `
+local function fib(n)
+    if n < 2 then
+        return n
+    end
+    return fib(n - 1) + fib(n - 2)
+end
+return {fib = fib}
+`)
+	var slot PreparedRuntimeSlot
+	candidate, err := slot.Prepare(program, RuntimeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.Close()
+	if candidate.native == nil || len(candidate.native.executables) != 1 || candidate.native.executables[0] == nil {
+		t.Fatal("bounded self-recursive function was not installed as native code")
+	}
+	if err := slot.Activate(candidate); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := preparedRuntimeSlotNumberInvoke(t, &slot, module, "fib", 20); got != 6765 {
+		t.Fatalf("native fib(20) = %v, want 6765", got)
+	}
+	// Native entry admission is deliberately capped. The value above the cap
+	// must replay the exact canonical Machine function, not fail or truncate.
+	if got := preparedRuntimeSlotNumberInvoke(t, &slot, module, "fib", 25); got != 75025 {
+		t.Fatalf("replayed fib(25) = %v, want 75025", got)
+	}
+	if err := slot.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPreparedNativeArchitecturesQualifyBoundedSelfRecursion(t *testing.T) {
+	module := LogicalModule("prepared/native-recursion-inventory")
+	program := preparedRuntimeSlotSourceProgram(t, module, `
+local function descend(n)
+    if n < 1 then
+        return n
+    end
+    return descend(n - 1) + 1
+end
+return {descend = descend}
+`)
+	image, err := program.preparedProgramImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ir, err := buildBackendProgramIR(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, architecture := range []backendNativeArchitecture{
+		backendNativeArchitectureARM64,
+		backendNativeArchitectureX8664,
+	} {
+		artifact, err := emitBackendNativeProgram(ir, architecture)
+		if err != nil {
+			t.Fatalf("architecture %d: %v", architecture, err)
+		}
+		if len(artifact.modules) != 1 || len(artifact.modules[0].functions) < 2 ||
+			!artifact.modules[0].functions[1].prepared {
+			t.Fatalf("architecture %d recursion inventory = %#v", architecture, artifact.modules)
+		}
+	}
+}
+
+func TestPreparedRuntimeSlotNativeCarriesCapturedNumbersInsideGeneration(t *testing.T) {
+	module := LogicalModule("prepared/reload-native-captured-recursion")
+	program := preparedRuntimeSlotSourceProgram(t, module, `
+local function run(n, seed)
+    local function fib(x)
+        if x < 2 + seed % 3 then
+            return x
+        end
+        return fib(x - 1) + fib(x - 2)
+    end
+    return fib(n)
+end
+return run
+`)
+	image, err := program.preparedProgramImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ir, err := buildBackendProgramIR(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, architecture := range []backendNativeArchitecture{
+		backendNativeArchitectureARM64,
+		backendNativeArchitectureX8664,
+	} {
+		artifact, err := emitBackendNativeProgram(ir, architecture)
+		if err != nil {
+			t.Fatalf("architecture %d: %v", architecture, err)
+		}
+		if len(artifact.modules) != 1 || len(artifact.modules[0].functions) != 3 ||
+			!artifact.modules[0].functions[1].prepared ||
+			!artifact.modules[0].functions[2].prepared {
+			t.Fatalf("architecture %d captured inventory = %#v", architecture, artifact.modules)
+		}
+	}
+
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" && runtime.GOARCH != "amd64" {
+		return
+	}
+	var slot PreparedRuntimeSlot
+	candidate, err := slot.Prepare(program, RuntimeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.Close()
+	functions := candidate.native.bundle.program.modules[0].functions
+	if len(functions) != 3 || functions[1] == nil || functions[2] != nil {
+		t.Fatalf("captured prepared entries = %#v, want parent only", functions)
+	}
+	if err := slot.Activate(candidate); err != nil {
+		t.Fatal(err)
+	}
+	if got := preparedRuntimeSlotNumberInvokeMany(t, &slot, module, "", 5, 0); got != 5 {
+		t.Fatalf("native captured run(5, 0) = %v, want 5", got)
+	}
+	if got := preparedRuntimeSlotNumberInvokeMany(t, &slot, module, "", 5, 1); got != 8 {
+		t.Fatalf("native captured run(5, 1) = %v, want 8", got)
+	}
+	if got := preparedRuntimeSlotNumberInvokeMany(t, &slot, module, "", 25, 0); got != 75025 {
+		t.Fatalf("replayed captured run(25, 0) = %v, want 75025", got)
+	}
+	if err := slot.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const preparedRuntimeSlotMutableCaptureSource = `
+local function run(x)
+    local bias = 1
+    local function read()
+        return bias
+    end
+    if x > 0 then
+        bias = 2
+    end
+    return read()
+end
+return run
+`
+
+func TestRuntimeMutableCaptureBranchSemantics(t *testing.T) {
+	for _, engine := range []string{"vm", "machine"} {
+		t.Run(engine, func(t *testing.T) {
+			t.Setenv(runtimeEngineEnvironment, engine)
+			module := LogicalModule("runtime/mutable-capture-" + engine)
+			program := preparedRuntimeSlotSourceProgram(t, module, preparedRuntimeSlotMutableCaptureSource)
+			owner, err := program.NewRuntime(RuntimeOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer owner.Close()
+			values, err := owner.Invoke(
+				context.Background(),
+				Invocation{Module: module},
+				NumberValue(4),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(values) != 1 {
+				t.Fatalf("mutable-capture values = %v, want one number", values)
+			}
+			got, ok := values[0].Number()
+			if !ok || got != 2 {
+				t.Fatalf("mutable-capture run(4) = %v, want 2", values[0])
+			}
+		})
+	}
+}
+
+func TestPreparedRuntimeSlotMutableCaptureUsesCanonicalFallback(t *testing.T) {
+	module := LogicalModule("prepared/reload-native-mutable-capture")
+	program := preparedRuntimeSlotSourceProgram(t, module, preparedRuntimeSlotMutableCaptureSource)
+	image, err := program.preparedProgramImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ir, err := buildBackendProgramIR(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, architecture := range []backendNativeArchitecture{
+		backendNativeArchitectureARM64,
+		backendNativeArchitectureX8664,
+	} {
+		artifact, err := emitBackendNativeProgram(ir, architecture)
+		if err != nil {
+			t.Fatalf("architecture %d: %v", architecture, err)
+		}
+		if len(artifact.modules) != 1 || len(artifact.modules[0].functions) != 3 {
+			t.Fatalf("architecture %d mutable-capture inventory = %#v", architecture, artifact.modules)
+		}
+		for protoIndex, function := range artifact.modules[0].functions {
+			if function.prepared {
+				t.Fatalf("architecture %d mutable-capture Proto %d was emitted: %#v", architecture, protoIndex, function)
+			}
+		}
+	}
+
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" && runtime.GOARCH != "amd64" {
+		return
+	}
+	var slot PreparedRuntimeSlot
+	candidate, err := slot.Prepare(program, RuntimeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.Close()
+	if err := slot.Activate(candidate); err != nil {
+		t.Fatal(err)
+	}
+	if got := preparedRuntimeSlotNumberInvokeMany(t, &slot, module, "", 4); got != 2 {
+		t.Fatalf("mutable-capture fallback run(4) = %v, want 2", got)
+	}
+	if err := slot.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestPreparedRuntimeSlotActivatesOnlyAtExplicitSafePoint(t *testing.T) {
 	firstProgram := preparedRuntimeSlotTestProgram(t, 41)
@@ -419,6 +861,53 @@ func preparedRuntimeSlotResult(t *testing.T, slot *PreparedRuntimeSlot) float64 
 		}
 		if !ok {
 			t.Fatalf("Invoke values = %v, want one number", values)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func preparedRuntimeSlotNumberInvoke(
+	t *testing.T,
+	slot *PreparedRuntimeSlot,
+	module ModuleID,
+	export string,
+	argument float64,
+) float64 {
+	return preparedRuntimeSlotNumberInvokeMany(t, slot, module, export, argument)
+}
+
+func preparedRuntimeSlotNumberInvokeMany(
+	t *testing.T,
+	slot *PreparedRuntimeSlot,
+	module ModuleID,
+	export string,
+	arguments ...float64,
+) float64 {
+	t.Helper()
+	values := make([]Value, len(arguments))
+	for index, argument := range arguments {
+		values[index] = NumberValue(argument)
+	}
+	var result float64
+	err := slot.Use(func(runtime *Runtime) error {
+		results, err := runtime.Invoke(
+			context.Background(),
+			Invocation{Module: module, Export: export},
+			values...,
+		)
+		if err != nil {
+			return err
+		}
+		var ok bool
+		if len(results) == 1 {
+			result, ok = results[0].Number()
+		}
+		if !ok {
+			t.Fatalf("Invoke values = %v, want one number", results)
 		}
 		return nil
 	})

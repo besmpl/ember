@@ -330,6 +330,18 @@ func backendOperationUse(operation *backendOperationIR, register int32) backendV
 	return invalidBackendValueID
 }
 
+func backendOperationDefinition(operation *backendOperationIR, register int32) backendValueID {
+	if operation == nil {
+		return invalidBackendValueID
+	}
+	for _, definition := range operation.defs {
+		if definition.register == register {
+			return definition.value
+		}
+	}
+	return invalidBackendValueID
+}
+
 func (ir *backendProtoIR) backendCallClassification(operation *backendOperationIR) backendCallIR {
 	result := backendCallIR{targetProto: -1, nativeID: -1}
 	switch operation.op {

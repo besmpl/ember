@@ -1,118 +1,156 @@
-# ADR 0010: Use Hybrid Prepared-Generation Reload
+# ADR 0010: Use Static and Reload-Time Prepared Generations
 
 Status: Accepted
 
 ## Context
 
-Prepared SSA AOT-to-Go is Ember's only proven path comfortably inside the
-Luau throughput target. It emits ordinary compiled Go functions, so source
-unknown at the host's original build cannot enter that process as data alone.
-The problem is native code installation, not parsing or lowering.
+Static prepared SSA AOT-to-Go is Ember's fastest and most portable execution
+path, but it can compile only source known before the application build. Hot
+reload needs changed source to become compiled code while the current Runtime
+continues serving the host.
 
-Four installation families were compared under the same priorities: prepared
-throughput, changed-source capability, atomic failure, state ownership,
-portability, unload behavior, reload latency, and interface locality.
+The generation transaction and the code-installation mechanism are separate
+problems. `PreparedRuntimeSlot` already provides the honest transaction:
+prepare an inert exact generation, activate only at an idle host safe point,
+scope use to one generation, and close old owner-bound state. The missing piece
+was a no-cgo compiled-code mechanism for a Program unknown at the original Go
+build.
 
-| Family | Strength | Blocking liability |
-| --- | --- | --- |
-| Rebuild and re-exec | Portable compiled Go and clean reclamation | Not same-process; host state handoff is application-specific |
-| Content-addressed Go plugin | Same-process direct prepared functions using the existing generator | cgo and supported Unix only; exact build identity; cannot unload |
-| Integrated native JIT | Same-process code with custom backends | Executable memory, ABI, stack-map, unwind, and platform obligations |
-| Portable data artifact and generic kernel | Same-process, pure-Go, reclaimable | Executes as another interpreter/VM and loses the proven AOT advantage |
+Measured candidates included a content-addressed Go plugin, rebuild/re-exec,
+an external prepared worker, several whole-Go and direct Wasm designs, dynamic
+VM/superword/SSA-region designs, and a small native capsule. The Wasm variants
+missed the required 1.5x Luau row after materially different lowerings. Dynamic
+specialization did not transfer generally. Plugins require cgo and cannot
+unload. A process boundary gives clean reclamation but turns fine-grained host
+interaction into IPC.
 
-Standard Go does not provide unknown-at-build, same-process, portable,
-unloadable, no-cgo native code simultaneously. A single loader abstraction
-would also be dishonest: static packages, plugins, replacement processes, and
-JIT memory have different trust, close, and state semantics.
-
-Three caller interfaces were compared. A broad Builder/Artifact/Lease graph was
-rejected because it advertised substitutability those resources do not have
-and could not automatically associate escaped callbacks with leases. A
-game-first interface with generic StateTransfer was rejected because Ember
-cannot safely serialize owner-bound values, closures, frames, or host objects.
-A narrow generation transaction deleted the most caller complexity without
-claiming either false capability.
+The native capsule was initially rejected because a leaf proof did not justify
+executable memory, private runtime ABI, two ISAs, or reclamation machinery. It
+became justified only after safer architectures failed the frozen performance
+gate and a complete generation-owned implementation proved those obligations.
 
 ## Decision
 
-Shipping applications continue to statically link generated prepared bundles.
-Rebuild/re-exec is the portable hot-reload fallback.
+Ember uses three explicit prepared modes:
 
-The root package exposes `PreparedRuntimeSlot` immediately above
-`Program.NewRuntime`:
+1. **Static generated Go** is the portable release path. The host calls
+   `Program.WritePreparedGo`, compiles the generated package with the
+   application, and passes its exact bundle through `RuntimeOptions.Prepared`.
+2. **Reload-time native preparation** is the same-process no-cgo hot-reload
+   path. Calling `PreparedRuntimeSlot.Prepare` with a nil
+   `RuntimeOptions.Prepared` lowers the exact changed Program into an inert
+   native generation before activation.
+3. **Canonical Machine replay** remains complete. Unsupported platforms,
+   Protos, runtime values, or static-call dependency graphs receive nil bundle
+   entries and replay from the entry before effects.
 
-1. `Prepare` requires `RuntimeOptions.Prepared`, performs exact ABI, semantic,
-   Program-hash, module, and Proto-inventory binding, and creates an inert
-   candidate without changing or executing the active generation.
-2. `Activate` is an explicit host safe-point transaction. It rejects active
-   `Use`, foreign candidates, stale base generations, and closed slots before
-   retiring the old Runtime and publishing the candidate.
-3. `Use` scopes one synchronous host batch to a stable generation. Runtime
-   references may not escape it. Host callbacks and continuation work must be
-   serialized inside the same generation boundary.
-4. Candidate and slot Close operations are explicit and idempotent. A failed
-   bind, load, or activation leaves the active Runtime usable.
+The optional `preparedplugin` package remains a separate host adapter for
+applications that deliberately accept Go plugin and cgo constraints. It is not
+the default reload mechanism and does not share native-generation lifetime
+semantics.
 
-Successful activation starts fresh script-owned runtime state. World state,
-files, clocks, networking, and other application objects remain host owned.
-Any state transfer uses an application schema over detached data. Raw values,
+### Semantic and ISA seams
+
+One target-independent native candidate builder owns semantic admission. The
+current subset contains pure numeric constants, arithmetic, comparisons,
+branches, loops, direct static calls, bounded self-recursion, and immutable
+module-private numeric captures, with at most eight explicit plus hidden
+arguments and one numeric result.
+
+ARM64 and x86-64 emitters consume that candidate. Each emitted function has a
+Go-facing pointer/count/result adapter and a private register fast-call body.
+Native-to-native calls use D0-D7 or XMM0-XMM7 and return through D0/XMM0 plus
+X0/RAX status. ISA code owns instruction selection and relocation only; it
+cannot change language qualification.
+
+Tables, host effects, mutable or escaping closures, varargs, coroutines, and
+unproved operations remain canonical. A runtime value mismatch requests replay
+before the native body performs an effect.
+
+### Preparation and activation
+
+`PreparedRuntimeSlot.Prepare` is explicitly expensive. It builds backend IR,
+emits and validates the native artifact, installs executable mappings, binds an
+exact `PreparedBundle`, and constructs the Runtime while the active generation
+remains usable. It performs no guest execution.
+
+`Activate` performs no compilation, mapping, file I/O, source loading, or guest
+work. It rejects busy, stale, foreign, used, and closed candidates, closes the
+old Runtime, publishes the candidate, and retires the old executable images.
+`Use` serializes one host batch against a stable generation.
+
+Successful activation starts fresh script-owned state. World state, files,
+clocks, networking, and other application objects remain host-owned. Raw
 tables, closures, callbacks, frames, and suspensions never cross generations;
-closing the old Runtime makes those handles closed or stale.
+application state transfer uses an explicit detached schema.
 
-The optional `preparedplugin` package is the one reviewed native edge. On a
-cgo-enabled Darwin, FreeBSD, or Linux build it opens the standard generated
-`Bundle` symbol from an absolute plugin path. Other builds compile a stub that
-returns `ErrUnsupported`. File watching, source snapshots, Go command
-execution, artifact caches, activation scheduling, generation caps, and
-process restart policy remain Host Adapter effects.
+### Native boundary and ownership
 
-Every plugin package path and filename must be content-derived and immutable;
-Go will not load changed code under an already loaded plugin package path.
-Identical build identities reuse their existing artifact. Exact
-`Program.NewRuntime` binding remains the final correctness authority; the
-artifact hash is cache identity, not trust. Plugins are trusted native
-application code and must be built with the same Go toolchain, build flags, and
-shared dependency sources as the host.
+The executable-memory and private-runtime edge is confined to
+`internal/preparednative`.
+
+- One generation owns all module mappings and the Go closures that reference
+  their entries.
+- Calls hold read leases; close waits for them before unmapping.
+- Darwin mappings use `MAP_JIT`, serialized per-thread write windows, and
+  instruction-cache invalidation before publication.
+- A tiny architecture-specific trampoline enters generated code on the Go
+  runtime's foreign/system stack.
+- Generated code may read argument and result pointers only for the duration of
+  the call and cannot retain Go pointers.
+- The repository's pure-Go scanner allowlists only the exact `purego`,
+  executable-memory, assembly-call, and `runtime.cgocall` sites.
+
+`CGO_ENABLED=0` is required and tested. This path nevertheless depends on one
+private Go runtime ABI through `purego`; toolchain upgrades must keep the
+focused boundary, race, checkptr, and linked-symbol tests green.
+
+### Platform support
+
+Native installation is currently supported on Darwin ARM64 and Darwin x86-64;
+x86-64 requires SSE4.1. Both emitters and the complete Darwin execution path
+are tested. Linux/Windows x86-64 cross-builds retain the exact Machine fallback
+until platform-specific native mapping and call boundaries are implemented.
 
 ## Consequences
 
-- Prepared guest execution is unchanged. No reload check enters generated
-  functions, side exits, or guest operations. The scoped slot boundary measured
-  28.6-29.6 ns/op and 0 B/0 allocations on the selection host; one boundary can
-  cover a complete frame.
-- The active generation continues while source compilation, Go compilation,
-  plugin loading, and exact binding happen off the safe point. Activation does
-  no toolchain or loader work.
-- Same-process editor reload is available for source unknown at the original
-  build without routing that source through the slower dynamic Machine.
-- Go plugins cannot be unloaded. Editors must deduplicate by complete build
-  identity, impose a generation/memory cap, and restart periodically. Static
-  releases and re-exec reclaim code normally.
-- Plugin loading inherits Go's narrower OS/cgo support, exact build-identity
-  requirements, security risk, and race-detector limitations. It is not the
-  portable production deployment mechanism.
-- ADR 0008's no-plugin rule is superseded only for this explicit optional
-  adapter. The root runtime, normal generated packages, and cgo-disabled builds
-  retain the pure-Go boundary.
+- Changed Luau source can become compiled same-process code without invoking
+  the Go toolchain, using cgo, or pausing the active generation for compilation.
+- Static prepared Go remains the release default and can cover a broader
+  prepared subset without executable-memory policy.
+- Native coverage is deliberately partial. Performance is a property of the
+  qualified numeric region plus the host's real fallback mix, not a blanket
+  claim about arbitrary Luau.
+- The accepted four-row production-path capture measures median/worst ratios of
+  0.688620/0.692415 for arithmetic `for`, 0.280739/0.286104 for branching,
+  0.167772/0.176960 for captured recursion, and 1.268322/1.290334 for iterative
+  Fibonacci against pinned Luau 0.728.
+- Thirty-two repeated generation swaps reclaim each prior mapping and old
+  handles reject calls. A longer resident-memory soak remains a production
+  hardening item.
+- Unsupported mutable captures also proved the fallback itself: a shared
+  optimizer bug that removed conditional captured writes was repaired in the
+  common compiler, and VM, Machine, and slot replay now agree.
+- Executable memory, private runtime ABI, and per-ISA maintenance are real
+  production costs. They remain behind one deep internal module rather than
+  leaking into `Runtime`, backend IR, or host adapters.
 
-The platform and lifetime constraints come from Go's official
-[`plugin` package documentation](https://pkg.go.dev/plugin); the standard
-loader's cgo/OS build boundary is visible in
-[`plugin_dlopen.go`](https://go.dev/src/plugin/plugin_dlopen.go). Luau's own
-same-process native path likewise exposes an explicit code-generation context
-and compile operation in its
-[`CodeGen` interface](https://github.com/luau-lang/luau/blob/master/CodeGen/include/Luau/CodeGen.h),
-which is JIT machinery rather than a portable data-artifact shortcut.
+## Alternatives considered
 
-## Alternatives Rejected
-
-- Continue optimizing only the dynamic VM: retained as compatibility fallback,
-  but prior complete evidence is far outside the requested Luau ratio.
-- Put compiler and plugin operations in `Runtime`: rejected because it hides
-  filesystem/process/native effects and delays failure into the owner seam.
-- Automatically migrate script heaps or callbacks: rejected because identity
-  and continuation semantics cannot be preserved across independently compiled
-  Programs.
-- Integrate a native JIT now: rejected because it recreates Luau's executable
-  allocator, custom entry ABI, unwind metadata, and platform backends without a
-  demonstrated advantage over Ember's current compiled-Go backend.
+- **Continue only with static generated Go:** retained for releases, but it
+  cannot admit source unknown at the original build.
+- **Go plugin:** retained as an optional adapter; rejected as the no-cgo default
+  because it requires cgo, has exact Go build-identity constraints, and cannot
+  reclaim loaded code.
+- **Rebuild/re-exec or prepared worker:** valid host fallbacks with clean code
+  reclamation; rejected as transparent game hot reload because process-local
+  state and fine-grained host calls need explicit handoff or IPC.
+- **Prepared Wasm capsule:** rejected after whole-Go, direct-CFG, structured,
+  and semantics-complete variants measured about 2.14x, 4.1x, 2.44x, and 3.53x
+  Luau on the blocking row.
+- **Generated superword VM or adaptive SSA regions:** rejected because measured
+  wins were workload- or benchmark-zone-specific and did not provide a general
+  parity architecture.
+- **One generic loader interface:** rejected because static packages, plugins,
+  processes, native mappings, and Machine replay have different trust, failure,
+  close, and state semantics.

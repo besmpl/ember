@@ -295,15 +295,7 @@ func backendGoFiniteClosureIteratorControlsUnobserved(
 }
 
 func backendGoDefinitionForRegister(operation *backendOperationIR, register int32) backendValueID {
-	if operation == nil {
-		return invalidBackendValueID
-	}
-	for _, definition := range operation.defs {
-		if definition.register == register {
-			return definition.value
-		}
-	}
-	return invalidBackendValueID
+	return backendOperationDefinition(operation, register)
 }
 
 func backendGoFindDerivedOperation(
