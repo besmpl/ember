@@ -11,7 +11,19 @@ die() {
 }
 
 hash_file() {
-	shasum -a 256 "$1" | awk 'NF == 2 { print $1 }'
+	if command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 "$1" | awk 'NF == 2 { print $1 }'
+	else
+		sha256sum "$1" | awk 'NF == 2 { print $1 }'
+	fi
+}
+
+hash_stdin() {
+	if command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 | awk 'NF == 2 { print $1 }'
+	else
+		sha256sum | awk 'NF == 2 { print $1 }'
+	fi
 }
 
 quiet_sample() {
@@ -19,7 +31,11 @@ quiet_sample() {
 		awk -v line="$2" 'NR == line { print; exit }' "$1"
 		return
 	fi
-	load=$(sysctl -n vm.loadavg | awk '{ print $2 }')
+	case "$(uname -s)" in
+	Darwin) load=$(sysctl -n vm.loadavg | awk '{ print $2 }') ;;
+	Linux) load=$(awk '{ print $1 }' /proc/loadavg) ;;
+	*) return 1 ;;
+	esac
 	cpu=$(LC_ALL=C ps -A -o %cpu= | awk '{ sum += $1 } END { printf "%.6f", sum + 0 }')
 	printf '%s %s\n' "$load" "$cpu"
 }
@@ -285,11 +301,12 @@ trap 'touch "$output/INCOMPLETE" 2>/dev/null || true' EXIT HUP INT TERM
 scripts/runtime-acceptance-env --output "$output/environment.tsv" --capture-kind parity || die 'acceptance environment rejected'
 environment_hash=$(hash_file "$output/environment.tsv")
 source_commit=$(git rev-parse HEAD)
-command="CGO_ENABLED=0 GOMAXPROCS=1 EMBER_RUNTIME_ENGINE=$engine LUAU_BIN=$LUAU_BIN scripts/check-runtime-parity --phase $phase --capture-role $role --capture-pair $pair --output $output"
+acceptance_profile=${EMBER_RUNTIME_ACCEPTANCE_PROFILE:-darwin-arm64-m1}
+command="CGO_ENABLED=0 GOMAXPROCS=1 EMBER_RUNTIME_ACCEPTANCE_PROFILE=$acceptance_profile EMBER_RUNTIME_ENGINE=$engine LUAU_BIN=$LUAU_BIN scripts/check-runtime-parity --phase $phase --capture-role $role --capture-pair $pair --output $output"
 [ "$capture_only" -eq 0 ] || command="$command --capture-only"
 printf '%s\n' "$command" >"$output/command.txt"
 printf '%s\n' "${cases:-all-37}" >"$output/cases.txt"
-capture_id=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$source_commit" "$environment_hash" "$phase" "$execution_mode" "$role" "$pair" "$output" | shasum -a 256 | awk '{print $1}')
+capture_id=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$source_commit" "$environment_hash" "$phase" "$execution_mode" "$role" "$pair" "$output" | hash_stdin)
 
 if ! CGO_ENABLED=0 GOMAXPROCS=1 EMBER_RUNTIME_ENGINE="$engine" LUAU_BIN="$LUAU_BIN" \
 	EMBER_RUNTIME_PARITY_LIVE=1 \

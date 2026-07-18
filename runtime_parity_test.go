@@ -23,20 +23,22 @@ import (
 )
 
 const (
-	parityLuauSHA256  = "c921fa51dbc0d81f9acbddcfa9208aa58f039388301f9fba77d2c5a324cb42bd"
-	parityLuauVersion = "0.728"
-	parityPlatform    = "Darwin 24.6.0 arm64"
-	parityCPU         = "Apple M1"
-	parityRawHeader   = "schema_version\tcapture_phase\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\texecution_mode\tengine\trepeat\tacquisition_order\tn_guest_calls\truntime_seed\telapsed_ns\tresult_integer\tworkload_sha256\tprogram_sha256\tenvironment_sha256\tcontaminated"
-	paritySlopeHeader = "schema_version\tcapture_phase\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\texecution_mode\tengine\trepeat\tslope_ns_per_guest_call\tintercept_ns\tresult_set_sha256\tworkload_sha256\tprogram_sha256\tenvironment_sha256"
-	parityRawDefault  = "tmp/runtime-parity/raw.tsv"
-	parityRepeatCount = 3
-	parityCaptureSeed = int64(0x454d42455206)
-	paritySeedVersion = "guest-seed-v1"
-	paritySeedHash    = "391b333d0af12e8757b34878f0f601c550c1dce902e7077bab3a532889c375fa"
+	parityLuauSHA256           = "c921fa51dbc0d81f9acbddcfa9208aa58f039388301f9fba77d2c5a324cb42bd"
+	parityLuauVersion          = "0.728"
+	parityPlatform             = "Darwin 24.6.0 arm64"
+	parityCPU                  = "Apple M1"
+	parityLinuxAMD64LuauSHA256 = "2a6ff9e7c17a0a6fed47c04da67495d1594eda38ce915f01c78c7fa5e9e796b8"
+	parityRawHeader            = "schema_version\tcapture_phase\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\texecution_mode\tengine\trepeat\tacquisition_order\tn_guest_calls\truntime_seed\telapsed_ns\tresult_integer\tworkload_sha256\tprogram_sha256\tenvironment_sha256\tcontaminated"
+	paritySlopeHeader          = "schema_version\tcapture_phase\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\texecution_mode\tengine\trepeat\tslope_ns_per_guest_call\tintercept_ns\tresult_set_sha256\tworkload_sha256\tprogram_sha256\tenvironment_sha256"
+	parityRawDefault           = "tmp/runtime-parity/raw.tsv"
+	parityRepeatCount          = 3
+	parityCaptureSeed          = int64(0x454d42455206)
+	paritySeedVersion          = "guest-seed-v1"
+	paritySeedHash             = "391b333d0af12e8757b34878f0f601c550c1dce902e7077bab3a532889c375fa"
 
-	// The acceptance host has eight logical CPUs. This caps external activity
-	// at three cores. The live CPU sample excludes this measuring process.
+	// Cap external activity at three logical cores on every acceptance host.
+	// The host's exact CPU is recorded in the evidence, and the live CPU sample
+	// excludes this measuring process.
 	parityCPUMax = 300.0
 
 	parityPointAttemptLimit = 60
@@ -86,6 +88,43 @@ type parityEnvironment struct {
 	CPU         string
 	CGOEnabled  string
 	GOMAXPROCS  int
+}
+
+type parityHostProfile struct {
+	Name       string
+	GOOS       string
+	GOARCH     string
+	Platform   string
+	CPU        string
+	LuauSHA256 string
+	VerifyBrew bool
+}
+
+func parityHostProfileFor(name string) (parityHostProfile, error) {
+	if name == "" {
+		name = "darwin-arm64-m1"
+	}
+	switch name {
+	case "darwin-arm64-m1":
+		return parityHostProfile{
+			Name:       name,
+			GOOS:       "darwin",
+			GOARCH:     "arm64",
+			Platform:   parityPlatform,
+			CPU:        parityCPU,
+			LuauSHA256: parityLuauSHA256,
+			VerifyBrew: true,
+		}, nil
+	case "linux-amd64":
+		return parityHostProfile{
+			Name:       name,
+			GOOS:       "linux",
+			GOARCH:     "amd64",
+			LuauSHA256: parityLinuxAMD64LuauSHA256,
+		}, nil
+	default:
+		return parityHostProfile{}, fmt.Errorf("unknown parity host profile %q", name)
+	}
 }
 
 func finiteParityFloat(value float64) bool {
@@ -436,22 +475,33 @@ func parityCommandOutput(name string, args ...string) (string, error) {
 }
 
 func inspectParityEnvironment() (parityEnvironment, error) {
-	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
-		return parityEnvironment{}, fmt.Errorf("parity runner: want darwin/arm64, got %s/%s", runtime.GOOS, runtime.GOARCH)
+	profile, err := parityHostProfileFor(os.Getenv("EMBER_RUNTIME_ACCEPTANCE_PROFILE"))
+	if err != nil {
+		return parityEnvironment{}, fmt.Errorf("parity runner: %w", err)
+	}
+	if runtime.GOOS != profile.GOOS || runtime.GOARCH != profile.GOARCH {
+		return parityEnvironment{}, fmt.Errorf(
+			"parity runner: profile %s wants %s/%s, got %s/%s",
+			profile.Name,
+			profile.GOOS,
+			profile.GOARCH,
+			runtime.GOOS,
+			runtime.GOARCH,
+		)
 	}
 	platform, err := parityCommandOutput("uname", "-srm")
 	if err != nil {
 		return parityEnvironment{}, fmt.Errorf("parity runner uname: %w", err)
 	}
-	if platform != parityPlatform {
-		return parityEnvironment{}, fmt.Errorf("parity runner: want %q, got %q", parityPlatform, platform)
+	if profile.Platform != "" && platform != profile.Platform {
+		return parityEnvironment{}, fmt.Errorf("parity runner: want %q, got %q", profile.Platform, platform)
 	}
-	cpu, err := parityCommandOutput("sysctl", "-n", "machdep.cpu.brand_string")
+	cpu, err := inspectParityCPU(profile)
 	if err != nil {
 		return parityEnvironment{}, fmt.Errorf("parity runner cpu: %w", err)
 	}
-	if cpu != parityCPU {
-		return parityEnvironment{}, fmt.Errorf("parity runner: want CPU %q, got %q", parityCPU, cpu)
+	if profile.CPU != "" && cpu != profile.CPU {
+		return parityEnvironment{}, fmt.Errorf("parity runner: want CPU %q, got %q", profile.CPU, cpu)
 	}
 	if cgo := os.Getenv("CGO_ENABLED"); cgo != "0" {
 		return parityEnvironment{}, fmt.Errorf("parity runner: CGO_ENABLED must be 0, got %q", cgo)
@@ -474,15 +524,17 @@ func inspectParityEnvironment() (parityEnvironment, error) {
 	if err != nil {
 		return parityEnvironment{}, fmt.Errorf("parity runner Luau digest: %w", err)
 	}
-	if digest != parityLuauSHA256 {
-		return parityEnvironment{}, fmt.Errorf("parity runner Luau SHA-256: want %s, got %s", parityLuauSHA256, digest)
+	if digest != profile.LuauSHA256 {
+		return parityEnvironment{}, fmt.Errorf("parity runner Luau SHA-256: want %s, got %s", profile.LuauSHA256, digest)
 	}
-	brewVersion, err := parityCommandOutput("brew", "info", "luau", "--json=v2")
-	if err != nil {
-		return parityEnvironment{}, fmt.Errorf("parity runner Homebrew Luau info: %w", err)
-	}
-	if !strings.Contains(brewVersion, `"version":"`+parityLuauVersion+`"`) && !strings.Contains(brewVersion, `"version": "`+parityLuauVersion+`"`) {
-		return parityEnvironment{}, fmt.Errorf("parity runner Homebrew Luau version: want %s", parityLuauVersion)
+	if profile.VerifyBrew {
+		brewVersion, err := parityCommandOutput("brew", "info", "luau", "--json=v2")
+		if err != nil {
+			return parityEnvironment{}, fmt.Errorf("parity runner Homebrew Luau info: %w", err)
+		}
+		if !strings.Contains(brewVersion, `"version":"`+parityLuauVersion+`"`) && !strings.Contains(brewVersion, `"version": "`+parityLuauVersion+`"`) {
+			return parityEnvironment{}, fmt.Errorf("parity runner Homebrew Luau version: want %s", parityLuauVersion)
+		}
 	}
 	return parityEnvironment{
 		LuauPath:    luauPath,
@@ -495,11 +547,36 @@ func inspectParityEnvironment() (parityEnvironment, error) {
 	}, nil
 }
 
-func sampleParitySystem() (paritySystemSample, error) {
-	if runtime.GOOS != "darwin" {
-		return paritySystemSample{}, fmt.Errorf("parity system sample: want darwin, got %s", runtime.GOOS)
+func inspectParityCPU(profile parityHostProfile) (string, error) {
+	switch profile.GOOS {
+	case "darwin":
+		return parityCommandOutput("sysctl", "-n", "machdep.cpu.brand_string")
+	case "linux":
+		inventory, err := os.ReadFile("/proc/cpuinfo")
+		if err != nil {
+			return "", err
+		}
+		return parseParityLinuxCPU(string(inventory))
+	default:
+		return "", fmt.Errorf("unsupported parity CPU probe for %s", profile.GOOS)
 	}
-	loadOutput, err := parityCommandOutput("sysctl", "-n", "vm.loadavg")
+}
+
+func parseParityLinuxCPU(inventory string) (string, error) {
+	for _, line := range strings.Split(inventory, "\n") {
+		name, value, ok := strings.Cut(line, ":")
+		if ok && strings.TrimSpace(name) == "model name" {
+			model := strings.TrimSpace(value)
+			if model != "" {
+				return model, nil
+			}
+		}
+	}
+	return "", errors.New("Linux CPU inventory has no model name")
+}
+
+func sampleParitySystem() (paritySystemSample, error) {
+	loadOutput, err := paritySystemLoadOutput()
 	if err != nil {
 		return paritySystemSample{}, fmt.Errorf("parity system load: %w", err)
 	}
@@ -523,6 +600,18 @@ func sampleParitySystem() (paritySystemSample, error) {
 		return paritySystemSample{}, fmt.Errorf("parity system CPU: %w", err)
 	}
 	return paritySystemSample{Load: load, CPU: cpu}, nil
+}
+
+func paritySystemLoadOutput() (string, error) {
+	switch runtime.GOOS {
+	case "darwin":
+		return parityCommandOutput("sysctl", "-n", "vm.loadavg")
+	case "linux":
+		load, err := os.ReadFile("/proc/loadavg")
+		return strings.TrimSpace(string(load)), err
+	default:
+		return "", fmt.Errorf("unsupported parity load probe for %s", runtime.GOOS)
+	}
 }
 
 func parseParityProcessCPU(output string, selfPID int) (float64, error) {
@@ -934,8 +1023,35 @@ func TestRuntimeParityHarness(t *testing.T) {
 	if parityLuauSHA256 != "c921fa51dbc0d81f9acbddcfa9208aa58f039388301f9fba77d2c5a324cb42bd" || parityLuauVersion != "0.728" {
 		t.Fatal("Luau reference pin changed")
 	}
-	if parityPlatform != "Darwin 24.6.0 arm64" || parityCPU != "Apple M1" {
-		t.Fatal("runner pin changed")
+	darwinProfile, err := parityHostProfileFor("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if darwinProfile.Name != "darwin-arm64-m1" || darwinProfile.GOOS != "darwin" ||
+		darwinProfile.GOARCH != "arm64" || darwinProfile.Platform != "Darwin 24.6.0 arm64" ||
+		darwinProfile.CPU != "Apple M1" || darwinProfile.LuauSHA256 != parityLuauSHA256 ||
+		!darwinProfile.VerifyBrew {
+		t.Fatalf("default parity profile = %#v", darwinProfile)
+	}
+	linuxProfile, err := parityHostProfileFor("linux-amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linuxProfile.Name != "linux-amd64" || linuxProfile.GOOS != "linux" ||
+		linuxProfile.GOARCH != "amd64" || linuxProfile.Platform != "" || linuxProfile.CPU != "" ||
+		linuxProfile.LuauSHA256 != "2a6ff9e7c17a0a6fed47c04da67495d1594eda38ce915f01c78c7fa5e9e796b8" ||
+		linuxProfile.VerifyBrew {
+		t.Fatalf("Linux parity profile = %#v", linuxProfile)
+	}
+	if _, err := parityHostProfileFor("unknown"); err == nil {
+		t.Fatal("accepted unknown parity host profile")
+	}
+	linuxCPU, err := parseParityLinuxCPU("processor: 0\nmodel name : Example CPU 123\nprocessor: 1\n")
+	if err != nil || linuxCPU != "Example CPU 123" {
+		t.Fatalf("parsed Linux CPU = %q, %v", linuxCPU, err)
+	}
+	if _, err := parseParityLinuxCPU("processor: 0\n"); err == nil {
+		t.Fatal("accepted Linux CPU inventory without a model name")
 	}
 
 	manifest := parityCaseManifest()

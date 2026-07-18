@@ -5,14 +5,40 @@ script_dir=${0%/*}
 [ "$script_dir" = "$0" ] && script_dir=.
 repo_root=$(cd "$script_dir/.." && pwd)
 
-expected_go=go1.26.4
-expected_goos=darwin
-expected_goarch=arm64
-expected_os_build=24.6.0
-expected_cpu='Apple M1'
-expected_luau_version=0.728
-expected_luau_sha256=c921fa51dbc0d81f9acbddcfa9208aa58f039388301f9fba77d2c5a324cb42bd
 header='schema_version	go_version	goos	goarch	os_build	cpu_model	cgo_enabled	gomaxprocs	luau_version	luau_sha256'
+
+configure_profile() {
+	case "$1" in
+	darwin-arm64-m1)
+		profile=darwin-arm64-m1
+		expected_go=go1.26.4
+		expected_goos=darwin
+		expected_goarch=arm64
+		expected_os_build=24.6.0
+		expected_cpu='Apple M1'
+		expected_luau_version=0.728
+		expected_luau_sha256=c921fa51dbc0d81f9acbddcfa9208aa58f039388301f9fba77d2c5a324cb42bd
+		;;
+	linux-amd64)
+		profile=linux-amd64
+		expected_go=go1.26.4
+		expected_goos=linux
+		expected_goarch=amd64
+		expected_os_build=
+		expected_cpu=
+		expected_luau_version=0.728
+		expected_luau_sha256=2a6ff9e7c17a0a6fed47c04da67495d1594eda38ce915f01c78c7fa5e9e796b8
+		;;
+	*)
+		return 1
+		;;
+	esac
+}
+
+configure_profile "${EMBER_RUNTIME_ACCEPTANCE_PROFILE:-darwin-arm64-m1}" || {
+	printf 'runtime-acceptance-env: unknown acceptance profile: %s\n' "${EMBER_RUNTIME_ACCEPTANCE_PROFILE:-}" >&2
+	exit 2
+}
 
 usage() {
 	cat >&2 <<'EOF'
@@ -40,13 +66,21 @@ validate_values() {
 	[ "$actual_go" = "$expected_go" ] || { fail "Go version must be $expected_go, got $actual_go"; return 1; }
 	[ "$actual_goos" = "$expected_goos" ] || { fail "GOOS must be $expected_goos, got $actual_goos"; return 1; }
 	[ "$actual_goarch" = "$expected_goarch" ] || { fail "GOARCH must be $expected_goarch, got $actual_goarch"; return 1; }
-	[ "$actual_os_build" = "$expected_os_build" ] || { fail "OS build must be Darwin $expected_os_build, got $actual_os_build"; return 1; }
-	[ "$actual_cpu" = "$expected_cpu" ] || { fail "CPU must be $expected_cpu, got $actual_cpu"; return 1; }
+	if [ -n "$expected_os_build" ]; then
+		[ "$actual_os_build" = "$expected_os_build" ] || { fail "OS build must be $expected_os_build, got $actual_os_build"; return 1; }
+	else
+		[ -n "$actual_os_build" ] || { fail 'OS build must not be empty'; return 1; }
+	fi
+	if [ -n "$expected_cpu" ]; then
+		[ "$actual_cpu" = "$expected_cpu" ] || { fail "CPU must be $expected_cpu, got $actual_cpu"; return 1; }
+	else
+		[ -n "$actual_cpu" ] || { fail 'CPU model must not be empty'; return 1; }
+	fi
 	[ "$actual_cgo_env" = 0 ] || { fail "CGO_ENABLED environment must be 0, got $actual_cgo_env"; return 1; }
 	[ "$actual_cgo_go" = 0 ] || { fail "go env CGO_ENABLED must be 0, got $actual_cgo_go"; return 1; }
 	[ "$actual_gomaxprocs" = 1 ] || { fail "GOMAXPROCS environment must be 1, got $actual_gomaxprocs"; return 1; }
 	tab=$(printf '\t')
-	for field in "$actual_go" "$actual_goos" "$actual_goarch" "$actual_os_build" "$actual_cpu" "$actual_cgo_env" "$actual_cgo_go" "$actual_gomaxprocs"; do
+	for field in "$actual_go" "$actual_goos" "$actual_goarch" "$actual_os_build" "$actual_cpu" "$actual_cgo_env" "$actual_cgo_go" "$actual_gomaxprocs" "$actual_luau_version" "$actual_luau_sha256"; do
 		case "$field" in
 		*"$tab"*) fail 'environment values must not contain tabs'; return 1 ;;
 		esac
@@ -94,8 +128,8 @@ set_valid_fixture() {
 	actual_go=$expected_go
 	actual_goos=$expected_goos
 	actual_goarch=$expected_goarch
-	actual_os_build=$expected_os_build
-	actual_cpu=$expected_cpu
+	actual_os_build=${expected_os_build:-fixture-os-build}
+	actual_cpu=${expected_cpu:-Fixture CPU}
 	actual_cgo_env=0
 	actual_cgo_go=0
 	actual_gomaxprocs=1
@@ -122,6 +156,7 @@ expect_invalid() {
 }
 
 run_self_test() {
+	configure_profile darwin-arm64-m1
 	for kind in performance parity allocation; do
 		set_valid_fixture "$kind"
 		validate_values || fail "self-test rejected valid $kind values"
@@ -137,6 +172,17 @@ run_self_test() {
 	expect_invalid luau-executable actual_luau_executable 0
 	expect_invalid luau-version actual_luau_version 0.999
 	expect_invalid luau-sha256 actual_luau_sha256 deadbeef
+
+	configure_profile linux-amd64
+	set_valid_fixture parity
+	actual_os_build=6.0.0-test
+	actual_cpu='Example x86 CPU'
+	validate_values || fail 'self-test rejected valid Linux amd64 parity values'
+	[ "$expected_luau_sha256" = 2a6ff9e7c17a0a6fed47c04da67495d1594eda38ce915f01c78c7fa5e9e796b8 ] || fail 'Linux Luau pin changed'
+	if configure_profile unknown >/dev/null 2>&1; then
+		fail 'self-test accepted unknown profile'
+	fi
+	configure_profile darwin-arm64-m1
 
 	root=$(mktemp -d "${TMPDIR:-/tmp}/runtime-acceptance-env.XXXXXX")
 	trap 'rm -rf "$root"' EXIT HUP INT TERM
@@ -197,13 +243,36 @@ case "$capture_kind" in
 performance|parity|allocation) ;;
 *) fail "unknown capture kind: $capture_kind"; exit 2 ;;
 esac
+[ "$profile" = darwin-arm64-m1 ] || [ "$capture_kind" = parity ] || {
+	fail "profile $profile supports parity captures only"
+	exit 2
+}
 [ ! -e "$output" ] || { fail "output already exists: $output"; exit 1; }
 
 actual_go=$(go env GOVERSION)
 actual_goos=$(go env GOOS)
 actual_goarch=$(go env GOARCH)
 actual_os_build=$(uname -r)
-actual_cpu=$(sysctl -n machdep.cpu.brand_string)
+case "$expected_goos" in
+darwin)
+	actual_cpu=$(sysctl -n machdep.cpu.brand_string)
+	;;
+linux)
+	actual_cpu=$(awk -F: '
+		$1 ~ /^[[:space:]]*model name[[:space:]]*$/ {
+			value = $2
+			sub(/^[[:space:]]*/, "", value)
+			sub(/[[:space:]]*$/, "", value)
+			print value
+			exit
+		}
+	' /proc/cpuinfo)
+	;;
+*)
+	fail "profile $profile has no CPU probe"
+	exit 2
+	;;
+esac
 actual_cgo_env=${CGO_ENABLED-}
 actual_cgo_go=$(go env CGO_ENABLED)
 actual_gomaxprocs=${GOMAXPROCS-}

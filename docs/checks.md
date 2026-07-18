@@ -124,6 +124,28 @@ Windows CI proves execution, ABI, mapping protection, and lifecycle behavior;
 it does not silently promote noisy hosted-runner timings into performance
 claims.
 
+The explicit `linux-amd64` acceptance profile extends this same four-row gate
+to physical x86-64 without weakening the Darwin pin. It requires Go 1.26.4,
+`CGO_ENABLED=0`, `GOMAXPROCS=1`, Linux/amd64, and the official Luau 0.728 Linux
+binary at SHA-256
+`2a6ff9e7c17a0a6fed47c04da67495d1594eda38ce915f01c78c7fa5e9e796b8`.
+The environment artifact records the exact kernel and CPU model because hosted
+runner hardware is attributable but not a stable CPU SKU. Run it with:
+
+```sh
+CGO_ENABLED=0 GOMAXPROCS=1 \
+  EMBER_RUNTIME_ACCEPTANCE_PROFILE=linux-amd64 \
+  LUAU_BIN=/path/to/pinned/linux-amd64/luau \
+  scripts/check-runtime-parity --phase prepared-native-parity15 \
+  --capture-role candidate --capture-pair a \
+  --output /tmp/ember-prepared-native-linux-amd64
+```
+
+Pull-request CI verifies both the release archive and extracted executable
+digests before running this profile, then uploads the complete capture. A green
+job is an exact x86-64 receipt; a timing failure remains visible rather than
+being converted to semantic-only success.
+
 On the pinned eight-logical-CPU M1, acquisition starts after three one-second
 samples with aggregate CPU at most 300%. One-minute load remains diagnostic but
 is not an admission gate: it is lagging, core-count-blind, and includes blocked
@@ -255,10 +277,11 @@ go test -race -count=1 ./...
 go test -gcflags=all=-d=checkptr=2 -count=1 ./...
 ```
 
-Platform coverage is explicit in CI: Linux amd64 runs the standard checks,
-macOS and Linux arm64 run the test suite (arm64 also builds), Windows x86-64
-and ARM64 run strict-cgo-off tests and builds on native hosted runners, and the
-Linux 386 lane uses the compile-only command below:
+Platform coverage is explicit in CI: Linux amd64 runs the standard checks and
+the pinned native parity gate, macOS and Linux arm64 run the test suite (arm64
+also builds), Windows x86-64 and ARM64 run strict-cgo-off tests and builds on
+native hosted runners, and the Linux 386 lane uses the compile-only command
+below:
 
 ```sh
 GOOS=linux GOARCH=386 go test -run '^$' ./...

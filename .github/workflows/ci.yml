@@ -75,6 +75,63 @@ jobs:
       - name: Build Linux arm64 packages
         run: go build ./...
 
+  linux-amd64-performance:
+    name: linux-amd64-performance
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+      GOMAXPROCS: "1"
+      EMBER_RUNTIME_ACCEPTANCE_PROFILE: linux-amd64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install pinned Luau 0.728 oracle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          oracle_dir="${RUNNER_TEMP}/luau-0.728-linux-amd64"
+          mkdir -p "${oracle_dir}"
+          gh release download 0.728 \
+            --repo luau-lang/luau \
+            --pattern luau-ubuntu.zip \
+            --dir "${oracle_dir}"
+          printf '%s  %s\n' \
+            d3c81eb98c048c118a1fa0b0d3777e52226b5152e2df4f31d1baf660f7f0c115 \
+            "${oracle_dir}/luau-ubuntu.zip" | sha256sum -c -
+          unzip -q "${oracle_dir}/luau-ubuntu.zip" -d "${oracle_dir}/bin"
+          printf '%s  %s\n' \
+            2a6ff9e7c17a0a6fed47c04da67495d1594eda38ce915f01c78c7fa5e9e796b8 \
+            "${oracle_dir}/bin/luau" | sha256sum -c -
+          chmod 0500 "${oracle_dir}/bin/luau"
+          printf 'LUAU_BIN=%s\n' "${oracle_dir}/bin/luau" >>"${GITHUB_ENV}"
+
+      - name: Run Linux x86-64 native parity gate
+        shell: bash
+        run: |
+          scripts/check-runtime-parity \
+            --phase prepared-native-parity15 \
+            --capture-role candidate \
+            --capture-pair a \
+            --output "${RUNNER_TEMP}/ember-prepared-native-linux-amd64"
+
+      - name: Upload Linux x86-64 parity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prepared-native-linux-amd64-${{ github.sha }}
+          path: ${{ runner.temp }}/ember-prepared-native-linux-amd64
+          if-no-files-found: warn
+
   linux-386:
     name: linux-386-compile
     runs-on: ubuntu-latest
