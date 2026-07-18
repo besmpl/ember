@@ -72,8 +72,6 @@ b2:
 	v43 = v18 + v20
 	v17 = v42
 	v18 = v43
-	v19 = v19
-	v20 = v20
 	goto b1
 b3:
 	return v17, true
@@ -147,8 +145,6 @@ b2:
 	v43 = v18 + v20
 	v17 = v42
 	v18 = v43
-	v19 = v19
-	v20 = v20
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v17)

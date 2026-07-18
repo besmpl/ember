@@ -1192,7 +1192,6 @@ b15:
 		return 0, false
 	}
 	v487 = v484 + v486
-	v302 = v302
 	v336 = v487
 	goto b14
 b16:
@@ -2390,7 +2389,6 @@ b15:
 		return machinePreparedReplayEntry()
 	}
 	v487 = v484 + v486
-	v302 = v302
 	v336 = v487
 	goto b14
 b16:

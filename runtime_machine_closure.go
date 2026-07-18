@@ -178,7 +178,7 @@ func (arena *machineClosureArena) newCellStopped(value slot) (machineCellHandle,
 	if err := arena.ready(); err != nil {
 		return machineCellHandle{}, err
 	}
-	if len(arena.cells) >= int(^uint32(0)) {
+	if uint64(len(arena.cells)) >= math.MaxUint32 {
 		return machineCellHandle{}, errMachineClosureIndex
 	}
 	arena.cells = append(arena.cells, machineCellRecord{value: value, generation: 1, live: 1})
@@ -205,7 +205,7 @@ func (arena *machineClosureArena) openCellStopped(register int, value slot) (mac
 			}
 		}
 	}
-	if len(arena.cells) >= int(^uint32(0)) {
+	if uint64(len(arena.cells)) >= math.MaxUint32 {
 		return machineCellHandle{}, errMachineClosureIndex
 	}
 	arena.cells = append(arena.cells, machineCellRecord{value: value, openRegister: openRegister, generation: 1, live: 1})
@@ -223,7 +223,7 @@ func (arena *machineClosureArena) createClosureStopped(module programModuleID, p
 	if uint64(proto) >= uint64(arena.protoCounts[module]) {
 		return machineClosureHandle{}, errMachineClosureProto
 	}
-	if len(arena.closures) >= int(^uint32(0)) || uint64(len(arena.captureCells))+uint64(len(captures)) > math.MaxUint32 {
+	if uint64(len(arena.closures)) >= math.MaxUint32 || uint64(len(arena.captureCells))+uint64(len(captures)) > math.MaxUint32 {
 		return machineClosureHandle{}, errMachineClosureIndex
 	}
 	byValueCount := 0

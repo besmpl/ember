@@ -53,8 +53,6 @@ b2:
 	v26 = v11 + v13
 	v10 = v25
 	v11 = v26
-	v12 = v12
-	v13 = v13
 	goto b1
 b3:
 	return v10, true
@@ -109,8 +107,6 @@ b2:
 	v26 = v11 + v13
 	v10 = v25
 	v11 = v26
-	v12 = v12
-	v13 = v13
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v10)

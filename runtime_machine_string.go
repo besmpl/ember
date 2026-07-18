@@ -53,7 +53,7 @@ func (arena *machineStringArena) internBytesStopped(value []byte) (machineString
 	if id := arena.find(value, hash); id != invalidMachineStringID {
 		return id, nil
 	}
-	if len(arena.records) == math.MaxUint32 {
+	if uint64(len(arena.records)) == math.MaxUint32 {
 		return invalidMachineStringID, errors.New("machine string arena has too many strings")
 	}
 	if uint64(len(arena.data))+uint64(len(value)) > math.MaxUint32 {

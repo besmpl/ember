@@ -4305,6 +4305,9 @@ func (emitter *backendGoNumericEmitter) emitValueCopy(
 	source backendValueID,
 	indent int,
 ) {
+	if destination == source {
+		return
+	}
 	prefix := strings.Repeat("\t", indent)
 	destinationTags := emitter.plan.tags[destination-1]
 	if destinationTags == backendTagNil {

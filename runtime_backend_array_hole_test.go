@@ -101,6 +101,12 @@ func TestBackendGoBoundedRootRecordArrayCompactionFixtureIsFreshAndCorrect(t *te
 			t.Fatalf("generated array-hole source contains runtime table/dispatch marker %q", forbidden)
 		}
 	}
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 3 && fields[1] == "=" && fields[0] == fields[2] {
+			t.Fatalf("generated array-hole source contains identity assignment %q", strings.TrimSpace(line))
+		}
+	}
 
 	root, err := Compile(backendArrayHoleCompactionProofSource)
 	if err != nil {

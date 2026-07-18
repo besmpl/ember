@@ -104,7 +104,7 @@ run_fail 'result: FAIL' scripts/performance-audit-compare --before "$root/alloca
 write_capture "$root/candidate" env candidate 90 10 1
 scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/gates.tsv" >"$root/pass"
 grep -F 'result: PASS' "$root/pass" >/dev/null
-grep -F $'row\tscenario_ember_run\tBenchmarkScenarioLuau/wide/ember_run' "$root/gates.tsv" >/dev/null
+awk -F '\t' '$1 == "row" && $2 == "scenario_ember_run" && $3 == "BenchmarkScenarioLuau/wide/ember_run" { found=1 } END { exit !found }' "$root/gates.tsv"
 printf '%s\n' 'environment mutation' >>"$root/candidate/environment.tsv"
 run_fail 'environment.tsv mismatch' scripts/performance-audit-compare --before "$root/base1" --after "$root/candidate" --manifest "$root/gates.tsv"
 write_capture "$root/candidate" env candidate 90 10 1

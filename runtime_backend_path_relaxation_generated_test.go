@@ -959,8 +959,6 @@ b22:
 		return 0, false
 	}
 	if !(v532 < math.Float64frombits(0x408f380000000000)) {
-		v343 = v343
-		v371 = v371
 		goto b21
 	}
 	goto b23
@@ -970,7 +968,6 @@ b23:
 	}
 	v533 = ra1_1[int(v531)-1]
 	v534 = v371 + v533
-	v343 = v343
 	v371 = v534
 	goto b21
 b24:
@@ -1935,8 +1932,6 @@ b22:
 		return machinePreparedReplayEntry()
 	}
 	if !(v532 < math.Float64frombits(0x408f380000000000)) {
-		v343 = v343
-		v371 = v371
 		goto b21
 	}
 	goto b23
@@ -1946,7 +1941,6 @@ b23:
 	}
 	v533 = ra1_1[int(v531)-1]
 	v534 = v371 + v533
-	v343 = v343
 	v371 = v534
 	goto b21
 b24:

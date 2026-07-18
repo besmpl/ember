@@ -380,10 +380,6 @@ b4:
 	}
 	v296 = ra0_5[int(v295)-1]
 	if !v296 {
-		v72 = v72
-		v73 = v73
-		v74 = v74
-		v75 = v75
 		goto b3
 	}
 	goto b5
@@ -442,11 +438,6 @@ b7:
 		return 0, false
 	}
 	if !(v309 > math.Float64frombits(0x0000000000000000)) {
-		v105 = v105
-		v106 = v106
-		v107 = v107
-		v108 = v108
-		v112 = v112
 		goto b6
 	}
 	goto b8
@@ -492,11 +483,6 @@ b8:
 		return 0, false
 	}
 	if v322 > v325 {
-		v105 = v105
-		v106 = v106
-		v107 = v107
-		v108 = v108
-		v112 = v112
 		goto b6
 	}
 	goto b9
@@ -1003,10 +989,6 @@ b4:
 	}
 	v296 = ra0_5[int(v295)-1]
 	if !v296 {
-		v72 = v72
-		v73 = v73
-		v74 = v74
-		v75 = v75
 		goto b3
 	}
 	goto b5
@@ -1065,11 +1047,6 @@ b7:
 		return machinePreparedReplayEntry()
 	}
 	if !(v309 > math.Float64frombits(0x0000000000000000)) {
-		v105 = v105
-		v106 = v106
-		v107 = v107
-		v108 = v108
-		v112 = v112
 		goto b6
 	}
 	goto b8
@@ -1115,11 +1092,6 @@ b8:
 		return machinePreparedReplayEntry()
 	}
 	if v322 > v325 {
-		v105 = v105
-		v106 = v106
-		v107 = v107
-		v108 = v108
-		v112 = v112
 		goto b6
 	}
 	goto b9

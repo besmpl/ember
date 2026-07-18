@@ -74,11 +74,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -169,11 +166,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)

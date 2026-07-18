@@ -512,9 +512,12 @@ func TestWordcodeRejectsMalformedCacheIndex(t *testing.T) {
 			bad.sidecar = append([]uint32(nil), cacheIndex.sidecar...)
 			bad.constants = append([]int(nil), cacheIndex.constants...)
 			mutate(&bad)
-			candidate := *proto
-			candidate.cacheIndex = &bad
-			if err := verifyWordcodeForProto(&candidate, words); err == nil {
+			candidate := &Proto{
+				registers:      proto.registers,
+				cacheSiteCount: proto.cacheSiteCount,
+				cacheIndex:     &bad,
+			}
+			if err := verifyWordcodeForProto(candidate, words); err == nil {
 				t.Fatal("accepted malformed cache index")
 			}
 		})

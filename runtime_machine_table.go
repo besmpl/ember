@@ -163,7 +163,7 @@ func (arena *machineTableArena) newTableStopped(arrayCapacity, recordCapacity ui
 	if arena == nil || arena.closed {
 		return invalidMachineTableID, errMachineTableArenaClosed
 	}
-	if len(arena.tables) == math.MaxUint32 {
+	if uint64(len(arena.tables)) == math.MaxUint32 {
 		return invalidMachineTableID, errors.New("machine table arena has too many tables")
 	}
 	fieldCapacity, err := machineTableFieldCapacity(recordCapacity)

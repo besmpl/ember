@@ -226,10 +226,6 @@ b4:
 	}
 	v116 = ra0_4[int(v115)-1]
 	if !v116 {
-		v43 = v43
-		v44 = v44
-		v45 = v45
-		v46 = v46
 		goto b3
 	}
 	goto b5
@@ -420,11 +416,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -515,11 +508,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -819,9 +809,6 @@ b8:
 	v122 = v109
 	v123 = v121 + v122
 	v37 = v123
-	v38 = v38
-	v39 = v39
-	v40 = v40
 	goto b3
 b9:
 	v124 = v38 + v40
@@ -904,11 +891,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -999,11 +983,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -1212,9 +1193,6 @@ b4:
 	}
 	v116 = v56 + v115
 	v56 = v116
-	v57 = v57
-	v58 = v58
-	v59 = v59
 	goto b3
 b5:
 	v117 = v57 + v59
@@ -1394,11 +1372,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -1489,11 +1464,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -2392,11 +2364,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -2487,11 +2456,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -3083,11 +3049,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -3178,11 +3141,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -3892,11 +3852,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -3987,11 +3944,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -5023,11 +4977,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -5118,11 +5069,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -5516,10 +5464,6 @@ b4:
 	}
 	v296 = ra0_5[int(v295)-1]
 	if !v296 {
-		v72 = v72
-		v73 = v73
-		v74 = v74
-		v75 = v75
 		goto b3
 	}
 	goto b5
@@ -5578,11 +5522,6 @@ b7:
 		return 0, false
 	}
 	if !(v309 > math.Float64frombits(0x0000000000000000)) {
-		v105 = v105
-		v106 = v106
-		v107 = v107
-		v108 = v108
-		v112 = v112
 		goto b6
 	}
 	goto b8
@@ -5628,11 +5567,6 @@ b8:
 		return 0, false
 	}
 	if v322 > v325 {
-		v105 = v105
-		v106 = v106
-		v107 = v107
-		v108 = v108
-		v112 = v112
 		goto b6
 	}
 	goto b9
@@ -5833,11 +5767,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -5928,11 +5859,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -6924,11 +6852,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -7019,11 +6944,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -7709,11 +7631,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -7804,11 +7723,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -8908,11 +8824,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -9003,11 +8916,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -10209,7 +10119,6 @@ b15:
 		return 0, false
 	}
 	v478 = v475 + v477
-	v295 = v295
 	v329 = v478
 	goto b14
 b16:
@@ -10289,11 +10198,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -10384,11 +10290,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -11174,11 +11077,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -11269,11 +11169,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -11934,22 +11831,11 @@ b7:
 	}
 	v337 = !(vp335 == vp336 && (!vp335 || v335 == v336))
 	if !v337 {
-		v104 = v104
-		v105 = v105
-		v106 = v106
-		v107 = v107
-		v111 = v111
-		v114 = v114
 		goto b5
 	}
 	goto b8
 b8:
 	v338 = false
-	v104 = v104
-	v105 = v105
-	v106 = v106
-	v107 = v107
-	v111 = v111
 	v114 = v338
 	goto b5
 b9:
@@ -12046,22 +11932,11 @@ b9:
 		return 0, false
 	}
 	if !(v341 > v340) {
-		v104 = v104
-		v105 = v105
-		v106 = v106
-		v107 = v107
-		v111 = v111
-		v114 = v114
 		goto b5
 	}
 	goto b10
 b10:
 	v342 = false
-	v104 = v104
-	v105 = v105
-	v106 = v106
-	v107 = v107
-	v111 = v111
 	v114 = v342
 	goto b5
 b11:
@@ -12324,11 +12199,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -12419,11 +12291,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -13122,11 +12991,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -13217,11 +13083,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -13931,11 +13794,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -14026,11 +13886,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -14991,8 +14848,6 @@ b22:
 		return 0, false
 	}
 	if !(v527 < math.Float64frombits(0x408f380000000000)) {
-		v343 = v343
-		v371 = v371
 		goto b21
 	}
 	goto b23
@@ -15002,7 +14857,6 @@ b23:
 	}
 	v528 = ra1_1[int(v526)-1]
 	v529 = v371 + v528
-	v343 = v343
 	v371 = v529
 	goto b21
 b24:
@@ -15082,11 +14936,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -15177,11 +15028,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -16840,11 +16688,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -16935,11 +16780,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -17436,11 +17278,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -17531,11 +17370,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -17943,11 +17779,6 @@ b6:
 	}
 	v170 = v92 + v169
 	v92 = v170
-	v93 = v93
-	v94 = v94
-	v95 = v95
-	v99 = v99
-	v104 = v104
 	goto b5
 b7:
 	v171 = v65 + v67
@@ -18132,11 +17963,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -18227,11 +18055,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -19116,11 +18941,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -19211,11 +19033,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -19862,17 +19681,6 @@ b12:
 b13:
 	v530 = v168 - math.Floor(v168/math.Float64frombits(0x4014000000000000))*math.Float64frombits(0x4014000000000000)
 	if v530 != math.Float64frombits(0x0000000000000000) {
-		v167 = v167
-		v168 = v168
-		v169 = v169
-		v170 = v170
-		v171 = v171
-		v172 = v172
-		v173 = v173
-		v174 = v174
-		v175 = v175
-		v176 = v176
-		v179 = v179
 		goto b8
 	}
 	goto b14
@@ -19932,16 +19740,6 @@ b14:
 	v544 = mf0_1[int(v543)-1]
 	v545 = v167 + v544
 	v167 = v545
-	v168 = v168
-	v169 = v169
-	v170 = v170
-	v171 = v171
-	v172 = v172
-	v173 = v173
-	v174 = v174
-	v175 = v175
-	v176 = v176
-	v179 = v179
 	goto b8
 b15:
 	v546 = v254 + v256
@@ -20188,11 +19986,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -20283,11 +20078,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -20816,11 +20608,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -20911,11 +20700,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -21038,10 +20824,7 @@ b2:
 	ra0_1[rn0] = r0_1
 	rn0++
 	v128 = v26 + v28
-	v24 = v24
 	v26 = v128
-	v27 = v27
-	v28 = v28
 	goto b1
 b3:
 	v129 = v24
@@ -21131,17 +20914,10 @@ b8:
 	}
 	rn0--
 	v78 = v145
-	v79 = v79
-	v80 = v80
-	v81 = v81
-	v82 = v82
 	goto b6
 b9:
 	v151 = v82 + math.Float64frombits(0x3ff0000000000000)
 	v78 = v145
-	v79 = v79
-	v80 = v80
-	v81 = v81
 	v82 = v151
 	goto b6
 b10:
@@ -21254,11 +21030,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -21349,11 +21122,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -21650,9 +21420,6 @@ b4:
 	v158 = v153
 	v159 = v157 + v158
 	v65 = v159
-	v66 = v66
-	v67 = v67
-	v68 = v68
 	goto b3
 b5:
 	v160 = v66 + v68
@@ -21880,11 +21647,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -21975,11 +21739,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -22055,8 +21816,6 @@ b2:
 	v27 = v10 + v12
 	v9 = v26
 	v10 = v27
-	v11 = v11
-	v12 = v12
 	goto b1
 b3:
 	return v9, true
@@ -22132,11 +21891,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -22227,11 +21983,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -22383,11 +22136,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -22478,11 +22228,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -22629,11 +22376,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -22724,11 +22468,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -22823,10 +22564,7 @@ b2:
 	a0[t0] = v55
 	n0++
 	v57 = v18 + v20
-	v16 = v16
 	v18 = v57
-	v19 = v19
-	v20 = v20
 	goto b1
 b3:
 	v58 = v16
@@ -22872,8 +22610,6 @@ b5:
 	v67 = v39 + v41
 	v38 = v66
 	v39 = v67
-	v40 = v40
-	v41 = v41
 	goto b4
 b6:
 	v68 = v38
@@ -22952,11 +22688,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -23047,11 +22780,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -23201,11 +22931,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -23296,11 +23023,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -23380,8 +23104,6 @@ b2:
 	v32 = v13 + v15
 	v12 = v31
 	v13 = v32
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -23475,11 +23197,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -23570,11 +23289,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -23653,8 +23369,6 @@ b2:
 	v39 = v17 + v19
 	v16 = v38
 	v17 = v39
-	v18 = v18
-	v19 = v19
 	goto b1
 b3:
 	return v16, true
@@ -23748,11 +23462,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -23843,11 +23554,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -23929,8 +23637,6 @@ b2:
 	v39 = v16 + v18
 	v15 = v38
 	v16 = v39
-	v17 = v17
-	v18 = v18
 	goto b1
 b3:
 	return v15, true
@@ -24006,11 +23712,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -24101,11 +23804,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -24190,8 +23890,6 @@ b2:
 	v43 = v15 + v17
 	v14 = v42
 	v15 = v43
-	v16 = v16
-	v17 = v17
 	goto b1
 b3:
 	return v14, true
@@ -24315,11 +24013,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -24410,11 +24105,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -24730,11 +24422,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -24825,11 +24514,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -24988,11 +24674,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -25083,11 +24766,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)
@@ -25161,8 +24841,6 @@ b2:
 	v10 = v26
 	v11 = v27
 	v12 = v28
-	v13 = v13
-	v14 = v14
 	goto b1
 b3:
 	return v10, true
@@ -25238,11 +24916,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return v12, true
@@ -25333,11 +25008,8 @@ b2:
 	v32 = v28 * v31
 	v33 = v12 + v32
 	v34 = v13 + v15
-	v11 = v11
 	v12 = v33
 	v13 = v34
-	v14 = v14
-	v15 = v15
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v12)

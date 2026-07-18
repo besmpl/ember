@@ -1288,9 +1288,8 @@ func verifyWordcodeForProto(proto *Proto, words []wordcodeWord) error {
 	if err != nil {
 		return err
 	}
-	candidate := *proto
 	for pc, ins := range code {
-		if err := verifyInstruction(&candidate, pc, ins, len(code)); err != nil {
+		if err := verifyInstruction(proto, pc, ins, len(code)); err != nil {
 			return fmt.Errorf("instruction %d %s: %w", pc, opcodeName(ins.op), err)
 		}
 	}

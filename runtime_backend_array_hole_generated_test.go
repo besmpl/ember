@@ -132,10 +132,7 @@ b2:
 	ra0_1[rn0] = r0_1
 	rn0++
 	v139 = v27 + v29
-	v25 = v25
 	v27 = v139
-	v28 = v28
-	v29 = v29
 	goto b1
 b3:
 	v140 = math.Float64frombits(0x0000000000000000)
@@ -229,20 +226,11 @@ b8:
 		ra0_1[rrm51] = ra0_1[rrm51+1]
 	}
 	rn0--
-	v73 = v73
 	v82 = v159
-	v83 = v83
-	v84 = v84
-	v85 = v85
-	v86 = v86
 	goto b6
 b9:
 	v165 = v86 + math.Float64frombits(0x3ff0000000000000)
-	v73 = v73
 	v82 = v159
-	v83 = v83
-	v84 = v84
-	v85 = v85
 	v86 = v165
 	goto b6
 b10:
@@ -419,10 +407,7 @@ b2:
 	ra0_1[rn0] = r0_1
 	rn0++
 	v139 = v27 + v29
-	v25 = v25
 	v27 = v139
-	v28 = v28
-	v29 = v29
 	goto b1
 b3:
 	v140 = math.Float64frombits(0x0000000000000000)
@@ -516,20 +501,11 @@ b8:
 		ra0_1[rrm51] = ra0_1[rrm51+1]
 	}
 	rn0--
-	v73 = v73
 	v82 = v159
-	v83 = v83
-	v84 = v84
-	v85 = v85
-	v86 = v86
 	goto b6
 b9:
 	v165 = v86 + math.Float64frombits(0x3ff0000000000000)
-	v73 = v73
 	v82 = v159
-	v83 = v83
-	v84 = v84
-	v85 = v85
 	v86 = v165
 	goto b6
 b10:

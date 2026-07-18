@@ -117,7 +117,7 @@ func newMachineOwnerWithPrepared(image *programImage, prepared *machinePreparedP
 	protoCounts := make([]uint32, len(image.modules))
 	maxRegisters, maxResults := 0, 0
 	for index, module := range image.modules {
-		if len(module.code.prototypes) > math.MaxUint32 {
+		if uint64(len(module.code.prototypes)) > math.MaxUint32 {
 			owner.closeStopped()
 			return nil, fmt.Errorf("bind machine owner: module %d prototype inventory exceeds uint32", index)
 		}

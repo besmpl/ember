@@ -106,7 +106,6 @@ jobs:
       CGO_ENABLED: '0'
       GOMAXPROCS: '1'
       LUAU_BIN: /opt/homebrew/bin/luau
-      PARITY_ARTIFACT_ROOT: ${{ runner.temp }}/ember-parity-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
       - name: Check out repository
@@ -117,6 +116,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+
+      - name: Select parity artifact directory
+        shell: bash
+        run: |
+          printf 'PARITY_ARTIFACT_ROOT=%s\n' \
+            "$RUNNER_TEMP/ember-parity-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >>"$GITHUB_ENV"
 
       - name: Capture pinned parity fingerprint
         if: ${{ always() }}
@@ -208,7 +213,6 @@ jobs:
       BENCHTIME: 500ms
       CGO_ENABLED: '0'
       GOMAXPROCS: '1'
-      PERFORMANCE_ARTIFACT_ROOT: ${{ runner.temp }}/ember-performance-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
       - name: Check out repository
@@ -219,6 +223,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+
+      - name: Select performance artifact directory
+        shell: bash
+        run: |
+          printf 'PERFORMANCE_ARTIFACT_ROOT=%s\n' \
+            "$RUNNER_TEMP/ember-performance-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >>"$GITHUB_ENV"
 
       - name: Run complete performance audit with profiles
         shell: bash

@@ -83,8 +83,6 @@ b2:
 	v54 = v17 + v19
 	v16 = v53
 	v17 = v54
-	v18 = v18
-	v19 = v19
 	goto b1
 b3:
 	return v16, true
@@ -169,8 +167,6 @@ b2:
 	v54 = v17 + v19
 	v16 = v53
 	v17 = v54
-	v18 = v18
-	v19 = v19
 	goto b1
 b3:
 	return machinePreparedReturnOneNumber(v16)

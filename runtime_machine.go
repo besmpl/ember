@@ -155,7 +155,7 @@ func bindScalarMachine(image *codeImage, controller *executionController) (*scal
 	machine.tableNumbers = machine.tableNumbers[:0]
 	machine.strings.reset()
 	machine.tables.reset()
-	if len(image.prototypes) > math.MaxUint32 {
+	if uint64(len(image.prototypes)) > math.MaxUint32 {
 		releaseScalarMachine(machine)
 		return nil, fmt.Errorf("bind compact Machine: prototype inventory exceeds uint32")
 	}
