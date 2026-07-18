@@ -96,16 +96,18 @@ func TestParseDispatchSpecRequiresOneRawStringDeclaration(t *testing.T) {
 }
 
 func TestParseFusionSpecIsClosedAndBounded(t *testing.T) {
-	source := []byte("package ember\nconst directFrameFusionSpec = `\nnumeric-for-trace numeric-loop 16\nfixed-self-call direct-call 1\nfixed-self-call-trace direct-call 3\ncompact-self-function direct-call 16\n`\n")
+	source := []byte("package ember\nconst directFrameFusionSpec = `\nnumeric-for-trace numeric-loop 16\nfixed-self-call direct-call 1\nfixed-self-call-trace direct-call 3\ncompact-self-function direct-call 16\ncompact-leaf-call direct-call 24\ncompact-loop iteration 16\n`\n")
 	entries, err := parseFusionSpec(source)
 	if err != nil {
 		t.Fatalf("parseFusionSpec returned error: %v", err)
 	}
-	if len(entries) != 4 ||
+	if len(entries) != 6 ||
 		entries[0].name != "numeric-for-trace" || entries[0].family != "numeric-loop" || entries[0].instructionCap != 16 ||
 		entries[1].name != "fixed-self-call" || entries[1].family != "direct-call" || entries[1].instructionCap != 1 ||
 		entries[2].name != "fixed-self-call-trace" || entries[2].family != "direct-call" || entries[2].instructionCap != 3 ||
-		entries[3].name != "compact-self-function" || entries[3].family != "direct-call" || entries[3].instructionCap != 16 {
+		entries[3].name != "compact-self-function" || entries[3].family != "direct-call" || entries[3].instructionCap != 16 ||
+		entries[4].name != "compact-leaf-call" || entries[4].family != "direct-call" || entries[4].instructionCap != 24 ||
+		entries[5].name != "compact-loop" || entries[5].family != "iteration" || entries[5].instructionCap != 16 {
 		t.Fatalf("fusion entries = %#v", entries)
 	}
 

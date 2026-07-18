@@ -1460,6 +1460,45 @@ reload:
 			op = opReturnOne
 			goto adaptiveDispatch
 
+		case directHandlerCompactLeafCallOpcode:
+			adaptiveWord := functionInstance.shadow.words[pc]
+			aux := words[nextWord]
+			c = int(int16(uint16(aux)))
+			nextWord++
+			argCount, borrowHint := decodeFixedCallCount(c)
+			if borrowHint {
+				callee := registers[b]
+				if value, ok := thread.runDirectCompactLeafCall(frame, callee, registers[b+1:b+1+argCount]); ok {
+					directFrameApplySingleCallIslandResult(frame, registers, a, 1, value)
+					functionInstance.shadow.words[pc] = adaptiveWord.incrementCounter()
+					break
+				}
+			}
+			functionInstance.shadow.words[pc] = adaptiveWord.withHandler(directHandlerID(opCallOne))
+			op = opCallOne
+			goto adaptiveDispatch
+
+		case directHandlerCompactLoopOpcode:
+			compactPC := pc
+			adaptiveWord := functionInstance.shadow.words[compactPC]
+			plan, planOK := functionInstance.shadow.compactLoopAt(compactPC)
+			if !planOK {
+				return directFrameExitAt(frame, compactPC, directFrameFail(fmt.Errorf("compact loop at word %d has no execution plan", compactPC)))
+			}
+			nextPC, errorPC, loopErr, guardOK := thread.runDirectCompactLoop(frame, functionInstance, plan)
+			if !guardOK {
+				generic := opcode(uint8(adaptiveWord.raw()) & uint8(wordcodeOpcodeMask))
+				functionInstance.shadow.words[compactPC] = adaptiveWord.withHandler(directHandlerID(generic))
+				pc = nextPC
+				continue
+			}
+			functionInstance.shadow.words[compactPC] = adaptiveWord.incrementCounter()
+			if loopErr != nil {
+				return directFrameExitAt(frame, errorPC, directFrameFail(loopErr))
+			}
+			pc = nextPC
+			continue
+
 		case opNumericForCheck:
 			d := int(int32(words[nextWord]))
 			nextWord++
@@ -1844,6 +1883,15 @@ reload:
 				frame.clearOpenResultWindow()
 				registers[a] = result
 				break
+			}
+			if !instrumented {
+				if borrowHint {
+					if value, ok := thread.runDirectCompactLeafCall(frame, callee, registers[b+1:b+1+argCount]); ok {
+						directFrameApplySingleCallIslandResult(frame, registers, a, 1, value)
+						observeDirectCompactLeafCall(functionInstance, pc)
+						break
+					}
+				}
 			}
 			if borrowHint {
 				if closure, ok := callee.scriptFunction(); ok {

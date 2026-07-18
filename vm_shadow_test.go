@@ -120,6 +120,15 @@ func TestDirectShadowEncodingIsBoundedAndSaturating(t *testing.T) {
 	if size := unsafe.Sizeof(directCompactSelfFunctionPlan{}); size != directCompactSelfFunctionPlanBytes {
 		t.Fatalf("directCompactSelfFunctionPlan size = %d, declared %d", size, directCompactSelfFunctionPlanBytes)
 	}
+	if size := unsafe.Sizeof(directCompactLeafOperation{}); size != directCompactLeafOperationBytes {
+		t.Fatalf("directCompactLeafOperation size = %d, declared %d", size, directCompactLeafOperationBytes)
+	}
+	if size := unsafe.Sizeof(directCompactLeafFunctionPlan{}); size != directCompactLeafFunctionPlanBytes {
+		t.Fatalf("directCompactLeafFunctionPlan size = %d, declared %d", size, directCompactLeafFunctionPlanBytes)
+	}
+	if size := unsafe.Sizeof(directCompactLoopPlan{}); size != directCompactLoopPlanBytes {
+		t.Fatalf("directCompactLoopPlan size = %d, declared %d", size, directCompactLoopPlanBytes)
+	}
 	word := newDirectShadowWord(0xfedcba98, directHandlerID(opAdd), 7)
 	for range 300 {
 		word = word.incrementCounter()
@@ -541,6 +550,341 @@ return run(17)
 	}
 	if !executed {
 		t.Fatalf("numeric captured upvalue did not execute through a compact self-function:\n%s", strings.Join(disassembly, "\n"))
+	}
+}
+
+func TestProductionExecutesPolymorphicCompactLeafCallsAndMatchesInstrumentedOracle(t *testing.T) {
+	proto, err := Compile(`
+local state = {hp = 100, shield = 20, score = 0}
+local handlers = {}
+function handlers.damage(s, amount)
+	if s.shield > 0 then
+		local absorbed = math.min(s.shield, amount)
+		s.shield = s.shield - absorbed
+		amount = amount - absorbed
+	end
+	s.hp = s.hp - amount
+	return s.hp
+end
+function handlers.heal(s, amount)
+	s.hp = s.hp + amount
+	return s.hp
+end
+function handlers.score(s, amount)
+	s.score = s.score + amount
+	return s.score
+end
+local events = {
+	{kind = "damage", amount = 7},
+	{kind = "score", amount = 5},
+	{kind = "heal", amount = 3},
+}
+local total = 0
+for round = 1, 20 do
+	for _, event in events do
+		total = total + handlers[event.kind](state, event.amount + round % 3)
+	end
+end
+return total + state.hp + state.shield + state.score
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := newVMThread(runtimeGlobals(nil))
+	enableAdaptiveShadowForTest(t, &production)
+	got, gotErr := production.run(proto, nil, nil)
+	instrumented := newVMThread(runtimeGlobals(nil))
+	instrumented.directFrameInstrumented = true
+	want, wantErr := instrumented.run(proto, nil, nil)
+	if difference := differentialDifference(
+		differentialRun{values: want, err: wantErr},
+		differentialRun{values: got, err: gotErr},
+	); difference != "" {
+		t.Fatalf("compact leaf execution differs: %s", difference)
+	}
+
+	plans := 0
+	fastPaths := 0
+	executions := uint8(0)
+	loopExecutions := uint8(0)
+	nestedLoopPlans := 0
+	dispatchLoopPlans := 0
+	var disassembly []string
+	for instanceProto, instance := range production.functionInstances {
+		plans += len(instance.shadow.compactLeafFunctions)
+		for _, plan := range instance.shadow.compactLeafFunctions {
+			if plan.fastPath.kind != directCompactLeafFastPathNone {
+				fastPaths++
+			}
+		}
+		disassembly = append(disassembly, disassembleProto(instanceProto)...)
+		for _, word := range instance.shadow.words {
+			if word.handler() == directHandlerCompactLeafCall {
+				executions += word.counter()
+			}
+			if word.handler() == directHandlerCompactLoop {
+				loopExecutions += word.counter()
+			}
+		}
+		for _, plan := range instance.shadow.compactLoops {
+			hasPrepare := false
+			hasArrayStep := false
+			for operationIndex := 0; operationIndex < int(plan.operationCount); operationIndex++ {
+				hasPrepare = hasPrepare || plan.operations[operationIndex].op == opPrepareIter
+				hasArrayStep = hasArrayStep || plan.operations[operationIndex].op == opArrayNextJump2
+			}
+			if hasPrepare && hasArrayStep {
+				nestedLoopPlans++
+			}
+			if plan.kind == directCompactLoopNestedDispatch {
+				dispatchLoopPlans++
+			}
+		}
+	}
+	if plans != 3 || fastPaths != 3 || executions == 0 || loopExecutions == 0 || nestedLoopPlans != 1 || dispatchLoopPlans != 1 {
+		t.Fatalf("compact leaf plans/fast paths/executions/loop executions/nested loops/dispatch loops = %d/%d/%d/%d/%d/%d, want 3/3/nonzero/nonzero/1/1:\n%s", plans, fastPaths, executions, loopExecutions, nestedLoopPlans, dispatchLoopPlans, strings.Join(disassembly, "\n"))
+	}
+}
+
+func TestProductionExecutesRenamedNestedDispatchLoopAndMatchesInstrumentedOracle(t *testing.T) {
+	proto, err := Compile(`
+local ledger = {energy = 30, points = 1}
+local routes = {}
+function routes.spend(record, delta)
+	record.energy = record.energy - delta
+	return record.energy
+end
+function routes.gain(record, delta)
+	record.points = record.points + delta
+	return record.points
+end
+local packets = {
+	{tag = "spend", delta = 2},
+	{tag = "gain", delta = 4},
+	{tag = "gain", delta = 7},
+}
+local sum = 0
+for epoch = 2, 31 do
+	for _, packet in packets do
+		sum = sum + routes[packet.tag](ledger, packet.delta + epoch % 4)
+	end
+end
+return sum + ledger.energy + ledger.points
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := newVMThread(runtimeGlobals(nil))
+	enableAdaptiveShadowForTest(t, &production)
+	got, gotErr := production.run(proto, nil, nil)
+	instrumented := newVMThread(runtimeGlobals(nil))
+	instrumented.directFrameInstrumented = true
+	want, wantErr := instrumented.run(proto, nil, nil)
+	if difference := differentialDifference(
+		differentialRun{values: want, err: wantErr},
+		differentialRun{values: got, err: gotErr},
+	); difference != "" {
+		t.Fatalf("renamed nested dispatch execution differs: %s", difference)
+	}
+
+	instance := production.functionInstances[proto]
+	if instance == nil {
+		t.Fatal("root function instance was not retained")
+	}
+	dispatchPlans := 0
+	for _, plan := range instance.shadow.compactLoops {
+		if plan.kind == directCompactLoopNestedDispatch {
+			dispatchPlans++
+		}
+	}
+	if dispatchPlans != 1 {
+		t.Fatalf("renamed dispatch loop plans = %d, want 1:\n%s", dispatchPlans, strings.Join(disassembleProto(proto), "\n"))
+	}
+}
+
+func TestNestedDispatchAliasGuardFallsBackBeforeMutation(t *testing.T) {
+	proto, err := Compile(`
+local record = {tag = "bump", delta = 1}
+local state = record
+local routes = {}
+function routes.bump(target, amount)
+	target.delta = target.delta + amount
+	return target.delta
+end
+local packets = {record}
+local sum = 0
+for epoch = 1, 12 do
+	for _, packet in packets do
+		sum = sum + routes[packet.tag](state, packet.delta + epoch % 3)
+	end
+end
+return sum + record.delta
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := newVMThread(runtimeGlobals(nil))
+	enableAdaptiveShadowForTest(t, &production)
+	got, gotErr := production.run(proto, nil, nil)
+	instrumented := newVMThread(runtimeGlobals(nil))
+	instrumented.directFrameInstrumented = true
+	want, wantErr := instrumented.run(proto, nil, nil)
+	if difference := differentialDifference(
+		differentialRun{values: want, err: wantErr},
+		differentialRun{values: got, err: gotErr},
+	); difference != "" {
+		t.Fatalf("aliased nested dispatch execution differs: %s", difference)
+	}
+
+	instance := production.functionInstances[proto]
+	if instance == nil {
+		t.Fatal("root function instance was not retained")
+	}
+	dispatchPlans := 0
+	for _, plan := range instance.shadow.compactLoops {
+		if plan.kind != directCompactLoopNestedDispatch {
+			continue
+		}
+		dispatchPlans++
+		if handler := instance.shadow.words[plan.startPC].handler(); handler == directHandlerCompactLoop {
+			t.Fatalf("aliased dispatch guard retained compact handler %d at %d", handler, plan.startPC)
+		}
+	}
+	if dispatchPlans != 1 {
+		t.Fatalf("aliased dispatch loop plans = %d, want 1:\n%s", dispatchPlans, strings.Join(disassembleProto(proto), "\n"))
+	}
+}
+
+func TestProductionExecutesEffectfulNumericCompactLoopsAndMatchesInstrumentedOracle(t *testing.T) {
+	proto, err := Compile(`
+local values = {}
+for i = 1, 80 do
+	table.insert(values, i % 9)
+end
+local removed = 0
+for i = 1, 20 do
+	removed = removed + table.remove(values, 1)
+end
+return removed + rawlen(values)
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := newVMThread(runtimeGlobals(nil))
+	enableAdaptiveShadowForTest(t, &production)
+	got, gotErr := production.run(proto, nil, nil)
+	instrumented := newVMThread(runtimeGlobals(nil))
+	instrumented.directFrameInstrumented = true
+	want, wantErr := instrumented.run(proto, nil, nil)
+	if difference := differentialDifference(
+		differentialRun{values: want, err: wantErr},
+		differentialRun{values: got, err: gotErr},
+	); difference != "" {
+		t.Fatalf("effectful compact loop execution differs: %s", difference)
+	}
+
+	instance := production.functionInstances[proto]
+	if instance == nil || len(instance.shadow.compactLoops) != 2 {
+		t.Fatalf("compact loops = %d, want 2:\n%s", len(instance.shadow.compactLoops), strings.Join(disassembleProto(proto), "\n"))
+	}
+	executions := uint8(0)
+	for _, plan := range instance.shadow.compactLoops {
+		word := instance.shadow.words[int(plan.startPC)]
+		if word.handler() == directHandlerCompactLoop {
+			executions += word.counter()
+		}
+	}
+	if executions != 2 {
+		t.Fatalf("effectful compact loop executions = %d, want 2", executions)
+	}
+}
+
+func TestCompactLoopIntrinsicGuardFallsBackBeforeEffects(t *testing.T) {
+	proto, err := Compile(`
+local values = {}
+local calls = 0
+table.insert = function(target, value)
+	calls = calls + 1
+	target[rawlen(target) + 1] = value * 2
+end
+for index = 1, 8 do
+	table.insert(values, index)
+end
+return calls, values[8]
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := newVMThread(runtimeGlobals(nil))
+	enableAdaptiveShadowForTest(t, &production)
+	got, gotErr := production.run(proto, nil, nil)
+	instrumented := newVMThread(runtimeGlobals(nil))
+	instrumented.directFrameInstrumented = true
+	want, wantErr := instrumented.run(proto, nil, nil)
+	if difference := differentialDifference(
+		differentialRun{values: want, err: wantErr},
+		differentialRun{values: got, err: gotErr},
+	); difference != "" {
+		t.Fatalf("compact loop intrinsic fallback differs: %s", difference)
+	}
+	if len(got) != 2 || valueNumber(got[0]) != 8 || valueNumber(got[1]) != 16 {
+		t.Fatalf("overridden intrinsic results = %v, want [8 16]", got)
+	}
+
+	instance := production.functionInstances[proto]
+	if instance == nil || len(instance.shadow.compactLoops) != 1 {
+		count := 0
+		if instance != nil {
+			count = len(instance.shadow.compactLoops)
+		}
+		t.Fatalf("overridden intrinsic compact loops = %d, want 1:\n%s", count, strings.Join(disassembleProto(proto), "\n"))
+	}
+	plan := instance.shadow.compactLoops[0]
+	if handler := instance.shadow.words[plan.startPC].handler(); handler == directHandlerCompactLoop {
+		t.Fatalf("overridden intrinsic retained compact handler %d at %d", handler, plan.startPC)
+	}
+}
+
+func TestCompactLeafCallMetatableGuardFallsBackBeforeMutation(t *testing.T) {
+	proto, err := Compile(`
+local state = setmetatable({score = 1}, {})
+local function update(s, amount)
+	s.score = s.score + amount
+	return s.score
+end
+local first = update(state, 2)
+return first, state.score
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := newVMThread(runtimeGlobals(nil))
+	enableAdaptiveShadowForTest(t, &production)
+	got, gotErr := production.run(proto, nil, nil)
+	instrumented := newVMThread(runtimeGlobals(nil))
+	instrumented.directFrameInstrumented = true
+	want, wantErr := instrumented.run(proto, nil, nil)
+	if difference := differentialDifference(
+		differentialRun{values: want, err: wantErr},
+		differentialRun{values: got, err: gotErr},
+	); difference != "" {
+		t.Fatalf("compact leaf metatable fallback differs: %s", difference)
+	}
+	if len(got) != 2 || valueNumber(got[0]) != 3 || valueNumber(got[1]) != 3 {
+		t.Fatalf("guard-miss results = %v, want [3 3]", got)
+	}
+
+	plans := 0
+	for _, instance := range production.functionInstances {
+		plans += len(instance.shadow.compactLeafFunctions)
+		for _, word := range instance.shadow.words {
+			if word.handler() == directHandlerCompactLeafCall {
+				t.Fatalf("metatable guard miss left compact caller handler %d/%d", word.handler(), word.counter())
+			}
+		}
+	}
+	if plans != 1 {
+		t.Fatalf("compact leaf plans = %d, want 1", plans)
 	}
 }
 

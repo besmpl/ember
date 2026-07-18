@@ -1541,6 +1541,12 @@ func (thread *vmThread) shadowFunctionInstance(proto *Proto) (*vmFunctionInstanc
 	if err := tileDirectFixedSelfCallTraces(proto, &shadow); err != nil {
 		return nil, fmt.Errorf("shadow: tile calls: %w", err)
 	}
+	if err := tileDirectCompactLeafFunction(proto, &shadow); err != nil {
+		return nil, fmt.Errorf("shadow: tile leaf: %w", err)
+	}
+	if err := tileDirectCompactLoops(proto, &shadow); err != nil {
+		return nil, fmt.Errorf("shadow: tile loops: %w", err)
+	}
 	instance.shadow = shadow
 	return instance, nil
 }

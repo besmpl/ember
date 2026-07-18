@@ -293,9 +293,9 @@ func parseDispatchSpec(source []byte, want []string) ([]dispatchSpecEntry, error
 	return entries, nil
 }
 
-var fusionNames = dispatchStringSet([]string{"numeric-for-trace", "fixed-self-call", "fixed-self-call-trace", "compact-self-function"})
+var fusionNames = dispatchStringSet([]string{"numeric-for-trace", "fixed-self-call", "fixed-self-call-trace", "compact-self-function", "compact-leaf-call", "compact-loop"})
 
-var fusionFamilyNames = dispatchStringSet([]string{"numeric-loop", "direct-call"})
+var fusionFamilyNames = dispatchStringSet([]string{"numeric-loop", "direct-call", "iteration"})
 
 func parseFusionSpec(source []byte) ([]fusionSpecEntry, error) {
 	text, err := rawStringDeclaration(source, "directFrameFusionSpec")
@@ -609,7 +609,7 @@ func renderVariant(template []byte, instrumented bool) ([]byte, error) {
 		return nil, fmt.Errorf("canonical loop parameter marker occurs %d times, want one", got)
 	}
 	text = strings.ReplaceAll(text, ", instrumented bool", "")
-	const policyMarkerCount = 39
+	const policyMarkerCount = 40
 	if instrumented {
 		var err error
 		text, err = replaceAllExact(text, "instrumented", "true", policyMarkerCount)
@@ -635,8 +635,8 @@ func renderVariant(template []byte, instrumented bool) ([]byte, error) {
 				return nil, err
 			}
 		}
-		if got := strings.Count(text, "if !true {"); got != 2 {
-			return nil, fmt.Errorf("instrumented shadow marker occurs %d times, want 2", got)
+		if got := strings.Count(text, "if !true {"); got != 3 {
+			return nil, fmt.Errorf("instrumented shadow marker occurs %d times, want 3", got)
 		}
 		text, err = stripGoBlock(text, "if !true {")
 		if err != nil {
@@ -692,8 +692,8 @@ func renderVariant(template []byte, instrumented bool) ([]byte, error) {
 				return nil, err
 			}
 		}
-		if got := strings.Count(text, "if !false {"); got != 2 {
-			return nil, fmt.Errorf("production shadow marker occurs %d times, want 2", got)
+		if got := strings.Count(text, "if !false {"); got != 3 {
+			return nil, fmt.Errorf("production shadow marker occurs %d times, want 3", got)
 		}
 		text, err = unwrapGoBlock(text, "if !false {")
 		if err != nil {

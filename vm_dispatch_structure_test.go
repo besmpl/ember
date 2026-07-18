@@ -127,12 +127,14 @@ func TestGeneratedDirectSemanticCatalogCoversOpcodeMetadata(t *testing.T) {
 	if directGeneratedHandlerCount > directAdaptiveHandlerCap {
 		t.Fatalf("generated handler count = %d, cap = %d", directGeneratedHandlerCount, directAdaptiveHandlerCap)
 	}
-	if directFusedHandlerCount != 4 ||
+	if directFusedHandlerCount != 6 ||
 		directHandlerNumericForTrace < directHandlerID(opcodeLimit+directAdaptiveHandlerCount) ||
 		directHandlerFixedSelfCall <= directHandlerNumericForTrace ||
 		directHandlerFixedSelfCallTrace <= directHandlerFixedSelfCall ||
-		directHandlerCompactSelfFunction <= directHandlerFixedSelfCallTrace {
-		t.Fatalf("fused handler inventory = numeric:%d self-call:%d call-trace:%d compact-self:%d count:%d", directHandlerNumericForTrace, directHandlerFixedSelfCall, directHandlerFixedSelfCallTrace, directHandlerCompactSelfFunction, directFusedHandlerCount)
+		directHandlerCompactSelfFunction <= directHandlerFixedSelfCallTrace ||
+		directHandlerCompactLeafCall <= directHandlerCompactSelfFunction ||
+		directHandlerCompactLoop <= directHandlerCompactLeafCall {
+		t.Fatalf("fused handler inventory = numeric:%d self-call:%d call-trace:%d compact-self:%d compact-leaf:%d compact-loop:%d count:%d", directHandlerNumericForTrace, directHandlerFixedSelfCall, directHandlerFixedSelfCallTrace, directHandlerCompactSelfFunction, directHandlerCompactLeafCall, directHandlerCompactLoop, directFusedHandlerCount)
 	}
 	seenSpecialized := make(map[directHandlerID]opcode)
 	for _, op := range allOpcodes {

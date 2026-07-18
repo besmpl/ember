@@ -84,4 +84,6 @@ numeric-for-trace  numeric-loop  16
 fixed-self-call    direct-call   1
 fixed-self-call-trace direct-call 3
 compact-self-function direct-call 16
+compact-leaf-call direct-call 24
+compact-loop iteration 16
 `

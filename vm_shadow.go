@@ -153,13 +153,17 @@ type directShadowCode struct {
 	numericTraces        []directNumericTracePlan
 	fixedSelfCallTraces  []directFixedSelfCallTracePlan
 	compactSelfFunctions []directCompactSelfFunctionPlan
+	compactLeafFunctions []directCompactLeafFunctionPlan
+	compactLoops         []directCompactLoopPlan
 }
 
 func (code directShadowCode) retainedBytes() int64 {
 	return directShadowStateBytes(cap(code.words), cap(code.caches)) +
 		int64(cap(code.numericTraces))*directNumericTracePlanBytes +
 		int64(cap(code.fixedSelfCallTraces))*directFixedSelfCallTracePlanBytes +
-		int64(cap(code.compactSelfFunctions))*directCompactSelfFunctionPlanBytes
+		int64(cap(code.compactSelfFunctions))*directCompactSelfFunctionPlanBytes +
+		int64(cap(code.compactLeafFunctions))*directCompactLeafFunctionPlanBytes +
+		int64(cap(code.compactLoops))*directCompactLoopPlanBytes
 }
 
 func directShadowStateBytes(wordCount int, cacheCount int) int64 {
