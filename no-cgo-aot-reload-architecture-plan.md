@@ -1,6 +1,6 @@
 # No-CGO native prepared reload architecture audit
 
-Status: implemented; final repository verification pending.
+Status: implemented, verified, committed, and pushed.
 
 This file is the implementation audit requested for Ember's no-cgo hot-reload
 slice. It records the architecture that survived measurement, the designs that
@@ -211,15 +211,13 @@ production-ready Luau replacement.
 
 Remaining pressure is explicit:
 
-1. Run the complete repository, race, checkptr, and cross-build gates on the
-   cohesive result.
-2. Add native installation and ABI tests for Linux/Windows x86-64 before
+1. Add native installation and ABI tests for Linux/Windows x86-64 before
    advertising native speed there.
-3. Measure real game scripts by native coverage and end-to-end frame cost;
+2. Measure real game scripts by native coverage and end-to-end frame cost;
    never extrapolate the four numeric rows to tables or host-heavy behavior.
-4. Add a long resident-memory soak beyond the deterministic 32-generation
+3. Add a long resident-memory soak beyond the deterministic 32-generation
    reclamation test.
-5. Widen qualification only through Luau behavior tests and replay-safe
+4. Widen qualification only through Luau behavior tests and replay-safe
    semantics, never workload names or benchmark fingerprints.
 
 ## Acceptance checklist
@@ -231,4 +229,4 @@ Remaining pressure is explicit:
 - [x] Activation, retirement, repeated reclamation, and close are explicit.
 - [x] Static prepared Go and ordinary Machine paths remain intact.
 - [x] Mutable-capture fallback semantics pass VM and Machine differentials.
-- [ ] Final repository checks, documentation verification, commit, and push.
+- [x] Final repository checks, documentation verification, commit, and push.
