@@ -43,9 +43,14 @@ const (
 
 	parityPointAttemptLimit = 60
 	parityPointRetryDelay   = time.Second
+
+	// A slope is not acceptance evidence when the decisive point is shorter
+	// than ordinary scheduler disturbances. The uniform iteration schedule is
+	// sized to clear this floor for every qualified row on certified hosts.
+	parityMinimumMaxPointElapsed = 5 * time.Millisecond
 )
 
-var parityIterations = [...]int{1, 10, 100, 1000}
+var parityIterations = [...]int{50, 500, 5000, 50000}
 
 const parityPairCount = 9
 
@@ -129,6 +134,22 @@ func parityHostProfileFor(name string) (parityHostProfile, error) {
 
 func finiteParityFloat(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func validateParityMeasurementWindow(samples map[int]float64) error {
+	maxN := parityIterations[len(parityIterations)-1]
+	elapsed, ok := samples[maxN]
+	if !ok {
+		return fmt.Errorf("parity measurement window: missing N=%d", maxN)
+	}
+	if elapsed <= 0 || !finiteParityFloat(elapsed) {
+		return fmt.Errorf("parity measurement window: invalid timing N=%d: %v", maxN, elapsed)
+	}
+	minimum := float64(parityMinimumMaxPointElapsed.Nanoseconds())
+	if elapsed < minimum {
+		return fmt.Errorf("parity measurement window: N=%d elapsed_ns=%.17g, want at least %.17g", maxN, elapsed, minimum)
+	}
+	return nil
 }
 
 // fitParityLine fits T(N)=entry+N*inner with an intercept. Keeping this
@@ -1014,8 +1035,22 @@ func TestRuntimeParityHarness(t *testing.T) {
 	if parityRawHeader != wantRawHeader || paritySlopeHeader != wantSlopeHeader {
 		t.Fatal("runtime parity schema v2 changed")
 	}
-	if !reflectDeepEqualInts(parityIterations[:], []int{1, 10, 100, 1000}) {
+	if !reflectDeepEqualInts(parityIterations[:], []int{50, 500, 5000, 50000}) {
 		t.Fatalf("iteration points changed: %v", parityIterations)
+	}
+	if parityMinimumMaxPointElapsed != 5*time.Millisecond {
+		t.Fatalf("minimum max-point elapsed = %s, want 5ms", parityMinimumMaxPointElapsed)
+	}
+	adequateWindow := map[int]float64{50000: float64((5 * time.Millisecond).Nanoseconds())}
+	if err := validateParityMeasurementWindow(adequateWindow); err != nil {
+		t.Fatalf("rejected adequate measurement window: %v", err)
+	}
+	shortWindow := map[int]float64{50000: float64((5 * time.Millisecond).Nanoseconds() - 1)}
+	if err := validateParityMeasurementWindow(shortWindow); err == nil {
+		t.Fatal("accepted a measurement window shorter than 5ms")
+	}
+	if err := validateParityMeasurementWindow(map[int]float64{}); err == nil {
+		t.Fatal("accepted a measurement window without the maximum point")
 	}
 	if parityPairCount != 9 {
 		t.Fatalf("pair count = %d, want 9", parityPairCount)
@@ -1110,7 +1145,7 @@ func TestRuntimeParityHarness(t *testing.T) {
 	if math.Abs(fit.Entry-entry) > 1e-9 || math.Abs(fit.Inner-inner) > 1e-9 {
 		t.Fatalf("fit = %+v, want entry=%v inner=%v", fit, entry, inner)
 	}
-	negativeEntry, err := fitParityLine(map[int]float64{1: 5, 10: 95, 100: 995, 1000: 9995})
+	negativeEntry, err := fitParityLine(map[int]float64{50: 495, 500: 4995, 5000: 49995, 50000: 499995})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1119,10 +1154,10 @@ func TestRuntimeParityHarness(t *testing.T) {
 	}
 
 	ratio, emberFit, luauFit, err := parityRatio(samples, map[int]float64{
-		1:    22,
-		10:   40,
-		100:  220,
-		1000: 2020,
+		50:    120,
+		500:   1020,
+		5000:  10020,
+		50000: 100020,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1140,13 +1175,13 @@ func TestRuntimeParityHarness(t *testing.T) {
 	if _, _, err := summarizeParityRatios([]float64{1}); err == nil {
 		t.Fatal("accepted incomplete ratio set")
 	}
-	if _, err := fitParityLine(map[int]float64{1: 1, 10: 2, 100: 3}); err == nil {
+	if _, err := fitParityLine(map[int]float64{50: 1, 500: 2, 5000: 3}); err == nil {
 		t.Fatal("accepted missing timing point")
 	}
-	if _, err := fitParityLine(map[int]float64{1: 1, 10: 2, 100: 3, 1000: math.NaN()}); err == nil {
+	if _, err := fitParityLine(map[int]float64{50: 1, 500: 2, 5000: 3, 50000: math.NaN()}); err == nil {
 		t.Fatal("accepted non-finite timing")
 	}
-	if _, _, _, err := parityRatio(samples, map[int]float64{1: 1, 10: 1, 100: 1, 1000: 1}); err == nil {
+	if _, _, _, err := parityRatio(samples, map[int]float64{50: 1, 500: 1, 5000: 1, 50000: 1}); err == nil {
 		t.Fatal("accepted non-positive Luau slope")
 	}
 	repeatMedian, repeatSpread, err := summarizeParityRepeatRatios([]float64{0.90, 1.00, 1.10})
@@ -1518,6 +1553,9 @@ func TestRuntimeParityLive(t *testing.T) {
 		}
 		for _, engine := range []string{"ember", "luau"} {
 			for repeat := 1; repeat <= parityRepeatCount; repeat++ {
+				if err := validateParityMeasurementWindow(timings[engine][repeat]); err != nil {
+					t.Fatalf("%s %s repeat=%d: %v", tc.name, engine, repeat, err)
+				}
 				fit, err := fitParityLine(timings[engine][repeat])
 				if err != nil {
 					t.Fatalf("%s %s repeat=%d fit: %v", tc.name, engine, repeat, err)
