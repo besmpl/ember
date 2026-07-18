@@ -96,23 +96,30 @@ The executable-memory and private-runtime edge is confined to
   instruction-cache invalidation before publication.
 - Linux mappings are populated read-write and sealed read-execute before
   publication; they are never writable and executable simultaneously.
+- Windows mappings use `VirtualAlloc` read-write storage, seal it
+  read-execute with `VirtualProtect`, flush the process instruction cache, and
+  release it with `VirtualFree`. Dynamic-code policy rejection selects the
+  canonical Machine fallback before effects.
 - A tiny architecture-specific trampoline enters generated code on the Go
-  runtime's foreign/system stack.
+  runtime's foreign/system stack. Windows x86-64 translates its distinct outer
+  ABI and preserves the nonvolatile registers touched by Ember's private
+  kernel ABI; Windows ARM64 shares the existing register contract.
 - Generated code may read argument and result pointers only for the duration of
   the call and cannot retain Go pointers.
 - The repository's pure-Go scanner allowlists only the exact `purego`,
   executable-memory, assembly-call, and `runtime.cgocall` sites.
 
 `CGO_ENABLED=0` is required and tested. This path nevertheless depends on one
-private Go runtime ABI through `purego`; toolchain upgrades must keep the
-focused boundary, race, checkptr, and linked-symbol tests green.
+private Go runtime ABI: cgo-disabled Unix builds initialize it through
+`purego`, while Windows provides the transition directly. Toolchain upgrades
+must keep the focused boundary, race, checkptr, and linked-symbol tests green.
 
 ### Platform support
 
-Native installation is currently supported on Darwin and Linux for ARM64 and
+Native installation is supported on Darwin, Linux, and Windows for ARM64 and
 x86-64; x86-64 requires SSE4.1. Both emitters and complete execution paths are
-tested with cgo disabled. Windows cross-builds retain the exact Machine fallback
-until its platform-specific native mapping and call boundaries are implemented.
+tested with cgo disabled. Hosts whose dynamic-code policy rejects executable
+pages retain the exact Machine fallback.
 
 ## Consequences
 

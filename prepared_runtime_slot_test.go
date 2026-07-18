@@ -35,7 +35,7 @@ func TestPreparedRuntimeSlotPreparesSourceUnknownAtHostBuild(t *testing.T) {
 
 func TestPreparedRuntimeSlotRetiresReloadTimeNativeImages(t *testing.T) {
 	if !preparedRuntimeNativeTestPlatform() {
-		t.Skip("reload-time native execution requires Darwin or Linux on ARM64 or x86-64")
+		t.Skip("reload-time native execution requires Darwin, Linux, or Windows on ARM64 or x86-64")
 	}
 	firstProgram := preparedRuntimeSlotTestProgram(t, 41)
 	secondProgram := preparedRuntimeSlotTestProgram(t, 42)
@@ -86,7 +86,7 @@ func TestPreparedRuntimeSlotRetiresReloadTimeNativeImages(t *testing.T) {
 
 func TestPreparedRuntimeSlotRepeatedReloadsReclaimNativeImages(t *testing.T) {
 	if !preparedRuntimeNativeTestPlatform() {
-		t.Skip("reload-time native execution requires Darwin or Linux on ARM64 or x86-64")
+		t.Skip("reload-time native execution requires Darwin, Linux, or Windows on ARM64 or x86-64")
 	}
 	var slot PreparedRuntimeSlot
 	var active interface {
@@ -218,7 +218,7 @@ return {
 
 func TestPreparedRuntimeSlotReloadTimeNativeExecutesBoundedSelfRecursion(t *testing.T) {
 	if !preparedRuntimeNativeTestPlatform() {
-		t.Skip("reload-time native execution requires Darwin or Linux on ARM64 or x86-64")
+		t.Skip("reload-time native execution requires Darwin, Linux, or Windows on ARM64 or x86-64")
 	}
 	module := LogicalModule("prepared/reload-native-recursion")
 	program := preparedRuntimeSlotSourceProgram(t, module, `
@@ -451,7 +451,7 @@ func TestPreparedRuntimeSlotMutableCaptureUsesCanonicalFallback(t *testing.T) {
 }
 
 func preparedRuntimeNativeTestPlatform() bool {
-	return (runtime.GOOS == "darwin" || runtime.GOOS == "linux") &&
+	return (runtime.GOOS == "darwin" || runtime.GOOS == "linux" || runtime.GOOS == "windows") &&
 		(runtime.GOARCH == "arm64" || runtime.GOARCH == "amd64")
 }
 

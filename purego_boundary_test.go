@@ -529,13 +529,32 @@ func reviewedPreparedNativeAPI(relative, owner, importPath, name string, called 
 			return false
 		}
 		return name == "Mmap" && called || name == "Mprotect" && called || name == "PROT_EXEC"
+	case "internal/preparednative/executable_windows.go":
+		if importPath != "golang.org/x/sys/windows" {
+			return false
+		}
+		switch owner {
+		case pureGoPackageOwner:
+			return (name == "NewLazySystemDLL" || name == "NewProc") && called
+		case "mapExecutable":
+			return (name == "VirtualAlloc" || name == "VirtualProtect" || name == "VirtualFree" || name == "Call") && called ||
+				name == "PAGE_EXECUTE_READ"
+		case "unmapExecutable":
+			return name == "VirtualFree" && called
+		default:
+			return false
+		}
+	case "internal/preparednative/executable_windows_test.go":
+		return owner == "TestExecutableWindowsMappingIsSealedReadExecute" &&
+			importPath == "golang.org/x/sys/windows" &&
+			(name == "VirtualQuery" && called || name == "PAGE_EXECUTE_READ")
 	default:
 		return false
 	}
 }
 
 func reviewedPreparedNativeLinkname(relative, directive string) bool {
-	return relative == "internal/preparednative/call_unix.go" &&
+	return relative == "internal/preparednative/call.go" &&
 		directive == "//go:linkname runtimeCGOCall runtime.cgocall"
 }
 
@@ -544,8 +563,9 @@ func reviewedPreparedNativeAssemblyCall(relative, opcode, target string) bool {
 		return false
 	}
 	target = strings.Trim(target, " \t,")
-	return relative == "internal/preparednative/call_unix_arm64.s" && target == "(R9)" ||
-		relative == "internal/preparednative/call_unix_amd64.s" && target == "AX"
+	return relative == "internal/preparednative/call_arm64.s" && target == "(R9)" ||
+		relative == "internal/preparednative/call_unix_amd64.s" && target == "AX" ||
+		relative == "internal/preparednative/call_windows_amd64.s" && target == "AX"
 }
 
 func pureGoProcessAPI(importPath, name string) bool {
@@ -575,7 +595,12 @@ func pureGoForeignAPI(importPath, name string) bool {
 		}
 	}
 	if strings.HasSuffix(importPath, "/windows") || importPath == "syscall" {
-		if strings.HasPrefix(name, "LoadLibrary") || strings.HasPrefix(name, "VirtualAlloc") || strings.HasPrefix(name, "VirtualProtect") || strings.Contains(name, "LazyDLL") {
+		if strings.HasPrefix(name, "LoadLibrary") ||
+			strings.HasPrefix(name, "VirtualAlloc") ||
+			strings.HasPrefix(name, "VirtualProtect") ||
+			name == "VirtualFree" || name == "VirtualQuery" ||
+			name == "NewLazySystemDLL" || name == "NewProc" || name == "Call" ||
+			strings.Contains(name, "LazyDLL") {
 			return true
 		}
 		switch name {

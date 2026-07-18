@@ -1,10 +1,8 @@
 package preparednative
 
 import (
-	"errors"
 	"fmt"
 	"runtime"
-	"syscall"
 
 	"golang.org/x/sys/cpu"
 )
@@ -19,7 +17,7 @@ func validateNativeExecutionPlatform() error {
 	if nativeExecutionPlatformAvailable(runtime.GOOS, runtime.GOARCH, cpu.X86.HasSSE41) {
 		return nil
 	}
-	if (runtime.GOOS == "darwin" || runtime.GOOS == "linux") &&
+	if (runtime.GOOS == "darwin" || runtime.GOOS == "linux" || runtime.GOOS == "windows") &&
 		runtime.GOARCH == "amd64" && !cpu.X86.HasSSE41 {
 		return fmt.Errorf("%w: x86-64 native code requires SSE4.1", ErrUnavailable)
 	}
@@ -27,7 +25,7 @@ func validateNativeExecutionPlatform() error {
 }
 
 func nativeExecutionPlatformAvailable(goos, goarch string, hasSSE41 bool) bool {
-	if goos != "darwin" && goos != "linux" {
+	if goos != "darwin" && goos != "linux" && goos != "windows" {
 		return false
 	}
 	switch goarch {
@@ -38,11 +36,4 @@ func nativeExecutionPlatformAvailable(goos, goarch string, hasSSE41 bool) bool {
 	default:
 		return false
 	}
-}
-
-func nativeMappingPolicyUnavailable(err error) bool {
-	return errors.Is(err, syscall.EPERM) ||
-		errors.Is(err, syscall.EACCES) ||
-		errors.Is(err, syscall.ENOTSUP) ||
-		errors.Is(err, syscall.EINVAL)
 }

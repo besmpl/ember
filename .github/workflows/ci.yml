@@ -95,6 +95,66 @@ jobs:
         # format error after the cross-compile succeeds.
         run: GOOS=linux GOARCH=386 go test -run '^$' ./...
 
+  windows-amd64:
+    name: windows-amd64
+    runs-on: windows-latest
+    env:
+      CGO_ENABLED: "0"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Verify Windows x86-64 target
+        shell: pwsh
+        run: |
+          if ((go env GOOS) -ne 'windows' -or (go env GOARCH) -ne 'amd64') {
+            throw "expected windows/amd64 Go toolchain"
+          }
+
+      - name: Run Windows x86-64 tests
+        run: go test -count=1 ./...
+
+      - name: Build Windows x86-64 packages
+        run: go build ./...
+
+  windows-arm64:
+    name: windows-arm64
+    # GitHub-hosted Windows ARM64 is a public-preview runner. Keep the job
+    # explicit so unavailable runner capacity is visible rather than omitted.
+    runs-on: windows-11-arm
+    env:
+      CGO_ENABLED: "0"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Verify Windows ARM64 target
+        shell: pwsh
+        run: |
+          if ((go env GOOS) -ne 'windows' -or (go env GOARCH) -ne 'arm64') {
+            throw "expected windows/arm64 Go toolchain"
+          }
+
+      - name: Run Windows ARM64 tests
+        run: go test -count=1 ./...
+
+      - name: Build Windows ARM64 packages
+        run: go build ./...
+
   vet:
     name: vet
     runs-on: ubuntu-latest

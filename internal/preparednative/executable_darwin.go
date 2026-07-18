@@ -35,7 +35,7 @@ func mapExecutable(code []byte) ([]byte, error) {
 		syscall.MAP_ANON|syscall.MAP_PRIVATE|syscall.MAP_JIT,
 	)
 	if err != nil {
-		if nativeMappingPolicyUnavailable(err) {
+		if unixMappingPolicyUnavailable(err) {
 			return nil, fmt.Errorf("%w: allocate MAP_JIT region: %v", ErrUnavailable, err)
 		}
 		return nil, fmt.Errorf("allocate MAP_JIT region: %w", err)

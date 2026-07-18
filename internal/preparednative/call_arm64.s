@@ -1,11 +1,11 @@
-//go:build darwin || linux
+//go:build (darwin || linux || windows) && arm64
 
 #include "go_asm.h"
 #include "textflag.h"
 
 // nativeCallTrampoline is entered on the runtime's system stack using the
-// platform C ABI. It translates one pointer-to-frame argument into Ember's
-// kernel ABI.
+// platform C ABI. All supported ARM64 hosts pass its frame pointer in R0; the
+// generated kernel's R0/R1/R2 boundary is therefore shared across OSes.
 GLOBL ·nativeCallTrampolineABI0(SB), NOPTR|RODATA, $8
 DATA ·nativeCallTrampolineABI0(SB)/8, $nativeCallTrampoline(SB)
 

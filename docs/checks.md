@@ -252,8 +252,9 @@ go test -gcflags=all=-d=checkptr=2 -count=1 ./...
 ```
 
 Platform coverage is explicit in CI: Linux amd64 runs the standard checks,
-macOS and Linux arm64 run the test suite (arm64 also builds), and the Linux
-386 lane uses the compile-only command below:
+macOS and Linux arm64 run the test suite (arm64 also builds), Windows x86-64
+and ARM64 run strict-cgo-off tests and builds on native hosted runners, and the
+Linux 386 lane uses the compile-only command below:
 
 ```sh
 GOOS=linux GOARCH=386 go test -run '^$' ./...

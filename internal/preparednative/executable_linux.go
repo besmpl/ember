@@ -19,7 +19,7 @@ func mapExecutable(code []byte) (_ []byte, resultErr error) {
 		syscall.MAP_ANON|syscall.MAP_PRIVATE,
 	)
 	if err != nil {
-		if nativeMappingPolicyUnavailable(err) {
+		if unixMappingPolicyUnavailable(err) {
 			return nil, fmt.Errorf("%w: allocate writable region: %v", ErrUnavailable, err)
 		}
 		return nil, fmt.Errorf("allocate writable region: %w", err)
@@ -32,7 +32,7 @@ func mapExecutable(code []byte) (_ []byte, resultErr error) {
 
 	copy(memory, code)
 	if err := syscall.Mprotect(memory, syscall.PROT_READ|syscall.PROT_EXEC); err != nil {
-		if nativeMappingPolicyUnavailable(err) {
+		if unixMappingPolicyUnavailable(err) {
 			return nil, fmt.Errorf("%w: seal executable region: %v", ErrUnavailable, err)
 		}
 		return nil, fmt.Errorf("seal executable region: %w", err)

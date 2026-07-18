@@ -64,8 +64,8 @@ type nativeTestHelper interface {
 
 func nativeIdentityCode(test nativeTestHelper) []byte {
 	test.Helper()
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-		test.Skip("prepared native execution is currently implemented on Darwin and Linux")
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
+		test.Skip("prepared native execution is currently implemented on Darwin, Linux, and Windows")
 		return nil
 	}
 	switch runtime.GOARCH {

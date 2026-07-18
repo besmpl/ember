@@ -1,12 +1,10 @@
-//go:build (darwin || linux) && (arm64 || amd64)
+//go:build (darwin || linux || windows) && (arm64 || amd64)
 
 package preparednative
 
 import (
 	"sync"
 	"unsafe"
-
-	_ "github.com/ebitengine/purego"
 )
 
 var nativeCallPool = sync.Pool{New: func() any { return new(nativeCallFrame) }}
@@ -21,9 +19,9 @@ type nativeCallFrame struct {
 
 var nativeCallTrampolineABI0 uintptr
 
-// runtimeCGOCall enters foreign code on the runtime's system stack. Purego's
-// package initialization installs its all-Go runtime/cgo substitute when the
-// host is built with CGO_ENABLED=0.
+// runtimeCGOCall enters foreign code on the runtime's system stack. Windows
+// supports this transition directly; cgo-disabled Unix builds install purego's
+// all-Go runtime/cgo substitute from call_unix_runtime.go.
 //
 //go:linkname runtimeCGOCall runtime.cgocall
 func runtimeCGOCall(function uintptr, argument unsafe.Pointer) int32

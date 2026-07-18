@@ -39,6 +39,6 @@ Current runtime decisions:
   from production after scalar wins failed to transfer to object workloads.
 - `0010-hybrid-aot-generation-reload.md`: selects static prepared bundles for
   releases, reload-time no-cgo ARM64/x86-64 native generations on supported
-  Darwin and Linux hosts, exact Machine replay, and a prepared-generation
-  safe-point transaction. The Go-plugin adapter remains an optional separate
-  host choice.
+  Darwin, Linux, and Windows hosts, exact Machine replay, and a
+  prepared-generation safe-point transaction. The Go-plugin adapter remains an
+  optional separate host choice.
