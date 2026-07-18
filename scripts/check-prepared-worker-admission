@@ -88,8 +88,15 @@ summary_passes() {
 		-v expected_capture="${4:-}" \
 		-v expected_source="${5:-}" \
 		-v expected_environment="${6:-}" '
+		function valid_scale(value) {
+			return value ~ /^(1|2|4|8|16|32|64|128|256|512|1024)$/
+		}
+		function number(value) {
+			return value ~ /^-?(0|[1-9][0-9]*)([.][0-9]+)?([eE][+-]?[0-9]+)?$/
+		}
+		function positive_number(value) { return number(value) && value + 0 > 0 }
 		BEGIN {
-			header = "schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tworker_luau_median\tworker_luau_p90\tembedded_luau_median\tembedded_luau_p90\tworker_embedded_max\tstatus\tenvironment_sha256"
+			header = "schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tcall_scale\tworker_luau_median\tworker_luau_p90\tembedded_luau_median\tembedded_luau_p90\tworker_embedded_max\tstatus\tenvironment_sha256"
 		}
 		NR == 1 {
 			if ($0 != header) invalid = 1
@@ -98,19 +105,20 @@ summary_passes() {
 		{
 			rows++
 			key = $5 "/" $6
-			if (seen[key]++ || NF != 13 || $1 != "1" || ($3 != "a" && $3 != "b") ||
+			if (seen[key]++ || NF != 14 || $1 != "1" || ($3 != "a" && $3 != "b") ||
 				(expected_pair != "" && $3 != expected_pair) || $2 == "" || $4 == "" ||
-				$7 <= 0 || $8 <= 0 || $9 <= 0 || $10 <= 0 || $11 <= 0 ||
-				$7 > 1.00 || $8 > 1.05 || $9 > 1.00 || $10 > 1.05 || $12 != "PASS" ||
-				$13 == "" || (expected_capture != "" && $2 != expected_capture) ||
+				!valid_scale($7) || !positive_number($8) || !positive_number($9) ||
+				!positive_number($10) || !positive_number($11) || !positive_number($12) ||
+				$8 > 1.00 || $9 > 1.05 || $10 > 1.00 || $11 > 1.05 || $13 != "PASS" ||
+				$14 == "" || (expected_capture != "" && $2 != expected_capture) ||
 				(expected_source != "" && $4 != expected_source) ||
-				(expected_environment != "" && $13 != expected_environment)) invalid = 1
+				(expected_environment != "" && $14 != expected_environment)) invalid = 1
 			if (rows == 1) {
 				capture_id = $2
 				capture_pair = $3
 				source_commit = $4
-				environment = $13
-			} else if ($2 != capture_id || $3 != capture_pair || $4 != source_commit || $13 != environment) invalid = 1
+				environment = $14
+			} else if ($2 != capture_id || $3 != capture_pair || $4 != source_commit || $14 != environment) invalid = 1
 		}
 		END { exit invalid || rows == 0 || (expected_rows > 0 && rows != expected_rows) }
 	' "$1"
@@ -122,9 +130,15 @@ host_summary_passes() {
 		-v expected_capture="${3:-}" \
 		-v expected_source="${4:-}" \
 		-v expected_environment="${5:-}" '
+		function number(value) {
+			return value ~ /^-?(0|[1-9][0-9]*)([.][0-9]+)?([eE][+-]?[0-9]+)?$/
+		}
+		function positive_number(value) { return number(value) && value + 0 > 0 }
+		function uint(value) { return value ~ /^(0|[1-9][0-9]*)$/ }
+		function positive_uint(value) { return uint(value) && value + 0 > 0 }
 		NR == 1 { if ($0 != "field\tvalue") invalid = 1; next }
 		NF != 2 || seen[$1]++ { invalid = 1; next }
-		{ value[$1] = $2 }
+		{ rows++; value[$1] = $2 }
 		END {
 			required["schema_version"] = 1
 			required["capture_id"] = 1
@@ -153,15 +167,25 @@ host_summary_passes() {
 				(expected_capture != "" && value["capture_id"] != expected_capture) ||
 				(expected_source != "" && value["source_commit"] != expected_source) ||
 				(expected_environment != "" && value["environment_sha256"] != expected_environment) ||
-				value["semantic_match"] != "true" || value["exchange_phases"] != 1 ||
-				value["worker_embedded_slope_max"] <= 0 ||
+				value["semantic_match"] != "true" || value["exchange_phases"] != "1" ||
+				!positive_number(value["worker_embedded_slope_max"]) ||
+				value["worker_embedded_slope_budget"] != "1.50" ||
+				value["frame_budget_ns"] != "16666666" || value["exchange_budget_ns"] != "1666666" ||
+				value["rss_safety_ceiling_bytes"] != "536870912" ||
 				value["worker_embedded_slope_max"] > value["worker_embedded_slope_budget"] ||
-				value["representative_exchange_p50_ns"] <= 0 ||
+				!positive_uint(value["frame_budget_ns"]) || !positive_uint(value["exchange_budget_ns"]) ||
+				!positive_uint(value["embedded_latency_p50_ns"]) || !positive_uint(value["embedded_latency_p95_ns"]) ||
+				!positive_uint(value["embedded_latency_p99_ns"]) || !positive_uint(value["worker_latency_p50_ns"]) ||
+				!positive_uint(value["worker_latency_p95_ns"]) || !positive_uint(value["worker_latency_p99_ns"]) ||
+				!positive_uint(value["representative_exchange_p50_ns"]) ||
+				!positive_uint(value["representative_exchange_p95_ns"]) ||
+				!positive_uint(value["representative_exchange_p99_ns"]) ||
+				!positive_uint(value["rss_safety_ceiling_bytes"]) ||
 				value["representative_exchange_p95_ns"] < value["representative_exchange_p50_ns"] ||
 				value["representative_exchange_p99_ns"] < value["representative_exchange_p95_ns"] ||
 				value["representative_exchange_p99_ns"] > value["exchange_budget_ns"] ||
 				value["status"] != "PASS") invalid = 1
-			exit invalid
+			exit invalid || rows != 22
 		}
 	' "$1"
 }
@@ -176,7 +200,8 @@ semantic_evidence_passes() {
 		NR == 1 { if ($0 != header) invalid = 1; next }
 		{
 			rows++
-			if (NF != 8 || $1 != 1 || $3 != expected_pair || seen[$5]++ || $6 == "" || $7 != "PASS" ||
+			if (NF != 8 || $1 != 1 || $3 != expected_pair || seen[$5]++ ||
+				length($6) != 64 || $6 !~ /^[0-9a-f]+$/ || $7 != "PASS" ||
 				(expected_capture != "" && $2 != expected_capture) ||
 				(expected_source != "" && $4 != expected_source) ||
 				(expected_environment != "" && $8 != expected_environment)) invalid = 1
@@ -210,7 +235,7 @@ capture_rows_pass() {
 			for (part = 1; part <= key_count; part++) key = key SUBSEP $(key_columns[part])
 			if (seen[key]++) invalid = 1
 		}
-		END { exit invalid || rows != expected_rows }
+		END { exit invalid || rows == 0 || (expected_rows > 0 && rows != expected_rows) }
 	' "$1"
 }
 
@@ -223,21 +248,71 @@ metadata_file_passes() {
 		-v expected_cases="$6" '
 		NR == 1 { if ($0 != "field\tvalue") invalid = 1; next }
 		NF != 2 || seen[$1]++ { invalid = 1; next }
-		{ value[$1] = $2 }
+		{ rows++; value[$1] = $2 }
 		END {
+			required["schema_version"] = 1
+			required["capture_id"] = 1
+			required["capture_pair"] = 1
+			required["source_commit"] = 1
+			required["environment_sha256"] = 1
+			required["go_version"] = 1
+			required["platform"] = 1
+			required["cpu"] = 1
+			required["cgo_enabled"] = 1
+			required["gomaxprocs"] = 1
+			required["luau_sha256"] = 1
+			required["luau_version"] = 1
+			required["case_count"] = 1
+			for (key in required) if (!(key in value) || value[key] == "") invalid = 1
 			if (value["schema_version"] != 1 || value["capture_id"] != expected_capture ||
 				value["capture_pair"] != expected_pair || value["source_commit"] != expected_source ||
-				value["environment_sha256"] != expected_environment || value["case_count"] != expected_cases) invalid = 1
-			exit invalid
+				value["environment_sha256"] != expected_environment || value["case_count"] != expected_cases ||
+				value["case_count"] !~ /^[1-9][0-9]*$/ || value["cgo_enabled"] != "0" ||
+				value["gomaxprocs"] != "1" || length(value["luau_sha256"]) != 64 ||
+				value["luau_sha256"] !~ /^[0-9a-f]+$/) invalid = 1
+			exit invalid || rows != 13
 		}
 	' "$1"
 }
 
+metadata_matches_acceptance() {
+	awk -F '\t' -v metadata_file="$1" -v acceptance_file="$2" '
+		FILENAME == metadata_file {
+			if (FNR == 1) next
+			metadata[$1] = $2
+			next
+		}
+		FILENAME == acceptance_file {
+			if (FNR == 1) {
+				if ($0 != "schema_version\tgo_version\tgoos\tgoarch\tos_build\tcpu_model\tcgo_enabled\tgomaxprocs\tluau_version\tluau_sha256") invalid = 1
+				next
+			}
+			rows++
+			if (NF != 10 || $1 != "1") invalid = 1
+			if ($3 == "darwin") expected_platform = "Darwin " $5 " " $4
+			else if ($3 == "linux" && $4 == "amd64") expected_platform = "Linux " $5 " x86_64"
+			else if ($3 == "linux" && $4 == "arm64") expected_platform = "Linux " $5 " aarch64"
+			else invalid = 1
+			if (metadata["go_version"] != $2 || metadata["platform"] != expected_platform ||
+				metadata["cpu"] != $6 || metadata["cgo_enabled"] != $7 ||
+				metadata["gomaxprocs"] != $8 || metadata["luau_version"] != $9 ||
+				metadata["luau_sha256"] != $10) invalid = 1
+			next
+		}
+		END { exit invalid || rows != 1 }
+	' "$1" "$2"
+}
+
 host_slopes_match_summary() {
 	awk -F '\t' -v expected="$2" '
+		function number(value) {
+			return value ~ /^-?(0|[1-9][0-9]*)([.][0-9]+)?([eE][+-]?[0-9]+)?$/
+		}
+		function positive_number(value) { return number(value) && value + 0 > 0 }
 		NR == 1 { next }
 		{
-			if (($5 != "embedded" && $5 != "worker") || $6 < 1 || $6 > 3 || $7 <= 0 || slope[$5, $6] != "") invalid = 1
+			if (($5 != "embedded" && $5 != "worker") || $6 !~ /^[123]$/ ||
+				!positive_number($7) || !number($8) || slope[$5, $6] != "") invalid = 1
 			slope[$5, $6] = $7
 		}
 		END {
@@ -249,50 +324,493 @@ host_slopes_match_summary() {
 			difference = maximum - expected
 			if (difference < 0) difference = -difference
 			tolerance = expected * 0.000000000001 + 0.000000000001
-			exit invalid || expected <= 0 || difference > tolerance
+			exit invalid || !positive_number(expected) || difference > tolerance
 		}
 	' "$1"
 }
 
 resource_evidence_passes() {
 	awk -F '\t' -v ceiling="$2" '
+		function uint(value) { return value ~ /^(0|[1-9][0-9]*)$/ }
+		function positive_uint(value) { return uint(value) && value + 0 > 0 }
 		NR == 1 { next }
 		NR == 2 {
-			if ($5 <= 0 || $6 < 0 || $7 < 0 || $8 <= 0 || $9 <= 0 || $8 > ceiling || $9 > ceiling) invalid = 1
+			if (!positive_uint($5) || !uint($6) || !uint($7) || !positive_uint($8) || !positive_uint($9) ||
+				!positive_uint(ceiling) || $8 > ceiling || $9 > ceiling ||
+				$6 > 2 * $5 + 100000000 || $7 > 2 * $5 + 100000000) invalid = 1
 		}
-		END { exit invalid || NR != 2 || ceiling <= 0 }
+		END { exit invalid || NR != 2 }
 	' "$1"
 }
 
 parity_raw_domains_pass() {
 	awk -F '\t' '
+		function valid_scale(value) {
+			return value ~ /^(1|2|4|8|16|32|64|128|256|512|1024)$/
+		}
+		function number(value) {
+			return value ~ /^-?(0|[1-9][0-9]*)([.][0-9]+)?([eE][+-]?[0-9]+)?$/
+		}
+		function positive_number(value) { return number(value) && value + 0 > 0 }
 		NR == 1 { next }
 		{
-			if (($7 != "embedded" && $7 != "worker" && $7 != "luau") ||
-				$8 !~ /^[123]$/ || $9 !~ /^[0-9]+$/ || $9 < 1 || $9 > 36 ||
-				($10 != 1600 && $10 != 16000 && $10 != 160000 && $10 != 1600000) || $12 <= 0) invalid = 1
+			case_id = $5 "/" $6
+			if (!(case_id in scale)) scale[case_id] = $7
+			if (!valid_scale($7) || $7 != scale[case_id] ||
+				($8 != "embedded" && $8 != "worker" && $8 != "luau") ||
+				$9 !~ /^[123]$/ || $10 !~ /^([1-9]|[12][0-9]|3[0-6])$/ ||
+				$11 !~ /^[1-9][0-9]*$/ || $12 != "76198126637574" ||
+				($11 != 50 * $7 && $11 != 500 * $7 && $11 != 5000 * $7 && $11 != 50000 * $7) ||
+				!positive_number($13) || $14 !~ /^-?(0|[1-9][0-9]*)$/ ||
+				($11 == 50000 * $7 && $13 < 5000000)) invalid = 1
 		}
 		END { exit invalid || NR < 2 }
+	' "$1"
+}
+
+parity_raw_order_passes() {
+	awk -F '\t' '
+		NR == 1 { next }
+		{
+			case_id = $5 "/" $6
+			if ($3 == "a") pair = 1
+			else if ($3 == "b") pair = 2
+			else { invalid = 1; next }
+
+			scale = $7 + 0
+			if ($11 == 50 * scale) point = 0
+			else if ($11 == 500 * scale) point = 1
+			else if ($11 == 5000 * scale) point = 2
+			else if ($11 == 50000 * scale) point = 3
+			else { invalid = 1; next }
+
+			cycle = (pair + $9 + point) % 3
+			if (cycle == 0) {
+				position["embedded"] = 0
+				position["worker"] = 1
+				position["luau"] = 2
+			} else if (cycle == 1) {
+				position["worker"] = 0
+				position["luau"] = 1
+				position["embedded"] = 2
+			} else {
+				position["luau"] = 0
+				position["embedded"] = 1
+				position["worker"] = 2
+			}
+			expected_order = ($9 - 1) * 12 + point * 3 + position[$8] + 1
+			if ($10 != expected_order || seen[case_id, $10]++) invalid = 1
+			rows[case_id]++
+		}
+		END {
+			for (case_id in rows) if (rows[case_id] != 36) invalid = 1
+			exit invalid || NR < 2
+		}
 	' "$1"
 }
 
 parity_slope_domains_pass() {
 	awk -F '\t' '
+		function valid_scale(value) {
+			return value ~ /^(1|2|4|8|16|32|64|128|256|512|1024)$/
+		}
+		function number(value) {
+			return value ~ /^-?(0|[1-9][0-9]*)([.][0-9]+)?([eE][+-]?[0-9]+)?$/
+		}
+		function positive_number(value) { return number(value) && value + 0 > 0 }
+		function digest(value) { return length(value) == 64 && value ~ /^[0-9a-f]+$/ }
 		NR == 1 { next }
 		{
-			if (($7 != "embedded" && $7 != "worker" && $7 != "luau") || $8 !~ /^[123]$/ || $9 <= 0) invalid = 1
+			case_id = $5 "/" $6
+			if (!(case_id in scale)) scale[case_id] = $7
+			if (!valid_scale($7) || $7 != scale[case_id] ||
+				($8 != "embedded" && $8 != "worker" && $8 != "luau") || $9 !~ /^[123]$/ ||
+				!positive_number($10) || !number($11) || !digest($12) || !digest($13) || !digest($14)) invalid = 1
 		}
 		END { exit invalid || NR < 2 }
 	' "$1"
 }
 
+parity_schedule_domains_pass() {
+	awk -F '\t' '
+		function valid_scale(value) {
+			return value ~ /^(1|2|4|8|16|32|64|128|256|512|1024)$/
+		}
+		NR == 1 { next }
+		{ if (!valid_scale($7)) invalid = 1 }
+		END { exit invalid || NR < 2 }
+	' "$1"
+}
+
+parity_calibration_domains_pass() {
+	awk -F '\t' -v expected_mode="$3" -v target_ns=10000000 '
+		function valid_scale(value) {
+			return value ~ /^(1|2|4|8|16|32|64|128|256|512|1024)$/
+		}
+		function positive_number(value) {
+			return value ~ /^(0|[1-9][0-9]*)([.][0-9]+)?([eE][+-]?[0-9]+)?$/ && value + 0 > 0
+		}
+		NR == FNR {
+			if (FNR == 1) next
+			case_id = $5 "/" $6
+			scheduled[case_id] = $7
+			cases++
+			next
+		}
+		FNR == 1 { next }
+		{
+			case_id = $5 "/" $6
+			scale = $8
+			trial = $9
+			if (!(case_id in scheduled) || $7 != expected_mode || !valid_scale(scale) ||
+				trial !~ /^[123]$/ || !positive_number($10) ||
+				($11 != "true" && $11 != "false")) invalid = 1
+			want_selected = (scale == scheduled[case_id] ? "true" : "false")
+			if ($11 != want_selected) invalid = 1
+			count[case_id, scale]++
+			rows[case_id]++
+			if (!((case_id SUBSEP scale) in minimum) || $10 + 0 < minimum[case_id, scale]) {
+				minimum[case_id, scale] = $10 + 0
+			}
+		}
+		END {
+			if (expected_mode != "adaptive" && expected_mode != "prescribed") invalid = 1
+			for (case_id in scheduled) {
+				selected = scheduled[case_id] + 0
+				if (expected_mode == "adaptive") {
+					required = 0
+					for (scale = 1; scale <= selected; scale *= 2) {
+						required += 3
+						if (count[case_id, scale] != 3) invalid = 1
+						if (scale < selected && minimum[case_id, scale] >= target_ns) invalid = 1
+						if (scale == selected && minimum[case_id, scale] < target_ns) invalid = 1
+					}
+					if (rows[case_id] != required) invalid = 1
+				} else {
+					if (rows[case_id] != 3 || count[case_id, selected] != 3 ||
+						minimum[case_id, selected] < target_ns) invalid = 1
+				}
+			}
+			exit invalid || cases == 0
+		}
+	' "$1" "$2"
+}
+
+prepared_worker_raw_matches_slopes() {
+	awk -F '\t' -v raw_file="$1" -v slope_file="$2" '
+		function number(value) {
+			return value ~ /^-?(0|[1-9][0-9]*)([.][0-9]+)?([eE][+-]?[0-9]+)?$/
+		}
+		function positive_number(value) { return number(value) && value + 0 > 0 }
+		function digest(value) { return length(value) == 64 && value ~ /^[0-9a-f]+$/ }
+		function near(left, right, difference, scale) {
+			difference = left - right
+			if (difference < 0) difference = -difference
+			scale = right
+			if (scale < 0) scale = -scale
+			return difference <= scale * 0.000000001 + 0.000000001
+		}
+		BEGIN { base[1] = 50; base[2] = 500; base[3] = 5000; base[4] = 50000 }
+		FILENAME == raw_file {
+			if (FNR == 1) next
+			id = $5 "/" $6
+			engine = $8
+			repeat = $9
+			n = $11
+			if (!positive_number($13) || $14 !~ /^-?(0|[1-9][0-9]*)$/ ||
+				!digest($15) || !digest($16)) invalid = 1
+			key = id SUBSEP engine SUBSEP repeat SUBSEP n
+			timing[key] = $13 + 0
+			result_key = id SUBSEP repeat SUBSEP n
+			if (!(result_key in result)) result[result_key] = $14
+			else if (result[result_key] != $14) invalid = 1
+			if (!(id in raw_scale)) {
+				raw_scale[id] = $7
+				raw_workload[id] = $15
+				raw_program[id] = $16
+			} else if (raw_scale[id] != $7 || raw_workload[id] != $15 || raw_program[id] != $16) invalid = 1
+			raw_case[id] = 1
+			next
+		}
+		FILENAME == slope_file {
+			if (FNR == 1) next
+			id = $5 "/" $6
+			engine = $8
+			repeat = $9
+			if (!(id in raw_case) || !positive_number($10) || !number($11) ||
+				!digest($12) || !digest($13) || !digest($14) ||
+				$7 != raw_scale[id] || $13 != raw_workload[id] || $14 != raw_program[id]) invalid = 1
+			result_key = id SUBSEP repeat
+			if (!(result_key in result_hash)) result_hash[result_key] = $12
+			else if (result_hash[result_key] != $12) invalid = 1
+			mean_n = 0
+			mean_t = 0
+			for (point = 1; point <= 4; point++) {
+				n = base[point] * $7
+				key = id SUBSEP engine SUBSEP repeat SUBSEP n
+				if (!(key in timing)) invalid = 1
+				mean_n += n
+				mean_t += timing[key]
+			}
+			mean_n /= 4
+			mean_t /= 4
+			numerator = 0
+			denominator = 0
+			for (point = 1; point <= 4; point++) {
+				n = base[point] * $7
+				key = id SUBSEP engine SUBSEP repeat SUBSEP n
+				delta_n = n - mean_n
+				numerator += delta_n * (timing[key] - mean_t)
+				denominator += delta_n * delta_n
+			}
+			derived_slope = numerator / denominator
+			derived_intercept = mean_t - derived_slope * mean_n
+			if (derived_slope <= 0 || !near($10 + 0, derived_slope) || !near($11 + 0, derived_intercept)) invalid = 1
+			slope_case[id] = 1
+			next
+		}
+		END {
+			for (id in raw_case) if (!(id in slope_case)) invalid = 1
+			for (id in slope_case) if (!(id in raw_case)) invalid = 1
+			exit invalid
+		}
+	' "$1" "$2"
+}
+
+prepared_worker_result_hashes_match() (
+	set -eu
+	raw_file=$1
+	slope_file=$2
+	work=$(mktemp -d "${TMPDIR:-/tmp}/prepared-worker-result-hashes.XXXXXX")
+	trap 'rm -rf "$work"' EXIT HUP INT TERM
+	awk -F '\t' 'NR > 1 && $8 == "embedded" { print $5 "/" $6 "\t" $9 "\t" $11 "\t" $14 }' "$raw_file" >"$work/raw-results.tsv"
+	: >"$work/actual.tsv"
+	current=
+	while IFS="	" read -r case_id repeat n result; do
+		key=$case_id/$repeat
+		if [ -n "$current" ] && [ "$key" != "$current" ]; then
+			printf '%s\t%s\n' "$current" "$(hash_file "$work/payload")" >>"$work/actual.tsv"
+			: >"$work/payload"
+		fi
+		current=$key
+		printf '%s=%s\n' "$n" "$result" >>"$work/payload"
+	done <"$work/raw-results.tsv"
+	[ -n "$current" ] || exit 1
+	printf '%s\t%s\n' "$current" "$(hash_file "$work/payload")" >>"$work/actual.tsv"
+	awk -F '\t' 'NR > 1 && $8 == "embedded" { print $5 "/" $6 "/" $9 "\t" $12 }' "$slope_file" >"$work/expected.tsv"
+	LC_ALL=C sort "$work/actual.tsv" >"$work/actual.sorted.tsv"
+	LC_ALL=C sort "$work/expected.tsv" >"$work/expected.sorted.tsv"
+	cmp -s "$work/actual.sorted.tsv" "$work/expected.sorted.tsv"
+)
+
+prepared_worker_slopes_match_summary() {
+	awk -F '\t' -v slope_file="$1" -v summary_file="$2" '
+		function number(value) {
+			return value ~ /^-?(0|[1-9][0-9]*)([.][0-9]+)?([eE][+-]?[0-9]+)?$/
+		}
+		function positive_number(value) { return number(value) && value + 0 > 0 }
+		function near(left, right, difference, scale) {
+			difference = left - right
+			if (difference < 0) difference = -difference
+			scale = right
+			if (scale < 0) scale = -scale
+			return difference <= scale * 0.000000001 + 0.000000001
+		}
+		function sort_nine(values, i, j, value) {
+			for (i = 2; i <= 9; i++) {
+				value = values[i]
+				j = i - 1
+				while (j >= 1 && values[j] > value) { values[j + 1] = values[j]; j-- }
+				values[j + 1] = value
+			}
+		}
+		FILENAME == slope_file {
+			if (FNR == 1) next
+			id = $5 "/" $6
+			key = id SUBSEP $8 SUBSEP $9
+			slope[key] = $10 + 0
+			scale[id] = $7
+			cases[id] = 1
+			next
+		}
+		FILENAME == summary_file {
+			if (FNR == 1) next
+			id = $5 "/" $6
+			if (!(id in cases) || summary_seen[id]++ || $7 != scale[id] ||
+				!positive_number($8) || !positive_number($9) || !positive_number($10) ||
+				!positive_number($11) || !positive_number($12) || $13 != "PASS") invalid = 1
+			count = 0
+			for (left = 1; left <= 3; left++) for (right = 1; right <= 3; right++) {
+				worker_ratio[++count] = slope[id, "worker", left] / slope[id, "luau", right]
+				embedded_ratio[count] = slope[id, "embedded", left] / slope[id, "luau", right]
+			}
+			sort_nine(worker_ratio)
+			sort_nine(embedded_ratio)
+			worker_embedded_max = 0
+			for (repeat = 1; repeat <= 3; repeat++) {
+				ratio = slope[id, "worker", repeat] / slope[id, "embedded", repeat]
+				if (ratio > worker_embedded_max) worker_embedded_max = ratio
+			}
+			if (!near($8 + 0, worker_ratio[5]) || !near($9 + 0, worker_ratio[9]) ||
+				!near($10 + 0, embedded_ratio[5]) || !near($11 + 0, embedded_ratio[9]) ||
+				!near($12 + 0, worker_embedded_max) || worker_ratio[5] > 1.00 ||
+				worker_ratio[9] > 1.05 || embedded_ratio[5] > 1.00 || embedded_ratio[9] > 1.05) invalid = 1
+			next
+		}
+		END {
+			for (id in cases) if (!summary_seen[id]) invalid = 1
+			exit invalid
+		}
+	' "$1" "$2"
+}
+
+prepared_worker_host_raw_matches_slopes() {
+	awk -F '\t' -v raw_file="$1" -v slope_file="$2" '
+		function number(value) {
+			return value ~ /^-?(0|[1-9][0-9]*)([.][0-9]+)?([eE][+-]?[0-9]+)?$/
+		}
+		function positive_number(value) { return number(value) && value + 0 > 0 }
+		function digest(value) { return length(value) == 64 && value ~ /^[0-9a-f]+$/ }
+		function near(left, right, difference, scale) {
+			difference = left - right
+			if (difference < 0) difference = -difference
+			scale = right
+			if (scale < 0) scale = -scale
+			return difference <= scale * 0.000000001 + 0.000000001
+		}
+		function median_three(left, middle, right, minimum, maximum) {
+			minimum = left
+			if (middle < minimum) minimum = middle
+			if (right < minimum) minimum = right
+			maximum = left
+			if (middle > maximum) maximum = middle
+			if (right > maximum) maximum = right
+			return left + middle + right - minimum - maximum
+		}
+		BEGIN { work[1] = 200; work[2] = 2000; work[3] = 10000; work[4] = 20000 }
+		FILENAME == raw_file {
+			if (FNR == 1) next
+			engine = $5
+			repeat = $6
+			trial = $7
+			point = $9
+			if (!positive_number($10) || !digest($11)) invalid = 1
+			timing[engine, repeat, point, trial] = $10 + 0
+			result_key = repeat SUBSEP trial SUBSEP point
+			if (!(result_key in result)) result[result_key] = $11
+			else if (result[result_key] != $11) invalid = 1
+			next
+		}
+		FILENAME == slope_file {
+			if (FNR == 1) next
+			engine = $5
+			repeat = $6
+			if (!positive_number($7) || !number($8) || !digest($9)) invalid = 1
+			result_key = repeat
+			if (!(result_key in result_set)) result_set[result_key] = $9
+			else if (result_set[result_key] != $9) invalid = 1
+			mean_work = 0
+			mean_elapsed = 0
+			for (point_index = 1; point_index <= 4; point_index++) {
+				point = work[point_index]
+				median[point_index] = median_three(timing[engine, repeat, point, 1], timing[engine, repeat, point, 2], timing[engine, repeat, point, 3])
+				if (median[point_index] <= 0) invalid = 1
+				mean_work += point
+				mean_elapsed += median[point_index]
+			}
+			if (median[4] < 5000000) invalid = 1
+			mean_work /= 4
+			mean_elapsed /= 4
+			numerator = 0
+			denominator = 0
+			for (point_index = 1; point_index <= 4; point_index++) {
+				delta = work[point_index] - mean_work
+				numerator += delta * (median[point_index] - mean_elapsed)
+				denominator += delta * delta
+			}
+			derived_slope = numerator / denominator
+			derived_intercept = mean_elapsed - derived_slope * mean_work
+			if (derived_slope <= 0 || !near($7 + 0, derived_slope) || !near($8 + 0, derived_intercept)) invalid = 1
+			next
+		}
+		END { exit invalid }
+	' "$1" "$2"
+}
+
+prepared_worker_host_result_hashes_match() (
+	set -eu
+	raw_file=$1
+	slope_file=$2
+	work=$(mktemp -d "${TMPDIR:-/tmp}/prepared-worker-host-result-hashes.XXXXXX")
+	trap 'rm -rf "$work"' EXIT HUP INT TERM
+	awk -F '\t' 'NR > 1 && $5 == "embedded" { print $6 "\t" $9 "\t" $7 "\t" $11 }' "$raw_file" >"$work/raw-results.tsv"
+	: >"$work/actual.tsv"
+	current=
+	while IFS="	" read -r repeat point trial result_digest; do
+		if [ -n "$current" ] && [ "$repeat" != "$current" ]; then
+			printf '%s\t%s\n' "$current" "$(hash_file "$work/payload")" >>"$work/actual.tsv"
+			: >"$work/payload"
+		fi
+		current=$repeat
+		printf '%s/%s=%s\n' "$point" "$trial" "$result_digest" >>"$work/payload"
+	done <"$work/raw-results.tsv"
+	[ -n "$current" ] || exit 1
+	printf '%s\t%s\n' "$current" "$(hash_file "$work/payload")" >>"$work/actual.tsv"
+	awk -F '\t' 'NR > 1 && $5 == "embedded" { print $6 "\t" $9 }' "$slope_file" >"$work/expected.tsv"
+	LC_ALL=C sort "$work/actual.tsv" >"$work/actual.sorted.tsv"
+	LC_ALL=C sort "$work/expected.tsv" >"$work/expected.sorted.tsv"
+	cmp -s "$work/actual.sorted.tsv" "$work/expected.sorted.tsv"
+)
+
+prepared_worker_host_quantiles_match_summary() (
+	set -eu
+	latency_file=$1
+	exchange_file=$2
+	summary_file=$3
+	work=$(mktemp -d "${TMPDIR:-/tmp}/prepared-worker-host-quantiles.XXXXXX")
+	trap 'rm -rf "$work"' EXIT HUP INT TERM
+	awk -F '\t' 'NR > 1 { print $7 }' "$latency_file" | LC_ALL=C sort -n >"$work/embedded"
+	awk -F '\t' 'NR > 1 { print $8 }' "$latency_file" | LC_ALL=C sort -n >"$work/worker"
+	awk -F '\t' 'NR > 1 { print $6 }' "$exchange_file" | LC_ALL=C sort -n >"$work/exchange"
+	for specification in \
+		"embedded_latency_p50_ns:$work/embedded:2048" \
+		"embedded_latency_p95_ns:$work/embedded:3892" \
+		"embedded_latency_p99_ns:$work/embedded:4056" \
+		"worker_latency_p50_ns:$work/worker:2048" \
+		"worker_latency_p95_ns:$work/worker:3892" \
+		"worker_latency_p99_ns:$work/worker:4056" \
+		"representative_exchange_p50_ns:$work/exchange:2048" \
+		"representative_exchange_p95_ns:$work/exchange:3892" \
+		"representative_exchange_p99_ns:$work/exchange:4056"
+	do
+		field=${specification%%:*}
+		rest=${specification#*:}
+		values=${rest%:*}
+		line=${rest##*:}
+		derived=$(sed -n "${line}p" "$values")
+		[ -n "$derived" ] || exit 1
+		[ "$(capture_field "$summary_file" "$field")" = "$derived" ] || exit 1
+	done
+)
+
 host_slope_raw_domains_pass() {
 	awk -F '\t' '
+		function positive_uint(value) { return value ~ /^[1-9][0-9]*$/ }
+		function digest(value) { return length(value) == 64 && value ~ /^[0-9a-f]+$/ }
 		NR == 1 { next }
 		{
+			if ($3 == "a") pair = 1
+			else if ($3 == "b") pair = 2
+			else { invalid = 1; next }
+			if ($9 == 200) point = 0
+			else if ($9 == 2000) point = 1
+			else if ($9 == 10000) point = 2
+			else if ($9 == 20000) point = 3
+			else { invalid = 1; next }
+			expected_order = ( ($6 + $7 + point + pair) % 2 != 0 ? "worker,embedded" : "embedded,worker" )
 			if (($5 != "embedded" && $5 != "worker") || $6 !~ /^[123]$/ || $7 !~ /^[123]$/ ||
-				($8 != "embedded,worker" && $8 != "worker,embedded") ||
-				($9 != 200 && $9 != 2000 && $9 != 10000 && $9 != 20000) || $10 <= 0) invalid = 1
+				$8 != expected_order ||
+				$9 !~ /^(200|2000|10000|20000)$/ || !positive_uint($10) || !digest($11)) invalid = 1
 		}
 		END { exit invalid || NR < 2 }
 	' "$1"
@@ -300,12 +818,16 @@ host_slope_raw_domains_pass() {
 
 host_latency_domains_pass() {
 	awk -F '\t' -v maximum="$2" -v exchange_only="${3:-0}" '
+		function uint(value) { return value ~ /^(0|[1-9][0-9]*)$/ }
+		function positive_uint(value) { return value ~ /^[1-9][0-9]*$/ }
+		function digest(value) { return length(value) == 64 && value ~ /^[0-9a-f]+$/ }
 		NR == 1 { next }
 		{
-			if ($5 !~ /^[0-9]+$/ || $5 < 1 || $5 > maximum || seen[$5]++) invalid = 1
+			if (!positive_uint($5) || $5 > maximum || seen[$5]++) invalid = 1
 			if (exchange_only) {
-				if ($6 <= 0) invalid = 1
-			} else if (($6 != "embedded,worker" && $6 != "worker,embedded") || $7 <= 0 || $8 <= 0 || $9 < 0) invalid = 1
+				if (!positive_uint($6) || !digest($7)) invalid = 1
+			} else if (($6 != "embedded,worker" && $6 != "worker,embedded") ||
+				!positive_uint($7) || !positive_uint($8) || !uint($9) || !digest($10)) invalid = 1
 		}
 		END { exit invalid || NR != maximum + 1 }
 	' "$1"
@@ -313,17 +835,31 @@ host_latency_domains_pass() {
 
 host_crossing_domains_pass() {
 	awk -F '\t' '
+		function uint(value) { return value ~ /^(0|[1-9][0-9]*)$/ }
+		function digest(value) { return length(value) == 64 && value ~ /^[0-9a-f]+$/ }
 		NR == 1 { next }
 		{
-			if ($5 !~ /^[123]$/ || ($6 != 0 && $6 != 1 && $6 != 10 && $6 != 100 && $6 != 1000) ||
-				($7 != "batched" && $7 != "chatty") || $8 < 0) invalid = 1
+			if ($5 !~ /^[123]$/ || $6 !~ /^(0|1|10|100|1000)$/ ||
+				($7 != "batched" && $7 != "chatty") || !uint($8) || !digest($9)) invalid = 1
+			key = $5 SUBSEP $6
+			if (!(key in result)) result[key] = $9
+			else if (result[key] != $9) invalid = 1
+			elapsed[$5, $6, $7] = $8 + 0
 		}
-		END { exit invalid || NR < 2 }
+		END {
+			for (repeat = 1; repeat <= 3; repeat++) for (exchanges = 100; exchanges <= 1000; exchanges *= 10)
+				if (elapsed[repeat, exchanges, "chatty"] <= elapsed[repeat, exchanges, "batched"]) invalid = 1
+			exit invalid || NR < 2
+		}
 	' "$1"
 }
 
 case_inventory() {
 	awk -F '\t' 'NR > 1 { key = $5 "/" $6; if (!seen[key]++) print key }' "$1" | LC_ALL=C sort | hash_stdin
+}
+
+scale_inventory() {
+	awk -F '\t' 'NR > 1 { key = $5 "/" $6; if (!seen[key]++) print key "/" $7 }' "$1" | LC_ALL=C sort | hash_stdin
 }
 
 capture_field() {
@@ -335,7 +871,7 @@ validate_capture() {
 	expected_pair=$2
 	[ -d "$capture" ] || die "capture directory missing: $capture"
 	[ ! -e "$capture/INCOMPLETE" ] || die "capture is incomplete: $capture"
-	for artifact in raw.tsv slopes.tsv summary.tsv environment.tsv acceptance-environment.tsv cases.txt host-semantic.tsv host-slope-raw.tsv host-slopes.tsv host-latency.tsv host-exchange-latency.tsv host-resources.tsv host-crossing-scaling.tsv host-summary.tsv; do
+	for artifact in raw.tsv slopes.tsv summary.tsv parity-schedule.tsv parity-calibration.tsv environment.tsv acceptance-environment.tsv cases.txt command.txt acquisition.log host-semantic.tsv host-slope-raw.tsv host-slopes.tsv host-latency.tsv host-exchange-latency.tsv host-resources.tsv host-crossing-scaling.tsv host-summary.tsv; do
 		[ -s "$capture/$artifact" ] || die "$capture/$artifact missing or empty"
 	done
 	[ "$(wc -l <"$capture/cases.txt" | tr -d ' ')" = 1 ] || die "$capture/cases.txt must contain exactly one selection"
@@ -364,17 +900,39 @@ validate_capture() {
 	fi
 	semantic_evidence_passes "$capture/host-semantic.tsv" "$expected_pair" "$capture_id" "$source_commit" "$environment" || die "$capture semantic evidence failed"
 	metadata_file_passes "$capture/environment.tsv" "$capture_id" "$expected_pair" "$source_commit" "$environment" "$expected_case_count" || die "$capture environment metadata failed"
+	metadata_matches_acceptance "$capture/environment.tsv" "$capture/acceptance-environment.tsv" || die "$capture runtime metadata differs from acceptance environment"
 
 	capture_rows_pass "$capture/raw.tsv" \
-		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tengine\trepeat\torder\tn\tseed\telapsed_ns\tresult\tworkload_sha256\tprogram_sha256\tenvironment_sha256" \
-		16 "$((expected_case_count * 36))" "$capture_id" "$expected_pair" "$source_commit" "$environment" "5,6,7,8,10" || die "$capture raw inventory failed"
+		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tcall_scale\tengine\trepeat\torder\tn\tseed\telapsed_ns\tresult\tworkload_sha256\tprogram_sha256\tenvironment_sha256" \
+		17 "$((expected_case_count * 36))" "$capture_id" "$expected_pair" "$source_commit" "$environment" "5,6,8,9,11" || die "$capture raw inventory failed"
 	parity_raw_domains_pass "$capture/raw.tsv" || die "$capture raw coordinate domain failed"
+	parity_raw_order_passes "$capture/raw.tsv" || die "$capture raw acquisition order failed"
 	capture_rows_pass "$capture/slopes.tsv" \
-		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tengine\trepeat\tslope_ns_per_guest_call\tintercept_ns\tresult_set_sha256\tworkload_sha256\tprogram_sha256\tenvironment_sha256" \
-		14 "$((expected_case_count * 9))" "$capture_id" "$expected_pair" "$source_commit" "$environment" "5,6,7,8" || die "$capture slope inventory failed"
+		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tcall_scale\tengine\trepeat\tslope_ns_per_guest_call\tintercept_ns\tresult_set_sha256\tworkload_sha256\tprogram_sha256\tenvironment_sha256" \
+		15 "$((expected_case_count * 9))" "$capture_id" "$expected_pair" "$source_commit" "$environment" "5,6,8,9" || die "$capture slope inventory failed"
 	parity_slope_domains_pass "$capture/slopes.tsv" || die "$capture slope coordinate domain failed"
+	prepared_worker_raw_matches_slopes "$capture/raw.tsv" "$capture/slopes.tsv" || die "$capture slopes are not derived from raw evidence"
+	prepared_worker_result_hashes_match "$capture/raw.tsv" "$capture/slopes.tsv" || die "$capture result-set hashes differ from raw evidence"
+	prepared_worker_slopes_match_summary "$capture/slopes.tsv" "$capture/summary.tsv" || die "$capture summary is not derived from slopes"
+	capture_rows_pass "$capture/parity-schedule.tsv" \
+		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tcall_scale\tenvironment_sha256" \
+		8 "$expected_case_count" "$capture_id" "$expected_pair" "$source_commit" "$environment" "5,6" || die "$capture parity schedule inventory failed"
+	parity_schedule_domains_pass "$capture/parity-schedule.tsv" || die "$capture parity schedule domain failed"
+	capture_rows_pass "$capture/parity-calibration.tsv" \
+		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tmode\tcall_scale\ttrial\telapsed_ns\tselected\tenvironment_sha256" \
+		12 0 "$capture_id" "$expected_pair" "$source_commit" "$environment" "5,6,8,9" || die "$capture parity calibration inventory failed"
+	if [ "$expected_pair" = a ]; then
+		calibration_mode=adaptive
+	else
+		calibration_mode=prescribed
+	fi
+	parity_calibration_domains_pass "$capture/parity-schedule.tsv" "$capture/parity-calibration.tsv" "$calibration_mode" || die "$capture parity calibration policy failed"
 	[ "$(case_inventory "$capture/summary.tsv")" = "$(case_inventory "$capture/raw.tsv")" ] || die "$capture raw case inventory differs"
 	[ "$(case_inventory "$capture/summary.tsv")" = "$(case_inventory "$capture/slopes.tsv")" ] || die "$capture slope case inventory differs"
+	[ "$(case_inventory "$capture/summary.tsv")" = "$(case_inventory "$capture/parity-schedule.tsv")" ] || die "$capture schedule case inventory differs"
+	[ "$(scale_inventory "$capture/summary.tsv")" = "$(scale_inventory "$capture/raw.tsv")" ] || die "$capture raw scale inventory differs"
+	[ "$(scale_inventory "$capture/summary.tsv")" = "$(scale_inventory "$capture/slopes.tsv")" ] || die "$capture slope scale inventory differs"
+	[ "$(scale_inventory "$capture/summary.tsv")" = "$(scale_inventory "$capture/parity-schedule.tsv")" ] || die "$capture schedule scale inventory differs"
 
 	capture_rows_pass "$capture/host-slope-raw.tsv" \
 		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tengine\trepeat\ttrial\torder\twork\telapsed_ns\tresult_sha256\tenvironment_sha256" \
@@ -383,6 +941,8 @@ validate_capture() {
 	capture_rows_pass "$capture/host-slopes.tsv" \
 		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tengine\trepeat\tslope_ns_per_work\tintercept_ns\tresult_set_sha256\tenvironment_sha256" \
 		10 6 "$capture_id" "$expected_pair" "$source_commit" "$environment" "5,6" || die "$capture host slope inventory failed"
+	prepared_worker_host_raw_matches_slopes "$capture/host-slope-raw.tsv" "$capture/host-slopes.tsv" || die "$capture host slopes are not derived from raw evidence"
+	prepared_worker_host_result_hashes_match "$capture/host-slope-raw.tsv" "$capture/host-slopes.tsv" || die "$capture host result-set hashes differ from raw evidence"
 	host_slopes_match_summary "$capture/host-slopes.tsv" "$(capture_field "$capture/host-summary.tsv" worker_embedded_slope_max)" || die "$capture host slope summary differs"
 	capture_rows_pass "$capture/host-latency.tsv" \
 		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tsample\torder\tembedded_ns\tworker_ns\tobserved_worker_minus_embedded_ns_clamped\tresult_sha256\tenvironment_sha256" \
@@ -392,6 +952,7 @@ validate_capture() {
 		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tsample\tround_trip_ns\tresult_sha256\tenvironment_sha256" \
 		8 4096 "$capture_id" "$expected_pair" "$source_commit" "$environment" "5" || die "$capture host exchange inventory failed"
 	host_latency_domains_pass "$capture/host-exchange-latency.tsv" 4096 1 || die "$capture host exchange coordinate domain failed"
+	prepared_worker_host_quantiles_match_summary "$capture/host-latency.tsv" "$capture/host-exchange-latency.tsv" "$capture/host-summary.tsv" || die "$capture host quantiles are not derived from raw evidence"
 	capture_rows_pass "$capture/host-resources.tsv" \
 		"schema_version\tcapture_id\tcapture_pair\tsource_commit\twall_ns\tparent_cpu_ns\tchild_cpu_ns\tparent_peak_rss_bytes\tchild_peak_rss_bytes\tenvironment_sha256" \
 		10 1 "$capture_id" "$expected_pair" "$source_commit" "$environment" "1" || die "$capture host resource inventory failed"
@@ -405,8 +966,8 @@ validate_capture() {
 compare_captures() {
 	capture_a=$1
 	capture_b=$2
-	validate_capture "$capture_a" a
-	validate_capture "$capture_b" b
+	(validate_capture "$capture_a" a)
+	(validate_capture "$capture_b" b)
 	case_a=$(sed -n '1p' "$capture_a/cases.txt")
 	case_b=$(sed -n '1p' "$capture_b/cases.txt")
 	[ "$case_a" = "$case_b" ] || die 'capture case selections differ'
@@ -426,6 +987,7 @@ compare_captures() {
 	inventory_a=$(awk -F '\t' 'NR > 1 { print $5 "/" $6 }' "$capture_a/summary.tsv" | LC_ALL=C sort | hash_stdin)
 	inventory_b=$(awk -F '\t' 'NR > 1 { print $5 "/" $6 }' "$capture_b/summary.tsv" | LC_ALL=C sort | hash_stdin)
 	[ "$inventory_a" = "$inventory_b" ] || die 'capture case inventories differ'
+	[ "$(scale_inventory "$capture_a/parity-schedule.tsv")" = "$(scale_inventory "$capture_b/parity-schedule.tsv")" ] || die 'capture adaptive scale schedules differ'
 	printf 'check-prepared-worker-admission: paired captures PASS (%s)\n' "$source_a"
 }
 
@@ -445,8 +1007,8 @@ self_test() {
 		die 'busy fixture unlocked'
 	fi
 	cat >"$q/summary.tsv" <<'EOF'
-schema_version	capture_id	capture_pair	source_commit	corpus	name	worker_luau_median	worker_luau_p90	embedded_luau_median	embedded_luau_p90	worker_embedded_max	status	environment_sha256
-1	fixture-a	a	0000000000000000000000000000000000000000	classic	recursive_fibonacci	0.2	0.3	0.2	0.3	1.01	PASS	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+schema_version	capture_id	capture_pair	source_commit	corpus	name	call_scale	worker_luau_median	worker_luau_p90	embedded_luau_median	embedded_luau_p90	worker_embedded_max	status	environment_sha256
+1	fixture-a	a	0000000000000000000000000000000000000000	classic	recursive_fibonacci	32	0.2	0.3	0.2	0.3	1.01	PASS	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 EOF
 	summary_passes "$q/summary.tsv" a 1 fixture-a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb || die 'valid summary fixture failed'
 	sed 's/PASS/FAIL/' "$q/summary.tsv" >"$q/failing.tsv"
@@ -455,6 +1017,10 @@ EOF
 	fi
 	if summary_passes "$q/summary.tsv" a 1 spliced-capture 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; then
 		die 'summary from another capture passed'
+	fi
+	sed 's/\t0.2\t0.3/\t0.2junk\t0.3/' "$q/summary.tsv" >"$q/summary-numeric-junk.tsv"
+	if summary_passes "$q/summary-numeric-junk.tsv" a 1 fixture-a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; then
+		die 'summary numeric suffix passed'
 	fi
 	cat >"$q/host-summary.tsv" <<'EOF'
 field	value
@@ -467,8 +1033,8 @@ semantic_match	true
 exchange_phases	1
 worker_embedded_slope_max	1.01
 worker_embedded_slope_budget	1.50
-frame_budget_ns	1000
-exchange_budget_ns	100
+frame_budget_ns	16666666
+exchange_budget_ns	1666666
 embedded_latency_p50_ns	10
 embedded_latency_p95_ns	20
 embedded_latency_p99_ns	30
@@ -478,10 +1044,89 @@ worker_latency_p99_ns	35
 representative_exchange_p50_ns	5
 representative_exchange_p95_ns	10
 representative_exchange_p99_ns	20
-rss_safety_ceiling_bytes	1024
+rss_safety_ceiling_bytes	536870912
 status	PASS
 EOF
 	host_summary_passes "$q/host-summary.tsv" a fixture-a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb || die 'valid host summary fixture failed'
+	sed 's/worker_embedded_slope_max\t1.01/worker_embedded_slope_max\t1.01junk/' "$q/host-summary.tsv" >"$q/host-summary-numeric-junk.tsv"
+	if host_summary_passes "$q/host-summary-numeric-junk.tsv" a fixture-a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; then
+		die 'host summary numeric suffix passed'
+	fi
+	host_result_hash=$(
+		{
+			for point in 200 2000 10000 20000; do
+				for trial in 1 2 3; do
+					printf '%s/%s=%s\n' "$point" "$trial" cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+				done
+			done
+		} | hash_stdin
+	)
+	awk 'BEGIN {
+		OFS = "\t"
+		print "schema_version", "capture_id", "capture_pair", "source_commit", "engine", "repeat", "trial", "order", "work", "elapsed_ns", "result_sha256", "environment_sha256"
+		engine[1] = "embedded"; engine[2] = "worker"
+		slope[1] = 300; slope[2] = 330
+		intercept[1] = 10; intercept[2] = 20
+		work[1] = 200; work[2] = 2000; work[3] = 10000; work[4] = 20000
+		for (repeat = 1; repeat <= 3; repeat++) for (point = 1; point <= 4; point++) for (trial = 1; trial <= 3; trial++) for (which = 1; which <= 2; which++) {
+			order = ((repeat + trial + point) % 2 ? "worker,embedded" : "embedded,worker")
+			elapsed = slope[which] * work[point] + intercept[which] + trial - 2
+			print 1, "fixture-a", "a", "0000000000000000000000000000000000000000", engine[which], repeat, trial, order, work[point], elapsed, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		}
+	}' >"$q/host-derived-raw.tsv"
+	awk -v result_hash="$host_result_hash" 'BEGIN {
+		OFS = "\t"
+		print "schema_version", "capture_id", "capture_pair", "source_commit", "engine", "repeat", "slope_ns_per_work", "intercept_ns", "result_set_sha256", "environment_sha256"
+		engine[1] = "embedded"; engine[2] = "worker"
+		slope[1] = 300; slope[2] = 330
+		intercept[1] = 10; intercept[2] = 20
+		for (which = 1; which <= 2; which++) for (repeat = 1; repeat <= 3; repeat++)
+			print 1, "fixture-a", "a", "0000000000000000000000000000000000000000", engine[which], repeat, slope[which], intercept[which], result_hash, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	}' >"$q/host-derived-slopes.tsv"
+	host_slope_raw_domains_pass "$q/host-derived-raw.tsv" || die 'valid host slope raw fixture failed'
+	awk -F '\t' 'BEGIN { OFS = "\t" } NR > 1 { $3 = "b"; $8 = ($8 == "embedded,worker" ? "worker,embedded" : "embedded,worker") } { print }' "$q/host-derived-raw.tsv" >"$q/host-derived-raw-b.tsv"
+	host_slope_raw_domains_pass "$q/host-derived-raw-b.tsv" || die 'valid capture B host slope order failed'
+	awk -F '\t' 'BEGIN { OFS = "\t" } NR == 2 { $8 = ($8 == "embedded,worker" ? "worker,embedded" : "embedded,worker") } { print }' "$q/host-derived-raw.tsv" >"$q/host-derived-raw-wrong-order.tsv"
+	if host_slope_raw_domains_pass "$q/host-derived-raw-wrong-order.tsv"; then
+		die 'wrong host slope acquisition order passed'
+	fi
+	prepared_worker_host_raw_matches_slopes "$q/host-derived-raw.tsv" "$q/host-derived-slopes.tsv" || die 'valid host raw/slope derivation failed'
+	prepared_worker_host_result_hashes_match "$q/host-derived-raw.tsv" "$q/host-derived-slopes.tsv" || die 'valid host result-set derivation failed'
+	sed 's/\tworker\t1\t330\t20\t/\tworker\t1\t300\t20\t/' "$q/host-derived-slopes.tsv" >"$q/host-derived-slopes-spliced.tsv"
+	if prepared_worker_host_raw_matches_slopes "$q/host-derived-raw.tsv" "$q/host-derived-slopes-spliced.tsv"; then
+		die 'host slope not derived from raw evidence passed'
+	fi
+	awk -F '\t' 'BEGIN { OFS = "\t" } NR == 2 { $9 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" } { print }' "$q/host-derived-slopes.tsv" >"$q/host-derived-results-spliced.tsv"
+	if prepared_worker_host_result_hashes_match "$q/host-derived-raw.tsv" "$q/host-derived-results-spliced.tsv"; then
+		die 'host result-set hash not derived from raw evidence passed'
+	fi
+	awk 'BEGIN {
+		OFS = "\t"
+		print "schema_version", "capture_id", "capture_pair", "source_commit", "sample", "order", "embedded_ns", "worker_ns", "observed_worker_minus_embedded_ns_clamped", "result_sha256", "environment_sha256"
+		for (sample = 1; sample <= 4096; sample++) print 1, "fixture-a", "a", "0000000000000000000000000000000000000000", sample, "embedded,worker", sample, sample, 0, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	}' >"$q/host-quantile-latency.tsv"
+	awk 'BEGIN {
+		OFS = "\t"
+		print "schema_version", "capture_id", "capture_pair", "source_commit", "sample", "round_trip_ns", "result_sha256", "environment_sha256"
+		for (sample = 1; sample <= 4096; sample++) print 1, "fixture-a", "a", "0000000000000000000000000000000000000000", sample, sample, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	}' >"$q/host-quantile-exchange.tsv"
+	cat >"$q/host-quantile-summary.tsv" <<'EOF'
+field	value
+embedded_latency_p50_ns	2048
+embedded_latency_p95_ns	3892
+embedded_latency_p99_ns	4056
+worker_latency_p50_ns	2048
+worker_latency_p95_ns	3892
+worker_latency_p99_ns	4056
+representative_exchange_p50_ns	2048
+representative_exchange_p95_ns	3892
+representative_exchange_p99_ns	4056
+EOF
+	prepared_worker_host_quantiles_match_summary "$q/host-quantile-latency.tsv" "$q/host-quantile-exchange.tsv" "$q/host-quantile-summary.tsv" || die 'valid host quantile derivation failed'
+	sed 's/representative_exchange_p99_ns\t4056/representative_exchange_p99_ns\t1/' "$q/host-quantile-summary.tsv" >"$q/host-quantile-summary-spliced.tsv"
+	if prepared_worker_host_quantiles_match_summary "$q/host-quantile-latency.tsv" "$q/host-quantile-exchange.tsv" "$q/host-quantile-summary-spliced.tsv"; then
+		die 'host quantile not derived from raw evidence passed'
+	fi
 	cat >"$q/semantic.tsv" <<'EOF'
 schema_version	capture_id	capture_pair	source_commit	engine	trace_sha256	status	environment_sha256
 1	fixture-a	a	0000000000000000000000000000000000000000	embedded	cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc	PASS	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -493,6 +1138,36 @@ EOF
 	if semantic_evidence_passes "$q/semantic-mismatch.tsv" a fixture-a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; then
 		die 'mismatched semantic fixture passed'
 	fi
+	cat >"$q/environment.tsv" <<'EOF'
+field	value
+schema_version	1
+capture_id	fixture-a
+capture_pair	a
+source_commit	0000000000000000000000000000000000000000
+environment_sha256	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+go_version	go1.26.4
+platform	Darwin 24.6.0 arm64
+cpu	Apple M1
+cgo_enabled	0
+gomaxprocs	1
+luau_sha256	c921fa51dbc0d81f9acbddcfa9208aa58f039388301f9fba77d2c5a324cb42bd
+luau_version	0.728
+case_count	1
+EOF
+	cat >"$q/acceptance-environment.tsv" <<'EOF'
+schema_version	go_version	goos	goarch	os_build	cpu_model	cgo_enabled	gomaxprocs	luau_version	luau_sha256
+1	go1.26.4	darwin	arm64	24.6.0	Apple M1	0	1	0.728	c921fa51dbc0d81f9acbddcfa9208aa58f039388301f9fba77d2c5a324cb42bd
+EOF
+	metadata_file_passes "$q/environment.tsv" fixture-a a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 1 || die 'valid environment metadata failed'
+	metadata_matches_acceptance "$q/environment.tsv" "$q/acceptance-environment.tsv" || die 'valid acceptance metadata match failed'
+	sed '/^cpu\t/d' "$q/environment.tsv" >"$q/environment-missing.tsv"
+	if metadata_file_passes "$q/environment-missing.tsv" fixture-a a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 1; then
+		die 'incomplete environment metadata passed'
+	fi
+	sed 's/Apple M1/Other CPU/' "$q/environment.tsv" >"$q/environment-spliced.tsv"
+	if metadata_matches_acceptance "$q/environment-spliced.tsv" "$q/acceptance-environment.tsv"; then
+		die 'spliced environment metadata passed'
+	fi
 	cat >"$q/rows.tsv" <<'EOF'
 schema_version	capture_id	capture_pair	source_commit	key	environment_sha256
 1	fixture-a	a	0000000000000000000000000000000000000000	one	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -503,16 +1178,134 @@ EOF
 	fi
 	cat >"$q/raw-domain.tsv" <<'EOF'
 header
-1	fixture-a	a	0000000000000000000000000000000000000000	classic	recursive_fibonacci	embedded	1	1	1600	17	100	1	work	program	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+1	fixture-a	a	0000000000000000000000000000000000000000	classic	recursive_fibonacci	32	embedded	1	1	1600	76198126637574	100	1	work	program	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 EOF
 	parity_raw_domains_pass "$q/raw-domain.tsv" || die 'valid raw coordinate failed'
 	sed 's/\tembedded\t/\tunknown\t/' "$q/raw-domain.tsv" >"$q/raw-domain-invalid.tsv"
 	if parity_raw_domains_pass "$q/raw-domain-invalid.tsv"; then
 		die 'unknown raw engine passed'
 	fi
+	sed 's/\t32\tembedded/\t3\tembedded/' "$q/raw-domain.tsv" >"$q/raw-scale-invalid.tsv"
+	if parity_raw_domains_pass "$q/raw-scale-invalid.tsv"; then
+		die 'invalid raw call scale passed'
+	fi
+	for invalid_scale in 032 32.0 32e0 +32; do
+		sed "s/\t32\tembedded/\t${invalid_scale}\tembedded/" "$q/raw-domain.tsv" >"$q/raw-scale-spelling-invalid.tsv"
+		if parity_raw_domains_pass "$q/raw-scale-spelling-invalid.tsv"; then
+			die "noncanonical raw call scale passed: $invalid_scale"
+		fi
+	done
+	for invalid_n in 01600 1600.0 16e2 +1600; do
+		sed "s/\t1600\t76198126637574/\t${invalid_n}\t76198126637574/" "$q/raw-domain.tsv" >"$q/raw-n-spelling-invalid.tsv"
+		if parity_raw_domains_pass "$q/raw-n-spelling-invalid.tsv"; then
+			die "noncanonical raw N passed: $invalid_n"
+		fi
+		done
+	sed 's/\t76198126637574\t/\t17\t/' "$q/raw-domain.tsv" >"$q/raw-seed-invalid.tsv"
+	if parity_raw_domains_pass "$q/raw-seed-invalid.tsv"; then
+		die 'noncanonical parity seed passed'
+	fi
+	cat >"$q/raw-floor.tsv" <<'EOF'
+header
+1	fixture-a	a	0000000000000000000000000000000000000000	classic	recursive_fibonacci	32	embedded	1	1	1600000	76198126637574	5000000	1	work	program	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+	parity_raw_domains_pass "$q/raw-floor.tsv" || die 'valid raw maximum floor failed'
+	sed 's/\t5000000\t/\t4999999\t/' "$q/raw-floor.tsv" >"$q/raw-floor-invalid.tsv"
+	if parity_raw_domains_pass "$q/raw-floor-invalid.tsv"; then
+		die 'sub-floor raw maximum passed'
+	fi
+	cat >"$q/parity-schedule.tsv" <<'EOF'
+schema_version	capture_id	capture_pair	source_commit	corpus	name	call_scale	environment_sha256
+1	fixture-a	a	0000000000000000000000000000000000000000	classic	recursive_fibonacci	2	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+	parity_schedule_domains_pass "$q/parity-schedule.tsv" || die 'valid parity schedule failed'
+	sed 's/\t2\tbbbb/\t02\tbbbb/' "$q/parity-schedule.tsv" >"$q/parity-schedule-invalid.tsv"
+	if parity_schedule_domains_pass "$q/parity-schedule-invalid.tsv"; then
+		die 'noncanonical parity schedule scale passed'
+	fi
+	cat >"$q/parity-calibration-a.tsv" <<'EOF'
+schema_version	capture_id	capture_pair	source_commit	corpus	name	mode	call_scale	trial	elapsed_ns	selected	environment_sha256
+1	fixture-a	a	0000000000000000000000000000000000000000	classic	recursive_fibonacci	adaptive	1	1	10000000	false	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+1	fixture-a	a	0000000000000000000000000000000000000000	classic	recursive_fibonacci	adaptive	1	2	9999999	false	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+1	fixture-a	a	0000000000000000000000000000000000000000	classic	recursive_fibonacci	adaptive	1	3	10000000	false	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+1	fixture-a	a	0000000000000000000000000000000000000000	classic	recursive_fibonacci	adaptive	2	1	10000000	true	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+1	fixture-a	a	0000000000000000000000000000000000000000	classic	recursive_fibonacci	adaptive	2	2	11000000	true	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+1	fixture-a	a	0000000000000000000000000000000000000000	classic	recursive_fibonacci	adaptive	2	3	12000000	true	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+	parity_calibration_domains_pass "$q/parity-schedule.tsv" "$q/parity-calibration-a.tsv" adaptive || die 'valid adaptive calibration failed'
+	sed 's/\t9999999\tfalse/\t10000000\tfalse/' "$q/parity-calibration-a.tsv" >"$q/parity-calibration-premature.tsv"
+	if parity_calibration_domains_pass "$q/parity-schedule.tsv" "$q/parity-calibration-premature.tsv" adaptive; then
+		die 'premature adaptive scale selection passed'
+	fi
+	cat >"$q/parity-calibration-b.tsv" <<'EOF'
+schema_version	capture_id	capture_pair	source_commit	corpus	name	mode	call_scale	trial	elapsed_ns	selected	environment_sha256
+1	fixture-b	b	0000000000000000000000000000000000000000	classic	recursive_fibonacci	prescribed	2	1	10000000	true	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+1	fixture-b	b	0000000000000000000000000000000000000000	classic	recursive_fibonacci	prescribed	2	2	11000000	true	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+1	fixture-b	b	0000000000000000000000000000000000000000	classic	recursive_fibonacci	prescribed	2	3	12000000	true	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+	parity_calibration_domains_pass "$q/parity-schedule.tsv" "$q/parity-calibration-b.tsv" prescribed || die 'valid prescribed calibration failed'
+	sed 's/\t10000000\ttrue/\t9999999\ttrue/' "$q/parity-calibration-b.tsv" >"$q/parity-calibration-below-target.tsv"
+	if parity_calibration_domains_pass "$q/parity-schedule.tsv" "$q/parity-calibration-below-target.tsv" prescribed; then
+		die 'under-target prescribed calibration passed'
+	fi
+	result_set_hash=$(printf '%s\n' '50=50' '500=500' '5000=5000' '50000=50000' | hash_stdin)
+	awk -v result_hash="$result_set_hash" 'BEGIN {
+		OFS = "\t"
+		print "schema_version", "capture_id", "capture_pair", "source_commit", "corpus", "name", "call_scale", "engine", "repeat", "order", "n", "seed", "elapsed_ns", "result", "workload_sha256", "program_sha256", "environment_sha256"
+		engine[1] = "embedded"; engine[2] = "worker"; engine[3] = "luau"
+		slope[1] = 120; slope[2] = 100; slope[3] = 130
+		intercept[1] = 1; intercept[2] = 2; intercept[3] = 3
+		point[1] = 50; point[2] = 500; point[3] = 5000; point[4] = 50000
+		for (repeat = 1; repeat <= 3; repeat++) for (point_index = 1; point_index <= 4; point_index++) for (position = 0; position < 3; position++) {
+			cycle = (1 + repeat + point_index - 1) % 3
+			which = ((cycle + position) % 3) + 1
+			order = (repeat - 1) * 12 + (point_index - 1) * 3 + position + 1
+			n = point[point_index]
+			print 1, "fixture-a", "a", "0000000000000000000000000000000000000000", "classic", "recursive_fibonacci", 1, engine[which], repeat, order, n, 76198126637574, slope[which] * n + intercept[which], n, "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		}
+	}' >"$q/derived-raw.tsv"
+	awk -v result_hash="$result_set_hash" 'BEGIN {
+		OFS = "\t"
+		print "schema_version", "capture_id", "capture_pair", "source_commit", "corpus", "name", "call_scale", "engine", "repeat", "slope_ns_per_guest_call", "intercept_ns", "result_set_sha256", "workload_sha256", "program_sha256", "environment_sha256"
+		engine[1] = "embedded"; engine[2] = "worker"; engine[3] = "luau"
+		slope[1] = 120; slope[2] = 100; slope[3] = 130
+		intercept[1] = 1; intercept[2] = 2; intercept[3] = 3
+		for (which = 1; which <= 3; which++) for (repeat = 1; repeat <= 3; repeat++)
+			print 1, "fixture-a", "a", "0000000000000000000000000000000000000000", "classic", "recursive_fibonacci", 1, engine[which], repeat, slope[which], intercept[which], result_hash, "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	}' >"$q/derived-slopes.tsv"
+	cat >"$q/derived-summary.tsv" <<'EOF'
+schema_version	capture_id	capture_pair	source_commit	corpus	name	call_scale	worker_luau_median	worker_luau_p90	embedded_luau_median	embedded_luau_p90	worker_embedded_max	status	environment_sha256
+1	fixture-a	a	0000000000000000000000000000000000000000	classic	recursive_fibonacci	1	0.76923076923076927	0.76923076923076927	0.92307692307692313	0.92307692307692313	0.83333333333333337	PASS	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+	parity_raw_domains_pass "$q/derived-raw.tsv" || die 'derived raw fixture failed'
+	parity_raw_order_passes "$q/derived-raw.tsv" || die 'valid raw acquisition order failed'
+	awk -F '\t' 'BEGIN { OFS = "\t" } NR == 3 { $10 = 1 } { print }' "$q/derived-raw.tsv" >"$q/derived-raw-duplicate-order.tsv"
+	if parity_raw_order_passes "$q/derived-raw-duplicate-order.tsv"; then
+		die 'duplicate raw acquisition order passed'
+	fi
+	awk -F '\t' 'BEGIN { OFS = "\t" } NR == 2 { $8 = "worker" } NR == 4 { $8 = "luau" } { print }' "$q/derived-raw.tsv" >"$q/derived-raw-wrong-engine-order.tsv"
+	if parity_raw_order_passes "$q/derived-raw-wrong-engine-order.tsv"; then
+		die 'wrong raw engine acquisition order passed'
+	fi
+	parity_slope_domains_pass "$q/derived-slopes.tsv" || die 'derived slope fixture failed'
+	prepared_worker_raw_matches_slopes "$q/derived-raw.tsv" "$q/derived-slopes.tsv" || die 'valid raw/slope derivation failed'
+	prepared_worker_result_hashes_match "$q/derived-raw.tsv" "$q/derived-slopes.tsv" || die 'valid result-set derivation failed'
+	prepared_worker_slopes_match_summary "$q/derived-slopes.tsv" "$q/derived-summary.tsv" || die 'valid slope/summary derivation failed'
+	sed 's/0.76923076923076927/0.1/' "$q/derived-summary.tsv" >"$q/derived-summary-spliced.tsv"
+	if prepared_worker_slopes_match_summary "$q/derived-slopes.tsv" "$q/derived-summary-spliced.tsv"; then
+		die 'spliced performance summary passed'
+	fi
+	sed 's/\tworker\t1\t100\t2\t/\tworker\t1\t99\t2\t/' "$q/derived-slopes.tsv" >"$q/derived-slopes-spliced.tsv"
+	if prepared_worker_raw_matches_slopes "$q/derived-raw.tsv" "$q/derived-slopes-spliced.tsv"; then
+		die 'slope not derived from raw evidence passed'
+	fi
+	awk -F '\t' 'BEGIN { OFS = "\t" } NR == 2 { $12 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" } { print }' "$q/derived-slopes.tsv" >"$q/derived-result-spliced.tsv"
+	if prepared_worker_result_hashes_match "$q/derived-raw.tsv" "$q/derived-result-spliced.tsv"; then
+		die 'result-set hash not derived from raw evidence passed'
+	fi
 	cat >"$q/latency-domain.tsv" <<'EOF'
 header
-1	fixture-a	a	0000000000000000000000000000000000000000	1	embedded,worker	10	20	10	result	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+1	fixture-a	a	0000000000000000000000000000000000000000	1	embedded,worker	10	20	10	cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 EOF
 	host_latency_domains_pass "$q/latency-domain.tsv" 1 || die 'valid latency coordinate failed'
 	sed 's/\t1\tembedded/\t2\tembedded/' "$q/latency-domain.tsv" >"$q/latency-domain-invalid.tsv"
@@ -534,7 +1327,8 @@ EOF
 
 usage() {
 	cat >&2 <<'EOF'
-usage: scripts/check-prepared-worker-admission --capture-pair a|b --output DIR [--cases corpus/name,...]
+usage: scripts/check-prepared-worker-admission --capture-pair a --output DIR [--cases corpus/name,...]
+       scripts/check-prepared-worker-admission --capture-pair b --schedule-from DIR_A --output DIR [--cases corpus/name,...]
        scripts/check-prepared-worker-admission --compare-pair DIR_A DIR_B
        scripts/check-prepared-worker-admission --self-test
 EOF
@@ -543,6 +1337,7 @@ EOF
 pair=
 output=
 cases=
+schedule_from=
 self_test_requested=0
 compare_a=
 compare_b=
@@ -561,6 +1356,11 @@ while [ "$#" -gt 0 ]; do
 	--cases)
 		[ "$#" -ge 2 ] || die '--cases needs a value'
 		cases=$2
+		shift 2
+		;;
+	--schedule-from)
+		[ "$#" -ge 2 ] || die '--schedule-from needs a directory'
+		schedule_from=$2
 		shift 2
 		;;
 	--self-test)
@@ -583,13 +1383,13 @@ done
 
 if [ -n "$compare_a$compare_b" ]; then
 	[ -n "$compare_a" ] && [ -n "$compare_b" ] || die '--compare-pair needs two directories'
-	[ -z "$pair$output$cases" ] && [ "$self_test_requested" -eq 0 ] || die '--compare-pair accepts no capture arguments'
+	[ -z "$pair$output$cases$schedule_from" ] && [ "$self_test_requested" -eq 0 ] || die '--compare-pair accepts no capture arguments'
 	compare_captures "$compare_a" "$compare_b"
 	exit 0
 fi
 
 if [ "$self_test_requested" -eq 1 ]; then
-	[ -z "$pair$output$cases" ] || die '--self-test accepts no capture arguments'
+	[ -z "$pair$output$cases$schedule_from" ] || die '--self-test accepts no capture arguments'
 	self_test
 	exit 0
 fi
@@ -598,6 +1398,8 @@ fi
 [ -n "$output" ] || die '--output is required'
 [ ! -e "$output" ] || die "output already exists: $output"
 [ -n "${LUAU_BIN:-}" ] || die 'LUAU_BIN is required'
+[ "$pair" != a ] || [ -z "$schedule_from" ] || die 'capture A cannot use --schedule-from'
+[ "$pair" != b ] || [ -n "$schedule_from" ] || die 'capture B requires --schedule-from DIR_A'
 [ -z "$(git status --porcelain --untracked-files=no)" ] || die 'capture requires clean tracked files'
 
 quiet_status=0
@@ -620,17 +1422,30 @@ if ! CGO_ENABLED=0 GOMAXPROCS=1 EMBER_RUNTIME_ACCEPTANCE_PROFILE="$acceptance_pr
 	die 'acceptance environment rejected'
 fi
 environment_hash=$(hash_file "$temporary/environment.tsv")
-source_commit=$(git rev-parse HEAD)
+current_source_commit=$(git rev-parse HEAD)
 case_label=${cases:-all-37}
 if [ "$case_label" = all-37 ]; then
 	expected_case_count=37
 else
 	expected_case_count=$(printf '%s\n' "$case_label" | awk -F ',' '{ print NF }')
 fi
+schedule_input=
+schedule_hash=adaptive
+if [ "$pair" = b ]; then
+	(validate_capture "$schedule_from" a)
+	[ "$(capture_field "$schedule_from/host-summary.tsv" source_commit)" = "$current_source_commit" ] || die 'schedule capture source commit differs'
+	[ "$(capture_field "$schedule_from/host-summary.tsv" environment_sha256)" = "$environment_hash" ] || die 'schedule capture environment differs'
+	[ "$(sed -n '1p' "$schedule_from/cases.txt")" = "$case_label" ] || die 'schedule capture case selection differs'
+	schedule_hash=$(hash_file "$schedule_from/parity-schedule.tsv")
+	schedule_input="$temporary/parity-schedule-input.tsv"
+	awk -F '\t' 'BEGIN { OFS = "\t"; print "corpus", "name", "call_scale" } NR > 1 { print $5, $6, $7 }' \
+		"$schedule_from/parity-schedule.tsv" >"$schedule_input"
+fi
 capture_nonce=${temporary##*/}
-capture_id=$(printf '%s\n%s\n%s\n%s\n%s\n' "$source_commit" "$environment_hash" "$pair" "$case_label" "$capture_nonce" | hash_stdin)
+capture_id=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$current_source_commit" "$environment_hash" "$pair" "$case_label" "$schedule_hash" "$capture_nonce" | hash_stdin)
 command="CGO_ENABLED=0 GOMAXPROCS=1 EMBER_RUNTIME_ACCEPTANCE_PROFILE=$acceptance_profile EMBER_RUNTIME_ENGINE=invalid-but-overridden LUAU_BIN=$LUAU_BIN scripts/check-prepared-worker-admission --capture-pair $pair --output $output"
 [ -z "$cases" ] || command="$command --cases $cases"
+[ -z "$schedule_from" ] || command="$command --schedule-from $schedule_from"
 
 test_status=0
 CGO_ENABLED=0 GOMAXPROCS=1 \
@@ -640,10 +1455,11 @@ CGO_ENABLED=0 GOMAXPROCS=1 \
 	EMBER_PREPARED_WORKER_ADMISSION_LIVE=1 \
 	PREPARED_WORKER_CAPTURE_PAIR="$pair" \
 	PREPARED_WORKER_CAPTURE_ID="$capture_id" \
-	PREPARED_WORKER_SOURCE_COMMIT="$source_commit" \
+	PREPARED_WORKER_SOURCE_COMMIT="$current_source_commit" \
 	PREPARED_WORKER_ENVIRONMENT_SHA256="$environment_hash" \
 	PREPARED_WORKER_OUTPUT="$output" \
 	PREPARED_WORKER_CASES="$cases" \
+	PREPARED_WORKER_SCHEDULE="$schedule_input" \
 	go test -run '^TestPreparedWorkerAll37AdmissionLive$' -count=1 . >"$temporary/acquisition.log" 2>&1 || test_status=$?
 
 if [ ! -d "$output" ]; then

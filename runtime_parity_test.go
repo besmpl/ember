@@ -41,8 +41,9 @@ const (
 	// excludes this measuring process.
 	parityCPUMax = 300.0
 
-	parityPointAttemptLimit = 60
-	parityPointRetryDelay   = time.Second
+	parityPointAttemptLimit    = 60
+	parityPointRetryDelay      = time.Second
+	parityExternalPointTimeout = 60 * time.Second
 
 	// A slope is not acceptance evidence when the decisive point is shorter
 	// than ordinary scheduler disturbances. The uniform iteration schedule is
@@ -979,11 +980,13 @@ func measureParityEmberGuestBatch(callable *parityPreparedCallable, iterations i
 }
 
 func measureParityLuauGuestBatch(luauPath, scriptPath string, iterations int, seed int64) (float64, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), parityExternalPointTimeout)
+	defer cancel()
 	commandArgs := []string{scriptPath, "-a"}
 	commandArgs = append(commandArgs, strconv.Itoa(iterations), strconv.FormatInt(seed, 10))
-	output, err := exec.Command(luauPath, commandArgs...).CombinedOutput()
+	output, err := exec.CommandContext(ctx, luauPath, commandArgs...).CombinedOutput()
 	if err != nil {
-		return 0, "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+		return 0, "", parityLuauCommandError(ctx, err, output)
 	}
 	elapsed, result, err := parseParityLuauOutput(output)
 	if err != nil {
@@ -991,6 +994,22 @@ func measureParityLuauGuestBatch(luauPath, scriptPath string, iterations int, se
 	}
 	result, err = parityCanonicalIntegerString(result)
 	return elapsed, result, err
+}
+
+func parityLuauCommandError(ctx context.Context, commandErr error, output []byte) error {
+	if contextErr := ctx.Err(); contextErr != nil {
+		return fmt.Errorf("Luau parity: %w", contextErr)
+	}
+	return fmt.Errorf("%w: %s", commandErr, strings.TrimSpace(string(output)))
+}
+
+func TestMeasureParityLuauGuestBatchHonorsContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := parityLuauCommandError(ctx, errors.New("killed"), nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Luau measurement error = %v, want context canceled", err)
+	}
 }
 
 func measureParityLuauPublicCall(luauPath, scriptPath string, iterations int) (float64, string, error) {

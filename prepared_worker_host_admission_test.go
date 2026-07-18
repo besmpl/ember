@@ -535,7 +535,7 @@ func capturePreparedWorkerHostSlopes(t *testing.T, capture preparedWorkerCapture
 			"embedded": {},
 			"worker":   {},
 		}
-		var results strings.Builder
+		var resultDigests strings.Builder
 		sequence := uint64(1)
 		for index, work := range preparedWorkerHostWork {
 			durations := map[string][]time.Duration{
@@ -587,13 +587,19 @@ func capturePreparedWorkerHostSlopes(t *testing.T, capture preparedWorkerCapture
 					t.Fatalf("host slope repeat=%d trial=%d work=%d results differ", repeat, trial, work)
 				}
 				state = measured["worker"].State
-				fmt.Fprintf(&results, "%d/%d=%s\n", work, trial, canonicalPreparedWorkerTurn(measured["worker"]))
+				fmt.Fprintf(
+					&resultDigests,
+					"%d/%d=%s\n",
+					work,
+					trial,
+					parityStringSHA256(canonicalPreparedWorkerTurn(measured["worker"])),
+				)
 			}
 			for _, engine := range []string{"embedded", "worker"} {
 				timings[engine][work] = float64(preparedWorkerDurationQuantile(durations[engine], 0.50).Nanoseconds())
 			}
 		}
-		resultHash := parityStringSHA256(results.String())
+		resultHash := parityStringSHA256(resultDigests.String())
 		fits := make(map[string]parityFit, 2)
 		for _, engine := range []string{"embedded", "worker"} {
 			if err := validatePreparedWorkerHostWindow(timings[engine]); err != nil {

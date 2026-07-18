@@ -27,7 +27,10 @@ const (
 	preparedBatchWorkerMagic            = "EPB1"
 	preparedBatchWorkerMaxError         = 4 << 10
 	preparedWorkerAdmissionEnvironment  = "EMBER_PREPARED_WORKER_ADMISSION_LIVE"
-	preparedWorkerParityCallScale       = 32
+	preparedWorkerScheduleEnvironment   = "PREPARED_WORKER_SCHEDULE"
+	preparedWorkerParityCalibrationRuns = 3
+	preparedWorkerParityMaximumScale    = 1024
+	preparedWorkerParityTarget          = 10 * time.Millisecond
 )
 
 func TestPreparedBatchWorkerMatchesEmbedded(t *testing.T) {
@@ -123,20 +126,109 @@ func TestPreparedWorkerAdmissionGateRequiresBothSlopeAndLuauTargets(t *testing.T
 }
 
 func TestPreparedWorkerParityCallScalePreservesPerCallSlope(t *testing.T) {
+	const callScale = 32
 	samples := make(map[int]float64, len(parityIterations))
 	for _, base := range parityIterations {
-		n := base * preparedWorkerParityCallScale
+		n := base * callScale
 		samples[n] = float64(n * 4)
 	}
-	if err := validatePreparedWorkerParityWindow(samples); err != nil {
+	if err := validatePreparedWorkerParityWindow(samples, callScale); err != nil {
 		t.Fatal(err)
 	}
-	fit, err := fitPreparedWorkerParityLine(samples)
+	fit, err := fitPreparedWorkerParityLine(samples, callScale)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if fit.Inner != 4 || fit.Entry != 0 {
 		t.Fatalf("scaled fit = %#v, want 4ns per call with zero intercept", fit)
+	}
+}
+
+func TestPreparedWorkerParityCallScaleClearsNoiseFloor(t *testing.T) {
+	calls := 0
+	calibration, err := selectPreparedWorkerParityCallScale(func(iterations int) (float64, error) {
+		calls++
+		return float64(iterations * 7), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calibration.Scale != 32 || len(calibration.Samples) != 18 || calls != 18 {
+		t.Fatalf("calibration = %#v after %d calls, want scale 32 after 18 calls", calibration, calls)
+	}
+}
+
+func TestPreparedWorkerParityPrescribedScaleMustClearTarget(t *testing.T) {
+	calibration, err := verifyPreparedWorkerParityCallScale(4, func(iterations int) (float64, error) {
+		return float64(iterations * 60), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calibration.Scale != 4 || len(calibration.Samples) != preparedWorkerParityCalibrationRuns {
+		t.Fatalf("prescribed calibration = %#v", calibration)
+	}
+	if _, err := verifyPreparedWorkerParityCallScale(2, func(iterations int) (float64, error) {
+		return float64(iterations), nil
+	}); err == nil {
+		t.Fatal("under-scaled prescribed window passed")
+	}
+}
+
+func TestPreparedWorkerParityCallScaleUsesConservativeTrial(t *testing.T) {
+	trial := 0
+	calibration, err := selectPreparedWorkerParityCallScale(func(iterations int) (float64, error) {
+		trial++
+		if iterations == parityIterations[len(parityIterations)-1] && trial == 3 {
+			return float64(preparedWorkerParityTarget.Nanoseconds() - 1), nil
+		}
+		return float64(preparedWorkerParityTarget.Nanoseconds()), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calibration.Scale != 2 || len(calibration.Samples) != 2*preparedWorkerParityCalibrationRuns {
+		t.Fatalf("calibration = %#v, want scale 2 after one low trial at scale 1", calibration)
+	}
+}
+
+func TestPreparedWorkerParityCallScaleRejectsUnmeasurableWindow(t *testing.T) {
+	calibration, err := selectPreparedWorkerParityCallScale(func(int) (float64, error) {
+		return 1, nil
+	})
+	if err == nil {
+		t.Fatalf("calibration = %#v, want maximum-scale failure", calibration)
+	}
+	wantSamples := preparedWorkerParityCalibrationRuns * 11 // powers of two from 1 through 1024
+	if len(calibration.Samples) != wantSamples {
+		t.Fatalf("calibration recorded %d samples, want %d", len(calibration.Samples), wantSamples)
+	}
+}
+
+func TestPreparedWorkerParityScheduleIsClosedAndCanonical(t *testing.T) {
+	selected, err := parityManifestSelection("classic/recursive_fibonacci")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const valid = "corpus\tname\tcall_scale\nclassic\trecursive_fibonacci\t32\n"
+	schedule, err := parsePreparedWorkerParitySchedule([]byte(valid), selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := schedule["classic/recursive_fibonacci"]; got != 32 {
+		t.Fatalf("scheduled scale = %d, want 32", got)
+	}
+	for _, invalid := range []string{
+		"corpus\tname\tcall_scale\nclassic\trecursive_fibonacci\t032\n",
+		"corpus\tname\tcall_scale\nclassic\trecursive_fibonacci\t32.0\n",
+		"corpus\tname\tcall_scale\nclassic\trecursive_fibonacci\t32e0\n",
+		"corpus\tname\tcall_scale\nclassic\trecursive_fibonacci\t+32\n",
+		"corpus\tname\tcall_scale\nclassic\trecursive_fibonacci\t3\n",
+		"corpus\tname\tcall_scale\nclassic\tunknown\t32\n",
+	} {
+		if _, err := parsePreparedWorkerParitySchedule([]byte(invalid), selected); err == nil {
+			t.Fatalf("invalid schedule passed: %q", invalid)
+		}
 	}
 }
 
@@ -161,6 +253,14 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	scheduledScales, calibrationMode, err := loadPreparedWorkerParitySchedule(
+		pair,
+		os.Getenv(preparedWorkerScheduleEnvironment),
+		selected,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Mkdir(output, 0o700); err != nil {
 		t.Fatalf("create prepared worker capture: %v", err)
 	}
@@ -170,6 +270,10 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 	defer slopes.Close()
 	summaryFile := createPreparedWorkerCaptureFile(t, filepath.Join(output, "summary.tsv"))
 	defer summaryFile.Close()
+	scheduleFile := createPreparedWorkerCaptureFile(t, filepath.Join(output, "parity-schedule.tsv"))
+	defer scheduleFile.Close()
+	calibrationFile := createPreparedWorkerCaptureFile(t, filepath.Join(output, "parity-calibration.tsv"))
+	defer calibrationFile.Close()
 	metadata := createPreparedWorkerCaptureFile(t, filepath.Join(output, "environment.tsv"))
 	defer metadata.Close()
 
@@ -191,9 +295,11 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 	} {
 		writePreparedWorkerCapture(t, metadata, "%s\t%s\n", field[0], field[1])
 	}
-	writePreparedWorkerCapture(t, raw, "schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tengine\trepeat\torder\tn\tseed\telapsed_ns\tresult\tworkload_sha256\tprogram_sha256\tenvironment_sha256\n")
-	writePreparedWorkerCapture(t, slopes, "schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tengine\trepeat\tslope_ns_per_guest_call\tintercept_ns\tresult_set_sha256\tworkload_sha256\tprogram_sha256\tenvironment_sha256\n")
-	writePreparedWorkerCapture(t, summaryFile, "schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tworker_luau_median\tworker_luau_p90\tembedded_luau_median\tembedded_luau_p90\tworker_embedded_max\tstatus\tenvironment_sha256\n")
+	writePreparedWorkerCapture(t, raw, "schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tcall_scale\tengine\trepeat\torder\tn\tseed\telapsed_ns\tresult\tworkload_sha256\tprogram_sha256\tenvironment_sha256\n")
+	writePreparedWorkerCapture(t, slopes, "schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tcall_scale\tengine\trepeat\tslope_ns_per_guest_call\tintercept_ns\tresult_set_sha256\tworkload_sha256\tprogram_sha256\tenvironment_sha256\n")
+	writePreparedWorkerCapture(t, summaryFile, "schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tcall_scale\tworker_luau_median\tworker_luau_p90\tembedded_luau_median\tembedded_luau_p90\tworker_embedded_max\tstatus\tenvironment_sha256\n")
+	writePreparedWorkerCapture(t, scheduleFile, "schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tcall_scale\tenvironment_sha256\n")
+	writePreparedWorkerCapture(t, calibrationFile, "schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tmode\tcall_scale\ttrial\telapsed_ns\tselected\tenvironment_sha256\n")
 	capturePreparedWorkerHostAdmission(t, preparedWorkerCaptureContext{
 		ID:              captureID,
 		Pair:            pair,
@@ -218,6 +324,47 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 		embedded, err := prepareParityExactGuestBatch(preparedSource)
 		if err != nil {
 			t.Fatalf("%s prepare embedded: %v", caseID, err)
+		}
+		var calibration preparedWorkerParityCalibration
+		if calibrationMode == "adaptive" {
+			calibration, err = calibratePreparedWorkerParityCallScale(embedded)
+		} else {
+			calibration, err = verifyPreparedWorkerParityCallableScale(scheduledScales[caseID], embedded)
+		}
+		if closeErr := embedded.close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			t.Fatalf("%s calibrate measurement window: %v", caseID, err)
+		}
+		callScale := calibration.Scale
+		writePreparedWorkerCapture(t, scheduleFile, "1\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
+			captureID,
+			pair,
+			sourceCommit,
+			entry.Corpus,
+			entry.Name,
+			callScale,
+			environmentHash,
+		)
+		for _, sample := range calibration.Samples {
+			writePreparedWorkerCapture(t, calibrationFile, "1\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%.17g\t%s\t%s\n",
+				captureID,
+				pair,
+				sourceCommit,
+				entry.Corpus,
+				entry.Name,
+				calibrationMode,
+				sample.Scale,
+				sample.Trial,
+				sample.Elapsed,
+				strconv.FormatBool(sample.Scale == callScale),
+				environmentHash,
+			)
+		}
+		embedded, err = prepareParityExactGuestBatch(preparedSource)
+		if err != nil {
+			t.Fatalf("%s prepare measured embedded: %v", caseID, err)
 		}
 		worker := startPreparedBatchWorker(t, caseID)
 		luauSource, err := parityGuestBatchLuauSource(entry.Case.source, parityDefaultFixtureVariant)
@@ -253,7 +400,7 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 		programHash := parityStringSHA256(programSource)
 		for repeat := 1; repeat <= parityRepeatCount; repeat++ {
 			for iterationIndex, baseN := range parityIterations {
-				n := baseN * preparedWorkerParityCallScale
+				n := baseN * callScale
 				order := preparedWorkerEngineOrder(pairIndex, repeat, iterationIndex)
 				point, err := acquireCleanParityPoint(parityPointAttemptLimit, sampleParitySystem, func() ([]parityPointMeasurement, error) {
 					measurements := make([]parityPointMeasurement, 0, len(order))
@@ -309,12 +456,13 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 					timings[measurement.engine][repeat][n] = measurement.elapsed
 					results[measurement.engine][repeat][n] = measurement.result
 					acquisitionOrder := (repeat-1)*len(parityIterations)*3 + iterationIndex*3 + measurement.engineIndex + 1
-					writePreparedWorkerCapture(t, raw, "1\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%.17g\t%s\t%s\t%s\t%s\n",
+					writePreparedWorkerCapture(t, raw, "1\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%d\t%d\t%d\t%d\t%.17g\t%s\t%s\t%s\t%s\n",
 						captureID,
 						pair,
 						sourceCommit,
 						entry.Corpus,
 						entry.Name,
+						callScale,
 						measurement.engine,
 						repeat,
 						acquisitionOrder,
@@ -334,30 +482,31 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 		for _, engine := range engines {
 			fits[engine] = make([]float64, parityRepeatCount)
 			for repeat := 1; repeat <= parityRepeatCount; repeat++ {
-				if err := validatePreparedWorkerParityWindow(timings[engine][repeat]); err != nil {
+				if err := validatePreparedWorkerParityWindow(timings[engine][repeat], callScale); err != nil {
 					_ = embedded.close()
 					_ = worker.Close()
 					t.Fatalf("%s %s repeat=%d: %v", caseID, engine, repeat, err)
 				}
-				fit, err := fitPreparedWorkerParityLine(timings[engine][repeat])
+				fit, err := fitPreparedWorkerParityLine(timings[engine][repeat], callScale)
 				if err != nil {
 					_ = embedded.close()
 					_ = worker.Close()
 					t.Fatalf("%s %s repeat=%d: %v", caseID, engine, repeat, err)
 				}
 				fits[engine][repeat-1] = fit.Inner
-				resultHash, err := preparedWorkerResultSetSHA256(results[engine][repeat])
+				resultHash, err := preparedWorkerResultSetSHA256(results[engine][repeat], callScale)
 				if err != nil {
 					_ = embedded.close()
 					_ = worker.Close()
 					t.Fatal(err)
 				}
-				writePreparedWorkerCapture(t, slopes, "1\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%.17g\t%.17g\t%s\t%s\t%s\t%s\n",
+				writePreparedWorkerCapture(t, slopes, "1\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%d\t%.17g\t%.17g\t%s\t%s\t%s\t%s\n",
 					captureID,
 					pair,
 					sourceCommit,
 					entry.Corpus,
 					entry.Name,
+					callScale,
 					engine,
 					repeat,
 					fit.Inner,
@@ -375,12 +524,13 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 			status = "FAIL"
 			gateFailures = append(gateFailures, caseID+": "+gateErr.Error())
 		}
-		writePreparedWorkerCapture(t, summaryFile, "1\t%s\t%s\t%s\t%s\t%s\t%.17g\t%.17g\t%.17g\t%.17g\t%.17g\t%s\t%s\n",
+		writePreparedWorkerCapture(t, summaryFile, "1\t%s\t%s\t%s\t%s\t%s\t%d\t%.17g\t%.17g\t%.17g\t%.17g\t%.17g\t%s\t%s\n",
 			captureID,
 			pair,
 			sourceCommit,
 			entry.Corpus,
 			entry.Name,
+			callScale,
 			caseSummary.WorkerLuauMedian,
 			caseSummary.WorkerLuauP90,
 			caseSummary.EmbeddedLuauMedian,
@@ -749,7 +899,209 @@ func preparedWorkerParityEntry(t testing.TB, caseID string) parityManifestEntry 
 	return selected[0]
 }
 
-func normalizePreparedWorkerParitySamples(samples map[int]float64) (map[int]float64, error) {
+type preparedWorkerParityCalibrationSample struct {
+	Scale   int
+	Trial   int
+	Elapsed float64
+}
+
+type preparedWorkerParityCalibration struct {
+	Scale   int
+	Samples []preparedWorkerParityCalibrationSample
+}
+
+func selectPreparedWorkerParityCallScale(measure func(int) (float64, error)) (preparedWorkerParityCalibration, error) {
+	calibration := preparedWorkerParityCalibration{}
+	if measure == nil {
+		return calibration, fmt.Errorf("prepared worker parity calibration: nil measurement")
+	}
+	target := float64(preparedWorkerParityTarget.Nanoseconds())
+	maximumN := parityIterations[len(parityIterations)-1]
+	for scale := 1; scale <= preparedWorkerParityMaximumScale; scale *= 2 {
+		minimum := float64(0)
+		for trial := 1; trial <= preparedWorkerParityCalibrationRuns; trial++ {
+			elapsed, err := measure(maximumN * scale)
+			if err != nil {
+				return calibration, err
+			}
+			if elapsed <= 0 || !finiteParityFloat(elapsed) {
+				return calibration, fmt.Errorf("prepared worker parity calibration: invalid timing %v", elapsed)
+			}
+			calibration.Samples = append(calibration.Samples, preparedWorkerParityCalibrationSample{
+				Scale:   scale,
+				Trial:   trial,
+				Elapsed: elapsed,
+			})
+			if minimum == 0 || elapsed < minimum {
+				minimum = elapsed
+			}
+		}
+		if minimum >= target {
+			calibration.Scale = scale
+			return calibration, nil
+		}
+	}
+	return calibration, fmt.Errorf(
+		"prepared worker parity calibration: maximum scale %d did not reach %s",
+		preparedWorkerParityMaximumScale,
+		preparedWorkerParityTarget,
+	)
+}
+
+func verifyPreparedWorkerParityCallScale(
+	callScale int,
+	measure func(int) (float64, error),
+) (preparedWorkerParityCalibration, error) {
+	calibration := preparedWorkerParityCalibration{Scale: callScale}
+	if err := validatePreparedWorkerParityCallScale(callScale); err != nil {
+		return calibration, err
+	}
+	if measure == nil {
+		return calibration, fmt.Errorf("prepared worker parity calibration: nil measurement")
+	}
+	minimum := float64(0)
+	maximumN := parityIterations[len(parityIterations)-1]
+	for trial := 1; trial <= preparedWorkerParityCalibrationRuns; trial++ {
+		elapsed, err := measure(maximumN * callScale)
+		if err != nil {
+			return calibration, err
+		}
+		if elapsed <= 0 || !finiteParityFloat(elapsed) {
+			return calibration, fmt.Errorf("prepared worker parity calibration: invalid timing %v", elapsed)
+		}
+		calibration.Samples = append(calibration.Samples, preparedWorkerParityCalibrationSample{
+			Scale:   callScale,
+			Trial:   trial,
+			Elapsed: elapsed,
+		})
+		if minimum == 0 || elapsed < minimum {
+			minimum = elapsed
+		}
+	}
+	if minimum < float64(preparedWorkerParityTarget.Nanoseconds()) {
+		return calibration, fmt.Errorf(
+			"prepared worker parity calibration: prescribed scale %d minimum %gns is below %s",
+			callScale,
+			minimum,
+			preparedWorkerParityTarget,
+		)
+	}
+	return calibration, nil
+}
+
+func calibratePreparedWorkerParityCallScale(callable *parityPreparedCallable) (preparedWorkerParityCalibration, error) {
+	return selectPreparedWorkerParityCallScale(func(iterations int) (float64, error) {
+		elapsed, _, err := measureParityEmberGuestBatch(callable, iterations, parityCaptureSeed)
+		return elapsed, err
+	})
+}
+
+func verifyPreparedWorkerParityCallableScale(
+	callScale int,
+	callable *parityPreparedCallable,
+) (preparedWorkerParityCalibration, error) {
+	return verifyPreparedWorkerParityCallScale(callScale, func(iterations int) (float64, error) {
+		elapsed, _, err := measureParityEmberGuestBatch(callable, iterations, parityCaptureSeed)
+		return elapsed, err
+	})
+}
+
+func validatePreparedWorkerParityCallScale(callScale int) error {
+	if callScale <= 0 || callScale > preparedWorkerParityMaximumScale || callScale&(callScale-1) != 0 {
+		return fmt.Errorf("prepared worker parity window: invalid call scale %d", callScale)
+	}
+	return nil
+}
+
+func loadPreparedWorkerParitySchedule(
+	pair string,
+	path string,
+	selected []parityManifestEntry,
+) (map[string]int, string, error) {
+	switch pair {
+	case "a":
+		if path != "" {
+			return nil, "", fmt.Errorf("prepared worker parity schedule: capture A must adapt independently")
+		}
+		return nil, "adaptive", nil
+	case "b":
+		if path == "" {
+			return nil, "", fmt.Errorf("prepared worker parity schedule: capture B requires Capture A's schedule")
+		}
+	default:
+		return nil, "", fmt.Errorf("prepared worker parity schedule: invalid capture pair %q", pair)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("prepared worker parity schedule: %w", err)
+	}
+	schedule, err := parsePreparedWorkerParitySchedule(data, selected)
+	if err != nil {
+		return nil, "", err
+	}
+	return schedule, "prescribed", nil
+}
+
+func parsePreparedWorkerParitySchedule(
+	data []byte,
+	selected []parityManifestEntry,
+) (map[string]int, error) {
+	const header = "corpus\tname\tcall_scale"
+	wanted := make(map[string]struct{}, len(selected))
+	for _, entry := range selected {
+		wanted[entry.Corpus+"/"+entry.Name] = struct{}{}
+	}
+	schedule := make(map[string]int, len(selected))
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	line := 0
+	for scanner.Scan() {
+		line++
+		if line == 1 {
+			if scanner.Text() != header {
+				return nil, fmt.Errorf("prepared worker parity schedule: invalid header")
+			}
+			continue
+		}
+		fields := strings.Split(scanner.Text(), "\t")
+		if len(fields) != 3 || fields[0] == "" || fields[1] == "" {
+			return nil, fmt.Errorf("prepared worker parity schedule: line %d is invalid", line)
+		}
+		caseID := fields[0] + "/" + fields[1]
+		if _, ok := wanted[caseID]; !ok {
+			return nil, fmt.Errorf("prepared worker parity schedule: unexpected case %s", caseID)
+		}
+		if _, exists := schedule[caseID]; exists {
+			return nil, fmt.Errorf("prepared worker parity schedule: duplicate case %s", caseID)
+		}
+		callScale, err := strconv.Atoi(fields[2])
+		if err != nil || strconv.Itoa(callScale) != fields[2] {
+			return nil, fmt.Errorf("prepared worker parity schedule: scale %q is not canonical", fields[2])
+		}
+		if err := validatePreparedWorkerParityCallScale(callScale); err != nil {
+			return nil, err
+		}
+		schedule[caseID] = callScale
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("prepared worker parity schedule: %w", err)
+	}
+	if line == 0 {
+		return nil, fmt.Errorf("prepared worker parity schedule: missing header")
+	}
+	if len(schedule) != len(wanted) {
+		return nil, fmt.Errorf(
+			"prepared worker parity schedule: got %d cases, want %d",
+			len(schedule),
+			len(wanted),
+		)
+	}
+	return schedule, nil
+}
+
+func normalizePreparedWorkerParitySamples(samples map[int]float64, callScale int) (map[int]float64, error) {
+	if err := validatePreparedWorkerParityCallScale(callScale); err != nil {
+		return nil, err
+	}
 	if len(samples) != len(parityIterations) {
 		return nil, fmt.Errorf(
 			"prepared worker parity window: got %d points, want %d",
@@ -759,7 +1111,7 @@ func normalizePreparedWorkerParitySamples(samples map[int]float64) (map[int]floa
 	}
 	normalized := make(map[int]float64, len(parityIterations))
 	for _, base := range parityIterations {
-		n := base * preparedWorkerParityCallScale
+		n := base * callScale
 		elapsed, ok := samples[n]
 		if !ok {
 			return nil, fmt.Errorf("prepared worker parity window: missing N=%d", n)
@@ -769,16 +1121,16 @@ func normalizePreparedWorkerParitySamples(samples map[int]float64) (map[int]floa
 	return normalized, nil
 }
 
-func validatePreparedWorkerParityWindow(samples map[int]float64) error {
-	normalized, err := normalizePreparedWorkerParitySamples(samples)
+func validatePreparedWorkerParityWindow(samples map[int]float64, callScale int) error {
+	normalized, err := normalizePreparedWorkerParitySamples(samples, callScale)
 	if err != nil {
 		return err
 	}
 	return validateParityMeasurementWindow(normalized)
 }
 
-func fitPreparedWorkerParityLine(samples map[int]float64) (parityFit, error) {
-	normalized, err := normalizePreparedWorkerParitySamples(samples)
+func fitPreparedWorkerParityLine(samples map[int]float64, callScale int) (parityFit, error) {
+	normalized, err := normalizePreparedWorkerParitySamples(samples, callScale)
 	if err != nil {
 		return parityFit{}, err
 	}
@@ -786,14 +1138,17 @@ func fitPreparedWorkerParityLine(samples map[int]float64) (parityFit, error) {
 	if err != nil {
 		return parityFit{}, err
 	}
-	fit.Inner /= preparedWorkerParityCallScale
+	fit.Inner /= float64(callScale)
 	return fit, nil
 }
 
-func preparedWorkerResultSetSHA256(results map[int]string) (string, error) {
+func preparedWorkerResultSetSHA256(results map[int]string, callScale int) (string, error) {
+	if err := validatePreparedWorkerParityCallScale(callScale); err != nil {
+		return "", err
+	}
 	var builder strings.Builder
 	for _, base := range parityIterations {
-		n := base * preparedWorkerParityCallScale
+		n := base * callScale
 		result, ok := results[n]
 		if !ok || result == "" {
 			return "", fmt.Errorf("prepared worker result set: missing N=%d", n)
