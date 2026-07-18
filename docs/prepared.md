@@ -132,11 +132,18 @@ The following remain canonical Machine execution:
 - mutable or escaping closures;
 - varargs and coroutines;
 - unsupported operations or static-call dependencies;
+- functions whose planned frame or static call path exceeds the native stack
+  budget;
 - qualified functions called with nonnumeric values.
 
 Replay begins at the function entry before any effect. Qualification is based
 only on Program semantics, never source names, benchmark names, or workload
 hashes.
+
+An invocation with any configured `ExecutionLimits`, or with a cancellable
+context, uses the canonical Machine even when native code is installed. Native
+kernels do not poll policy state, so Ember chooses the policy-capable engine
+before execution rather than weakening limits or cancellation.
 
 | Host process | Reload-time result |
 | --- | --- |
@@ -144,6 +151,8 @@ hashes.
 | Darwin x86-64 with SSE4.1 | Native qualified subset plus exact Machine replay |
 | Linux ARM64 | Native qualified subset plus exact Machine replay |
 | Linux x86-64 with SSE4.1 | Native qualified subset plus exact Machine replay |
+| Windows ARM64 | Native qualified subset plus exact Machine replay |
+| Windows x86-64 with SSE4.1 | Native qualified subset plus exact Machine replay |
 | Other OS/ISA or denied executable-memory policy | Exact all-Machine bundle |
 
 ARM64 and x86-64 use separate emitters behind one target-independent semantic
@@ -151,25 +160,37 @@ candidate. Native-to-native calls use a private register ABI; only the outer
 adapter accepts argument/result pointers from Go.
 
 The Darwin installer uses generation-owned `MAP_JIT` memory, serialized JIT
-write protection, and explicit instruction-cache invalidation. The Linux
-installer maps writable pages, copies the complete image, and seals them
-read-execute before publication. Both use architecture-specific system-stack
-trampolines. Calls hold a lease so retirement cannot unmap active code. The
-implementation passes with `CGO_ENABLED=0`, but uses `purego` and one audited
-private `runtime.cgocall` boundary. Hosts must treat Go toolchain and OS
-security-policy upgrades as compatibility events and rerun race/checkptr plus
-the focused native tests.
+write protection, and explicit instruction-cache invalidation. Linux maps
+writable pages, copies the complete image, and seals them read-execute before
+publication. Windows uses `VirtualAlloc`, seals the image with
+`VirtualProtect`, flushes the process instruction cache, and releases it with
+`VirtualFree`. All three use architecture-specific system-stack trampolines.
+Calls hold a lease so retirement cannot unmap active code.
 
-Native installation on Windows is not implemented yet. Its emitters
-cross-build, but the runtime deliberately selects exact Machine fallback rather
-than claiming native speed.
+Each emitted frame stays below one memory page, avoiding unrepresented Windows
+stack probes, and a target-independent analysis limits generated body frames
+on any static native call path to 64 KiB. Bounded self-recursion is charged at
+its full admitted depth; unproved cycles use Machine replay.
+
+The implementation passes with `CGO_ENABLED=0`, but uses `purego` on Unix and
+one audited private `runtime.cgocall` boundary on every supported OS. Hosts must
+treat Go toolchain and OS security-policy upgrades as compatibility events and
+rerun race/checkptr plus the focused native tests. Native execution remains
+trusted in-process code, not a fault-containment boundary: an emitter defect or
+hardware execution fault may terminate the process rather than replaying.
+
+Darwin ARM64 is the currently performance-certified host for the pinned
+four-row Luau 0.728 comparison. Linux and Windows ARM64/x86-64 have native
+semantic, ABI, executable-memory, and generation-lifecycle coverage, but that
+coverage is not a cross-host wall-time ratio claim. See `checks.md` for the
+exact evidence contract.
 
 ## Choosing a deployment path
 
 | Need | Recommended path |
 | --- | --- |
 | Shipping release; source known at build | Static generated Go |
-| Same-process editor reload on supported Darwin/Linux | Nil-bundle `PreparedRuntimeSlot.Prepare` |
+| Same-process editor reload on supported Darwin/Linux/Windows | Nil-bundle `PreparedRuntimeSlot.Prepare` |
 | Complete behavior outside the native subset | Automatic canonical Machine replay |
 | Same-process generated Go under accepted cgo/plugin limits | Optional `preparedplugin` adapter |
 | Compiled reload where no native installer exists | Rebuild/re-exec or an application-owned worker |

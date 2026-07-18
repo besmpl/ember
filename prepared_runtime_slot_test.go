@@ -93,7 +93,7 @@ func TestPreparedRuntimeSlotRepeatedReloadsReclaimNativeImages(t *testing.T) {
 		Call(...float64) (float64, bool, error)
 	}
 
-	for generation := 0; generation < 32; generation++ {
+	for generation := 0; generation < 1024; generation++ {
 		want := 100 + generation
 		program := preparedRuntimeSlotTestProgram(t, want)
 		candidate, err := slot.Prepare(program, RuntimeOptions{})
@@ -133,6 +133,123 @@ func TestPreparedRuntimeSlotRepeatedReloadsReclaimNativeImages(t *testing.T) {
 	}
 	if _, _, err := active.Call(); err == nil || !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("last native image after slot close error = %v, want closed", err)
+	}
+}
+
+func TestPreparedRuntimeSlotExecutionPolicyUsesCanonicalMachine(t *testing.T) {
+	module := LogicalModule("prepared/reload-native-limits")
+	program := preparedRuntimeSlotSourceProgram(t, module, `
+return function(n)
+    local total = 0
+    while n > 0 do
+        total = total + 1
+        n = n - 1
+    end
+    return total
+end
+`)
+	image, err := program.preparedProgramImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ir, err := buildBackendProgramIR(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, architecture := range []backendNativeArchitecture{
+		backendNativeArchitectureARM64,
+		backendNativeArchitectureX8664,
+	} {
+		artifact, err := emitBackendNativeProgram(ir, architecture)
+		if err != nil {
+			t.Fatalf("architecture %d: %v", architecture, err)
+		}
+		if len(artifact.modules) != 1 || len(artifact.modules[0].functions) < 2 ||
+			!artifact.modules[0].functions[1].prepared {
+			t.Fatalf("architecture %d bounded-loop inventory = %#v", architecture, artifact.modules)
+		}
+	}
+
+	if !preparedRuntimeNativeTestPlatform() {
+		return
+	}
+	var slot PreparedRuntimeSlot
+	candidate, err := slot.Prepare(program, RuntimeOptions{
+		Limits: ExecutionLimits{MaxInstructions: 256},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.Close()
+	native := false
+	for _, executable := range candidate.native.executables {
+		native = native || executable != nil
+	}
+	if !native {
+		t.Skip("current CPU or process policy selected canonical fallback")
+	}
+	if err := slot.Activate(candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := slot.Use(func(runtime *Runtime) error {
+		_, invokeErr := runtime.Invoke(
+			context.Background(),
+			Invocation{Module: module},
+			NumberValue(1),
+		)
+		return invokeErr
+	}); err != nil {
+		t.Fatalf("warm limited native-capable Invoke: %v", err)
+	}
+	err = slot.Use(func(runtime *Runtime) error {
+		_, invokeErr := runtime.Invoke(
+			context.Background(),
+			Invocation{Module: module},
+			NumberValue(100000),
+		)
+		return invokeErr
+	})
+	if !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("limited native-capable Invoke error = %v, want ErrLimitExceeded", err)
+	}
+	if err := slot.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var cancellableSlot PreparedRuntimeSlot
+	candidate, err = cancellableSlot.Prepare(program, RuntimeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.Close()
+	if err := cancellableSlot.Activate(candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := cancellableSlot.Use(func(runtime *Runtime) error {
+		_, invokeErr := runtime.Invoke(
+			context.Background(),
+			Invocation{Module: module},
+			NumberValue(1),
+		)
+		return invokeErr
+	}); err != nil {
+		t.Fatalf("warm native-capable Invoke: %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = cancellableSlot.Use(func(runtime *Runtime) error {
+		_, invokeErr := runtime.Invoke(
+			canceled,
+			Invocation{Module: module},
+			NumberValue(100000),
+		)
+		return invokeErr
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellable native-capable Invoke error = %v, want context.Canceled", err)
+	}
+	if err := cancellableSlot.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

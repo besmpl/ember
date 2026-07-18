@@ -56,29 +56,19 @@ func emitBackendNativeARM64Module(
 	if err != nil {
 		return backendNativeModule{}, err
 	}
+	frameSizes := make([]int, len(candidates))
 	for protoIndex, candidate := range candidates {
 		if candidate == nil {
 			continue
 		}
-		if _, err := planBackendNativeARM64Frame(candidate); err != nil {
+		frame, err := planBackendNativeARM64Frame(candidate)
+		if err != nil {
 			candidates[protoIndex] = nil
+			continue
 		}
+		frameSizes[protoIndex] = frame.size
 	}
-	for changed := true; changed; {
-		changed = false
-		for protoIndex, candidate := range candidates {
-			if candidate == nil {
-				continue
-			}
-			for _, dependency := range candidate.dependencies {
-				if dependency < 0 || int(dependency) >= len(candidates) || candidates[dependency] == nil {
-					candidates[protoIndex] = nil
-					changed = true
-					break
-				}
-			}
-		}
-	}
+	pruneBackendNativeStackCandidates(candidates, frameSizes)
 
 	functionCode := make([]backendNativeARM64FunctionCode, len(irs))
 	functions := make([]backendNativeFunction, len(irs))

@@ -2,7 +2,11 @@ package ember
 
 import "strconv"
 
-const backendNativeMaximumParameters = 8
+const (
+	backendNativeMaximumParameters      = 8
+	backendNativeMaximumStackPathBytes  = 64 << 10
+	backendNativeMaximumRecursiveFrames = backendGoMaxPreparedRecursiveArgument + 2
+)
 
 // backendNativeCandidate is the target-independent numeric subset accepted by
 // reload-time native backends. It owns semantic selection and static-call
@@ -305,4 +309,110 @@ func appendBackendNativeDependency(dependencies []int32, dependency int32) []int
 		}
 	}
 	return append(dependencies, dependency)
+}
+
+// pruneBackendNativeStackCandidates removes functions whose generated body
+// frames cannot fit in the conservative system-stack budget. Each emitter
+// supplies its planned frame sizes; semantic fallback remains target neutral.
+func pruneBackendNativeStackCandidates(candidates []*backendNativeCandidate, frameSizes []int) {
+	count := len(candidates)
+	admitted := make([]bool, count)
+	ownDepths := make([]int, count)
+	pendingDependencies := make([]int, count)
+	callers := make([][]int, count)
+
+	for index, candidate := range candidates {
+		if candidate == nil || index >= len(frameSizes) || frameSizes[index] <= 0 {
+			continue
+		}
+		ownDepth := frameSizes[index]
+		if candidate.options.selfRecursive {
+			if ownDepth > backendNativeMaximumStackPathBytes/backendNativeMaximumRecursiveFrames {
+				continue
+			}
+			ownDepth *= backendNativeMaximumRecursiveFrames
+		}
+		if ownDepth <= backendNativeMaximumStackPathBytes {
+			admitted[index] = true
+			ownDepths[index] = ownDepth
+		}
+	}
+
+	for caller, candidate := range candidates {
+		if candidate == nil {
+			continue
+		}
+		for _, dependency := range candidate.dependencies {
+			dependencyIndex := int(dependency)
+			if dependencyIndex == caller {
+				if !candidate.options.selfRecursive {
+					admitted[caller] = false
+				}
+				continue
+			}
+			if dependencyIndex < 0 || dependencyIndex >= count || candidates[dependencyIndex] == nil {
+				admitted[caller] = false
+				continue
+			}
+			callers[dependencyIndex] = append(callers[dependencyIndex], caller)
+			pendingDependencies[caller]++
+			if !admitted[dependencyIndex] {
+				admitted[caller] = false
+			}
+		}
+	}
+
+	depths := make([]int, count)
+	maximumDependencyDepths := make([]int, count)
+	processed := make([]bool, count)
+	queued := make([]bool, count)
+	queue := make([]int, 0, count)
+	enqueue := func(index int) {
+		if !queued[index] {
+			queued[index] = true
+			queue = append(queue, index)
+		}
+	}
+	for index, candidate := range candidates {
+		if candidate != nil && (!admitted[index] || pendingDependencies[index] == 0) {
+			enqueue(index)
+		}
+	}
+
+	for head := 0; head < len(queue); head++ {
+		index := queue[head]
+		processed[index] = true
+		if admitted[index] {
+			dependencyDepth := maximumDependencyDepths[index]
+			if dependencyDepth > backendNativeMaximumStackPathBytes-ownDepths[index] {
+				admitted[index] = false
+			} else {
+				depths[index] = ownDepths[index] + dependencyDepth
+			}
+		}
+
+		for _, caller := range callers[index] {
+			if processed[caller] {
+				continue
+			}
+			if !admitted[index] {
+				admitted[caller] = false
+				enqueue(caller)
+				continue
+			}
+			pendingDependencies[caller]--
+			if depths[index] > maximumDependencyDepths[caller] {
+				maximumDependencyDepths[caller] = depths[index]
+			}
+			if admitted[caller] && pendingDependencies[caller] == 0 {
+				enqueue(caller)
+			}
+		}
+	}
+
+	for index, candidate := range candidates {
+		if candidate != nil && (!processed[index] || !admitted[index]) {
+			candidates[index] = nil
+		}
+	}
 }

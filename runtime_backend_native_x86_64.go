@@ -54,29 +54,19 @@ func emitBackendNativeX8664Module(
 	if err != nil {
 		return backendNativeModule{}, err
 	}
+	frameSizes := make([]int, len(candidates))
 	for protoIndex, candidate := range candidates {
 		if candidate == nil {
 			continue
 		}
-		if _, err := planBackendNativeX8664Frame(candidate); err != nil {
+		frame, err := planBackendNativeX8664Frame(candidate)
+		if err != nil {
 			candidates[protoIndex] = nil
+			continue
 		}
+		frameSizes[protoIndex] = frame.size
 	}
-	for changed := true; changed; {
-		changed = false
-		for protoIndex, candidate := range candidates {
-			if candidate == nil {
-				continue
-			}
-			for _, dependency := range candidate.dependencies {
-				if dependency < 0 || int(dependency) >= len(candidates) || candidates[dependency] == nil {
-					candidates[protoIndex] = nil
-					changed = true
-					break
-				}
-			}
-		}
-	}
+	pruneBackendNativeStackCandidates(candidates, frameSizes)
 
 	functionCode := make([]backendNativeX8664FunctionCode, len(irs))
 	functions := make([]backendNativeFunction, len(irs))
@@ -151,7 +141,9 @@ const (
 	x8664ConditionParity     = byte(0x8a)
 )
 
-const backendNativeX8664MaximumFrameSize = 1 << 20
+// Keep every subtraction below one 4 KiB page so Windows never requires an
+// unrepresented __chkstk probe. Aggregate call paths have a separate budget.
+const backendNativeX8664MaximumFrameSize = 4096 - 8
 
 type backendNativeX8664Frame struct {
 	captureOffset      int

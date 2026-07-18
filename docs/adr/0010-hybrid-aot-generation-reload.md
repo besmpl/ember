@@ -106,6 +106,12 @@ The executable-memory and private-runtime edge is confined to
   kernel ABI; Windows ARM64 shares the existing register contract.
 - Generated code may read argument and result pointers only for the duration of
   the call and cannot retain Go pointers.
+- Every emitted body frame is smaller than one 4 KiB page, and a shared
+  call-graph analysis caps generated body frames on one admitted native path at
+  64 KiB. Oversized frames, aggregate paths, and unproved call cycles retain
+  canonical replay.
+- Calls with execution limits or a cancellable context select the canonical
+  Machine before entry because the native subset does not poll policy state.
 - The repository's pure-Go scanner allowlists only the exact `purego`,
   executable-memory, assembly-call, and `runtime.cgocall` sites.
 
@@ -121,6 +127,10 @@ x86-64; x86-64 requires SSE4.1. Both emitters and complete execution paths are
 tested with cgo disabled. Hosts whose dynamic-code policy rejects executable
 pages retain the exact Machine fallback.
 
+The generated mapping is trusted in-process code, not an exception or fault
+containment boundary. Unsupported source is rejected before entry, but an
+emitter defect or hardware execution fault may still terminate the process.
+
 ## Consequences
 
 - Changed Luau source can become compiled same-process code without invoking
@@ -133,10 +143,11 @@ pages retain the exact Machine fallback.
 - The accepted four-row production-path capture measures median/worst ratios of
   0.688620/0.692415 for arithmetic `for`, 0.280739/0.286104 for branching,
   0.167772/0.176960 for captured recursion, and 1.268322/1.290334 for iterative
-  Fibonacci against pinned Luau 0.728.
-- Thirty-two repeated generation swaps reclaim each prior mapping and old
-  handles reject calls. A longer resident-memory soak remains a production
-  hardening item.
+  Fibonacci against pinned Luau 0.728 on the certified Darwin ARM64 host.
+  Linux and Windows execution coverage is not a wall-time ratio claim.
+- One thousand twenty-four repeated generation swaps reclaim each prior
+  mapping, and old handles reject calls after every retirement and final slot
+  close.
 - Unsupported mutable captures also proved the fallback itself: a shared
   optimizer bug that removed conditional captured writes was repaired in the
   common compiler, and VM, Machine, and slot replay now agree.

@@ -118,7 +118,11 @@ iterative Fibonacci. The measured path is the public unknown-source
 `LoadProgram -> Prepare -> Activate -> Use -> Runtime.Invoke` path. Every
 median and worst paired Ember/Luau ratio must be at most 1.50. The phase fails
 when native execution is unavailable; exact Machine fallback is correct but is
-not native-performance evidence.
+not native-performance evidence. The accepted ratio receipt is currently
+certified only on the pinned Darwin ARM64 environment below. Native Linux and
+Windows CI proves execution, ABI, mapping protection, and lifecycle behavior;
+it does not silently promote noisy hosted-runner timings into performance
+claims.
 
 On the pinned eight-logical-CPU M1, acquisition starts after three one-second
 samples with aggregate CPU at most 300%. One-minute load remains diagnostic but

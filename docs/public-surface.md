@@ -155,13 +155,16 @@ testable seam.
   while the active generation remains usable. With a non-nil
   `RuntimeOptions.Prepared`, it uses that static or plugin bundle. With a nil
   bundle, it explicitly performs reload-time native preparation on supported
-  Darwin ARM64/x86-64 processes and supplies exact Machine replay entries for
-  unsupported functions, values, or platforms. `Activate` retires and
-  publishes at an explicit idle safe point and performs no compilation,
-  mapping, I/O, or guest work; `Use` scopes one serialized host operation to a
-  stable generation. Candidates are slot-bound and reject stale activation.
-  Successful activation closes old callbacks, suspensions, and executable
-  images with their owning Runtime; no script state is migrated implicitly.
+  Darwin, Linux, and Windows ARM64/x86-64 processes and supplies exact Machine
+  replay entries for unsupported functions, values, platforms, or native stack
+  budgets. An invocation with execution limits or a cancellable context uses
+  the policy-capable Machine even when native code is installed. `Activate`
+  retires and publishes at an explicit idle safe point and performs no
+  compilation, mapping, I/O, or guest work; `Use` scopes one serialized host
+  operation to a stable generation. Candidates are slot-bound and reject stale
+  activation. Successful activation closes old callbacks, suspensions, and
+  executable images with their owning Runtime; no script state is migrated
+  implicitly.
 - `preparedplugin.Open` is the optional cgo/platform-gated editor adapter for
   loading a generated `package main` bundle from an absolute Go-plugin path. It
   is outside the root runtime and returns `ErrUnsupported` rather than choosing
