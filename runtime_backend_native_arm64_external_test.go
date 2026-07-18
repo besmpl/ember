@@ -1,6 +1,7 @@
 package ember_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math"
@@ -11,6 +12,36 @@ import (
 	"github.com/besmpl/ember/internal/parityfixture"
 	"github.com/besmpl/ember/internal/preparednative"
 )
+
+func TestPreparedNativeARM64ArtifactIsDeterministic(t *testing.T) {
+	entry := ember.LogicalModule("prepared-native-arm64-deterministic")
+	program, _, err := ember.LoadProgram(context.Background(), paritySourceLoader{entry.String(): {
+		Name: entry.String(),
+		Text: "local function add(x) return x + 1 end\nlocal function batch(n, seed) local total = 0 for i = 1, n do total = total + add(seed + i) end return total end\nreturn batch\n",
+	}}, ember.ProgramOptions{
+		Entrypoints: []ember.Entrypoint{{Name: "main", Module: entry}},
+		Parallelism: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := ember.EmitPreparedNativeARM64ForTest(program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ember.EmitPreparedNativeARM64ForTest(program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ProgramHash != second.ProgramHash || len(first.Modules) != 1 || len(second.Modules) != 1 ||
+		!bytes.Equal(first.Modules[0].Code, second.Modules[0].Code) {
+		t.Fatal("ARM64 artifact is not deterministic")
+	}
+	if len(first.Modules[0].Functions) != 3 ||
+		!first.Modules[0].Functions[1].Prepared || !first.Modules[0].Functions[2].Prepared {
+		t.Fatalf("ARM64 function inventory = %#v", first.Modules[0].Functions)
+	}
+}
 
 func TestPreparedNativeARM64ScalarSemantics(t *testing.T) {
 	if (runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows") || runtime.GOARCH != "arm64" {

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPreparedRuntimeSlotPreparesSourceUnknownAtHostBuild(t *testing.T) {
@@ -615,6 +616,82 @@ func TestPreparedRuntimeSlotActivatesOnlyAtExplicitSafePoint(t *testing.T) {
 	}
 	if firstPreparedCalls == 0 || secondPreparedCalls == 0 {
 		t.Fatalf("prepared calls = first %d, second %d; want both nonzero", firstPreparedCalls, secondPreparedCalls)
+	}
+	if err := slot.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPreparedRuntimeSlotPreparesWhileActiveGenerationIsInUse(t *testing.T) {
+	firstProgram := preparedRuntimeSlotTestProgram(t, 41)
+	secondProgram := preparedRuntimeSlotTestProgram(t, 42)
+	secondBundle := replayPreparedBundleForTest(t, secondProgram, nil)
+	var slot PreparedRuntimeSlot
+	first, err := slot.Prepare(firstProgram, RuntimeOptions{
+		Prepared: replayPreparedBundleForTest(t, firstProgram, nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := slot.Activate(first); err != nil {
+		t.Fatal(err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	useDone := make(chan error, 1)
+	go func() {
+		useDone <- slot.Use(func(*Runtime) error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+
+	type prepareResult struct {
+		candidate *PreparedRuntimeCandidate
+		err       error
+	}
+	prepared := make(chan prepareResult, 1)
+	go func() {
+		candidate, prepareErr := slot.Prepare(secondProgram, RuntimeOptions{
+			Prepared: secondBundle,
+		})
+		prepared <- prepareResult{candidate: candidate, err: prepareErr}
+	}()
+
+	var result prepareResult
+	select {
+	case result = <-prepared:
+	case <-time.After(5 * time.Second):
+		close(release)
+		<-useDone
+		t.Fatal("Prepare blocked behind active Use")
+	}
+	if result.err != nil {
+		close(release)
+		<-useDone
+		t.Fatal(result.err)
+	}
+	defer result.candidate.Close()
+	if err := slot.Activate(result.candidate); !errors.Is(err, ErrRuntimeBusy) {
+		close(release)
+		<-useDone
+		t.Fatalf("Activate during Use error = %v, want ErrRuntimeBusy", err)
+	}
+	close(release)
+	if err := <-useDone; err != nil {
+		t.Fatal(err)
+	}
+	if got := preparedRuntimeSlotResult(t, &slot); got != 41 {
+		t.Fatalf("active result after overlapping Prepare = %v, want 41", got)
+	}
+	if err := slot.Activate(result.candidate); err != nil {
+		t.Fatal(err)
+	}
+	if got := preparedRuntimeSlotResult(t, &slot); got != 42 {
+		t.Fatalf("result after prepared candidate activation = %v, want 42", got)
 	}
 	if err := slot.Close(); err != nil {
 		t.Fatal(err)
