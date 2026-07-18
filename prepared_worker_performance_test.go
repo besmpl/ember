@@ -27,6 +27,7 @@ const (
 	preparedBatchWorkerMagic            = "EPB1"
 	preparedBatchWorkerMaxError         = 4 << 10
 	preparedWorkerAdmissionEnvironment  = "EMBER_PREPARED_WORKER_ADMISSION_LIVE"
+	preparedWorkerParityCallScale       = 32
 )
 
 func TestPreparedBatchWorkerMatchesEmbedded(t *testing.T) {
@@ -118,6 +119,24 @@ func TestPreparedWorkerAdmissionGateRequiresBothSlopeAndLuauTargets(t *testing.T
 		[]float64{100, 100, 100},
 	); err == nil {
 		t.Fatal("embedded slope above Luau target passed")
+	}
+}
+
+func TestPreparedWorkerParityCallScalePreservesPerCallSlope(t *testing.T) {
+	samples := make(map[int]float64, len(parityIterations))
+	for _, base := range parityIterations {
+		n := base * preparedWorkerParityCallScale
+		samples[n] = float64(n * 4)
+	}
+	if err := validatePreparedWorkerParityWindow(samples); err != nil {
+		t.Fatal(err)
+	}
+	fit, err := fitPreparedWorkerParityLine(samples)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fit.Inner != 4 || fit.Entry != 0 {
+		t.Fatalf("scaled fit = %#v, want 4ns per call with zero intercept", fit)
 	}
 }
 
@@ -233,7 +252,8 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 		workloadHash := parityStringSHA256(seededSource)
 		programHash := parityStringSHA256(programSource)
 		for repeat := 1; repeat <= parityRepeatCount; repeat++ {
-			for iterationIndex, n := range parityIterations {
+			for iterationIndex, baseN := range parityIterations {
+				n := baseN * preparedWorkerParityCallScale
 				order := preparedWorkerEngineOrder(pairIndex, repeat, iterationIndex)
 				point, err := acquireCleanParityPoint(parityPointAttemptLimit, sampleParitySystem, func() ([]parityPointMeasurement, error) {
 					measurements := make([]parityPointMeasurement, 0, len(order))
@@ -314,19 +334,19 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 		for _, engine := range engines {
 			fits[engine] = make([]float64, parityRepeatCount)
 			for repeat := 1; repeat <= parityRepeatCount; repeat++ {
-				if err := validateParityMeasurementWindow(timings[engine][repeat]); err != nil {
+				if err := validatePreparedWorkerParityWindow(timings[engine][repeat]); err != nil {
 					_ = embedded.close()
 					_ = worker.Close()
 					t.Fatalf("%s %s repeat=%d: %v", caseID, engine, repeat, err)
 				}
-				fit, err := fitParityLine(timings[engine][repeat])
+				fit, err := fitPreparedWorkerParityLine(timings[engine][repeat])
 				if err != nil {
 					_ = embedded.close()
 					_ = worker.Close()
 					t.Fatalf("%s %s repeat=%d: %v", caseID, engine, repeat, err)
 				}
 				fits[engine][repeat-1] = fit.Inner
-				resultHash, err := parityResultSetSHA256(results[engine][repeat])
+				resultHash, err := preparedWorkerResultSetSHA256(results[engine][repeat])
 				if err != nil {
 					_ = embedded.close()
 					_ = worker.Close()
@@ -727,6 +747,60 @@ func preparedWorkerParityEntry(t testing.TB, caseID string) parityManifestEntry 
 		t.Fatalf("prepared worker case selection = %#v, want exactly %s", selected, caseID)
 	}
 	return selected[0]
+}
+
+func normalizePreparedWorkerParitySamples(samples map[int]float64) (map[int]float64, error) {
+	if len(samples) != len(parityIterations) {
+		return nil, fmt.Errorf(
+			"prepared worker parity window: got %d points, want %d",
+			len(samples),
+			len(parityIterations),
+		)
+	}
+	normalized := make(map[int]float64, len(parityIterations))
+	for _, base := range parityIterations {
+		n := base * preparedWorkerParityCallScale
+		elapsed, ok := samples[n]
+		if !ok {
+			return nil, fmt.Errorf("prepared worker parity window: missing N=%d", n)
+		}
+		normalized[base] = elapsed
+	}
+	return normalized, nil
+}
+
+func validatePreparedWorkerParityWindow(samples map[int]float64) error {
+	normalized, err := normalizePreparedWorkerParitySamples(samples)
+	if err != nil {
+		return err
+	}
+	return validateParityMeasurementWindow(normalized)
+}
+
+func fitPreparedWorkerParityLine(samples map[int]float64) (parityFit, error) {
+	normalized, err := normalizePreparedWorkerParitySamples(samples)
+	if err != nil {
+		return parityFit{}, err
+	}
+	fit, err := fitParityLine(normalized)
+	if err != nil {
+		return parityFit{}, err
+	}
+	fit.Inner /= preparedWorkerParityCallScale
+	return fit, nil
+}
+
+func preparedWorkerResultSetSHA256(results map[int]string) (string, error) {
+	var builder strings.Builder
+	for _, base := range parityIterations {
+		n := base * preparedWorkerParityCallScale
+		result, ok := results[n]
+		if !ok || result == "" {
+			return "", fmt.Errorf("prepared worker result set: missing N=%d", n)
+		}
+		fmt.Fprintf(&builder, "%d=%s\n", n, result)
+	}
+	return parityStringSHA256(builder.String()), nil
 }
 
 type preparedWorkerAdmissionSummary struct {
