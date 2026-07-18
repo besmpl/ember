@@ -2,6 +2,7 @@
 internal/architectureproof/capture_test.go	measureLuau	pinned-luau	Execute the digest-validated Luau oracle for the no-CGO architecture ceiling.
 internal/architectureproof/capture_test.go	sampleLoad	runner-fingerprint	Read controlled runner load for architecture captures.
 internal/architectureproof/capture_test.go	sampleExternalCPU	runner-fingerprint	Read controlled runner CPU measurements for architecture captures.
+preparedplugin/open_integration_test.go	buildPreparedPlugin	generator-check	Build the generated Go plugin used by the AOT reload integration tracer.
 runtime_parity_test.go	parityCommandOutput	runner-fingerprint	Run pinned parity and fingerprint helper commands.
 runtime_parity_test.go	sampleParitySystem	runner-fingerprint	Read controlled runner load and CPU measurements.
 runtime_parity_test.go	measureParityLuauGuestBatch	pinned-luau	Execute the digest-validated Luau guest-batch oracle.

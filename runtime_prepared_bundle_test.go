@@ -269,7 +269,7 @@ return {
 	assertDetachedOwnerTable(t, thirdTable, 44)
 }
 
-func replayPreparedBundleForTest(t *testing.T, program *Program, onCall func()) *PreparedBundle {
+func replayPreparedBundleForTest(t testing.TB, program *Program, onCall func()) *PreparedBundle {
 	t.Helper()
 	image, err := program.preparedProgramImage()
 	if err != nil {

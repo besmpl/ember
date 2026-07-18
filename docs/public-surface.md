@@ -149,8 +149,19 @@ testable seam.
   Machine path. An ABI, semantic-version, Program-hash, or Proto-inventory
   mismatch returns `*PreparedBundleError` before runtime-owner mutation and
   never silently falls back. Generated bundles are trusted build artifacts,
-  not an untrusted-code sandbox; Ember does not use `init` registration,
-  plugins, helper processes, or runtime Go compilation.
+  not an untrusted-code sandbox; the root runtime does not use `init`
+  registration, helper processes, plugins, or runtime Go compilation.
+- `PreparedRuntimeSlot.Prepare` binds one exact prepared Program into an inert
+  candidate while the active generation remains usable. `Activate` retires and
+  publishes at an explicit idle safe point; `Use` scopes one serialized host
+  operation to a stable generation. Candidates are slot-bound and reject stale
+  activation. Successful activation closes old callbacks and suspensions with
+  their owning Runtime; no script state is migrated implicitly.
+- `preparedplugin.Open` is the optional cgo/platform-gated editor adapter for
+  loading a generated `package main` bundle from an absolute Go-plugin path. It
+  is outside the root runtime and returns `ErrUnsupported` rather than choosing
+  another engine. Static generated packages remain the portable production
+  path.
 - Scripts can read and assign globals as expression values, call host global
   functions, access fields or indexes on host global tables, and pass opaque
   host userdata values through script code. Local and upvalue names take

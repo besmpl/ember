@@ -476,9 +476,23 @@ func scanPureGoPackageUse(relative, owner, importPath, name string, called bool,
 		}
 		return
 	}
+	if reviewedPreparedPluginAPI(relative, owner, importPath, name, called) {
+		return
+	}
 	if pureGoForeignAPI(importPath, name) {
 		result.Issues = append(result.Issues, pureGoBoundaryIssue{Path: relative, Detail: fmt.Sprintf("forbidden foreign or executable-memory API %s.%s", importPath, name)})
 	}
+}
+
+// reviewedPreparedPluginAPI is the one explicit native edge in the repository.
+// Keep this path, owner, and direct-call check exact: the package is an opt-in
+// editor adapter with a cgo-disabled stub, not part of Ember's portable runtime.
+func reviewedPreparedPluginAPI(relative, owner, importPath, name string, called bool) bool {
+	return called &&
+		relative == "preparedplugin/open_supported.go" &&
+		owner == "openPreparedBundle" &&
+		importPath == "plugin" &&
+		name == "Open"
 }
 
 func pureGoProcessAPI(importPath, name string) bool {

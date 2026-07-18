@@ -2,6 +2,12 @@
 
 Status: Accepted
 
+ADR 0010 supersedes only this ADR's blanket plugin prohibition: the root
+runtime and portable release path remain static/no-cgo, while an optional
+platform-isolated editor adapter may load content-addressed generated Go
+plugins. The selected SSA AOT backend, exact binding, side exits, and
+performance gates are unchanged.
+
 ## Context
 
 ADR 0007 made the compact owner-bound Machine Ember's complete production

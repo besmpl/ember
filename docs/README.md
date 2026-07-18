@@ -50,6 +50,9 @@ and retire or delete it when the slice lands or is abandoned.
 - `adr/0009-generated-adaptive-superword-vm.md`: rejected bounded dynamic-VM
   experiment, exact four-family failure evidence, transferable mechanisms,
   and completed deletion gate.
+- `adr/0010-hybrid-aot-generation-reload.md`: prepared-only generation slots,
+  static release bundles, opt-in same-process Go-plugin editor reload, and
+  explicit generation/state lifetime constraints.
 
 ## Workflow Documents
 
