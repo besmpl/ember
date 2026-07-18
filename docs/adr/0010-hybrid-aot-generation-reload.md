@@ -141,15 +141,17 @@ emitter defect or hardware execution fault may still terminate the process.
   qualified numeric region plus the host's real fallback mix, not a blanket
   claim about arbitrary Luau.
 - Exact production-path captures certify both emitted ISA bodies against
-  pinned Luau 0.728. Darwin ARM64 records 0.681820/0.691079 for arithmetic
-  `for`, 0.294280/0.296317 for branching, 0.167200/0.171297 for captured
-  recursion, and 1.150250/1.218300 for iterative Fibonacci. Linux x86-64
-  records 0.513470/0.717228, 0.585633/0.589150, 0.237191/0.237788, and
-  0.673680/0.728353 respectively. The fitted slope is repeated work inside one
-  guest batch, so the OS-independent per-ISA body carries as a faithful
-  equivalent after each target's separate adapter/ABI/executable-lifecycle
-  execution proof. This does not generalize to arbitrary fallback mixes,
-  different CPUs, or one-shot boundary latency.
+  pinned Luau 0.728. Darwin ARM64 records 0.678812/0.694425 for arithmetic
+  `for`, 0.280691/0.281575 for branching, 0.146905/0.163852 for captured
+  recursion, and 1.162371/1.169486 for iterative Fibonacci. Linux x86-64
+  records 0.533502/0.629884, 0.527241/0.529386, 0.234622/0.235687, and
+  0.643121/0.654431 respectively. The fitted slope uses the uniform
+  N=50/500/5,000/50,000 schedule and rejects any engine/repeat whose largest
+  point is shorter than 5 ms. Repeated work remains inside one guest batch, so
+  the OS-independent per-ISA body carries as a faithful equivalent after each
+  target's separate adapter/ABI/executable-lifecycle execution proof. This does
+  not generalize to arbitrary fallback mixes, different CPUs, or one-shot
+  boundary latency.
 - One thousand twenty-four repeated generation swaps reclaim each prior
   mapping, and old handles reject calls after every retirement and final slot
   close.

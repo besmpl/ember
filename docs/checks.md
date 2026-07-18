@@ -72,10 +72,12 @@ Failed runs leave an `INCOMPLETE` marker in the newly created directory.
 `speed2x` additionally names the dynamic-runtime acceptance intent. Both use
 the breaking `guest_batch_v1` contract: one parameterized program and callable
 per case, one positive runtime seed shared by every N point and repeat, runtime
-`N={1,10,100,1000}`, one timed outer entry that executes N seed-dependent guest
-calls, exact integer checksums, and three fitted-slope repeats. Public-call
-lifecycle and allocation measurements remain separate. Output directories are
-caller-owned and must not already exist.
+`N={50,500,5000,50000}`, one timed outer entry that executes N seed-dependent
+guest calls, exact integer checksums, and three fitted-slope repeats. Every
+engine/repeat must spend at least 5 ms at N=50000 or acquisition fails before
+the slope is accepted. Public-call lifecycle and allocation measurements
+remain separate. Output directories are caller-owned and must not already
+exist.
 
 ```sh
 CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau \
@@ -147,19 +149,31 @@ digests before running this profile, then uploads the complete capture. A green
 job is an exact x86-64 receipt; a timing failure remains visible rather than
 being converted to semantic-only success.
 
-Exact commit `6bd26873b09aadbfe473098ae20dde2bc978703d`, CI run
-`29651961727`, and capture
-`afeaee0a2f8cc43c8fc367195d5e8cf6333b161c670bdea8e07819c290dfa534`
-record Linux `6.17.0-1020-azure` on an AMD EPYC 9V74, with environment hash
-`28a72d89a5d48af3851b647979595791be357e2f9b50c1386b479d41c883bceb`.
-All 96 raw rows are uncontaminated. The paired median/worst ratios are:
+Exact commit `ae62525718606d2c5dbdb43a02ed05ed653bc27a` binds both
+hardened-protocol receipts. Darwin ARM64 capture
+`8886a9cd770bbb6eab47859bfdcab31a0d97d2f24cad776a85f1ab4dbfd1572e`
+uses environment hash
+`7d7d8f68a17a5295d7401e234d8cd6630ef20ceeef6e8d97aaae1908187d1d19`;
+its raw/slopes SHA-256 values are
+`4c8fb23d41bf0eb6eebe5fb8f9e4e816fd8ad8d89f1001d38e903ce71a889845`
+and `35f6418e0a2d8d45b651dfcc05c84dfda3f3d9a23beb226ebf2761adcf82280a`.
+CI run `29652697515` records Linux `6.17.0-1020-azure` on an AMD EPYC
+7763 and uploads artifact `8431958969`. Its capture
+`16cb1b7431e42bbafa0a2002c4b061cfeafb0f8d36f96c766e6144289865df93`
+uses environment hash
+`1562b610760db9a7886fe04091a459adf0e3cfdf507d3e7827a017b45fb43ce9`;
+its raw/slopes SHA-256 values are
+`66d3afe6de4d7300143e405eacaa9828a45e1bd531b24776c96f522f7a3d7048`
+and `5bc66c2ad17a9ed0ad8008f90e027968b0ac4255d483c50c967c589926d32a9f`.
+Both receipts contain exactly 96 uncontaminated raw rows, including 24 rows at
+each declared N. The paired median/worst ratios are:
 
-| Frozen row | Darwin ARM64 | Linux x86-64 |
+| Qualified row | Darwin ARM64 | Linux x86-64 |
 | --- | ---: | ---: |
-| arithmetic `for` | 0.681820 / 0.691079 | 0.513470 / 0.717228 |
-| `while` plus branch | 0.294280 / 0.296317 | 0.585633 / 0.589150 |
-| recursive Fibonacci | 0.167200 / 0.171297 | 0.237191 / 0.237788 |
-| iterative Fibonacci | 1.150250 / 1.218300 | 0.673680 / 0.728353 |
+| arithmetic `for` | 0.678812 / 0.694425 | 0.533502 / 0.629884 |
+| `while` plus branch | 0.280691 / 0.281575 | 0.527241 / 0.529386 |
+| recursive Fibonacci | 0.146905 / 0.163852 | 0.234622 / 0.235687 |
+| iterative Fibonacci | 1.162371 / 1.169486 | 0.643121 / 0.654431 |
 
 The fit is `T(N)=entry+N*inner`, and `N` repetitions execute inside one
 qualified guest batch. The ratio therefore measures the private repeated
