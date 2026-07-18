@@ -35,18 +35,19 @@
 - Static prepared Go passes all 74 all-37 rows; unsupported entries replay through Machine. P1's numeric frame work binds generated Go while effect orchestration replays.
 - ADR 0010's native reload proves only four numeric rows. The slot, `runtime_prepared_native.go`, executable-memory `runtime_backend_native*`, `internal/preparednative`, and `preparedplugin` form the deletion family.
 - Owner-bound callbacks, suspensions, userdata, and values cannot cross processes. Existing slot tests prove safe-point/stale-handle behavior, not transferable state.
-- Provisional dirty-worktree P1 probes matched all three hashes, kept prepared host slope near `1.0x`, and put direct exchange p99 far below budget; claims await paired clean receipts. Generic crossing scaling makes batching mandatory.
+- Clean P1 receipts at `fcef38d4` bind two all-37 acquisitions to environment `7d7d8f…`: worst worker/Luau p90 was `0.191x`/`0.198x`, host slope was `1.080x`/`1.008x`, and exchange p99 was 41.9/19.2 microseconds. Generic crossing scaling makes batching mandatory.
 - `emberc` deterministically emits a bundle but does not embed a reconstructible Program, build an executable, supervise it, or attest an artifact. The pure-Go policy currently rejects unallowlisted `os/exec` use.
 
 ## Execution path
 
-### P1. Freeze the typed turn and decisive admission [D1, D5]
+### P1. Freeze the typed turn and decisive admission [D1, D5] — complete
 
 - **Touch:** private typed turn/probe fixtures, generated numeric work, exact all-37 fixtures, and the admission wrapper.
 - **Change:** Carry canonical state, projection, ordered events/completions, commands/effects, and revision. Run identical traces through pinned Luau, embedded generated numeric work, and one child exchange; keep effect orchestration exact. Prove semantic restart feasibility from a quiescent checkpoint. Use the batch observer only to discriminate crossing shape. Reject extra exchanges, pending activation, or missing D5.
 - **Proof:** Two bound captures prove three-engine hashes, all-37/matched slopes, rich-turn and direct-exchange quantiles, process ceilings, raw inventories, and crossing scaling.
+- **Result:** Capture IDs `396f0330…` and `cb381eab…` passed exact schedule replay and paired validation from `/tmp/ember-p1-final-receipts.XUGzTJ`; admission self-tests, `go test ./...`, `go build ./...`, and `scripts/check` pass. The P1 kill gate retains the architecture.
 
-### P2. Deepen the transactional worker island [D2, D3]
+### P2. Deepen the transactional worker island [D2, D3] — in progress
 
 - **Touch:** new private `internal/preparedworker` module and interface-level contract tests.
 - **Change:** Implement typed `Prepare`/`Activate`/`Transact`/`Close` over opaque identities. Inject application checkpoint codec/quiescence policy plus journal and outbox ports with an in-memory adapter. Cache identical completions, reject conflicts/gaps, classify guest/identity/protocol/stale/lost/conflict/unknown-commit failures, and never retry uncertainty.
