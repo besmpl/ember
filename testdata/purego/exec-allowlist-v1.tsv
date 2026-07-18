@@ -3,6 +3,10 @@ internal/architectureproof/capture_test.go	measureLuau	pinned-luau	Execute the d
 internal/architectureproof/capture_test.go	sampleLoad	runner-fingerprint	Read controlled runner load for architecture captures.
 internal/architectureproof/capture_test.go	sampleExternalCPU	runner-fingerprint	Read controlled runner CPU measurements for architecture captures.
 preparedplugin/open_integration_test.go	buildPreparedPlugin	generator-check	Build the generated Go plugin used by the AOT reload integration tracer.
+prepared_worker_admission_test.go	startPreparedWorkerProcess	test-helper	Launch the disposable application-owned static-AOT worker probe.
+prepared_worker_host_admission_test.go	runPreparedWorkerLuauTrace	pinned-luau	Execute the digest-validated Luau oracle for the typed host trace.
+prepared_worker_host_admission_test.go	samplePreparedWorkerProcess	runner-fingerprint	Read attributable CPU and RSS for the admission parent and worker child.
+prepared_worker_performance_test.go	startPreparedBatchWorker	test-helper	Launch one checked-in exact prepared batch in a disposable worker process.
 runtime_parity_test.go	parityCommandOutput	runner-fingerprint	Run pinned parity and fingerprint helper commands.
 runtime_parity_test.go	sampleParitySystem	runner-fingerprint	Read controlled runner load and CPU measurements.
 runtime_parity_test.go	measureParityLuauGuestBatch	pinned-luau	Execute the digest-validated Luau guest-batch oracle.

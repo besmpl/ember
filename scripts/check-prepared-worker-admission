@@ -1,0 +1,662 @@
+#!/bin/sh
+set -eu
+
+script_dir=${0%/*}
+[ "$script_dir" = "$0" ] && script_dir=.
+repo_root=$(cd "$script_dir/.." && pwd)
+cd "$repo_root"
+
+all37_inventory_sha256=0b0745ccf43ea4e1feb45af8fd215354e9af8ae1358271749c679622c3459b42
+
+die() {
+	printf 'check-prepared-worker-admission: %s\n' "$1" >&2
+	exit 2
+}
+
+hash_file() {
+	if command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 "$1" | awk 'NF == 2 { print $1 }'
+	elif command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | awk 'NF == 2 { print $1 }'
+	else
+		die 'SHA-256 tool is required'
+	fi
+}
+
+hash_stdin() {
+	if command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 | awk 'NF == 2 { print $1 }'
+	elif command -v sha256sum >/dev/null 2>&1; then
+		sha256sum | awk 'NF == 2 { print $1 }'
+	else
+		die 'SHA-256 tool is required'
+	fi
+}
+
+quiet_sample() {
+	if [ -n "${1:-}" ]; then
+		awk -v line="$2" 'NR == line { print; exit }' "$1"
+		return
+	fi
+	case "$(uname -s)" in
+	Darwin) load=$(sysctl -n vm.loadavg | awk '{ print $2 }') ;;
+	Linux) load=$(awk '{ print $1 }' /proc/loadavg) ;;
+	*) return 1 ;;
+	esac
+	cpu=$(LC_ALL=C ps -A -o %cpu= | awk '{ sum += $1 } END { printf "%.6f", sum + 0 }')
+	printf '%s %s\n' "$load" "$cpu"
+}
+
+sample_is_quiet() {
+	awk -v load_value="$1" -v cpu_value="$2" 'BEGIN {
+		n = "^[0-9]+([.][0-9]+)?$"
+		exit !((load_value ~ n) && (cpu_value ~ n) && cpu_value <= 300.0)
+	}'
+}
+
+wait_for_quiet() {
+	sample_file=$1
+	max_samples=$2
+	sleep_seconds=$3
+	consecutive=0
+	i=1
+	while [ "$i" -le "$max_samples" ]; do
+		if ! sample=$(quiet_sample "$sample_file" "$i"); then
+			return 2
+		fi
+		quiet_last_sample=$sample
+		load_value=${sample%% *}
+		cpu_value=${sample#* }
+		if sample_is_quiet "$load_value" "$cpu_value"; then
+			consecutive=$((consecutive + 1))
+			[ "$consecutive" -ge 3 ] && return 0
+		else
+			consecutive=0
+		fi
+		if [ "$i" -lt "$max_samples" ] && [ "$sleep_seconds" -gt 0 ]; then
+			sleep "$sleep_seconds"
+		fi
+		i=$((i + 1))
+	done
+	return 1
+}
+
+summary_passes() {
+	awk -F '\t' \
+		-v expected_pair="${2:-}" \
+		-v expected_rows="${3:-0}" \
+		-v expected_capture="${4:-}" \
+		-v expected_source="${5:-}" \
+		-v expected_environment="${6:-}" '
+		BEGIN {
+			header = "schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tworker_luau_median\tworker_luau_p90\tembedded_luau_median\tembedded_luau_p90\tworker_embedded_max\tstatus\tenvironment_sha256"
+		}
+		NR == 1 {
+			if ($0 != header) invalid = 1
+			next
+		}
+		{
+			rows++
+			key = $5 "/" $6
+			if (seen[key]++ || NF != 13 || $1 != "1" || ($3 != "a" && $3 != "b") ||
+				(expected_pair != "" && $3 != expected_pair) || $2 == "" || $4 == "" ||
+				$7 <= 0 || $8 <= 0 || $9 <= 0 || $10 <= 0 || $11 <= 0 ||
+				$7 > 1.00 || $8 > 1.05 || $9 > 1.00 || $10 > 1.05 || $12 != "PASS" ||
+				$13 == "" || (expected_capture != "" && $2 != expected_capture) ||
+				(expected_source != "" && $4 != expected_source) ||
+				(expected_environment != "" && $13 != expected_environment)) invalid = 1
+			if (rows == 1) {
+				capture_id = $2
+				capture_pair = $3
+				source_commit = $4
+				environment = $13
+			} else if ($2 != capture_id || $3 != capture_pair || $4 != source_commit || $13 != environment) invalid = 1
+		}
+		END { exit invalid || rows == 0 || (expected_rows > 0 && rows != expected_rows) }
+	' "$1"
+}
+
+host_summary_passes() {
+	awk -F '\t' \
+		-v expected_pair="$2" \
+		-v expected_capture="${3:-}" \
+		-v expected_source="${4:-}" \
+		-v expected_environment="${5:-}" '
+		NR == 1 { if ($0 != "field\tvalue") invalid = 1; next }
+		NF != 2 || seen[$1]++ { invalid = 1; next }
+		{ value[$1] = $2 }
+		END {
+			required["schema_version"] = 1
+			required["capture_id"] = 1
+			required["capture_pair"] = 1
+			required["source_commit"] = 1
+			required["environment_sha256"] = 1
+			required["semantic_match"] = 1
+			required["exchange_phases"] = 1
+			required["worker_embedded_slope_max"] = 1
+			required["worker_embedded_slope_budget"] = 1
+			required["frame_budget_ns"] = 1
+			required["exchange_budget_ns"] = 1
+			required["embedded_latency_p50_ns"] = 1
+			required["embedded_latency_p95_ns"] = 1
+			required["embedded_latency_p99_ns"] = 1
+			required["worker_latency_p50_ns"] = 1
+			required["worker_latency_p95_ns"] = 1
+			required["worker_latency_p99_ns"] = 1
+			required["representative_exchange_p50_ns"] = 1
+			required["representative_exchange_p95_ns"] = 1
+			required["representative_exchange_p99_ns"] = 1
+			required["rss_safety_ceiling_bytes"] = 1
+			required["status"] = 1
+			for (key in required) if (!(key in value) || value[key] == "") invalid = 1
+			if (value["schema_version"] != 1 || value["capture_pair"] != expected_pair ||
+				(expected_capture != "" && value["capture_id"] != expected_capture) ||
+				(expected_source != "" && value["source_commit"] != expected_source) ||
+				(expected_environment != "" && value["environment_sha256"] != expected_environment) ||
+				value["semantic_match"] != "true" || value["exchange_phases"] != 1 ||
+				value["worker_embedded_slope_max"] <= 0 ||
+				value["worker_embedded_slope_max"] > value["worker_embedded_slope_budget"] ||
+				value["representative_exchange_p50_ns"] <= 0 ||
+				value["representative_exchange_p95_ns"] < value["representative_exchange_p50_ns"] ||
+				value["representative_exchange_p99_ns"] < value["representative_exchange_p95_ns"] ||
+				value["representative_exchange_p99_ns"] > value["exchange_budget_ns"] ||
+				value["status"] != "PASS") invalid = 1
+			exit invalid
+		}
+	' "$1"
+}
+
+semantic_evidence_passes() {
+	awk -F '\t' \
+		-v expected_pair="$2" \
+		-v expected_capture="${3:-}" \
+		-v expected_source="${4:-}" \
+		-v expected_environment="${5:-}" '
+		BEGIN { header = "schema_version\tcapture_id\tcapture_pair\tsource_commit\tengine\ttrace_sha256\tstatus\tenvironment_sha256" }
+		NR == 1 { if ($0 != header) invalid = 1; next }
+		{
+			rows++
+			if (NF != 8 || $1 != 1 || $3 != expected_pair || seen[$5]++ || $6 == "" || $7 != "PASS" ||
+				(expected_capture != "" && $2 != expected_capture) ||
+				(expected_source != "" && $4 != expected_source) ||
+				(expected_environment != "" && $8 != expected_environment)) invalid = 1
+			if (rows == 1) { capture = $2; source = $4; trace = $6; environment = $8 }
+			else if ($2 != capture || $4 != source || $6 != trace || $8 != environment) invalid = 1
+		}
+		END {
+			if (!seen["embedded"] || !seen["worker"] || !seen["luau-language-oracle"] || rows != 3) invalid = 1
+			exit invalid
+		}
+	' "$1"
+}
+
+capture_rows_pass() {
+	awk -F '\t' \
+		-v expected_header="$2" \
+		-v expected_fields="$3" \
+		-v expected_rows="$4" \
+		-v expected_capture="$5" \
+		-v expected_pair="$6" \
+		-v expected_source="$7" \
+		-v expected_environment="$8" \
+		-v key_spec="$9" '
+		BEGIN { key_count = split(key_spec, key_columns, ",") }
+		NR == 1 { if ($0 != expected_header) invalid = 1; next }
+		{
+			rows++
+			if (NF != expected_fields || $1 != 1 || $2 != expected_capture ||
+				$3 != expected_pair || $4 != expected_source || $NF != expected_environment) invalid = 1
+			key = ""
+			for (part = 1; part <= key_count; part++) key = key SUBSEP $(key_columns[part])
+			if (seen[key]++) invalid = 1
+		}
+		END { exit invalid || rows != expected_rows }
+	' "$1"
+}
+
+metadata_file_passes() {
+	awk -F '\t' \
+		-v expected_capture="$2" \
+		-v expected_pair="$3" \
+		-v expected_source="$4" \
+		-v expected_environment="$5" \
+		-v expected_cases="$6" '
+		NR == 1 { if ($0 != "field\tvalue") invalid = 1; next }
+		NF != 2 || seen[$1]++ { invalid = 1; next }
+		{ value[$1] = $2 }
+		END {
+			if (value["schema_version"] != 1 || value["capture_id"] != expected_capture ||
+				value["capture_pair"] != expected_pair || value["source_commit"] != expected_source ||
+				value["environment_sha256"] != expected_environment || value["case_count"] != expected_cases) invalid = 1
+			exit invalid
+		}
+	' "$1"
+}
+
+host_slopes_match_summary() {
+	awk -F '\t' -v expected="$2" '
+		NR == 1 { next }
+		{
+			if (($5 != "embedded" && $5 != "worker") || $6 < 1 || $6 > 3 || $7 <= 0 || slope[$5, $6] != "") invalid = 1
+			slope[$5, $6] = $7
+		}
+		END {
+			for (repeat = 1; repeat <= 3; repeat++) {
+				if (slope["embedded", repeat] <= 0 || slope["worker", repeat] <= 0) invalid = 1
+				ratio = slope["worker", repeat] / slope["embedded", repeat]
+				if (ratio > maximum) maximum = ratio
+			}
+			difference = maximum - expected
+			if (difference < 0) difference = -difference
+			tolerance = expected * 0.000000000001 + 0.000000000001
+			exit invalid || expected <= 0 || difference > tolerance
+		}
+	' "$1"
+}
+
+resource_evidence_passes() {
+	awk -F '\t' -v ceiling="$2" '
+		NR == 1 { next }
+		NR == 2 {
+			if ($5 <= 0 || $6 < 0 || $7 < 0 || $8 <= 0 || $9 <= 0 || $8 > ceiling || $9 > ceiling) invalid = 1
+		}
+		END { exit invalid || NR != 2 || ceiling <= 0 }
+	' "$1"
+}
+
+parity_raw_domains_pass() {
+	awk -F '\t' '
+		NR == 1 { next }
+		{
+			if (($7 != "embedded" && $7 != "worker" && $7 != "luau") ||
+				$8 !~ /^[123]$/ || $9 !~ /^[0-9]+$/ || $9 < 1 || $9 > 36 ||
+				($10 != 50 && $10 != 500 && $10 != 5000 && $10 != 50000) || $12 <= 0) invalid = 1
+		}
+		END { exit invalid || NR < 2 }
+	' "$1"
+}
+
+parity_slope_domains_pass() {
+	awk -F '\t' '
+		NR == 1 { next }
+		{
+			if (($7 != "embedded" && $7 != "worker" && $7 != "luau") || $8 !~ /^[123]$/ || $9 <= 0) invalid = 1
+		}
+		END { exit invalid || NR < 2 }
+	' "$1"
+}
+
+host_slope_raw_domains_pass() {
+	awk -F '\t' '
+		NR == 1 { next }
+		{
+			if (($5 != "embedded" && $5 != "worker") || $6 !~ /^[123]$/ || $7 !~ /^[123]$/ ||
+				($8 != "embedded,worker" && $8 != "worker,embedded") ||
+				($9 != 200 && $9 != 2000 && $9 != 10000 && $9 != 20000) || $10 <= 0) invalid = 1
+		}
+		END { exit invalid || NR < 2 }
+	' "$1"
+}
+
+host_latency_domains_pass() {
+	awk -F '\t' -v maximum="$2" -v exchange_only="${3:-0}" '
+		NR == 1 { next }
+		{
+			if ($5 !~ /^[0-9]+$/ || $5 < 1 || $5 > maximum || seen[$5]++) invalid = 1
+			if (exchange_only) {
+				if ($6 <= 0) invalid = 1
+			} else if (($6 != "embedded,worker" && $6 != "worker,embedded") || $7 <= 0 || $8 <= 0 || $9 < 0) invalid = 1
+		}
+		END { exit invalid || NR != maximum + 1 }
+	' "$1"
+}
+
+host_crossing_domains_pass() {
+	awk -F '\t' '
+		NR == 1 { next }
+		{
+			if ($5 !~ /^[123]$/ || ($6 != 0 && $6 != 1 && $6 != 10 && $6 != 100 && $6 != 1000) ||
+				($7 != "batched" && $7 != "chatty") || $8 < 0) invalid = 1
+		}
+		END { exit invalid || NR < 2 }
+	' "$1"
+}
+
+case_inventory() {
+	awk -F '\t' 'NR > 1 { key = $5 "/" $6; if (!seen[key]++) print key }' "$1" | LC_ALL=C sort | hash_stdin
+}
+
+capture_field() {
+	awk -F '\t' -v wanted="$2" '$1 == wanted { if (found++) exit 2; value = $2 } END { if (!found) exit 1; print value }' "$1"
+}
+
+validate_capture() {
+	capture=$1
+	expected_pair=$2
+	[ -d "$capture" ] || die "capture directory missing: $capture"
+	[ ! -e "$capture/INCOMPLETE" ] || die "capture is incomplete: $capture"
+	for artifact in raw.tsv slopes.tsv summary.tsv environment.tsv acceptance-environment.tsv cases.txt host-semantic.tsv host-slope-raw.tsv host-slopes.tsv host-latency.tsv host-exchange-latency.tsv host-resources.tsv host-crossing-scaling.tsv host-summary.tsv; do
+		[ -s "$capture/$artifact" ] || die "$capture/$artifact missing or empty"
+	done
+	[ "$(wc -l <"$capture/cases.txt" | tr -d ' ')" = 1 ] || die "$capture/cases.txt must contain exactly one selection"
+	case_label=$(sed -n '1p' "$capture/cases.txt")
+	if [ "$case_label" = all-37 ]; then
+		expected_case_count=37
+	else
+		expected_case_count=$(printf '%s\n' "$case_label" | awk -F ',' '{ print NF }')
+	fi
+
+	host_summary_passes "$capture/host-summary.tsv" "$expected_pair" || die "$capture host summary failed"
+	capture_id=$(capture_field "$capture/host-summary.tsv" capture_id)
+	source_commit=$(capture_field "$capture/host-summary.tsv" source_commit)
+	environment=$(capture_field "$capture/host-summary.tsv" environment_sha256)
+	[ "${#capture_id}" -eq 64 ] || die "$capture capture ID is not SHA-256"
+	case "$capture_id" in *[!0-9a-f]*) die "$capture capture ID is not lowercase hexadecimal" ;; esac
+	[ "${#environment}" -eq 64 ] || die "$capture environment ID is not SHA-256"
+	case "$environment" in *[!0-9a-f]*) die "$capture environment ID is not lowercase hexadecimal" ;; esac
+	case "$source_commit" in *[!0-9a-f]*) die "$capture source commit is not lowercase hexadecimal" ;; esac
+	[ "${#source_commit}" -eq 40 ] || [ "${#source_commit}" -eq 64 ] || die "$capture source commit has invalid length"
+	[ "$(hash_file "$capture/acceptance-environment.tsv")" = "$environment" ] || die "$capture acceptance environment hash differs"
+	host_summary_passes "$capture/host-summary.tsv" "$expected_pair" "$capture_id" "$source_commit" "$environment" || die "$capture host metadata differs"
+	summary_passes "$capture/summary.tsv" "$expected_pair" "$expected_case_count" "$capture_id" "$source_commit" "$environment" || die "$capture summary failed"
+	if [ "$case_label" = all-37 ]; then
+		[ "$(case_inventory "$capture/summary.tsv")" = "$all37_inventory_sha256" ] || die "$capture is not the frozen all-37 inventory"
+	fi
+	semantic_evidence_passes "$capture/host-semantic.tsv" "$expected_pair" "$capture_id" "$source_commit" "$environment" || die "$capture semantic evidence failed"
+	metadata_file_passes "$capture/environment.tsv" "$capture_id" "$expected_pair" "$source_commit" "$environment" "$expected_case_count" || die "$capture environment metadata failed"
+
+	capture_rows_pass "$capture/raw.tsv" \
+		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tengine\trepeat\torder\tn\tseed\telapsed_ns\tresult\tworkload_sha256\tprogram_sha256\tenvironment_sha256" \
+		16 "$((expected_case_count * 36))" "$capture_id" "$expected_pair" "$source_commit" "$environment" "5,6,7,8,10" || die "$capture raw inventory failed"
+	parity_raw_domains_pass "$capture/raw.tsv" || die "$capture raw coordinate domain failed"
+	capture_rows_pass "$capture/slopes.tsv" \
+		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tengine\trepeat\tslope_ns_per_guest_call\tintercept_ns\tresult_set_sha256\tworkload_sha256\tprogram_sha256\tenvironment_sha256" \
+		14 "$((expected_case_count * 9))" "$capture_id" "$expected_pair" "$source_commit" "$environment" "5,6,7,8" || die "$capture slope inventory failed"
+	parity_slope_domains_pass "$capture/slopes.tsv" || die "$capture slope coordinate domain failed"
+	[ "$(case_inventory "$capture/summary.tsv")" = "$(case_inventory "$capture/raw.tsv")" ] || die "$capture raw case inventory differs"
+	[ "$(case_inventory "$capture/summary.tsv")" = "$(case_inventory "$capture/slopes.tsv")" ] || die "$capture slope case inventory differs"
+
+	capture_rows_pass "$capture/host-slope-raw.tsv" \
+		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tengine\trepeat\ttrial\torder\twork\telapsed_ns\tresult_sha256\tenvironment_sha256" \
+		12 72 "$capture_id" "$expected_pair" "$source_commit" "$environment" "5,6,7,9" || die "$capture host slope raw inventory failed"
+	host_slope_raw_domains_pass "$capture/host-slope-raw.tsv" || die "$capture host slope raw coordinate domain failed"
+	capture_rows_pass "$capture/host-slopes.tsv" \
+		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tengine\trepeat\tslope_ns_per_work\tintercept_ns\tresult_set_sha256\tenvironment_sha256" \
+		10 6 "$capture_id" "$expected_pair" "$source_commit" "$environment" "5,6" || die "$capture host slope inventory failed"
+	host_slopes_match_summary "$capture/host-slopes.tsv" "$(capture_field "$capture/host-summary.tsv" worker_embedded_slope_max)" || die "$capture host slope summary differs"
+	capture_rows_pass "$capture/host-latency.tsv" \
+		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tsample\torder\tembedded_ns\tworker_ns\tobserved_worker_minus_embedded_ns_clamped\tresult_sha256\tenvironment_sha256" \
+		11 4096 "$capture_id" "$expected_pair" "$source_commit" "$environment" "5" || die "$capture host latency inventory failed"
+	host_latency_domains_pass "$capture/host-latency.tsv" 4096 || die "$capture host latency coordinate domain failed"
+	capture_rows_pass "$capture/host-exchange-latency.tsv" \
+		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tsample\tround_trip_ns\tresult_sha256\tenvironment_sha256" \
+		8 4096 "$capture_id" "$expected_pair" "$source_commit" "$environment" "5" || die "$capture host exchange inventory failed"
+	host_latency_domains_pass "$capture/host-exchange-latency.tsv" 4096 1 || die "$capture host exchange coordinate domain failed"
+	capture_rows_pass "$capture/host-resources.tsv" \
+		"schema_version\tcapture_id\tcapture_pair\tsource_commit\twall_ns\tparent_cpu_ns\tchild_cpu_ns\tparent_peak_rss_bytes\tchild_peak_rss_bytes\tenvironment_sha256" \
+		10 1 "$capture_id" "$expected_pair" "$source_commit" "$environment" "1" || die "$capture host resource inventory failed"
+	resource_evidence_passes "$capture/host-resources.tsv" "$(capture_field "$capture/host-summary.tsv" rss_safety_ceiling_bytes)" || die "$capture host resource evidence failed"
+	capture_rows_pass "$capture/host-crossing-scaling.tsv" \
+		"schema_version\tcapture_id\tcapture_pair\tsource_commit\trepeat\texchanges\tshape\telapsed_ns\tresult_sha256\tenvironment_sha256" \
+		10 30 "$capture_id" "$expected_pair" "$source_commit" "$environment" "5,6,7" || die "$capture host crossing inventory failed"
+	host_crossing_domains_pass "$capture/host-crossing-scaling.tsv" || die "$capture host crossing coordinate domain failed"
+}
+
+compare_captures() {
+	capture_a=$1
+	capture_b=$2
+	validate_capture "$capture_a" a
+	validate_capture "$capture_b" b
+	case_a=$(sed -n '1p' "$capture_a/cases.txt")
+	case_b=$(sed -n '1p' "$capture_b/cases.txt")
+	[ "$case_a" = "$case_b" ] || die 'capture case selections differ'
+	[ "$case_a" = all-37 ] || die 'paired admission requires the frozen all-37 inventory'
+	capture_id_a=$(capture_field "$capture_a/host-summary.tsv" capture_id)
+	capture_id_b=$(capture_field "$capture_b/host-summary.tsv" capture_id)
+	[ "$capture_id_a" != "$capture_id_b" ] || die 'paired captures share one acquisition ID'
+	source_a=$(capture_field "$capture_a/host-summary.tsv" source_commit)
+	source_b=$(capture_field "$capture_b/host-summary.tsv" source_commit)
+	[ "$source_a" = "$source_b" ] || die 'capture source commits differ'
+	environment_a=$(capture_field "$capture_a/host-summary.tsv" environment_sha256)
+	environment_b=$(capture_field "$capture_b/host-summary.tsv" environment_sha256)
+	[ "$environment_a" = "$environment_b" ] || die 'capture environments differ'
+	trace_a=$(awk -F '\t' '$5 == "embedded" { print $6 }' "$capture_a/host-semantic.tsv")
+	trace_b=$(awk -F '\t' '$5 == "embedded" { print $6 }' "$capture_b/host-semantic.tsv")
+	[ "$trace_a" = "$trace_b" ] || die 'capture semantic traces differ'
+	inventory_a=$(awk -F '\t' 'NR > 1 { print $5 "/" $6 }' "$capture_a/summary.tsv" | LC_ALL=C sort | hash_stdin)
+	inventory_b=$(awk -F '\t' 'NR > 1 { print $5 "/" $6 }' "$capture_b/summary.tsv" | LC_ALL=C sort | hash_stdin)
+	[ "$inventory_a" = "$inventory_b" ] || die 'capture case inventories differ'
+	printf 'check-prepared-worker-admission: paired captures PASS (%s)\n' "$source_a"
+}
+
+mark_incomplete() {
+	if [ -n "${output:-}" ] && [ -d "$output" ]; then
+		touch "$output/INCOMPLETE" 2>/dev/null || true
+	fi
+}
+
+self_test() {
+	q=$(mktemp -d "${TMPDIR:-/tmp}/prepared-worker-admission-self-test.XXXXXX")
+	trap 'rm -rf "$q"' EXIT HUP INT TERM
+	printf '%s\n' '99 0' '99 0' '99 0' >"$q/quiet"
+	wait_for_quiet "$q/quiet" 3 0 || die 'quiet fixture stayed locked'
+	printf '%s\n' '1 301' '1 0' '1 301' '1 0' >"$q/busy"
+	if wait_for_quiet "$q/busy" 4 0; then
+		die 'busy fixture unlocked'
+	fi
+	cat >"$q/summary.tsv" <<'EOF'
+schema_version	capture_id	capture_pair	source_commit	corpus	name	worker_luau_median	worker_luau_p90	embedded_luau_median	embedded_luau_p90	worker_embedded_max	status	environment_sha256
+1	fixture-a	a	0000000000000000000000000000000000000000	classic	recursive_fibonacci	0.2	0.3	0.2	0.3	1.01	PASS	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+	summary_passes "$q/summary.tsv" a 1 fixture-a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb || die 'valid summary fixture failed'
+	sed 's/PASS/FAIL/' "$q/summary.tsv" >"$q/failing.tsv"
+	if summary_passes "$q/failing.tsv" a 1 fixture-a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; then
+		die 'failing summary fixture passed'
+	fi
+	if summary_passes "$q/summary.tsv" a 1 spliced-capture 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; then
+		die 'summary from another capture passed'
+	fi
+	cat >"$q/host-summary.tsv" <<'EOF'
+field	value
+schema_version	1
+capture_id	fixture-a
+capture_pair	a
+source_commit	0000000000000000000000000000000000000000
+environment_sha256	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+semantic_match	true
+exchange_phases	1
+worker_embedded_slope_max	1.01
+worker_embedded_slope_budget	1.50
+frame_budget_ns	1000
+exchange_budget_ns	100
+embedded_latency_p50_ns	10
+embedded_latency_p95_ns	20
+embedded_latency_p99_ns	30
+worker_latency_p50_ns	15
+worker_latency_p95_ns	25
+worker_latency_p99_ns	35
+representative_exchange_p50_ns	5
+representative_exchange_p95_ns	10
+representative_exchange_p99_ns	20
+rss_safety_ceiling_bytes	1024
+status	PASS
+EOF
+	host_summary_passes "$q/host-summary.tsv" a fixture-a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb || die 'valid host summary fixture failed'
+	cat >"$q/semantic.tsv" <<'EOF'
+schema_version	capture_id	capture_pair	source_commit	engine	trace_sha256	status	environment_sha256
+1	fixture-a	a	0000000000000000000000000000000000000000	embedded	cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc	PASS	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+1	fixture-a	a	0000000000000000000000000000000000000000	worker	cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc	PASS	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+1	fixture-a	a	0000000000000000000000000000000000000000	luau-language-oracle	cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc	PASS	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+	semantic_evidence_passes "$q/semantic.tsv" a fixture-a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb || die 'valid semantic fixture failed'
+	sed 's/worker\tcccc/worker\tdddd/' "$q/semantic.tsv" >"$q/semantic-mismatch.tsv"
+	if semantic_evidence_passes "$q/semantic-mismatch.tsv" a fixture-a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; then
+		die 'mismatched semantic fixture passed'
+	fi
+	cat >"$q/rows.tsv" <<'EOF'
+schema_version	capture_id	capture_pair	source_commit	key	environment_sha256
+1	fixture-a	a	0000000000000000000000000000000000000000	one	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+	capture_rows_pass "$q/rows.tsv" "schema_version\tcapture_id\tcapture_pair\tsource_commit\tkey\tenvironment_sha256" 6 1 fixture-a a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 5 || die 'valid bound artifact failed'
+	if capture_rows_pass "$q/rows.tsv" "schema_version\tcapture_id\tcapture_pair\tsource_commit\tkey\tenvironment_sha256" 6 1 fixture-b a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 5; then
+		die 'artifact from another capture passed'
+	fi
+	cat >"$q/raw-domain.tsv" <<'EOF'
+header
+1	fixture-a	a	0000000000000000000000000000000000000000	classic	recursive_fibonacci	embedded	1	1	50	17	100	1	work	program	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+	parity_raw_domains_pass "$q/raw-domain.tsv" || die 'valid raw coordinate failed'
+	sed 's/\tembedded\t/\tunknown\t/' "$q/raw-domain.tsv" >"$q/raw-domain-invalid.tsv"
+	if parity_raw_domains_pass "$q/raw-domain-invalid.tsv"; then
+		die 'unknown raw engine passed'
+	fi
+	cat >"$q/latency-domain.tsv" <<'EOF'
+header
+1	fixture-a	a	0000000000000000000000000000000000000000	1	embedded,worker	10	20	10	result	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+	host_latency_domains_pass "$q/latency-domain.tsv" 1 || die 'valid latency coordinate failed'
+	sed 's/\t1\tembedded/\t2\tembedded/' "$q/latency-domain.tsv" >"$q/latency-domain-invalid.tsv"
+	if host_latency_domains_pass "$q/latency-domain-invalid.tsv" 1; then
+		die 'out-of-range latency sample passed'
+	fi
+	cat >"$q/inventory.tsv" <<'EOF'
+header
+1	fixture-a	a	0000000000000000000000000000000000000000	classic	recursive_fibonacci
+1	fixture-a	a	0000000000000000000000000000000000000000	top10	arithmetic_for
+EOF
+	inventory_hash=$(case_inventory "$q/inventory.tsv")
+	sed 's/arithmetic_for/other_case/' "$q/inventory.tsv" >"$q/inventory-substitution.tsv"
+	[ "$(case_inventory "$q/inventory-substitution.tsv")" != "$inventory_hash" ] || die 'case substitution preserved inventory identity'
+	mkdir "$q/existing"
+	[ -e "$q/existing" ] || die 'existing-output fixture is missing'
+	printf '%s\n' 'prepared worker admission self-test: PASS'
+}
+
+usage() {
+	cat >&2 <<'EOF'
+usage: scripts/check-prepared-worker-admission --capture-pair a|b --output DIR [--cases corpus/name,...]
+       scripts/check-prepared-worker-admission --compare-pair DIR_A DIR_B
+       scripts/check-prepared-worker-admission --self-test
+EOF
+}
+
+pair=
+output=
+cases=
+self_test_requested=0
+compare_a=
+compare_b=
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+	--capture-pair)
+		[ "$#" -ge 2 ] || die '--capture-pair needs a value'
+		pair=$2
+		shift 2
+		;;
+	--output)
+		[ "$#" -ge 2 ] || die '--output needs a path'
+		output=$2
+		shift 2
+		;;
+	--cases)
+		[ "$#" -ge 2 ] || die '--cases needs a value'
+		cases=$2
+		shift 2
+		;;
+	--self-test)
+		self_test_requested=1
+		shift
+		;;
+	--compare-pair)
+		[ "$#" -ge 3 ] || die '--compare-pair needs two directories'
+		compare_a=$2
+		compare_b=$3
+		shift 3
+		;;
+	-h|--help)
+		usage
+		exit 0
+		;;
+	*) die "unknown argument: $1" ;;
+	esac
+done
+
+if [ -n "$compare_a$compare_b" ]; then
+	[ -n "$compare_a" ] && [ -n "$compare_b" ] || die '--compare-pair needs two directories'
+	[ -z "$pair$output$cases" ] && [ "$self_test_requested" -eq 0 ] || die '--compare-pair accepts no capture arguments'
+	compare_captures "$compare_a" "$compare_b"
+	exit 0
+fi
+
+if [ "$self_test_requested" -eq 1 ]; then
+	[ -z "$pair$output$cases" ] || die '--self-test accepts no capture arguments'
+	self_test
+	exit 0
+fi
+
+[ "$pair" = a ] || [ "$pair" = b ] || die '--capture-pair must be a or b'
+[ -n "$output" ] || die '--output is required'
+[ ! -e "$output" ] || die "output already exists: $output"
+[ -n "${LUAU_BIN:-}" ] || die 'LUAU_BIN is required'
+[ -z "$(git status --porcelain --untracked-files=no)" ] || die 'capture requires clean tracked files'
+
+quiet_status=0
+quiet_last_sample=
+wait_for_quiet "${PREPARED_WORKER_SAMPLES_FILE:-}" "${PREPARED_WORKER_MAX_SAMPLES:-60}" "${PREPARED_WORKER_SAMPLE_INTERVAL:-1}" || quiet_status=$?
+case "$quiet_status" in
+0) ;;
+1)
+	printf 'check-prepared-worker-admission: runner busy after sample %s; no acquisition created\n' "${quiet_last_sample:-unavailable}" >&2
+	exit 75
+	;;
+*) die 'runner quietness probe failed; no acquisition created' ;;
+esac
+
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/prepared-worker-admission.XXXXXX")
+trap 'mark_incomplete; rm -rf "$temporary"' EXIT HUP INT TERM
+acceptance_profile=${EMBER_RUNTIME_ACCEPTANCE_PROFILE:-darwin-arm64-m1}
+if ! CGO_ENABLED=0 GOMAXPROCS=1 EMBER_RUNTIME_ACCEPTANCE_PROFILE="$acceptance_profile" LUAU_BIN="$LUAU_BIN" \
+	scripts/runtime-acceptance-env --output "$temporary/environment.tsv" --capture-kind parity; then
+	die 'acceptance environment rejected'
+fi
+environment_hash=$(hash_file "$temporary/environment.tsv")
+source_commit=$(git rev-parse HEAD)
+case_label=${cases:-all-37}
+if [ "$case_label" = all-37 ]; then
+	expected_case_count=37
+else
+	expected_case_count=$(printf '%s\n' "$case_label" | awk -F ',' '{ print NF }')
+fi
+capture_nonce=${temporary##*/}
+capture_id=$(printf '%s\n%s\n%s\n%s\n%s\n' "$source_commit" "$environment_hash" "$pair" "$case_label" "$capture_nonce" | hash_stdin)
+command="CGO_ENABLED=0 GOMAXPROCS=1 EMBER_RUNTIME_ACCEPTANCE_PROFILE=$acceptance_profile EMBER_RUNTIME_ENGINE=invalid-but-overridden LUAU_BIN=$LUAU_BIN scripts/check-prepared-worker-admission --capture-pair $pair --output $output"
+[ -z "$cases" ] || command="$command --cases $cases"
+
+test_status=0
+CGO_ENABLED=0 GOMAXPROCS=1 \
+	EMBER_RUNTIME_ACCEPTANCE_PROFILE="$acceptance_profile" \
+	EMBER_RUNTIME_ENGINE=invalid-but-overridden \
+	LUAU_BIN="$LUAU_BIN" \
+	EMBER_PREPARED_WORKER_ADMISSION_LIVE=1 \
+	PREPARED_WORKER_CAPTURE_PAIR="$pair" \
+	PREPARED_WORKER_CAPTURE_ID="$capture_id" \
+	PREPARED_WORKER_SOURCE_COMMIT="$source_commit" \
+	PREPARED_WORKER_ENVIRONMENT_SHA256="$environment_hash" \
+	PREPARED_WORKER_OUTPUT="$output" \
+	PREPARED_WORKER_CASES="$cases" \
+	go test -run '^TestPreparedWorkerAll37AdmissionLive$' -count=1 . >"$temporary/acquisition.log" 2>&1 || test_status=$?
+
+if [ ! -d "$output" ]; then
+	mkdir -m 700 "$output"
+fi
+cp "$temporary/acquisition.log" "$output/acquisition.log"
+cp "$temporary/environment.tsv" "$output/acceptance-environment.tsv"
+printf '%s\n' "$command" >"$output/command.txt"
+printf '%s\n' "$case_label" >"$output/cases.txt"
+[ "$test_status" -eq 0 ] || die "admission acquisition failed; see $output/acquisition.log"
+validate_capture "$output" "$pair"
+
+rm -f "$output/INCOMPLETE"
+trap - EXIT HUP INT TERM
+rm -rf "$temporary"
+printf 'check-prepared-worker-admission: captured %s (%s) in %s\n' "$case_label" "$pair" "$output"
