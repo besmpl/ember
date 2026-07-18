@@ -153,6 +153,13 @@ func buildPreparedPlugin(t *testing.T, program *ember.Program) string {
 	if err := os.WriteFile(filepath.Join(directory, "go.mod"), []byte(goModule), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	moduleSums, err := os.ReadFile(filepath.Join(repositoryRoot, "go.sum"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "go.sum"), moduleSums, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(directory, "prepared_generated.go"), generated.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +167,7 @@ func buildPreparedPlugin(t *testing.T, program *ember.Program) string {
 	_, _ = artifactIdentity.Write(generated.Bytes())
 	_, _ = artifactIdentity.Write([]byte(module))
 	artifact := filepath.Join(directory, fmt.Sprintf("%x.so", artifactIdentity.Sum(nil)))
-	command := exec.CommandContext(context.Background(), "go", "build", "-buildmode=plugin", "-o", artifact, ".")
+	command := exec.CommandContext(context.Background(), "go", "build", "-mod=mod", "-buildmode=plugin", "-o", artifact, ".")
 	command.Dir = directory
 	command.Env = append(os.Environ(), "GOWORK=off", "CGO_ENABLED=1")
 	if output, err := command.CombinedOutput(); err != nil {

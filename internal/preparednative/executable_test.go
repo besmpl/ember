@@ -12,6 +12,7 @@ func TestExecutableCallsImmutableNativeKernel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	clear(code)
 	if got, prepared, err := executable.Call(17.25); err != nil || !prepared || got != 17.25 {
 		t.Fatalf("native identity = %v/%t, %v", got, prepared, err)
 	}
@@ -63,8 +64,8 @@ type nativeTestHelper interface {
 
 func nativeIdentityCode(test nativeTestHelper) []byte {
 	test.Helper()
-	if runtime.GOOS != "darwin" {
-		test.Skip("prepared native execution is currently implemented on Darwin")
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		test.Skip("prepared native execution is currently implemented on Darwin and Linux")
 		return nil
 	}
 	switch runtime.GOARCH {

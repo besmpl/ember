@@ -44,8 +44,8 @@ func TestPreparedNativeX8664ArtifactIsDeterministic(t *testing.T) {
 }
 
 func TestPreparedNativeX8664ScalarSemantics(t *testing.T) {
-	if runtime.GOOS != "darwin" || runtime.GOARCH != "amd64" {
-		t.Skip("prepared x86-64 execution proof requires Darwin amd64")
+	if (runtime.GOOS != "darwin" && runtime.GOOS != "linux") || runtime.GOARCH != "amd64" {
+		t.Skip("prepared x86-64 execution proof requires Darwin or Linux on amd64")
 	}
 	for _, tc := range []struct {
 		name   string
@@ -107,8 +107,8 @@ func prepareScalarNativeX8664Kernel(
 }
 
 func TestPreparedNativeX8664ArithmeticGuestBatchExecutesUnknownSource(t *testing.T) {
-	if runtime.GOOS != "darwin" || runtime.GOARCH != "amd64" {
-		t.Skip("prepared x86-64 execution proof requires Darwin amd64")
+	if (runtime.GOOS != "darwin" && runtime.GOOS != "linux") || runtime.GOARCH != "amd64" {
+		t.Skip("prepared x86-64 execution proof requires Darwin or Linux on amd64")
 	}
 	fixture, err := parityfixture.BuildGuestBatch(top10LuauCases[0].source, parityfixture.GuestBatchVariant{
 		CaseName: "__case", BatchName: "__batch",

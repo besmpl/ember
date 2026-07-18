@@ -1,10 +1,12 @@
-//go:build darwin && (arm64 || amd64)
+//go:build (darwin || linux) && (arm64 || amd64)
 
 package preparednative
 
 import (
 	"sync"
 	"unsafe"
+
+	_ "github.com/ebitengine/purego"
 )
 
 var nativeCallPool = sync.Pool{New: func() any { return new(nativeCallFrame) }}

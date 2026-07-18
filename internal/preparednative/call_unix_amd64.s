@@ -1,3 +1,5 @@
+//go:build darwin || linux
+
 #include "go_asm.h"
 #include "textflag.h"
 

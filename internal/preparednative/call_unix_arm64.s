@@ -1,8 +1,11 @@
+//go:build darwin || linux
+
 #include "go_asm.h"
 #include "textflag.h"
 
-// nativeCallTrampoline is entered on the runtime's system stack using the C
-// ABI. It translates one pointer-to-frame argument into Ember's kernel ABI.
+// nativeCallTrampoline is entered on the runtime's system stack using the
+// platform C ABI. It translates one pointer-to-frame argument into Ember's
+// kernel ABI.
 GLOBL ·nativeCallTrampolineABI0(SB), NOPTR|RODATA, $8
 DATA ·nativeCallTrampolineABI0(SB)/8, $nativeCallTrampoline(SB)
 

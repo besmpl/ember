@@ -54,8 +54,8 @@ Ember currently has a tiny root-package vertical slice:
    references;
 8. exact prepared execution through static generated Go, plus same-process
    reload-time ARM64/x86-64 native preparation for a proved numeric subset on
-   supported Darwin hosts. Unsupported functions, values, and platforms replay
-   through the canonical Machine before effects.
+   supported Darwin and Linux hosts. Unsupported functions, values, and
+   platforms replay through the canonical Machine before effects.
 
 This is only a seed. Full Luau grammar, full function syntax, broader standard
 libraries, and analyzer behavior remain future slices.

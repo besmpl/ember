@@ -121,16 +121,11 @@ func TestRunGenerationFailurePreservesOutput(t *testing.T) {
 	directory := t.TempDir()
 	outputPath := filepath.Join(directory, "prepared.go")
 	writeEmbercTestFile(t, outputPath, "unchanged")
-	writeEmbercTestFile(t, filepath.Join(directory, "main.luau"), `
-local add = function(value) return value + 1 end
-return {update = function()
-    add = function(value) return value + 2 end
-    return add(40)
-end}
-`)
+	writeEmbercTestFile(t, filepath.Join(directory, "main.luau"), `return {update = function() return 40 end}`)
 	manifest := writeEmbercTestManifest(t, directory, map[string]any{
-		"package": "preparedfixture",
-		"output":  "prepared.go",
+		"package":   "preparedfixture",
+		"output":    "prepared.go",
+		"max_bytes": 1,
 		"entrypoints": []map[string]string{
 			{"name": "main", "module": "logical:main"},
 		},
@@ -139,7 +134,7 @@ end}
 		},
 	})
 	if err := run([]string{manifest}); err == nil {
-		t.Fatal("unsupported generation succeeded")
+		t.Fatal("over-limit generation succeeded")
 	}
 	got, err := os.ReadFile(outputPath)
 	if err != nil {

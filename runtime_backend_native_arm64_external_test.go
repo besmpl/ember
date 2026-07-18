@@ -13,8 +13,8 @@ import (
 )
 
 func TestPreparedNativeARM64ScalarSemantics(t *testing.T) {
-	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
-		t.Skip("prepared native proof currently targets Darwin arm64")
+	if (runtime.GOOS != "darwin" && runtime.GOOS != "linux") || runtime.GOARCH != "arm64" {
+		t.Skip("prepared native proof requires Darwin or Linux on ARM64")
 	}
 	for _, tc := range []struct {
 		name   string
@@ -80,8 +80,8 @@ func prepareScalarNativeARM64Kernel(
 }
 
 func TestPreparedNativeARM64ArithmeticGuestBatchExecutesUnknownSource(t *testing.T) {
-	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
-		t.Skip("prepared native proof currently targets Darwin arm64")
+	if (runtime.GOOS != "darwin" && runtime.GOOS != "linux") || runtime.GOARCH != "arm64" {
+		t.Skip("prepared native proof requires Darwin or Linux on ARM64")
 	}
 	fixture, err := parityfixture.BuildGuestBatch(top10LuauCases[0].source, parityfixture.GuestBatchVariant{
 		CaseName: "__case", BatchName: "__batch",

@@ -15,6 +15,8 @@ jobs:
   ci:
     name: ci
     runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
 
     steps:
       - name: Check out repository
@@ -54,6 +56,8 @@ jobs:
     # GitHub-hosted ARM64 Linux is a public-preview runner. Keep this job
     # explicit so unavailable runner capacity is visible rather than omitted.
     runs-on: ubuntu-24.04-arm
+    env:
+      CGO_ENABLED: "0"
 
     steps:
       - name: Check out repository

@@ -142,6 +142,8 @@ hashes.
 | --- | --- |
 | Darwin ARM64 | Native qualified subset plus exact Machine replay |
 | Darwin x86-64 with SSE4.1 | Native qualified subset plus exact Machine replay |
+| Linux ARM64 | Native qualified subset plus exact Machine replay |
+| Linux x86-64 with SSE4.1 | Native qualified subset plus exact Machine replay |
 | Other OS/ISA or denied executable-memory policy | Exact all-Machine bundle |
 
 ARM64 and x86-64 use separate emitters behind one target-independent semantic
@@ -149,23 +151,25 @@ candidate. Native-to-native calls use a private register ABI; only the outer
 adapter accepts argument/result pointers from Go.
 
 The Darwin installer uses generation-owned `MAP_JIT` memory, serialized JIT
-write protection, instruction-cache invalidation, and an architecture-specific
-system-stack trampoline. Calls hold a lease so retirement cannot unmap active
-code. The implementation passes with `CGO_ENABLED=0`, but uses `purego` and one
-audited private `runtime.cgocall` boundary. Hosts must treat Go toolchain and OS
+write protection, and explicit instruction-cache invalidation. The Linux
+installer maps writable pages, copies the complete image, and seals them
+read-execute before publication. Both use architecture-specific system-stack
+trampolines. Calls hold a lease so retirement cannot unmap active code. The
+implementation passes with `CGO_ENABLED=0`, but uses `purego` and one audited
+private `runtime.cgocall` boundary. Hosts must treat Go toolchain and OS
 security-policy upgrades as compatibility events and rerun race/checkptr plus
 the focused native tests.
 
-Native installation on Linux and Windows is not implemented yet. The x86-64
-emitter cross-builds there, but the runtime deliberately selects exact Machine
-fallback rather than claiming native speed.
+Native installation on Windows is not implemented yet. Its emitters
+cross-build, but the runtime deliberately selects exact Machine fallback rather
+than claiming native speed.
 
 ## Choosing a deployment path
 
 | Need | Recommended path |
 | --- | --- |
 | Shipping release; source known at build | Static generated Go |
-| Same-process editor reload on supported Darwin | Nil-bundle `PreparedRuntimeSlot.Prepare` |
+| Same-process editor reload on supported Darwin/Linux | Nil-bundle `PreparedRuntimeSlot.Prepare` |
 | Complete behavior outside the native subset | Automatic canonical Machine replay |
 | Same-process generated Go under accepted cgo/plugin limits | Optional `preparedplugin` adapter |
 | Compiled reload where no native installer exists | Rebuild/re-exec or an application-owned worker |

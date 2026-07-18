@@ -504,31 +504,38 @@ func reviewedPreparedPluginAPI(relative, owner, importPath, name string, called 
 		name == "Open"
 }
 
-// reviewedPreparedNativeAPI contains Ember's no-cgo executable-memory seam in
-// one implementation file. Keep every owner and symbol exact so moving or
-// widening this edge requires an explicit review.
+// reviewedPreparedNativeAPI contains Ember's no-cgo executable-memory seams.
+// Keep every path, owner, and symbol exact so moving or widening this edge
+// requires an explicit review.
 func reviewedPreparedNativeAPI(relative, owner, importPath, name string, called bool) bool {
-	if relative != "internal/preparednative/executable_darwin.go" {
-		return false
-	}
-	switch owner {
-	case "mapExecutable":
-		if importPath == "syscall" {
-			return name == "Mmap" && called || name == "PROT_EXEC" || name == "MAP_JIT"
-		}
-		return importPath == "github.com/ebitengine/purego" && name == "SyscallN" && called
-	case "resolveJITSymbols":
-		if importPath != "github.com/ebitengine/purego" {
+	switch relative {
+	case "internal/preparednative/executable_darwin.go":
+		switch owner {
+		case "mapExecutable":
+			if importPath == "syscall" {
+				return name == "Mmap" && called || name == "PROT_EXEC" || name == "MAP_JIT"
+			}
+			return importPath == "github.com/ebitengine/purego" && name == "SyscallN" && called
+		case "resolveJITSymbols":
+			if importPath != "github.com/ebitengine/purego" {
+				return false
+			}
+			return name == "Dlsym" && called || name == "RTLD_DEFAULT"
+		default:
 			return false
 		}
-		return name == "Dlsym" && called || name == "RTLD_DEFAULT"
+	case "internal/preparednative/executable_linux.go":
+		if owner != "mapExecutable" || importPath != "syscall" {
+			return false
+		}
+		return name == "Mmap" && called || name == "Mprotect" && called || name == "PROT_EXEC"
 	default:
 		return false
 	}
 }
 
 func reviewedPreparedNativeLinkname(relative, directive string) bool {
-	return relative == "internal/preparednative/call_darwin.go" &&
+	return relative == "internal/preparednative/call_unix.go" &&
 		directive == "//go:linkname runtimeCGOCall runtime.cgocall"
 }
 
@@ -537,8 +544,8 @@ func reviewedPreparedNativeAssemblyCall(relative, opcode, target string) bool {
 		return false
 	}
 	target = strings.Trim(target, " \t,")
-	return relative == "internal/preparednative/call_darwin_arm64.s" && target == "(R9)" ||
-		relative == "internal/preparednative/call_darwin_amd64.s" && target == "AX"
+	return relative == "internal/preparednative/call_unix_arm64.s" && target == "(R9)" ||
+		relative == "internal/preparednative/call_unix_amd64.s" && target == "AX"
 }
 
 func pureGoProcessAPI(importPath, name string) bool {

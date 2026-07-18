@@ -37,9 +37,12 @@ test_binary="$artifact_dir/ember.test"
 CGO_ENABLED=0 go test -c -o "$test_binary" .
 
 go tool nm "$test_binary" > "$artifact_dir/symbols.txt"
+# Purego and its platform loader symbols are intentional at the structurally
+# reviewed prepared-native seam. CGO_ENABLED=0 and the CgoFiles inventory above
+# remain the authoritative prohibition on cgo-generated code.
 foreign_symbols="$(awk '
 BEGIN {
-	marker_count = split("runtime/cgo _cgoexp_ _cgo_gotypes .cgo2. plugin.open dlopen loadlibrary github.com/ebitengine/purego", markers)
+	marker_count = split("runtime/cgo _cgoexp_ _cgo_gotypes .cgo2. plugin.open loadlibrary", markers)
 }
 {
 	symbol = tolower($NF)
@@ -52,7 +55,7 @@ BEGIN {
 }
 ' "$artifact_dir/symbols.txt")"
 if [ -n "$foreign_symbols" ]; then
-	printf '%s\n' 'linked test binary contains forbidden cgo/loader/plugin symbols:' >&2
+	printf '%s\n' 'linked test binary contains forbidden cgo/plugin symbols:' >&2
 	printf '%s\n' "$foreign_symbols" >&2
 	exit 1
 fi

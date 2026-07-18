@@ -94,6 +94,8 @@ The executable-memory and private-runtime edge is confined to
 - Calls hold read leases; close waits for them before unmapping.
 - Darwin mappings use `MAP_JIT`, serialized per-thread write windows, and
   instruction-cache invalidation before publication.
+- Linux mappings are populated read-write and sealed read-execute before
+  publication; they are never writable and executable simultaneously.
 - A tiny architecture-specific trampoline enters generated code on the Go
   runtime's foreign/system stack.
 - Generated code may read argument and result pointers only for the duration of
@@ -107,10 +109,10 @@ focused boundary, race, checkptr, and linked-symbol tests green.
 
 ### Platform support
 
-Native installation is currently supported on Darwin ARM64 and Darwin x86-64;
-x86-64 requires SSE4.1. Both emitters and the complete Darwin execution path
-are tested. Linux/Windows x86-64 cross-builds retain the exact Machine fallback
-until platform-specific native mapping and call boundaries are implemented.
+Native installation is currently supported on Darwin and Linux for ARM64 and
+x86-64; x86-64 requires SSE4.1. Both emitters and complete execution paths are
+tested with cgo disabled. Windows cross-builds retain the exact Machine fallback
+until its platform-specific native mapping and call boundaries are implemented.
 
 ## Consequences
 

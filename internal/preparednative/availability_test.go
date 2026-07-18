@@ -16,7 +16,10 @@ func TestNativeExecutionPlatformAdmission(t *testing.T) {
 		{name: "Darwin ARM64", goos: "darwin", goarch: "arm64", wantNative: true},
 		{name: "Darwin x86-64", goos: "darwin", goarch: "amd64", hasSSE41: true, wantNative: true},
 		{name: "old Darwin x86-64", goos: "darwin", goarch: "amd64", wantNative: false},
-		{name: "Linux x86-64", goos: "linux", goarch: "amd64", hasSSE41: true, wantNative: false},
+		{name: "Linux ARM64", goos: "linux", goarch: "arm64", wantNative: true},
+		{name: "Linux x86-64", goos: "linux", goarch: "amd64", hasSSE41: true, wantNative: true},
+		{name: "old Linux x86-64", goos: "linux", goarch: "amd64", wantNative: false},
+		{name: "Windows x86-64", goos: "windows", goarch: "amd64", hasSSE41: true, wantNative: false},
 		{name: "unsupported ISA", goos: "darwin", goarch: "riscv64", wantNative: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
