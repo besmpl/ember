@@ -1,0 +1,2 @@
+# Source and generated fixtures must be byte-stable across host OSes.
+* text=auto eol=lf

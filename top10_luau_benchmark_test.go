@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -1740,8 +1741,38 @@ func TestTop10LuauBinaryValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); got != 0o500 {
-		t.Fatalf("staged Luau mode = %#o, want 0500", got)
+	if got := info.Mode().Perm(); !top10LuauStagedModeIsSafe(runtime.GOOS, got) {
+		t.Fatalf("staged Luau mode = %#o, unsafe on %s", got, runtime.GOOS)
+	}
+}
+
+func top10LuauStagedModeIsSafe(goos string, mode os.FileMode) bool {
+	permissions := mode.Perm()
+	if goos == "windows" {
+		return permissions&0o444 != 0 && permissions&0o222 == 0
+	}
+	return permissions == 0o500
+}
+
+func TestTop10LuauStagedModePolicy(t *testing.T) {
+	tests := []struct {
+		name string
+		goos string
+		mode os.FileMode
+		want bool
+	}{
+		{name: "Unix private executable", goos: "linux", mode: 0o500, want: true},
+		{name: "Unix writable executable", goos: "darwin", mode: 0o700, want: false},
+		{name: "Windows read-only", goos: "windows", mode: 0o444, want: true},
+		{name: "Windows writable", goos: "windows", mode: 0o666, want: false},
+		{name: "Windows inaccessible", goos: "windows", mode: 0, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := top10LuauStagedModeIsSafe(test.goos, test.mode); got != test.want {
+				t.Fatalf("top10LuauStagedModeIsSafe(%q, %#o) = %t, want %t", test.goos, test.mode, got, test.want)
+			}
+		})
 	}
 }
 
