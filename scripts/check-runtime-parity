@@ -41,12 +41,12 @@ quiet_sample() {
 }
 
 sample_is_quiet() {
-	awk -v load="$1" -v cpu="$2" 'BEGIN {
+	awk -v load_value="$1" -v cpu_value="$2" 'BEGIN {
 		n = "^[0-9]+([.][0-9]+)?$"
 		# Load average is lagging and includes runnable or blocked work that may
 		# not compete with this single-threaded benchmark. Keep it diagnostic,
 		# but admit samples by current external CPU use.
-		exit !((load ~ n) && (cpu ~ n) && cpu <= 300.0)
+		exit !((load_value ~ n) && (cpu_value ~ n) && cpu_value <= 300.0)
 	}'
 }
 
@@ -57,10 +57,13 @@ wait_for_quiet() {
 	consecutive=0
 	i=1
 	while [ "$i" -le "$max_samples" ]; do
-		sample=$(quiet_sample "$sample_file" "$i")
-		load=${sample%% *}
-		cpu=${sample#* }
-		if sample_is_quiet "$load" "$cpu"; then
+		if ! sample=$(quiet_sample "$sample_file" "$i"); then
+			return 2
+		fi
+		quiet_last_sample=$sample
+		load_value=${sample%% *}
+		cpu_value=${sample#* }
+		if sample_is_quiet "$load_value" "$cpu_value"; then
 			consecutive=$((consecutive + 1))
 			[ "$consecutive" -ge 3 ] && return 0
 		else
@@ -228,6 +231,9 @@ self_test() {
 	if wait_for_quiet "$q/busy-cpu" 4 0; then die 'busy CPU fixture unlocked'; fi
 	printf '%s\n' '1 0' '1 0' '1 0' >"$q/quiet"
 	wait_for_quiet "$q/quiet" 3 0 || die 'quiet fixture stayed locked'
+	probe_status=0
+	wait_for_quiet "$q/missing-samples" 1 0 >/dev/null 2>&1 || probe_status=$?
+	[ "$probe_status" -eq 2 ] || die 'quietness probe failure was not distinguished from a busy runner'
 	printf '%s\n' '4.9 250' '4.9 250' '4.9 250' >"$q/available-capacity"
 	wait_for_quiet "$q/available-capacity" 3 0 || die 'available M1 capacity stayed locked'
 	mkdir "$q/existing"
@@ -291,10 +297,17 @@ output_is_available "$output" || die "output already exists: $output"
 
 # Refuse to create an acquisition until the runner has been quiet for three
 # consecutive samples. Tests replace live samples with a deterministic file.
-if ! wait_for_quiet "${RUNTIME_PARITY_SAMPLES_FILE:-}" "${RUNTIME_PARITY_MAX_SAMPLES:-60}" "${RUNTIME_PARITY_SAMPLE_INTERVAL:-1}"; then
-	printf '%s\n' 'check-runtime-parity: runner busy; no acquisition created' >&2
+quiet_status=0
+quiet_last_sample=
+wait_for_quiet "${RUNTIME_PARITY_SAMPLES_FILE:-}" "${RUNTIME_PARITY_MAX_SAMPLES:-60}" "${RUNTIME_PARITY_SAMPLE_INTERVAL:-1}" || quiet_status=$?
+case "$quiet_status" in
+0) ;;
+1)
+	printf 'check-runtime-parity: runner busy after sample %s; no acquisition created\n' "${quiet_last_sample:-unavailable}" >&2
 	exit 75
-fi
+	;;
+*) die 'runner quietness probe failed; no acquisition created' ;;
+esac
 
 mkdir -m 700 "$output"
 trap 'touch "$output/INCOMPLETE" 2>/dev/null || true' EXIT HUP INT TERM
