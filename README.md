@@ -52,10 +52,10 @@ Ember currently has a tiny root-package vertical slice:
    and `table.sort`;
 7. source-to-result tests such as `return 1 + 2`, scalar literals, and local
    references;
-8. exact prepared execution through static generated Go, plus same-process
-   reload-time ARM64/x86-64 native preparation for a proved numeric subset on
-   supported Darwin, Linux, and Windows hosts. Unsupported functions, values,
-   and platforms replay through the canonical Machine before effects.
+8. exact prepared execution through deterministic generated Go, plus typed
+   transactional hot reload through supervised no-cgo static-AOT workers on
+   Darwin, Linux, and Windows ARM64/x86-64. Unsupported prepared functions
+   replay through the canonical Machine before effects.
 
 This is only a seed. Full Luau grammar, full function syntax, broader standard
 libraries, and analyzer behavior remain future slices.
@@ -65,6 +65,10 @@ libraries, and analyzer behavior remain future slices.
 ```go
 import "github.com/besmpl/ember"
 ```
+
+Hosts that need transactional static-AOT worker generations additionally use
+`github.com/besmpl/ember/preparedworker`; explicit worker construction lives in
+`github.com/besmpl/ember/preparedworkerbuild`.
 
 The root package should remain small. Future packages should exist only after a
 slice proves that the split makes the public interface smaller or the

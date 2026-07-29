@@ -69,16 +69,11 @@ func NewHandlerAt(checkpoint preparedworkerfixture.Checkpoint) (*Handler, error)
 	if err := validateState(checkpoint.State, "checkpoint state"); err != nil {
 		return nil, fmt.Errorf("prepare worker fixture: %w", err)
 	}
-	loader := sourceLoader{
-		preparedworkerfixture.MainModule:    preparedworkerfixture.MainSource,
-		preparedworkerfixture.NumericModule: preparedworkerfixture.NumericSource,
-		preparedworkerfixture.SharedModule:  preparedworkerfixture.SharedSource,
-	}
 	main := ember.LogicalModule("prepared-worker/main")
-	program, _, err := ember.LoadProgram(context.Background(), loader, ember.ProgramOptions{
-		Entrypoints: []ember.Entrypoint{{Name: "main", Module: main}},
-		Parallelism: 1,
-	})
+	program, _, err := preparedworkerfixturegenerated.LoadProgram(
+		context.Background(),
+		ember.ProgramOptions{Parallelism: 1},
+	)
 	if err != nil {
 		return nil, fmt.Errorf("prepare worker fixture: load Program: %w", err)
 	}
@@ -621,14 +616,4 @@ func uint32Argument(value ember.Value, name string) (uint32, error) {
 		return 0, fmt.Errorf("%s is not a uint32", name)
 	}
 	return uint32(number), nil
-}
-
-type sourceLoader map[string]string
-
-func (loader sourceLoader) LoadModule(_ context.Context, id ember.ModuleID) (ember.Source, error) {
-	text, ok := loader[id.String()]
-	if !ok {
-		return ember.Source{}, fmt.Errorf("prepared worker fixture: missing module %s", id)
-	}
-	return ember.Source{Name: id.String(), Text: text}, nil
 }

@@ -56,6 +56,14 @@ func TestRuntimeOptionsPreparedSelectsCopiedBundleExplicitly(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("prepared calls = %d, want 2", calls)
 	}
+	cancelable, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := second.Dispatch(cancelable, "update"); err != nil {
+		t.Fatalf("cancelable prepared Dispatch: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("prepared calls after cancelable Dispatch = %d, want 3", calls)
+	}
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -110,6 +118,25 @@ func TestRuntimeOptionsPreparedInvokeUsesBoundFunction(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("prepared Invoke calls = %d, want 1", calls)
+	}
+
+	cancelable, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	values, err = runtime.Invoke(cancelable, Invocation{
+		Module: LogicalModule("prepared/bundle"),
+		Export: "update",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 {
+		t.Fatalf("cancelable Invoke results = %d, want 1", len(values))
+	}
+	if number, ok := values[0].Number(); !ok || number != 42 {
+		t.Fatalf("cancelable Invoke result = %v/%t, want 42", number, ok)
+	}
+	if calls != 2 {
+		t.Fatalf("cancelable prepared Invoke calls = %d, want 2", calls)
 	}
 }
 

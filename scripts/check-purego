@@ -37,9 +37,8 @@ test_binary="$artifact_dir/ember.test"
 CGO_ENABLED=0 go test -c -o "$test_binary" .
 
 go tool nm "$test_binary" > "$artifact_dir/symbols.txt"
-# Purego and its platform loader symbols are intentional at the structurally
-# reviewed prepared-native seam. CGO_ENABLED=0 and the CgoFiles inventory above
-# remain the authoritative prohibition on cgo-generated code.
+# No loader, plugin, private-cgocall, or executable-memory exception remains.
+# The linked inventory complements the source scanner and CgoFiles check.
 foreign_symbols="$(awk '
 BEGIN {
 	marker_count = split("runtime/cgo _cgoexp_ _cgo_gotypes .cgo2. plugin.open loadlibrary", markers)

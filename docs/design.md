@@ -42,10 +42,23 @@ See `docs/adr/0001-go-native-runtime-mapping.md` for the full decision.
 
 The root package should not own game worlds, request routing, job scheduling,
 rendering, audio, assets, editor tooling, network transports, background
-workers, or external process lifecycle. ADR 0010 records the narrow exception
-for generation-owned executable memory: only the explicit
-`PreparedRuntimeSlot.Prepare` operation may install the proved reload-time
-numeric tier, behind one private boundary and exact Machine replay.
+workers, or external process lifecycle. The `preparedworker` subpackage owns
+only a typed application transaction stream, durable uncertainty, and the
+supervised worker lifetime behind it. Hosts still own schemas, quiescence,
+source watching, build policy, cache policy, and every application effect.
+ADR 0011 records that earned seam.
+
+The worker accepts immutable builds and closed records, never a remote
+`Runtime` or fine-grained host-function RPC. Static generated bundles retain
+exact Machine replay for unsupported prepared behavior without executable
+memory or a dynamic loader.
+
+Cancelable embedded and worker calls do not imply interpreter execution.
+Generated helpers share an opaque invocation context and poll it at compiler
+safe points; a canceled fast path replays before effects so the Machine can
+surface the exact context failure. Explicit execution limits remain a Machine
+policy because their instruction and resource accounting is semantic, not a
+best-effort generated-code check.
 
 This is not a permanent ban. It keeps the runtime small while the VM proves
 itself. Outer packages can attach these capabilities later if real examples

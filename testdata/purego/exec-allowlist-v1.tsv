@@ -2,11 +2,21 @@
 internal/architectureproof/capture_test.go	measureLuau	pinned-luau	Execute the digest-validated Luau oracle for the no-CGO architecture ceiling.
 internal/architectureproof/capture_test.go	sampleLoad	runner-fingerprint	Read controlled runner load for architecture captures.
 internal/architectureproof/capture_test.go	sampleExternalCPU	runner-fingerprint	Read controlled runner CPU measurements for architecture captures.
-preparedplugin/open_integration_test.go	buildPreparedPlugin	generator-check	Build the generated Go plugin used by the AOT reload integration tracer.
-prepared_worker_admission_test.go	startPreparedWorkerProcess	test-helper	Launch the disposable application-owned static-AOT worker probe.
+internal/mixedcheckpointproof/external_test.go	runCommand	test-helper	Run the Go toolchain and generated mixed Ruby/Sprig checkpoint application inside one bounded disposable offline test root.
+internal/rubyproof/external_test.go	runRubyTarget39	test-helper	Run the digest-pinned CRuby oracle with a five-second timeout, closed environment, bounded output, and strict stderr rejection.
+internal/rubyproof/external_test.go	runWithInput	test-helper	Run the Go toolchain and generated Ruby proof application inside bounded disposable local test roots.
+internal/sprigproof/external_test.go	runCommand	test-helper	Run the Go toolchain and generated proof application inside one bounded disposable offline test root.
+preparedsource/external_producer_integration_test.go	runCommand	test-helper	Run the Go toolchain and generated static application inside one bounded disposable offline test root.
+preparedsource/external_producer_integration_test.go	runCommandMustFail	test-helper	Verify rejected Go commands fail inside the bounded disposable external-producer test root.
+preparedworker/process_launcher.go	Launch	worker-launch	Launch one verified immutable EPW2 executable under the reviewed parent-lifetime owner.
+preparedworker/process_transport_admission_test.go	Launch	test-helper	Launch the bounded EPW2 transport observer from the current no-cgo test binary.
+preparedworkerbuild/build.go	runGoCommand	toolchain-build	Run the Go toolchain only during the explicit host-owned worker build effect.
+prepared_worker_embedded_observer_test.go	openPreparedWorkerEmbeddedObserver	test-helper	Launch the digest-verified production embedded observer used only by admission capture.
 prepared_worker_host_admission_test.go	runPreparedWorkerLuauTrace	pinned-luau	Execute the digest-validated Luau oracle for the typed host trace.
 prepared_worker_host_admission_test.go	samplePreparedWorkerProcess	runner-fingerprint	Read attributable CPU and RSS for the admission parent and worker child.
-prepared_worker_performance_test.go	startPreparedBatchWorker	test-helper	Launch one checked-in exact prepared batch in a disposable worker process.
+prepared_worker_host_runner_test.go	findPreparedWorkerChildPID	runner-fingerprint	Identify the one exact supervised EPW2 child for attributable admission resource sampling.
+prepared_worker_resource_darwin_test.go	samplePreparedWorkerResourcePoint	runner-fingerprint	Read a Darwin process-tree and RSS snapshot with the fixed system ps observer during the retained lifecycle soak.
+prepared_worker_resource_observer_test.go	TestPreparedWorkerResourceSamplerSeesOwnedChild	test-helper	Launch one blocked copy of the current test binary to prove the cross-platform descendant and RSS observer.
 runtime_parity_test.go	parityCommandOutput	runner-fingerprint	Run pinned parity and fingerprint helper commands.
 runtime_parity_test.go	sampleParitySystem	runner-fingerprint	Read controlled runner load and CPU measurements.
 runtime_parity_test.go	measureParityLuauGuestBatch	pinned-luau	Execute the digest-validated Luau guest-batch oracle.

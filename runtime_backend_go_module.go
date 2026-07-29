@@ -43,6 +43,7 @@ func emitBackendGoNumericModule(
 		targetUpvalueTargets: upvalueTargets,
 		preparedImportPath:   options.preparedImportPath,
 		preparedQualifier:    options.preparedQualifier,
+		preparedSafePoints:   true,
 		coroutineDeadString:  options.coroutineDeadString,
 	}
 
@@ -92,8 +93,6 @@ func emitBackendGoNumericModule(
 		source, preparedErr := emitBackendGoNumericProof(irs[protoIndex], protoOptions)
 		if preparedErr != nil {
 			protoOptions.preparedFunctionName = ""
-			protoOptions.preparedImportPath = ""
-			protoOptions.preparedQualifier = ""
 			source, err = emitBackendGoNumericProof(irs[protoIndex], protoOptions)
 			if err != nil {
 				// A nil bundle entry is an exact, explicit request for the

@@ -1,28 +1,17 @@
 package ember_test
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"io"
-	"os"
-	"os/exec"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/besmpl/ember/internal/preparedworkerfixture"
 	"github.com/besmpl/ember/internal/preparedworkerprobe"
-)
-
-const preparedWorkerProbeChildEnvironment = "EMBER_PREPARED_WORKER_PROBE_CHILD"
-
-const (
-	preparedWorkerReadyTimeout       = 10 * time.Second
-	preparedWorkerTransactionTimeout = 30 * time.Second
-	preparedWorkerCloseTimeout       = 3 * time.Second
+	"github.com/besmpl/ember/preparedworker"
 )
 
 func TestPreparedWorkerEmbeddedTurnTrace(t *testing.T) {
@@ -251,16 +240,18 @@ func TestPreparedWorkerEmbeddedTurnTrace(t *testing.T) {
 }
 
 func TestPreparedWorkerProcessMatchesEmbeddedTurn(t *testing.T) {
-	embedded, err := preparedworkerprobe.NewHandler()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := embedded.Close(); err != nil {
-			t.Error(err)
+	publication := buildPreparedWorkerHostPublication(
+		t,
+		"./internal/preparedworkerprobe/cmd/worker",
+		"ember-rich-game-worker",
+	)
+	embedded := openPreparedWorkerEmbeddedRunner(t, "process-match-embedded")
+	worker := openPreparedWorkerProcessRunner(t, publication, "process-match-worker")
+	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+		if pid := worker.ProcessID(t); pid <= 0 {
+			t.Fatalf("supervised worker PID = %d", pid)
 		}
-	})
-	worker := startPreparedWorkerProcess(t)
+	}
 
 	for _, request := range preparedWorkerTraceRequests() {
 		want, err := embedded.Transact(context.Background(), request)
@@ -395,8 +386,13 @@ func TestPreparedWorkerMaximumTurnAlwaysFitsResponse(t *testing.T) {
 	}
 }
 
-func TestPreparedWorkerRejectsOverflowingTurnWithoutTerminatingProcess(t *testing.T) {
-	worker := startPreparedWorkerProcess(t)
+func TestPreparedWorkerRejectsOverflowingTurnAndReactivatesFromDurableHead(t *testing.T) {
+	publication := buildPreparedWorkerHostPublication(
+		t,
+		"./internal/preparedworkerprobe/cmd/worker",
+		"ember-rich-game-overflow-worker",
+	)
+	worker := openPreparedWorkerProcessRunner(t, publication, "overflow-worker")
 	events := make([]preparedworkerfixture.DamageEvent, 64)
 	for index := range events {
 		events[index] = preparedworkerfixture.DamageEvent{
@@ -407,16 +403,39 @@ func TestPreparedWorkerRejectsOverflowingTurnWithoutTerminatingProcess(t *testin
 	}
 	invalid := preparedWorkerTraceRequests()[0]
 	invalid.Events = events
-	if _, err := worker.Transact(context.Background(), invalid); err == nil {
-		t.Fatal("worker accepted a turn whose mandatory output would overflow")
+	if _, err := worker.Transact(context.Background(), invalid); !preparedworker.IsFailure(err, preparedworker.FailureGuest) {
+		t.Fatalf("overflowing turn error = %v, want guest rejection", err)
+	}
+	resolution, err := worker.runner.Resolve(
+		context.Background(),
+		preparedworker.Operation[preparedworkerfixture.TurnRequest]{
+			Sequence: invalid.Sequence, BaseRevision: invalid.Revision, Request: invalid,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolution.Status != preparedworker.ResolveNotCommitted {
+		t.Fatalf("overflowing turn resolution = %v, want not committed", resolution.Status)
+	}
+	if _, err := worker.Transact(context.Background(), preparedWorkerTraceRequests()[0]); !preparedworker.IsFailure(err, preparedworker.FailureLost) {
+		t.Fatalf("apply before reactivation error = %v, want quarantined generation", err)
+	}
+	if err := worker.Reactivate(context.Background(), publication); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := worker.Transact(context.Background(), preparedWorkerTraceRequests()[0]); err != nil {
-		t.Fatalf("bounded rejection terminated or advanced the worker: %v", err)
+		t.Fatalf("apply after reactivation: %v", err)
 	}
 }
 
 func TestPreparedWorkerDeadlineTerminatesStalledGeneration(t *testing.T) {
-	worker := startPreparedWorkerProcess(t, "stall")
+	publication := buildPreparedWorkerHostPublication(
+		t,
+		"./internal/preparedworkerprobe/cmd/stallworker",
+		"ember-rich-game-stall-worker",
+	)
+	worker := openPreparedWorkerProcessRunner(t, publication, "stall-worker")
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	_, err := worker.Transact(ctx, preparedWorkerTraceRequests()[0])
@@ -443,229 +462,5 @@ func TestPreparedWorkerTerminalFailureCannotBeRetried(t *testing.T) {
 	}
 	if _, err := handler.Transact(context.Background(), request); err == nil || !strings.Contains(err.Error(), "terminal") {
 		t.Fatalf("retry error = %v, want terminal handler failure", err)
-	}
-}
-
-func TestPreparedWorkerProbeChild(t *testing.T) {
-	mode := os.Getenv(preparedWorkerProbeChildEnvironment)
-	if mode == "" {
-		t.Skip("run as the prepared worker probe child")
-	}
-	if mode == "echo" {
-		if err := preparedworkerprobe.Serve(os.Stdin, os.Stdout, preparedWorkerEchoTransactor{}); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	if mode == "stall" {
-		if err := preparedworkerprobe.Serve(os.Stdin, os.Stdout, preparedWorkerStallTransactor{}); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	if mode != "turn" {
-		t.Fatalf("unknown prepared worker probe child mode %q", mode)
-	}
-	handler, err := preparedworkerprobe.NewHandler()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := handler.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
-	if err := preparedworkerprobe.Serve(os.Stdin, os.Stdout, handler); err != nil {
-		t.Fatal(err)
-	}
-}
-
-type preparedWorkerEchoTransactor struct{}
-
-func (preparedWorkerEchoTransactor) Transact(
-	ctx context.Context,
-	request preparedworkerfixture.TurnRequest,
-) (preparedworkerfixture.TurnResult, error) {
-	if err := ctx.Err(); err != nil {
-		return preparedworkerfixture.TurnResult{}, err
-	}
-	return preparedworkerfixture.TurnResult{
-		Sequence: request.Sequence,
-		Revision: request.Revision + 1,
-		State: preparedworkerfixture.StateSnapshot{
-			Tick:  request.Projection.Step,
-			Total: request.Projection.Seed,
-		},
-		Commands: []preparedworkerfixture.Command{{
-			Kind: preparedworkerfixture.CommandDraw,
-			A:    request.Projection.Work,
-		}},
-		Effects: []preparedworkerfixture.Effect{{
-			ID:              preparedWorkerEffectID(request.Sequence, 1),
-			Kind:            preparedworkerfixture.EffectLoad,
-			NeedsCompletion: true,
-		}},
-		Pending: []uint64{preparedWorkerEffectID(request.Sequence, 1)},
-	}, nil
-}
-
-type preparedWorkerStallTransactor struct{}
-
-func (preparedWorkerStallTransactor) Transact(
-	context.Context,
-	preparedworkerfixture.TurnRequest,
-) (preparedworkerfixture.TurnResult, error) {
-	select {}
-}
-
-type preparedWorkerCommand struct {
-	wait func() error
-	kill func() error
-}
-
-func (command preparedWorkerCommand) terminate() error {
-	if command.kill == nil {
-		return nil
-	}
-	return command.kill()
-}
-
-type preparedWorkerProcess struct {
-	command preparedWorkerCommand
-	pid     int
-	output  io.ReadCloser
-	client  *preparedworkerprobe.Client
-	stderr  *bytes.Buffer
-	closed  bool
-}
-
-func startPreparedWorkerProcess(t *testing.T, requestedMode ...string) *preparedWorkerProcess {
-	t.Helper()
-	mode := "turn"
-	if len(requestedMode) > 1 {
-		t.Fatal("prepared worker probe: got multiple child modes")
-	}
-	if len(requestedMode) == 1 {
-		mode = requestedMode[0]
-	}
-	if mode != "turn" && mode != "echo" && mode != "stall" {
-		t.Fatalf("prepared worker probe: unknown child mode %q", mode)
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command(executable, "-test.run=^TestPreparedWorkerProbeChild$", "-test.count=1")
-	command.Env = append(os.Environ(), preparedWorkerProbeChildEnvironment+"="+mode)
-	input, err := command.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	output, err := command.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stderr := &bytes.Buffer{}
-	command.Stderr = stderr
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	processCommand := preparedWorkerCommand{
-		wait: command.Wait,
-		kill: func() error { return command.Process.Kill() },
-	}
-	readyContext, cancelReady := context.WithTimeout(context.Background(), preparedWorkerReadyTimeout)
-	client, err := preparedworkerprobe.NewClient(
-		readyContext,
-		output,
-		input,
-		processCommand.terminate,
-	)
-	cancelReady()
-	if err != nil {
-		_ = waitPreparedWorkerCommand(processCommand, preparedWorkerCloseTimeout)
-		t.Fatalf("start prepared worker probe: %v: %s", err, stderr.String())
-	}
-	process := &preparedWorkerProcess{
-		command: processCommand,
-		pid:     command.Process.Pid,
-		output:  output,
-		client:  client,
-		stderr:  stderr,
-	}
-	t.Cleanup(func() {
-		if err := process.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	return process
-}
-
-func (process *preparedWorkerProcess) Transact(
-	ctx context.Context,
-	request preparedworkerfixture.TurnRequest,
-) (preparedworkerfixture.TurnResult, error) {
-	if process == nil || process.closed {
-		return preparedworkerfixture.TurnResult{}, fmt.Errorf("prepared worker probe: closed")
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if _, ok := ctx.Deadline(); !ok {
-		bounded, cancel := context.WithTimeout(ctx, preparedWorkerTransactionTimeout)
-		defer cancel()
-		ctx = bounded
-	}
-	return process.client.Transact(ctx, request)
-}
-
-func (process *preparedWorkerProcess) Close() error {
-	if process == nil || process.closed {
-		return nil
-	}
-	process.closed = true
-	clientErr := process.client.Close()
-	waitErr := waitPreparedWorkerCommand(process.command, preparedWorkerCloseTimeout)
-	outputErr := process.output.Close()
-	if waitErr != nil && !process.client.WasAborted() {
-		return fmt.Errorf("prepared worker probe: wait: %w: %s", waitErr, process.stderr.String())
-	}
-	if clientErr != nil && !errors.Is(clientErr, os.ErrClosed) {
-		return fmt.Errorf("prepared worker probe: close client: %w", clientErr)
-	}
-	if outputErr != nil && !errors.Is(outputErr, os.ErrClosed) {
-		return fmt.Errorf("prepared worker probe: close output: %w", outputErr)
-	}
-	return nil
-}
-
-func waitPreparedWorkerCommand(command preparedWorkerCommand, timeout time.Duration) error {
-	if command.wait == nil {
-		return nil
-	}
-	completed := make(chan error, 1)
-	go func() { completed <- command.wait() }()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case err := <-completed:
-		return err
-	case <-timer.C:
-		killErr := command.terminate()
-		killTimer := time.NewTimer(timeout)
-		defer killTimer.Stop()
-		select {
-		case waitErr := <-completed:
-			return errors.Join(
-				fmt.Errorf("worker did not exit within %s", timeout),
-				killErr,
-				waitErr,
-			)
-		case <-killTimer.C:
-			return errors.Join(
-				fmt.Errorf("worker did not exit within %s after termination", timeout),
-				killErr,
-			)
-		}
 	}
 }

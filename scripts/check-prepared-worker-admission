@@ -124,6 +124,52 @@ summary_passes() {
 	' "$1"
 }
 
+worker_build_passes() {
+	awk -F '\t' \
+		-v expected_pair="$2" \
+		-v expected_capture="$3" \
+		-v expected_source="$4" \
+		-v expected_environment="$5" '
+		function digest(value) { return length(value) == 64 && value ~ /^[0-9a-f]+$/ }
+		BEGIN {
+			header = "schema_version\tcapture_id\tcapture_pair\tsource_commit\twire_magic\tprotocol_version\tbuild_id\texecutable_sha256\tcontract_sha256\trecipe_sha256\tprogram_sha256\tgenerated_sha256\twrapper_sha256\ttarget_os\ttarget_arch\tmodule_count\tactivated\tenvironment_sha256"
+		}
+		NR == 1 { if ($0 != header) invalid = 1; next }
+		{
+			rows++
+			if (NF != 18 || $1 != 1 || $2 != expected_capture || $3 != expected_pair ||
+				$4 != expected_source || $5 != "EPW2" || $6 != 1 ||
+				!digest($7) || !digest($8) || !digest($9) || !digest($10) ||
+				!digest($11) || !digest($12) || !digest($13) ||
+				$14 !~ /^(darwin|linux|windows)$/ || $15 !~ /^(amd64|arm64)$/ ||
+				$16 != 37 || $17 != "true" || $18 != expected_environment) invalid = 1
+		}
+		END { exit invalid || rows != 1 }
+	' "$1"
+}
+
+embedded_observer_build_passes() {
+	awk -F '\t' \
+		-v expected_pair="$2" \
+		-v expected_capture="$3" \
+		-v expected_source="$4" \
+		-v expected_environment="$5" '
+		function digest(value) { return length(value) == 64 && value ~ /^[0-9a-f]+$/ }
+		BEGIN {
+			header = "schema_version\tcapture_id\tcapture_pair\tsource_commit\tmode\texecutable_sha256\ttarget_os\ttarget_arch\tactivated\tenvironment_sha256"
+		}
+		NR == 1 { if ($0 != header) invalid = 1; next }
+		{
+			rows++
+			if (NF != 10 || $1 != 1 || $2 != expected_capture || $3 != expected_pair ||
+				$4 != expected_source || $5 != "production-compiled-open-embedded" ||
+				!digest($6) || $7 !~ /^(darwin|linux|windows)$/ ||
+				$8 !~ /^(amd64|arm64)$/ || $9 != "true" || $10 != expected_environment) invalid = 1
+		}
+		END { exit invalid || rows != 1 }
+	' "$1"
+}
+
 host_summary_passes() {
 	awk -F '\t' \
 		-v expected_pair="$2" \
@@ -149,17 +195,12 @@ host_summary_passes() {
 			required["exchange_phases"] = 1
 			required["worker_embedded_slope_max"] = 1
 			required["worker_embedded_slope_budget"] = 1
-			required["frame_budget_ns"] = 1
-			required["exchange_budget_ns"] = 1
 			required["embedded_latency_p50_ns"] = 1
 			required["embedded_latency_p95_ns"] = 1
 			required["embedded_latency_p99_ns"] = 1
 			required["worker_latency_p50_ns"] = 1
 			required["worker_latency_p95_ns"] = 1
 			required["worker_latency_p99_ns"] = 1
-			required["representative_exchange_p50_ns"] = 1
-			required["representative_exchange_p95_ns"] = 1
-			required["representative_exchange_p99_ns"] = 1
 			required["rss_safety_ceiling_bytes"] = 1
 			required["status"] = 1
 			for (key in required) if (!(key in value) || value[key] == "") invalid = 1
@@ -170,22 +211,75 @@ host_summary_passes() {
 				value["semantic_match"] != "true" || value["exchange_phases"] != "1" ||
 				!positive_number(value["worker_embedded_slope_max"]) ||
 				value["worker_embedded_slope_budget"] != "1.50" ||
-				value["frame_budget_ns"] != "16666666" || value["exchange_budget_ns"] != "1666666" ||
 				value["rss_safety_ceiling_bytes"] != "536870912" ||
 				value["worker_embedded_slope_max"] > value["worker_embedded_slope_budget"] ||
-				!positive_uint(value["frame_budget_ns"]) || !positive_uint(value["exchange_budget_ns"]) ||
 				!positive_uint(value["embedded_latency_p50_ns"]) || !positive_uint(value["embedded_latency_p95_ns"]) ||
 				!positive_uint(value["embedded_latency_p99_ns"]) || !positive_uint(value["worker_latency_p50_ns"]) ||
 				!positive_uint(value["worker_latency_p95_ns"]) || !positive_uint(value["worker_latency_p99_ns"]) ||
-				!positive_uint(value["representative_exchange_p50_ns"]) ||
-				!positive_uint(value["representative_exchange_p95_ns"]) ||
-				!positive_uint(value["representative_exchange_p99_ns"]) ||
 				!positive_uint(value["rss_safety_ceiling_bytes"]) ||
-				value["representative_exchange_p95_ns"] < value["representative_exchange_p50_ns"] ||
-				value["representative_exchange_p99_ns"] < value["representative_exchange_p95_ns"] ||
-				value["representative_exchange_p99_ns"] > value["exchange_budget_ns"] ||
+				value["embedded_latency_p95_ns"] < value["embedded_latency_p50_ns"] ||
+				value["embedded_latency_p99_ns"] < value["embedded_latency_p95_ns"] ||
+				value["worker_latency_p95_ns"] < value["worker_latency_p50_ns"] ||
+				value["worker_latency_p99_ns"] < value["worker_latency_p95_ns"] ||
 				value["status"] != "PASS") invalid = 1
-			exit invalid || rows != 22
+			exit invalid || rows != 17
+		}
+	' "$1"
+}
+
+transport_summary_passes() {
+	awk -F '\t' \
+		-v expected_pair="$2" \
+		-v expected_capture="${3:-}" \
+		-v expected_source="${4:-}" \
+		-v expected_environment="${5:-}" '
+		function uint(value) { return value ~ /^(0|[1-9][0-9]*)$/ }
+		function positive_uint(value) { return value ~ /^[1-9][0-9]*$/ }
+		function digest(value) { return length(value) == 64 && value ~ /^[0-9a-f]+$/ }
+		NR == 1 { if ($0 != "field\tvalue") invalid = 1; next }
+		NF != 2 || seen[$1]++ { invalid = 1; next }
+		{ rows++; value[$1] = $2 }
+		END {
+			required["schema_version"] = 1
+			required["capture_id"] = 1
+			required["capture_pair"] = 1
+			required["source_commit"] = 1
+			required["environment_sha256"] = 1
+			required["wire_magic"] = 1
+			required["protocol_version"] = 1
+			required["sample_count"] = 1
+			required["target_os"] = 1
+			required["target_arch"] = 1
+			required["observer_build_id"] = 1
+			required["observer_executable_sha256"] = 1
+			required["request_bytes"] = 1
+			required["response_bytes"] = 1
+			required["sample_set_sha256"] = 1
+			required["frame_budget_ns"] = 1
+			required["transport_budget_ns"] = 1
+			required["transport_latency_p50_ns"] = 1
+			required["transport_latency_p95_ns"] = 1
+			required["transport_latency_p99_ns"] = 1
+			required["status"] = 1
+			for (key in required) if (!(key in value) || value[key] == "") invalid = 1
+			if (value["schema_version"] != 1 || value["capture_pair"] != expected_pair ||
+				(expected_capture != "" && value["capture_id"] != expected_capture) ||
+				(expected_source != "" && value["source_commit"] != expected_source) ||
+				(expected_environment != "" && value["environment_sha256"] != expected_environment) ||
+				value["wire_magic"] != "EPW2" || value["protocol_version"] != 1 ||
+				value["sample_count"] != 4096 || value["target_os"] !~ /^(darwin|linux|windows)$/ ||
+				value["target_arch"] !~ /^(amd64|arm64)$/ || !digest(value["observer_build_id"]) ||
+				!digest(value["observer_executable_sha256"]) || value["request_bytes"] != 1024 ||
+				value["response_bytes"] != 14398 || !digest(value["sample_set_sha256"]) ||
+				value["frame_budget_ns"] != 16666666 || value["transport_budget_ns"] != 1666666 ||
+				!positive_uint(value["transport_latency_p50_ns"]) ||
+				!positive_uint(value["transport_latency_p95_ns"]) ||
+				!positive_uint(value["transport_latency_p99_ns"]) ||
+				value["transport_latency_p95_ns"] < value["transport_latency_p50_ns"] ||
+				value["transport_latency_p99_ns"] < value["transport_latency_p95_ns"] ||
+				value["transport_latency_p99_ns"] > value["transport_budget_ns"] ||
+				value["status"] != "PASS") invalid = 1
+			exit invalid || rows != 21
 		}
 	' "$1"
 }
@@ -765,23 +859,18 @@ prepared_worker_host_result_hashes_match() (
 prepared_worker_host_quantiles_match_summary() (
 	set -eu
 	latency_file=$1
-	exchange_file=$2
-	summary_file=$3
+	summary_file=$2
 	work=$(mktemp -d "${TMPDIR:-/tmp}/prepared-worker-host-quantiles.XXXXXX")
 	trap 'rm -rf "$work"' EXIT HUP INT TERM
 	awk -F '\t' 'NR > 1 { print $7 }' "$latency_file" | LC_ALL=C sort -n >"$work/embedded"
 	awk -F '\t' 'NR > 1 { print $8 }' "$latency_file" | LC_ALL=C sort -n >"$work/worker"
-	awk -F '\t' 'NR > 1 { print $6 }' "$exchange_file" | LC_ALL=C sort -n >"$work/exchange"
 	for specification in \
 		"embedded_latency_p50_ns:$work/embedded:2048" \
 		"embedded_latency_p95_ns:$work/embedded:3892" \
 		"embedded_latency_p99_ns:$work/embedded:4056" \
 		"worker_latency_p50_ns:$work/worker:2048" \
 		"worker_latency_p95_ns:$work/worker:3892" \
-		"worker_latency_p99_ns:$work/worker:4056" \
-		"representative_exchange_p50_ns:$work/exchange:2048" \
-		"representative_exchange_p95_ns:$work/exchange:3892" \
-		"representative_exchange_p99_ns:$work/exchange:4056"
+		"worker_latency_p99_ns:$work/worker:4056"
 	do
 		field=${specification%%:*}
 		rest=${specification#*:}
@@ -791,6 +880,34 @@ prepared_worker_host_quantiles_match_summary() (
 		[ -n "$derived" ] || exit 1
 		[ "$(capture_field "$summary_file" "$field")" = "$derived" ] || exit 1
 	done
+)
+
+prepared_worker_transport_quantiles_match_summary() (
+	set -eu
+	latency_file=$1
+	summary_file=$2
+	work=$(mktemp -d "${TMPDIR:-/tmp}/prepared-worker-transport-quantiles.XXXXXX")
+	trap 'rm -rf "$work"' EXIT HUP INT TERM
+	awk -F '\t' 'NR > 1 { print $6 }' "$latency_file" | LC_ALL=C sort -n >"$work/transport"
+	for specification in \
+		"transport_latency_p50_ns:2048" \
+		"transport_latency_p95_ns:3892" \
+		"transport_latency_p99_ns:4056"
+	do
+		field=${specification%%:*}
+		line=${specification##*:}
+		derived=$(sed -n "${line}p" "$work/transport")
+		[ -n "$derived" ] || exit 1
+		[ "$(capture_field "$summary_file" "$field")" = "$derived" ] || exit 1
+	done
+)
+
+prepared_worker_transport_sample_set_matches_summary() (
+	set -eu
+	latency_file=$1
+	summary_file=$2
+	derived=$(awk -F '\t' 'NR > 1 { print $5 "=" $6 "/" $7 }' "$latency_file" | hash_stdin)
+	[ "$(capture_field "$summary_file" sample_set_sha256)" = "$derived" ]
 )
 
 host_slope_raw_domains_pass() {
@@ -833,6 +950,53 @@ host_latency_domains_pass() {
 	' "$1"
 }
 
+transport_latency_domains_pass() {
+	awk -F '\t' -v maximum="$2" '
+		function positive_uint(value) { return value ~ /^[1-9][0-9]*$/ }
+		function digest(value) { return length(value) == 64 && value ~ /^[0-9a-f]+$/ }
+		NR == 1 { next }
+		{
+			if ($5 != NR - 1 || $5 > maximum || !positive_uint($5) ||
+				!positive_uint($6) || !digest($7)) invalid = 1
+		}
+		END { exit invalid || NR != maximum + 1 }
+	' "$1"
+}
+
+transport_target_matches_acceptance() {
+	awk -F '\t' -v summary_file="$1" -v acceptance_file="$2" '
+		FILENAME == summary_file {
+			if (FNR == 1) next
+			value[$1] = $2
+			next
+		}
+		FILENAME == acceptance_file {
+			if (FNR == 1) next
+			rows++
+			if (value["target_os"] != $3 || value["target_arch"] != $4) invalid = 1
+		}
+		END { exit invalid || rows != 1 }
+	' "$1" "$2"
+}
+
+embedded_observer_target_matches_acceptance() {
+	awk -F '\t' -v build_file="$1" -v acceptance_file="$2" '
+		FILENAME == build_file {
+			if (FNR == 1) next
+			rows++
+			target_os = $7
+			target_arch = $8
+			next
+		}
+		FILENAME == acceptance_file {
+			if (FNR == 1) next
+			acceptance_rows++
+			if (target_os != $3 || target_arch != $4) invalid = 1
+		}
+		END { exit invalid || rows != 1 || acceptance_rows != 1 }
+	' "$1" "$2"
+}
+
 host_crossing_domains_pass() {
 	awk -F '\t' '
 		function uint(value) { return value ~ /^(0|[1-9][0-9]*)$/ }
@@ -871,7 +1035,7 @@ validate_capture() {
 	expected_pair=$2
 	[ -d "$capture" ] || die "capture directory missing: $capture"
 	[ ! -e "$capture/INCOMPLETE" ] || die "capture is incomplete: $capture"
-	for artifact in raw.tsv slopes.tsv summary.tsv parity-schedule.tsv parity-calibration.tsv environment.tsv acceptance-environment.tsv cases.txt command.txt acquisition.log host-semantic.tsv host-slope-raw.tsv host-slopes.tsv host-latency.tsv host-exchange-latency.tsv host-resources.tsv host-crossing-scaling.tsv host-summary.tsv; do
+	for artifact in raw.tsv slopes.tsv summary.tsv parity-schedule.tsv parity-calibration.tsv environment.tsv acceptance-environment.tsv worker-build.tsv embedded-observer-build.tsv embedded-observer-command.txt embedded-observer-freshness.log cases.txt command.txt acquisition.log host-semantic.tsv host-slope-raw.tsv host-slopes.tsv host-latency.tsv host-resources.tsv host-crossing-scaling.tsv host-summary.tsv transport-latency.tsv transport-summary.tsv transport-command.txt transport-acquisition.log; do
 		[ -s "$capture/$artifact" ] || die "$capture/$artifact missing or empty"
 	done
 	[ "$(wc -l <"$capture/cases.txt" | tr -d ' ')" = 1 ] || die "$capture/cases.txt must contain exactly one selection"
@@ -894,6 +1058,7 @@ validate_capture() {
 	[ "${#source_commit}" -eq 40 ] || [ "${#source_commit}" -eq 64 ] || die "$capture source commit has invalid length"
 	[ "$(hash_file "$capture/acceptance-environment.tsv")" = "$environment" ] || die "$capture acceptance environment hash differs"
 	host_summary_passes "$capture/host-summary.tsv" "$expected_pair" "$capture_id" "$source_commit" "$environment" || die "$capture host metadata differs"
+	transport_summary_passes "$capture/transport-summary.tsv" "$expected_pair" "$capture_id" "$source_commit" "$environment" || die "$capture transport summary failed"
 	summary_passes "$capture/summary.tsv" "$expected_pair" "$expected_case_count" "$capture_id" "$source_commit" "$environment" || die "$capture summary failed"
 	if [ "$case_label" = all-37 ]; then
 		[ "$(case_inventory "$capture/summary.tsv")" = "$all37_inventory_sha256" ] || die "$capture is not the frozen all-37 inventory"
@@ -901,6 +1066,10 @@ validate_capture() {
 	semantic_evidence_passes "$capture/host-semantic.tsv" "$expected_pair" "$capture_id" "$source_commit" "$environment" || die "$capture semantic evidence failed"
 	metadata_file_passes "$capture/environment.tsv" "$capture_id" "$expected_pair" "$source_commit" "$environment" "$expected_case_count" || die "$capture environment metadata failed"
 	metadata_matches_acceptance "$capture/environment.tsv" "$capture/acceptance-environment.tsv" || die "$capture runtime metadata differs from acceptance environment"
+	transport_target_matches_acceptance "$capture/transport-summary.tsv" "$capture/acceptance-environment.tsv" || die "$capture transport target differs from acceptance environment"
+	worker_build_passes "$capture/worker-build.tsv" "$expected_pair" "$capture_id" "$source_commit" "$environment" || die "$capture EPW2 build evidence failed"
+	embedded_observer_build_passes "$capture/embedded-observer-build.tsv" "$expected_pair" "$capture_id" "$source_commit" "$environment" || die "$capture embedded observer build evidence failed"
+	embedded_observer_target_matches_acceptance "$capture/embedded-observer-build.tsv" "$capture/acceptance-environment.tsv" || die "$capture embedded observer target differs from acceptance environment"
 
 	capture_rows_pass "$capture/raw.tsv" \
 		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tcall_scale\tengine\trepeat\torder\tn\tseed\telapsed_ns\tresult\tworkload_sha256\tprogram_sha256\tenvironment_sha256" \
@@ -945,14 +1114,16 @@ validate_capture() {
 	prepared_worker_host_result_hashes_match "$capture/host-slope-raw.tsv" "$capture/host-slopes.tsv" || die "$capture host result-set hashes differ from raw evidence"
 	host_slopes_match_summary "$capture/host-slopes.tsv" "$(capture_field "$capture/host-summary.tsv" worker_embedded_slope_max)" || die "$capture host slope summary differs"
 	capture_rows_pass "$capture/host-latency.tsv" \
-		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tsample\torder\tembedded_ns\tworker_ns\tobserved_worker_minus_embedded_ns_clamped\tresult_sha256\tenvironment_sha256" \
+		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tsample\torder\tembedded_ns\tworker_ns\tpaired_worker_minus_embedded_ns_clamped\tresult_sha256\tenvironment_sha256" \
 		11 4096 "$capture_id" "$expected_pair" "$source_commit" "$environment" "5" || die "$capture host latency inventory failed"
 	host_latency_domains_pass "$capture/host-latency.tsv" 4096 || die "$capture host latency coordinate domain failed"
-	capture_rows_pass "$capture/host-exchange-latency.tsv" \
-		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tsample\tround_trip_ns\tresult_sha256\tenvironment_sha256" \
-		8 4096 "$capture_id" "$expected_pair" "$source_commit" "$environment" "5" || die "$capture host exchange inventory failed"
-	host_latency_domains_pass "$capture/host-exchange-latency.tsv" 4096 1 || die "$capture host exchange coordinate domain failed"
-	prepared_worker_host_quantiles_match_summary "$capture/host-latency.tsv" "$capture/host-exchange-latency.tsv" "$capture/host-summary.tsv" || die "$capture host quantiles are not derived from raw evidence"
+	prepared_worker_host_quantiles_match_summary "$capture/host-latency.tsv" "$capture/host-summary.tsv" || die "$capture host quantiles are not derived from raw evidence"
+	capture_rows_pass "$capture/transport-latency.tsv" \
+		"schema_version\tcapture_id\tcapture_pair\tsource_commit\tsample\telapsed_ns\tresponse_sha256\tenvironment_sha256" \
+		8 4096 "$capture_id" "$expected_pair" "$source_commit" "$environment" "5" || die "$capture transport latency inventory failed"
+	transport_latency_domains_pass "$capture/transport-latency.tsv" 4096 || die "$capture transport latency coordinate domain failed"
+	prepared_worker_transport_quantiles_match_summary "$capture/transport-latency.tsv" "$capture/transport-summary.tsv" || die "$capture transport quantiles are not derived from raw evidence"
+	prepared_worker_transport_sample_set_matches_summary "$capture/transport-latency.tsv" "$capture/transport-summary.tsv" || die "$capture transport samples differ from their summary digest"
 	capture_rows_pass "$capture/host-resources.tsv" \
 		"schema_version\tcapture_id\tcapture_pair\tsource_commit\twall_ns\tparent_cpu_ns\tchild_cpu_ns\tparent_peak_rss_bytes\tchild_peak_rss_bytes\tenvironment_sha256" \
 		10 1 "$capture_id" "$expected_pair" "$source_commit" "$environment" "1" || die "$capture host resource inventory failed"
@@ -984,6 +1155,12 @@ compare_captures() {
 	trace_a=$(awk -F '\t' '$5 == "embedded" { print $6 }' "$capture_a/host-semantic.tsv")
 	trace_b=$(awk -F '\t' '$5 == "embedded" { print $6 }' "$capture_b/host-semantic.tsv")
 	[ "$trace_a" = "$trace_b" ] || die 'capture semantic traces differ'
+	build_a=$(awk -F '\t' 'NR == 2 { for (field = 5; field <= 17; field++) printf "%s%s", (field == 5 ? "" : "\t"), $field; print "" }' "$capture_a/worker-build.tsv" | hash_stdin)
+	build_b=$(awk -F '\t' 'NR == 2 { for (field = 5; field <= 17; field++) printf "%s%s", (field == 5 ? "" : "\t"), $field; print "" }' "$capture_b/worker-build.tsv" | hash_stdin)
+	[ "$build_a" = "$build_b" ] || die 'capture EPW2 build identities differ'
+	embedded_observer_a=$(awk -F '\t' 'NR == 2 { for (field = 5; field <= 9; field++) printf "%s%s", (field == 5 ? "" : "\t"), $field; print "" }' "$capture_a/embedded-observer-build.tsv" | hash_stdin)
+	embedded_observer_b=$(awk -F '\t' 'NR == 2 { for (field = 5; field <= 9; field++) printf "%s%s", (field == 5 ? "" : "\t"), $field; print "" }' "$capture_b/embedded-observer-build.tsv" | hash_stdin)
+	[ "$embedded_observer_a" = "$embedded_observer_b" ] || die 'capture embedded observer build identities differ'
 	inventory_a=$(awk -F '\t' 'NR > 1 { print $5 "/" $6 }' "$capture_a/summary.tsv" | LC_ALL=C sort | hash_stdin)
 	inventory_b=$(awk -F '\t' 'NR > 1 { print $5 "/" $6 }' "$capture_b/summary.tsv" | LC_ALL=C sort | hash_stdin)
 	[ "$inventory_a" = "$inventory_b" ] || die 'capture case inventories differ'
@@ -1011,6 +1188,24 @@ schema_version	capture_id	capture_pair	source_commit	corpus	name	call_scale	work
 1	fixture-a	a	0000000000000000000000000000000000000000	classic	recursive_fibonacci	32	0.2	0.3	0.2	0.3	1.01	PASS	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 EOF
 	summary_passes "$q/summary.tsv" a 1 fixture-a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb || die 'valid summary fixture failed'
+	cat >"$q/worker-build.tsv" <<'EOF'
+schema_version	capture_id	capture_pair	source_commit	wire_magic	protocol_version	build_id	executable_sha256	contract_sha256	recipe_sha256	program_sha256	generated_sha256	wrapper_sha256	target_os	target_arch	module_count	activated	environment_sha256
+1	fixture-a	a	0000000000000000000000000000000000000000	EPW2	1	1111111111111111111111111111111111111111111111111111111111111111	2222222222222222222222222222222222222222222222222222222222222222	3333333333333333333333333333333333333333333333333333333333333333	4444444444444444444444444444444444444444444444444444444444444444	5555555555555555555555555555555555555555555555555555555555555555	6666666666666666666666666666666666666666666666666666666666666666	7777777777777777777777777777777777777777777777777777777777777777	linux	amd64	37	true	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+	worker_build_passes "$q/worker-build.tsv" a fixture-a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb || die 'valid EPW2 build fixture failed'
+	sed 's/\tEPW2\t/\tOLD1\t/' "$q/worker-build.tsv" >"$q/worker-build-spliced.tsv"
+	if worker_build_passes "$q/worker-build-spliced.tsv" a fixture-a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; then
+		die 'non-EPW2 build evidence passed'
+	fi
+	cat >"$q/embedded-observer-build.tsv" <<'EOF'
+schema_version	capture_id	capture_pair	source_commit	mode	executable_sha256	target_os	target_arch	activated	environment_sha256
+1	fixture-a	a	0000000000000000000000000000000000000000	production-compiled-open-embedded	8888888888888888888888888888888888888888888888888888888888888888	darwin	arm64	true	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+	embedded_observer_build_passes "$q/embedded-observer-build.tsv" a fixture-a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb || die 'valid embedded observer build fixture failed'
+	sed 's/production-compiled-open-embedded/test-binary-embedded/' "$q/embedded-observer-build.tsv" >"$q/embedded-observer-build-spliced.tsv"
+	if embedded_observer_build_passes "$q/embedded-observer-build-spliced.tsv" a fixture-a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; then
+		die 'test-binary embedded observer evidence passed'
+	fi
 	sed 's/PASS/FAIL/' "$q/summary.tsv" >"$q/failing.tsv"
 	if summary_passes "$q/failing.tsv" a 1 fixture-a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; then
 		die 'failing summary fixture passed'
@@ -1033,17 +1228,12 @@ semantic_match	true
 exchange_phases	1
 worker_embedded_slope_max	1.01
 worker_embedded_slope_budget	1.50
-frame_budget_ns	16666666
-exchange_budget_ns	1666666
 embedded_latency_p50_ns	10
 embedded_latency_p95_ns	20
 embedded_latency_p99_ns	30
 worker_latency_p50_ns	15
 worker_latency_p95_ns	25
 worker_latency_p99_ns	35
-representative_exchange_p50_ns	5
-representative_exchange_p95_ns	10
-representative_exchange_p99_ns	20
 rss_safety_ceiling_bytes	536870912
 status	PASS
 EOF
@@ -1102,14 +1292,9 @@ EOF
 	fi
 	awk 'BEGIN {
 		OFS = "\t"
-		print "schema_version", "capture_id", "capture_pair", "source_commit", "sample", "order", "embedded_ns", "worker_ns", "observed_worker_minus_embedded_ns_clamped", "result_sha256", "environment_sha256"
+		print "schema_version", "capture_id", "capture_pair", "source_commit", "sample", "order", "embedded_ns", "worker_ns", "paired_worker_minus_embedded_ns_clamped", "result_sha256", "environment_sha256"
 		for (sample = 1; sample <= 4096; sample++) print 1, "fixture-a", "a", "0000000000000000000000000000000000000000", sample, "embedded,worker", sample, sample, 0, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	}' >"$q/host-quantile-latency.tsv"
-	awk 'BEGIN {
-		OFS = "\t"
-		print "schema_version", "capture_id", "capture_pair", "source_commit", "sample", "round_trip_ns", "result_sha256", "environment_sha256"
-		for (sample = 1; sample <= 4096; sample++) print 1, "fixture-a", "a", "0000000000000000000000000000000000000000", sample, sample, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	}' >"$q/host-quantile-exchange.tsv"
 	cat >"$q/host-quantile-summary.tsv" <<'EOF'
 field	value
 embedded_latency_p50_ns	2048
@@ -1118,14 +1303,61 @@ embedded_latency_p99_ns	4056
 worker_latency_p50_ns	2048
 worker_latency_p95_ns	3892
 worker_latency_p99_ns	4056
-representative_exchange_p50_ns	2048
-representative_exchange_p95_ns	3892
-representative_exchange_p99_ns	4056
 EOF
-	prepared_worker_host_quantiles_match_summary "$q/host-quantile-latency.tsv" "$q/host-quantile-exchange.tsv" "$q/host-quantile-summary.tsv" || die 'valid host quantile derivation failed'
-	sed 's/representative_exchange_p99_ns\t4056/representative_exchange_p99_ns\t1/' "$q/host-quantile-summary.tsv" >"$q/host-quantile-summary-spliced.tsv"
-	if prepared_worker_host_quantiles_match_summary "$q/host-quantile-latency.tsv" "$q/host-quantile-exchange.tsv" "$q/host-quantile-summary-spliced.tsv"; then
+	prepared_worker_host_quantiles_match_summary "$q/host-quantile-latency.tsv" "$q/host-quantile-summary.tsv" || die 'valid host quantile derivation failed'
+	sed 's/worker_latency_p99_ns\t4056/worker_latency_p99_ns\t1/' "$q/host-quantile-summary.tsv" >"$q/host-quantile-summary-spliced.tsv"
+	if prepared_worker_host_quantiles_match_summary "$q/host-quantile-latency.tsv" "$q/host-quantile-summary-spliced.tsv"; then
 		die 'host quantile not derived from raw evidence passed'
+	fi
+	awk 'BEGIN {
+		OFS = "\t"
+		print "schema_version", "capture_id", "capture_pair", "source_commit", "sample", "elapsed_ns", "response_sha256", "environment_sha256"
+		for (sample = 1; sample <= 4096; sample++) print 1, "fixture-a", "a", "0000000000000000000000000000000000000000", sample, sample, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	}' >"$q/transport-latency.tsv"
+	transport_sample_set=$(awk -F '\t' 'NR > 1 { print $5 "=" $6 "/" $7 }' "$q/transport-latency.tsv" | hash_stdin)
+	cat >"$q/transport-summary.tsv" <<EOF
+field	value
+schema_version	1
+capture_id	fixture-a
+capture_pair	a
+source_commit	0000000000000000000000000000000000000000
+environment_sha256	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+wire_magic	EPW2
+protocol_version	1
+sample_count	4096
+target_os	linux
+target_arch	amd64
+observer_build_id	1111111111111111111111111111111111111111111111111111111111111111
+observer_executable_sha256	2222222222222222222222222222222222222222222222222222222222222222
+request_bytes	1024
+response_bytes	14398
+sample_set_sha256	$transport_sample_set
+frame_budget_ns	16666666
+transport_budget_ns	1666666
+transport_latency_p50_ns	2048
+transport_latency_p95_ns	3892
+transport_latency_p99_ns	4056
+status	PASS
+EOF
+	transport_summary_passes "$q/transport-summary.tsv" a fixture-a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb || die 'valid transport summary fixture failed'
+	transport_latency_domains_pass "$q/transport-latency.tsv" 4096 || die 'valid transport latency fixture failed'
+	prepared_worker_transport_quantiles_match_summary "$q/transport-latency.tsv" "$q/transport-summary.tsv" || die 'valid transport quantile derivation failed'
+	prepared_worker_transport_sample_set_matches_summary "$q/transport-latency.tsv" "$q/transport-summary.tsv" || die 'valid transport sample-set derivation failed'
+	sed 's/transport_latency_p99_ns\t4056/transport_latency_p99_ns\t1666667/' "$q/transport-summary.tsv" >"$q/transport-summary-over-budget.tsv"
+	if transport_summary_passes "$q/transport-summary-over-budget.tsv" a fixture-a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; then
+		die 'over-budget transport summary passed'
+	fi
+	sed 's/transport_latency_p99_ns\t4056/transport_latency_p99_ns\t1/' "$q/transport-summary.tsv" >"$q/transport-summary-spliced.tsv"
+	if prepared_worker_transport_quantiles_match_summary "$q/transport-latency.tsv" "$q/transport-summary-spliced.tsv"; then
+		die 'transport quantile not derived from raw evidence passed'
+	fi
+	awk -F '\t' 'BEGIN { OFS = "\t" } NR == 2 { $7 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" } { print }' "$q/transport-latency.tsv" >"$q/transport-latency-spliced.tsv"
+	if prepared_worker_transport_sample_set_matches_summary "$q/transport-latency-spliced.tsv" "$q/transport-summary.tsv"; then
+		die 'spliced transport sample set passed'
+	fi
+	awk -F '\t' 'BEGIN { OFS = "\t" } NR == 2 { $5 = 2 } { print }' "$q/transport-latency.tsv" >"$q/transport-latency-order-spliced.tsv"
+	if transport_latency_domains_pass "$q/transport-latency-order-spliced.tsv" 4096; then
+		die 'spliced transport sample order passed'
 	fi
 	cat >"$q/semantic.tsv" <<'EOF'
 schema_version	capture_id	capture_pair	source_commit	engine	trace_sha256	status	environment_sha256
@@ -1160,6 +1392,11 @@ schema_version	go_version	goos	goarch	os_build	cpu_model	cgo_enabled	gomaxprocs	
 EOF
 	metadata_file_passes "$q/environment.tsv" fixture-a a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 1 || die 'valid environment metadata failed'
 	metadata_matches_acceptance "$q/environment.tsv" "$q/acceptance-environment.tsv" || die 'valid acceptance metadata match failed'
+	embedded_observer_target_matches_acceptance "$q/embedded-observer-build.tsv" "$q/acceptance-environment.tsv" || die 'valid embedded observer target match failed'
+	sed 's/	darwin	arm64	/	darwin	amd64	/' "$q/embedded-observer-build.tsv" >"$q/embedded-observer-target-spliced.tsv"
+	if embedded_observer_target_matches_acceptance "$q/embedded-observer-target-spliced.tsv" "$q/acceptance-environment.tsv"; then
+		die 'spliced embedded observer target passed'
+	fi
 	sed '/^cpu\t/d' "$q/environment.tsv" >"$q/environment-missing.tsv"
 	if metadata_file_passes "$q/environment-missing.tsv" fixture-a a 0000000000000000000000000000000000000000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 1; then
 		die 'incomplete environment metadata passed'
@@ -1447,6 +1684,16 @@ command="CGO_ENABLED=0 GOMAXPROCS=1 EMBER_RUNTIME_ACCEPTANCE_PROFILE=$acceptance
 [ -z "$cases" ] || command="$command --cases $cases"
 [ -z "$schedule_from" ] || command="$command --schedule-from $schedule_from"
 
+embedded_observer="$temporary/embedded-observer"
+if ! CGO_ENABLED=0 GOMAXPROCS=1 go test -run '^TestPreparedWorkerParityFixtureIsFresh$' -count=1 . >"$temporary/embedded-observer-freshness.log" 2>&1; then
+	die 'embedded observer fixture freshness check failed'
+fi
+embedded_observer_command="CGO_ENABLED=0 GOMAXPROCS=1 go build -trimpath -buildvcs=false -o $embedded_observer ./internal/preparedworkerparity/cmd/embeddedobserver"
+if ! CGO_ENABLED=0 GOMAXPROCS=1 go build -trimpath -buildvcs=false -o "$embedded_observer" ./internal/preparedworkerparity/cmd/embeddedobserver; then
+	die 'embedded observer production build failed'
+fi
+embedded_observer_digest=$(hash_file "$embedded_observer")
+
 test_status=0
 CGO_ENABLED=0 GOMAXPROCS=1 \
 	EMBER_RUNTIME_ACCEPTANCE_PROFILE="$acceptance_profile" \
@@ -1460,16 +1707,35 @@ CGO_ENABLED=0 GOMAXPROCS=1 \
 	PREPARED_WORKER_OUTPUT="$output" \
 	PREPARED_WORKER_CASES="$cases" \
 	PREPARED_WORKER_SCHEDULE="$schedule_input" \
-	go test -run '^TestPreparedWorkerAll37AdmissionLive$' -count=1 . >"$temporary/acquisition.log" 2>&1 || test_status=$?
+	PREPARED_WORKER_EMBEDDED_OBSERVER="$embedded_observer" \
+	PREPARED_WORKER_EMBEDDED_OBSERVER_SHA256="$embedded_observer_digest" \
+	go test -timeout=35m -run '^TestPreparedWorkerAll37AdmissionLive$' -count=1 . >"$temporary/acquisition.log" 2>&1 || test_status=$?
 
 if [ ! -d "$output" ]; then
 	mkdir -m 700 "$output"
 fi
 cp "$temporary/acquisition.log" "$output/acquisition.log"
 cp "$temporary/environment.tsv" "$output/acceptance-environment.tsv"
+cp "$temporary/embedded-observer-freshness.log" "$output/embedded-observer-freshness.log"
 printf '%s\n' "$command" >"$output/command.txt"
+printf '%s\n' "$embedded_observer_command" >"$output/embedded-observer-command.txt"
 printf '%s\n' "$case_label" >"$output/cases.txt"
 [ "$test_status" -eq 0 ] || die "admission acquisition failed; see $output/acquisition.log"
+
+transport_command="CGO_ENABLED=0 GOMAXPROCS=1 EMBER_PREPARED_WORKER_TRANSPORT_ADMISSION_LIVE=1 PREPARED_WORKER_CAPTURE_PAIR=$pair PREPARED_WORKER_CAPTURE_ID=$capture_id PREPARED_WORKER_SOURCE_COMMIT=$current_source_commit PREPARED_WORKER_ENVIRONMENT_SHA256=$environment_hash PREPARED_WORKER_OUTPUT=$output go test -run '^TestProcessBackendTransportAdmissionLive$' -count=1 ./preparedworker"
+transport_status=0
+CGO_ENABLED=0 GOMAXPROCS=1 \
+	EMBER_PREPARED_WORKER_TRANSPORT_ADMISSION_LIVE=1 \
+	PREPARED_WORKER_CAPTURE_PAIR="$pair" \
+	PREPARED_WORKER_CAPTURE_ID="$capture_id" \
+	PREPARED_WORKER_SOURCE_COMMIT="$current_source_commit" \
+	PREPARED_WORKER_ENVIRONMENT_SHA256="$environment_hash" \
+	PREPARED_WORKER_OUTPUT="$output" \
+	go test -run '^TestProcessBackendTransportAdmissionLive$' -count=1 ./preparedworker >"$temporary/transport-acquisition.log" 2>&1 || transport_status=$?
+cp "$temporary/transport-acquisition.log" "$output/transport-acquisition.log"
+printf '%s\n' "$transport_command" >"$output/transport-command.txt"
+[ "$transport_status" -eq 0 ] || die "transport acquisition failed; see $output/transport-acquisition.log"
+
 validate_capture "$output" "$pair"
 
 rm -f "$output/INCOMPLETE"

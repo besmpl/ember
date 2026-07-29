@@ -197,8 +197,13 @@ func loadPureGoExecAllowlist(path string) (map[string]pureGoExecAllowEntry, erro
 		if entry.File == "" || entry.Owner == "" || entry.Purpose == "" {
 			return nil, fmt.Errorf("pure-Go exec allowlist %s:%d: empty file, owner, or purpose", path, lineNumber)
 		}
-		if !strings.HasSuffix(entry.File, "_test.go") {
-			return nil, fmt.Errorf("pure-Go exec allowlist %s:%d: %q is not a _test.go file", path, lineNumber, entry.File)
+		if !strings.HasSuffix(entry.File, "_test.go") && !pureGoProductionExecClass(entry.Class) {
+			return nil, fmt.Errorf(
+				"pure-Go exec allowlist %s:%d: %q is not a _test.go file or reviewed production edge",
+				path,
+				lineNumber,
+				entry.File,
+			)
 		}
 		if !pureGoExecClass(entry.Class) {
 			return nil, fmt.Errorf("pure-Go exec allowlist %s:%d: unknown class %q", path, lineNumber, entry.Class)
@@ -217,11 +222,16 @@ func loadPureGoExecAllowlist(path string) (map[string]pureGoExecAllowEntry, erro
 
 func pureGoExecClass(class string) bool {
 	switch class {
-	case "pinned-luau", "runner-fingerprint", "generator-check", "test-helper":
+	case "pinned-luau", "runner-fingerprint", "generator-check", "test-helper",
+		"toolchain-build", "worker-launch":
 		return true
 	default:
 		return false
 	}
+}
+
+func pureGoProductionExecClass(class string) bool {
+	return class == "toolchain-build" || class == "worker-launch"
 }
 
 func pureGoAllowlistKey(file, owner string) string {
@@ -319,9 +329,6 @@ func scanPureGoAssembly(path, relative string) []pureGoBoundaryIssue {
 			if index+1 < len(fields) && pureGoAssemblyTarget(fields[index+1], labels) {
 				break
 			}
-			if index+1 < len(fields) && reviewedPreparedNativeAssemblyCall(relative, opcode, fields[index+1]) {
-				break
-			}
 			issues = append(issues, pureGoBoundaryIssue{Path: relative, Detail: fmt.Sprintf("assembly call-like instruction %s has non-Go target at line %d", opcode, lineNumber+1)})
 			break
 		}
@@ -357,9 +364,6 @@ func scanPureGoFile(path, relative string, allowlist map[string]pureGoExecAllowE
 		for _, comment := range group.List {
 			text := strings.TrimSpace(comment.Text)
 			if strings.HasPrefix(text, "//go:linkname") || strings.HasPrefix(text, "/*go:linkname") {
-				if reviewedPreparedNativeLinkname(relative, text) {
-					continue
-				}
 				result.Issues = append(result.Issues, pureGoBoundaryIssue{Path: relative, Detail: "private go:linkname directive"})
 			}
 		}
@@ -456,6 +460,9 @@ func scanPureGoPackageUse(relative, owner, importPath, name string, called bool,
 		if name == "LookPath" {
 			return
 		}
+		if reviewedPreparedWorkerExecType(relative, owner, name, called) {
+			return
+		}
 		if name != "Command" && name != "CommandContext" {
 			result.Issues = append(result.Issues, pureGoBoundaryIssue{Path: relative, Detail: fmt.Sprintf("os/exec use %s is not an approved launch constructor", name)})
 			return
@@ -482,90 +489,26 @@ func scanPureGoPackageUse(relative, owner, importPath, name string, called bool,
 		}
 		return
 	}
-	if reviewedPreparedPluginAPI(relative, owner, importPath, name, called) {
-		return
-	}
-	if reviewedPreparedNativeAPI(relative, owner, importPath, name, called) {
-		return
-	}
 	if pureGoForeignAPI(importPath, name) {
 		result.Issues = append(result.Issues, pureGoBoundaryIssue{Path: relative, Detail: fmt.Sprintf("forbidden foreign or executable-memory API %s.%s", importPath, name)})
 	}
 }
 
-// reviewedPreparedPluginAPI is one explicit native edge in the repository.
-// Keep this path, owner, and direct-call check exact: the package is an opt-in
-// editor adapter with a cgo-disabled stub, not part of Ember's portable runtime.
-func reviewedPreparedPluginAPI(relative, owner, importPath, name string, called bool) bool {
-	return called &&
-		relative == "preparedplugin/open_supported.go" &&
-		owner == "openPreparedBundle" &&
-		importPath == "plugin" &&
-		name == "Open"
-}
-
-// reviewedPreparedNativeAPI contains Ember's no-cgo executable-memory seams.
-// Keep every path, owner, and symbol exact so moving or widening this edge
-// requires an explicit review.
-func reviewedPreparedNativeAPI(relative, owner, importPath, name string, called bool) bool {
-	switch relative {
-	case "internal/preparednative/executable_darwin.go":
-		switch owner {
-		case "mapExecutable":
-			if importPath == "syscall" {
-				return name == "Mmap" && called || name == "PROT_EXEC" || name == "MAP_JIT"
-			}
-			return importPath == "github.com/ebitengine/purego" && name == "SyscallN" && called
-		case "resolveJITSymbols":
-			if importPath != "github.com/ebitengine/purego" {
-				return false
-			}
-			return name == "Dlsym" && called || name == "RTLD_DEFAULT"
-		default:
-			return false
-		}
-	case "internal/preparednative/executable_linux.go":
-		if owner != "mapExecutable" || importPath != "syscall" {
-			return false
-		}
-		return name == "Mmap" && called || name == "Mprotect" && called || name == "PROT_EXEC"
-	case "internal/preparednative/executable_windows.go":
-		if importPath != "golang.org/x/sys/windows" {
-			return false
-		}
-		switch owner {
-		case pureGoPackageOwner:
-			return (name == "NewLazySystemDLL" || name == "NewProc") && called
-		case "mapExecutable":
-			return (name == "VirtualAlloc" || name == "VirtualProtect" || name == "VirtualFree" || name == "Call") && called ||
-				name == "PAGE_EXECUTE_READ"
-		case "unmapExecutable":
-			return name == "VirtualFree" && called
-		default:
-			return false
-		}
-	case "internal/preparednative/executable_windows_test.go":
-		return owner == "TestExecutableWindowsMappingIsSealedReadExecute" &&
-			importPath == "golang.org/x/sys/windows" &&
-			(name == "VirtualQuery" && called || name == "PAGE_EXECUTE_READ")
+func reviewedPreparedWorkerExecType(relative, owner, name string, called bool) bool {
+	if name != "Cmd" || called {
+		return false
+	}
+	key := pureGoAllowlistKey(relative, owner)
+	switch key {
+	case "preparedworker/process_parent_lease_darwin.go::newWorkerParentLease",
+		"preparedworker/process_parent_lease_other.go::newWorkerParentLease",
+		"preparedworker/process_platform_unix.go::configureWorkerCommand",
+		"preparedworker/process_platform_unsupported.go::configureWorkerCommand",
+		"preparedworker/process_platform_windows.go::configureWorkerCommand":
+		return true
 	default:
 		return false
 	}
-}
-
-func reviewedPreparedNativeLinkname(relative, directive string) bool {
-	return relative == "internal/preparednative/call.go" &&
-		directive == "//go:linkname runtimeCGOCall runtime.cgocall"
-}
-
-func reviewedPreparedNativeAssemblyCall(relative, opcode, target string) bool {
-	if opcode != "CALL" {
-		return false
-	}
-	target = strings.Trim(target, " \t,")
-	return relative == "internal/preparednative/call_arm64.s" && target == "(R9)" ||
-		relative == "internal/preparednative/call_unix_amd64.s" && target == "AX" ||
-		relative == "internal/preparednative/call_windows_amd64.s" && target == "AX"
 }
 
 func pureGoProcessAPI(importPath, name string) bool {

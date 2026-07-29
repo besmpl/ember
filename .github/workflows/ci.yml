@@ -34,9 +34,14 @@ jobs:
       - name: Build packages
         run: go build ./...
 
-  macos:
-    name: macos
-    runs-on: macos-latest
+      - name: Cross-build prepared worker targets
+        run: scripts/check-prepared-worker-targets
+
+  macos-arm64:
+    name: macos-arm64
+    runs-on: macos-15
+    env:
+      CGO_ENABLED: "0"
 
     steps:
       - name: Check out repository
@@ -48,8 +53,41 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Run macOS tests
+      - name: Verify macOS ARM64 target
+        run: |
+          test "$(go env GOOS)/$(go env GOARCH)" = darwin/arm64
+
+      - name: Run macOS ARM64 tests
         run: go test -count=1 ./...
+
+      - name: Build macOS ARM64 packages
+        run: go build ./...
+
+  macos-amd64:
+    name: macos-amd64
+    runs-on: macos-15-intel
+    env:
+      CGO_ENABLED: "0"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Verify macOS x86-64 target
+        run: |
+          test "$(go env GOOS)/$(go env GOARCH)" = darwin/amd64
+
+      - name: Run macOS x86-64 tests
+        run: go test -count=1 ./...
+
+      - name: Build macOS x86-64 packages
+        run: go build ./...
 
   linux-arm64:
     name: linux-arm64
@@ -78,6 +116,7 @@ jobs:
   linux-amd64-performance:
     name: linux-amd64-performance
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     env:
       CGO_ENABLED: "0"
       GOMAXPROCS: "1"
@@ -115,21 +154,48 @@ jobs:
           chmod 0500 "${oracle_dir}/bin/luau"
           printf 'LUAU_BIN=%s\n' "${oracle_dir}/bin/luau" >>"${GITHUB_ENV}"
 
-      - name: Run Linux x86-64 native parity gate
+      - name: Run paired Linux x86-64 EPW2 admission
         shell: bash
         run: |
-          scripts/check-runtime-parity \
-            --phase prepared-native-parity15 \
-            --capture-role candidate \
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/ember-prepared-worker-linux-amd64"
+          scripts/check-prepared-worker-admission \
             --capture-pair a \
-            --output "${RUNNER_TEMP}/ember-prepared-native-linux-amd64"
+            --output "${evidence}/a"
+          scripts/check-prepared-worker-admission \
+            --capture-pair b \
+            --schedule-from "${evidence}/a" \
+            --output "${evidence}/b"
+          scripts/check-prepared-worker-admission \
+            --compare-pair "${evidence}/a" "${evidence}/b"
 
-      - name: Upload Linux x86-64 parity evidence
+      - name: Run Linux x86-64 resource-bounded reload soak
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(go env GOOS)/$(go env GOARCH)" = linux/amd64
+          evidence="${RUNNER_TEMP}/ember-prepared-worker-linux-amd64"
+          soak="${evidence}/soak"
+          mkdir -p "${soak}"
+          {
+            printf 'target=%s\n' "$(go env GOOS)/$(go env GOARCH)"
+            printf 'commit='; git rev-parse HEAD
+            printf 'go_version='; go version
+            go env
+          } >"${soak}/fingerprint.txt"
+          EMBER_PREPARED_WORKER_SWAP_SOAK=1 \
+            EMBER_PREPARED_WORKER_SWAP_SOAK_OUTPUT="${soak}" \
+            go test \
+            -run '^TestPreparedWorkerParityAlternatesIndependentStaticAOTGenerations$' \
+            -count=1 . 2>&1 | tee "${soak}/acquisition.log"
+          test -f "${soak}/resource-summary.tsv"
+
+      - name: Upload Linux x86-64 admission evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: prepared-native-linux-amd64-${{ github.sha }}
-          path: ${{ runner.temp }}/ember-prepared-native-linux-amd64
+          name: prepared-worker-linux-amd64-${{ github.sha }}
+          path: ${{ runner.temp }}/ember-prepared-worker-linux-amd64
           if-no-files-found: warn
 
   linux-386:

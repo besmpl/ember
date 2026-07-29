@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/besmpl/ember"
-	"github.com/besmpl/ember/internal/preparednative"
 )
 
 const (
@@ -44,6 +43,9 @@ const (
 	parityPointAttemptLimit    = 60
 	parityPointRetryDelay      = time.Second
 	parityExternalPointTimeout = 60 * time.Second
+	parityCallScaleMaximum     = 1024
+	parityCallScaleTarget      = 10 * time.Millisecond
+	parityCallScaleTrials      = 3
 
 	// A slope is not acceptance evidence when the decisive point is shorter
 	// than ordinary scheduler disturbances. The uniform iteration schedule is
@@ -64,11 +66,11 @@ type parityCaptureContract struct {
 
 func parityContractForPhase(phase string) (parityCaptureContract, error) {
 	switch phase {
-	case "full", "speed2x", "prepared-parity1x", "prepared-native-parity15":
+	case "full", "speed2x", "prepared-parity1x":
 		return parityCaptureContract{
 			Phase:         phase,
 			Lifecycle:     "guest_batch",
-			CallableScope: "guest_batch_v1",
+			CallableScope: "guest_batch_v2",
 			GuestBatch:    true,
 		}, nil
 	default:
@@ -151,6 +153,85 @@ func validateParityMeasurementWindow(samples map[int]float64) error {
 		return fmt.Errorf("parity measurement window: N=%d elapsed_ns=%.17g, want at least %.17g", maxN, elapsed, minimum)
 	}
 	return nil
+}
+
+func selectRuntimeParityCallScale(measure func(int) (float64, error)) (int, error) {
+	if measure == nil {
+		return 0, errors.New("runtime parity call-scale calibration: nil measurement")
+	}
+	maximumN := parityIterations[len(parityIterations)-1]
+	target := float64(parityCallScaleTarget.Nanoseconds())
+	for scale := 1; scale <= parityCallScaleMaximum; scale *= 2 {
+		minimum := float64(0)
+		for range parityCallScaleTrials {
+			elapsed, err := measure(maximumN * scale)
+			if err != nil {
+				return 0, err
+			}
+			if elapsed <= 0 || !finiteParityFloat(elapsed) {
+				return 0, fmt.Errorf("runtime parity call-scale calibration: invalid timing %v", elapsed)
+			}
+			if minimum == 0 || elapsed < minimum {
+				minimum = elapsed
+			}
+		}
+		if minimum >= target {
+			return scale, nil
+		}
+	}
+	return 0, fmt.Errorf(
+		"runtime parity call-scale calibration: maximum scale %d did not reach %s",
+		parityCallScaleMaximum,
+		parityCallScaleTarget,
+	)
+}
+
+func normalizeRuntimeParitySamples[T any](samples map[int]T, callScale int) (map[int]T, error) {
+	if callScale <= 0 || callScale > parityCallScaleMaximum || callScale&(callScale-1) != 0 {
+		return nil, fmt.Errorf("runtime parity window: invalid call scale %d", callScale)
+	}
+	if len(samples) != len(parityIterations) {
+		return nil, fmt.Errorf("runtime parity window: got %d points, want %d", len(samples), len(parityIterations))
+	}
+	normalized := make(map[int]T, len(parityIterations))
+	for _, baseN := range parityIterations {
+		n := baseN * callScale
+		value, ok := samples[n]
+		if !ok {
+			return nil, fmt.Errorf("runtime parity window: missing N=%d", n)
+		}
+		normalized[baseN] = value
+	}
+	return normalized, nil
+}
+
+func validateRuntimeParityMeasurementWindow(samples map[int]float64, callScale int) error {
+	normalized, err := normalizeRuntimeParitySamples(samples, callScale)
+	if err != nil {
+		return err
+	}
+	return validateParityMeasurementWindow(normalized)
+}
+
+func fitRuntimeParityLine(samples map[int]float64, callScale int) (parityFit, error) {
+	normalized, err := normalizeRuntimeParitySamples(samples, callScale)
+	if err != nil {
+		return parityFit{}, err
+	}
+	fit, err := fitParityLine(normalized)
+	if err != nil {
+		return parityFit{}, err
+	}
+	fit.Inner /= float64(callScale)
+	return fit, nil
+}
+
+func runtimeParityResultSetSHA256(results map[int]string, callScale int) (string, error) {
+	normalized, err := normalizeRuntimeParitySamples(results, callScale)
+	if err != nil {
+		return "", err
+	}
+	return parityResultSetSHA256(normalized)
 }
 
 // fitParityLine fits T(N)=entry+N*inner with an intercept. Keeping this
@@ -808,118 +889,6 @@ func prepareParityExactGuestBatch(source string) (*parityPreparedCallable, error
 	return &parityPreparedCallable{callback: callback, closeFunc: callback.Close}, nil
 }
 
-func prepareParityNativeGuestBatch(source, moduleName string) (*parityPreparedCallable, error) {
-	if err := preparednative.Available(); err != nil {
-		return nil, fmt.Errorf("prepare native parity execution: %w", err)
-	}
-	ctx := context.Background()
-	module := ember.LogicalModule(moduleName)
-	program, _, err := ember.LoadProgram(ctx, paritySourceLoader{module.String(): {
-		Name: module.String(), Text: source,
-	}}, ember.ProgramOptions{
-		Entrypoints: []ember.Entrypoint{{Name: "parity", Module: module}},
-		Parallelism: 1,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("load prepared native parity Program: %w", err)
-	}
-	var slot ember.PreparedRuntimeSlot
-	candidate, err := slot.Prepare(program, ember.RuntimeOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("prepare native parity generation: %w", err)
-	}
-	if err := slot.Activate(candidate); err != nil {
-		_ = candidate.Close()
-		return nil, fmt.Errorf("activate native parity generation: %w", err)
-	}
-	callable := &parityPreparedCallable{}
-	callable.batchFunc = func(iterations int, seed int64) ([]ember.Value, error) {
-		var values []ember.Value
-		err := slot.Use(func(runtime *ember.Runtime) error {
-			var invokeErr error
-			values, invokeErr = runtime.Invoke(
-				ctx,
-				ember.Invocation{Module: module},
-				ember.NumberValue(float64(iterations)),
-				ember.NumberValue(float64(seed)),
-			)
-			return invokeErr
-		})
-		return values, err
-	}
-	callable.closeFunc = slot.Close
-	return callable, nil
-}
-
-func TestPreparedNativeGeneralRowsUseNativeBatchOnBothArchitectures(t *testing.T) {
-	selected, err := parityManifestSelection(
-		"top10/arithmetic_for,top10/while_branching,classic/recursive_fibonacci,classic/iterative_fibonacci",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range selected {
-		t.Run(entry.Corpus+"/"+entry.Name, func(t *testing.T) {
-			programSource, _, err := runtimeParityGuestBatchProgram(entry.Case.source, parityDefaultFixtureVariant)
-			if err != nil {
-				t.Fatal(err)
-			}
-			module := ember.LogicalModule("prepared-native-parity15/" + entry.Corpus + "/" + entry.Name)
-			program, _, err := ember.LoadProgram(context.Background(), paritySourceLoader{module.String(): {
-				Name: module.String(), Text: programSource + "return " + parityDefaultFixtureVariant.batchName + "\n",
-			}}, ember.ProgramOptions{
-				Entrypoints: []ember.Entrypoint{{Name: "main", Module: module}},
-				Parallelism: 1,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			arm64, err := ember.EmitPreparedNativeARM64ForTest(program)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(arm64.Modules) != 1 || len(arm64.Modules[0].RootClosures) < 2 {
-				t.Fatalf("ARM64 module inventory = %#v", arm64.Modules)
-			}
-			arm64Batch := arm64.Modules[0].RootClosures[len(arm64.Modules[0].RootClosures)-1]
-			if arm64Batch < 0 || int(arm64Batch) >= len(arm64.Modules[0].Functions) ||
-				!arm64.Modules[0].Functions[arm64Batch].Prepared {
-				t.Fatalf("ARM64 batch Proto %d is not native: %#v", arm64Batch, arm64.Modules[0].Functions)
-			}
-			arm64Function := arm64.Modules[0].Functions[arm64Batch]
-			if arm64Function.BodyOffset >= arm64Function.Offset {
-				t.Fatalf(
-					"ARM64 batch body/adapter offsets = %d/%d, want a private body before its boundary adapter",
-					arm64Function.BodyOffset,
-					arm64Function.Offset,
-				)
-			}
-
-			x8664, err := ember.EmitPreparedNativeX8664ForTest(program)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(x8664.Modules) != 1 || len(x8664.Modules[0].RootClosures) < 2 {
-				t.Fatalf("x86-64 module inventory = %#v", x8664.Modules)
-			}
-			x8664Batch := x8664.Modules[0].RootClosures[len(x8664.Modules[0].RootClosures)-1]
-			if x8664Batch < 0 || int(x8664Batch) >= len(x8664.Modules[0].Functions) ||
-				!x8664.Modules[0].Functions[x8664Batch].Prepared {
-				t.Fatalf("x86-64 batch Proto %d is not native: %#v", x8664Batch, x8664.Modules[0].Functions)
-			}
-			x8664Function := x8664.Modules[0].Functions[x8664Batch]
-			if x8664Function.BodyOffset >= x8664Function.Offset {
-				t.Fatalf(
-					"x86-64 batch body/adapter offsets = %d/%d, want a private body before its boundary adapter",
-					x8664Function.BodyOffset,
-					x8664Function.Offset,
-				)
-			}
-		})
-	}
-}
-
 type parityTimedCall func() ([]ember.Value, error)
 type parityTimedBatch func(int, int64) ([]ember.Value, error)
 
@@ -1070,6 +1039,32 @@ func TestRuntimeParityHarness(t *testing.T) {
 	}
 	if err := validateParityMeasurementWindow(map[int]float64{}); err == nil {
 		t.Fatal("accepted a measurement window without the maximum point")
+	}
+	calibrationCalls := 0
+	callScale, err := selectRuntimeParityCallScale(func(iterations int) (float64, error) {
+		calibrationCalls++
+		return float64(iterations * 7), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if callScale != 32 || calibrationCalls != 18 {
+		t.Fatalf("runtime parity call scale = %d after %d calls, want 32 after 18", callScale, calibrationCalls)
+	}
+	scaledSamples := make(map[int]float64, len(parityIterations))
+	for _, baseN := range parityIterations {
+		n := baseN * callScale
+		scaledSamples[n] = float64(n * 4)
+	}
+	if err := validateRuntimeParityMeasurementWindow(scaledSamples, callScale); err != nil {
+		t.Fatal(err)
+	}
+	scaledFit, err := fitRuntimeParityLine(scaledSamples, callScale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scaledFit.Inner != 4 || scaledFit.Entry != 0 {
+		t.Fatalf("runtime parity scaled fit = %#v, want 4ns per call with zero intercept", scaledFit)
 	}
 	if parityPairCount != 9 {
 		t.Fatalf("pair count = %d, want 9", parityPairCount)
@@ -1380,7 +1375,7 @@ func TestRuntimeParityLive(t *testing.T) {
 	executionMode := os.Getenv("RUNTIME_PARITY_EXECUTION_MODE")
 	if (role != "frozen-current" && role != "candidate") ||
 		(pair != "a" && pair != "b") ||
-		(executionMode != "vm" && executionMode != "machine" && executionMode != "prepared" && executionMode != "prepared-native") ||
+		(executionMode != "vm" && executionMode != "machine" && executionMode != "prepared") ||
 		captureID == "" ||
 		!parityHexDigest(sourceCommit, 40, 64) ||
 		!parityHexDigest(environmentHash, 64) {
@@ -1391,12 +1386,6 @@ func TestRuntimeParityLive(t *testing.T) {
 	}
 	if contract.Phase != "prepared-parity1x" && executionMode == "prepared" {
 		t.Fatal("dynamic parity phase cannot emit prepared evidence")
-	}
-	if contract.Phase == "prepared-native-parity15" && executionMode != "prepared-native" {
-		t.Fatal("prepared-native-parity15 requires prepared-native execution")
-	}
-	if contract.Phase != "prepared-native-parity15" && executionMode == "prepared-native" {
-		t.Fatal("non-native parity phase cannot emit prepared-native evidence")
 	}
 	rawPath, err := parityRawPath(os.Getenv("RUNTIME_PARITY_RAW"))
 	if err != nil {
@@ -1453,11 +1442,6 @@ func TestRuntimeParityLive(t *testing.T) {
 		var owner *parityPreparedCallable
 		if executionMode == "prepared" {
 			owner, err = prepareParityExactGuestBatch(programSource + "return " + parityDefaultFixtureVariant.batchName + "\n")
-		} else if executionMode == "prepared-native" {
-			owner, err = prepareParityNativeGuestBatch(
-				programSource+"return "+parityDefaultFixtureVariant.batchName+"\n",
-				"parity/"+entry.Corpus+"/"+entry.Name,
-			)
 		} else {
 			owner, err = prepareParityEmberRuntimeNamed(emberSource, "parity/"+entry.Corpus+"/"+entry.Name)
 		}
@@ -1482,6 +1466,23 @@ func TestRuntimeParityLive(t *testing.T) {
 			_ = owner.close()
 			t.Fatalf("%s write Luau script: %v", tc.name, err)
 		}
+		callScale, err := selectRuntimeParityCallScale(func(iterations int) (float64, error) {
+			point, err := acquireCleanParityPoint(parityPointAttemptLimit, sampleParitySystem, func() ([]parityPointMeasurement, error) {
+				elapsed, result, err := measureParityEmberGuestBatch(owner, iterations, parityCaptureSeed)
+				if err != nil {
+					return nil, err
+				}
+				return []parityPointMeasurement{{engine: "ember", elapsed: elapsed, result: result}}, nil
+			}, func() { time.Sleep(parityPointRetryDelay) })
+			if err != nil {
+				return 0, err
+			}
+			return point[0].elapsed, nil
+		})
+		if err != nil {
+			_ = owner.close()
+			t.Fatalf("%s calibrate runtime parity call scale: %v", tc.name, err)
+		}
 		timings := map[string]map[int]map[int]float64{"ember": {}, "luau": {}}
 		results := map[string]map[int]map[int]string{"ember": {}, "luau": {}}
 		workloadHash := parityStringSHA256(seededSource)
@@ -1495,7 +1496,8 @@ func TestRuntimeParityLive(t *testing.T) {
 			timings["luau"][repeat] = make(map[int]float64, len(parityIterations))
 			results["ember"][repeat] = make(map[int]string, len(parityIterations))
 			results["luau"][repeat] = make(map[int]string, len(parityIterations))
-			for iterationIndex, n := range parityIterations {
+			for iterationIndex, baseN := range parityIterations {
+				n := baseN * callScale
 				order := parityEngineOrderFor(pairIndex, repeat, iterationIndex)
 				point, err := acquireCleanParityPoint(parityPointAttemptLimit, sampleParitySystem, func() ([]parityPointMeasurement, error) {
 					measurements := make([]parityPointMeasurement, 0, len(order))
@@ -1572,14 +1574,14 @@ func TestRuntimeParityLive(t *testing.T) {
 		}
 		for _, engine := range []string{"ember", "luau"} {
 			for repeat := 1; repeat <= parityRepeatCount; repeat++ {
-				if err := validateParityMeasurementWindow(timings[engine][repeat]); err != nil {
+				if err := validateRuntimeParityMeasurementWindow(timings[engine][repeat], callScale); err != nil {
 					t.Fatalf("%s %s repeat=%d: %v", tc.name, engine, repeat, err)
 				}
-				fit, err := fitParityLine(timings[engine][repeat])
+				fit, err := fitRuntimeParityLine(timings[engine][repeat], callScale)
 				if err != nil {
 					t.Fatalf("%s %s repeat=%d fit: %v", tc.name, engine, repeat, err)
 				}
-				resultSetHash, err := parityResultSetSHA256(results[engine][repeat])
+				resultSetHash, err := runtimeParityResultSetSHA256(results[engine][repeat], callScale)
 				if err != nil {
 					t.Fatalf("%s %s repeat=%d result set: %v", tc.name, engine, repeat, err)
 				}

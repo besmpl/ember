@@ -34,13 +34,112 @@ jobs:
         run: |
           set -euo pipefail
           ruby -e 'require "yaml"; YAML.load_file(".github/workflows/scheduled.yml"); puts "scheduled workflow YAML: pass"'
-          sh -n scripts/check-runtime-parity scripts/runtime-ratio-gate scripts/runtime-allocation-gate scripts/runtime-acceptance-env scripts/performance-audit
+          sh -n scripts/check-runtime-parity scripts/check-prepared-worker-admission scripts/runtime-ratio-gate scripts/runtime-allocation-gate scripts/runtime-acceptance-env scripts/performance-audit
           scripts/check-runtime-parity --self-test
+          scripts/check-prepared-worker-admission --self-test
           scripts/runtime-ratio-gate --self-test
           scripts/runtime-allocation-gate --self-test
           scripts/runtime-acceptance-env --self-test
           go test -run '^TestRuntimeParityHarness$' .
           scripts/performance-audit --help >/dev/null
+
+  prepared-worker-soak:
+    name: EPW2 1024 swaps (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: '0'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            runner: ubuntu-latest
+            target: linux/amd64
+          - name: darwin-arm64
+            runner: macos-15
+            target: darwin/arm64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run exact alternating-generation soak
+        shell: bash
+        run: |
+          set -o pipefail
+          test "$(go env GOOS)/$(go env GOARCH)" = '${{ matrix.target }}'
+          mkdir -p prepared-worker-soak
+          {
+            printf 'target=%s\n' '${{ matrix.target }}'
+            printf 'commit='; git rev-parse HEAD
+            printf 'go_version='; go version
+            go env
+          } >prepared-worker-soak/fingerprint.txt
+          EMBER_PREPARED_WORKER_SWAP_SOAK=1 \
+            EMBER_PREPARED_WORKER_SWAP_SOAK_OUTPUT="$PWD/prepared-worker-soak" \
+            go test \
+            -run '^TestPreparedWorkerParityAlternatesIndependentStaticAOTGenerations$' \
+            -count=1 . 2>&1 | tee prepared-worker-soak/acquisition.log
+
+      - name: Preserve EPW2 soak evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: prepared-worker-soak-${{ matrix.name }}-${{ github.sha }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: prepared-worker-soak
+
+  prepared-worker-admission-arm64:
+    name: EPW2 admission (Darwin arm64 Apple M1)
+    runs-on: [self-hosted, macOS, ARM64, apple-m1, ember-parity]
+    timeout-minutes: 120
+    env:
+      CGO_ENABLED: '0'
+      GOMAXPROCS: '1'
+      LUAU_BIN: /opt/homebrew/bin/luau
+      EMBER_RUNTIME_ACCEPTANCE_PROFILE: darwin-arm64-m1
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Capture paired all-37 EPW2 admission
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/ember-prepared-worker-arm64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          scripts/check-prepared-worker-admission \
+            --capture-pair a \
+            --output "$evidence/a"
+          scripts/check-prepared-worker-admission \
+            --capture-pair b \
+            --schedule-from "$evidence/a" \
+            --output "$evidence/b"
+          scripts/check-prepared-worker-admission \
+            --compare-pair "$evidence/a" "$evidence/b"
+
+      - name: Preserve Darwin ARM64 EPW2 evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: prepared-worker-darwin-arm64-${{ github.sha }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/ember-prepared-worker-arm64-${{ github.run_id }}-${{ github.run_attempt }}
 
   fuzz:
     name: fuzz ${{ matrix.target }}

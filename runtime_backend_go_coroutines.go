@@ -472,14 +472,18 @@ func emitBackendGoCoroutineTarget(
 	target backendGoNumericTarget,
 	plan backendGoNumericPlan,
 	yields map[int32]int,
+	parentOptions backendGoNumericOptions,
 ) (bool, error) {
 	emitter := backendGoNumericEmitter{
 		ir:          target.ir,
 		plan:        plan,
 		resultCount: 1,
 		options: backendGoNumericOptions{
-			functionName:    target.functionName,
-			coroutineTarget: true,
+			functionName:       target.functionName,
+			coroutineTarget:    true,
+			preparedImportPath: parentOptions.preparedImportPath,
+			preparedQualifier:  parentOptions.preparedQualifier,
+			preparedSafePoints: parentOptions.preparedSafePoints,
 		},
 	}
 	stateName := target.functionName + "State"
@@ -498,8 +502,15 @@ func emitBackendGoCoroutineTarget(
 		fmt.Fprintf(source, "\tv%d %s\n", valueIndex+1, goType)
 	}
 	source.WriteString("}\n\n")
-	fmt.Fprintf(source, "func %s(state *%s, p0 float64, first bool) (float64, bool, bool) {\n", target.functionName, stateName)
+	fmt.Fprintf(source, "func %s(state *%s, p0 float64, first bool", target.functionName, stateName)
+	if emitter.options.preparedSafePoints {
+		fmt.Fprintf(source, ", context %s", emitter.options.preparedContextType())
+	}
+	source.WriteString(") (float64, bool, bool) {\n")
 	source.WriteString("\tif state == nil {\n\t\treturn 0, false, false\n\t}\n")
+	emitter.emitPreparedSafePoint(1)
+	source.WriteString(emitter.body.String())
+	emitter.body.Reset()
 	for upvalue := range target.ir.upvalues {
 		fmt.Fprintf(source, "\tu%d := &state.u%d\n", upvalue, upvalue)
 	}

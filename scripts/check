@@ -19,6 +19,7 @@ done
 
 scripts/bench-summary-test
 scripts/performance-audit-compare-test
+scripts/check-prepared-worker-admission --self-test
 
 go test -count=1 ./...
 

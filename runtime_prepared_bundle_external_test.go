@@ -26,7 +26,7 @@ func TestPreparedBundleGeneratedSurfaceIsOpaqueAndConstructible(t *testing.T) {
 		}
 		return ember.PreparedReplayEntry()
 	})
-	bundle := ember.NewPreparedBundle(1, 1, [32]byte{}, [][]ember.PreparedFunction{{function}})
+	bundle := ember.NewPreparedBundle(2, 1, [32]byte{}, [][]ember.PreparedFunction{{function}})
 	if bundle == nil {
 		t.Fatal("NewPreparedBundle returned nil")
 	}

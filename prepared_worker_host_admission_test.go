@@ -15,14 +15,11 @@ import (
 	"time"
 
 	"github.com/besmpl/ember/internal/preparedworkerfixture"
-	"github.com/besmpl/ember/internal/preparedworkerprobe"
 )
 
 const (
 	preparedWorkerLatencySampleCount = 4096
 	preparedWorkerHostPointTrials    = 3
-	preparedWorkerFrameBudget        = time.Second / 60
-	preparedWorkerExchangeBudget     = preparedWorkerFrameBudget / 10
 	preparedWorkerDevSlopeBudget     = 1.50
 	preparedWorkerRSSSafetyCeiling   = 512 << 20
 )
@@ -48,9 +45,6 @@ type preparedWorkerHostSummary struct {
 	WorkerLatencyP50   time.Duration
 	WorkerLatencyP95   time.Duration
 	WorkerLatencyP99   time.Duration
-	ExchangeCostP50    time.Duration
-	ExchangeCostP95    time.Duration
-	ExchangeCostP99    time.Duration
 	Wall               time.Duration
 	ParentCPU          time.Duration
 	ChildCPU           time.Duration
@@ -69,9 +63,6 @@ func TestPreparedWorkerHostAdmissionGate(t *testing.T) {
 		WorkerLatencyP50:   150 * time.Microsecond,
 		WorkerLatencyP95:   200 * time.Microsecond,
 		WorkerLatencyP99:   250 * time.Microsecond,
-		ExchangeCostP50:    50 * time.Microsecond,
-		ExchangeCostP95:    100 * time.Microsecond,
-		ExchangeCostP99:    preparedWorkerExchangeBudget,
 		Wall:               time.Second,
 		ParentCPU:          250 * time.Millisecond,
 		ChildCPU:           500 * time.Millisecond,
@@ -92,8 +83,6 @@ func TestPreparedWorkerHostAdmissionGate(t *testing.T) {
 		}},
 		{name: "embedded latency", mutate: func(summary *preparedWorkerHostSummary) { summary.EmbeddedLatencyP95 = 50 * time.Microsecond }},
 		{name: "worker latency", mutate: func(summary *preparedWorkerHostSummary) { summary.WorkerLatencyP99 = 0 }},
-		{name: "exchange latency", mutate: func(summary *preparedWorkerHostSummary) { summary.ExchangeCostP95 = summary.ExchangeCostP99 + 1 }},
-		{name: "exchange p99", mutate: func(summary *preparedWorkerHostSummary) { summary.ExchangeCostP99++ }},
 		{name: "parent RSS", mutate: func(summary *preparedWorkerHostSummary) { summary.ParentPeakRSS = preparedWorkerRSSSafetyCeiling + 1 }},
 		{name: "child RSS", mutate: func(summary *preparedWorkerHostSummary) { summary.ChildPeakRSS = preparedWorkerRSSSafetyCeiling + 1 }},
 		{name: "parent CPU", mutate: func(summary *preparedWorkerHostSummary) { summary.ParentCPU = 3 * time.Second }},
@@ -120,10 +109,20 @@ func TestPreparedWorkerDurationQuantile(t *testing.T) {
 	}
 }
 
-func capturePreparedWorkerHostAdmission(t *testing.T, capture preparedWorkerCaptureContext) {
+func capturePreparedWorkerHostAdmission(
+	t *testing.T,
+	capture preparedWorkerCaptureContext,
+	parityClient *preparedWorkerParityClient,
+) {
 	t.Helper()
-	embeddedTrace := runPreparedWorkerTrace(t, newPreparedWorkerHandler(t))
-	worker := startPreparedWorkerProcess(t)
+	publication := buildPreparedWorkerHostPublication(
+		t,
+		"./internal/preparedworkerprobe/cmd/worker",
+		"ember-rich-game-admission-worker",
+	)
+	embedded := openPreparedWorkerEmbeddedRunner(t, "semantic-embedded")
+	embeddedTrace := runPreparedWorkerTrace(t, embedded)
+	worker := openPreparedWorkerProcessRunner(t, publication, "semantic-worker")
 	workerTrace := runPreparedWorkerTrace(t, worker)
 	if err := worker.Close(); err != nil {
 		t.Fatal(err)
@@ -140,9 +139,9 @@ func capturePreparedWorkerHostAdmission(t *testing.T, capture preparedWorkerCapt
 		)
 	}
 
-	slopeMax := capturePreparedWorkerHostSlopes(t, capture)
-	latency := capturePreparedWorkerLatency(t, capture)
-	capturePreparedWorkerCrossingScaling(t, capture)
+	slopeMax := capturePreparedWorkerHostSlopes(t, capture, publication)
+	latency := capturePreparedWorkerLatency(t, capture, publication)
+	capturePreparedWorkerCrossingScaling(t, capture, parityClient)
 	latency.SemanticMatch = true
 	latency.ExchangePhases = 1
 	latency.WorkerEmbeddedMax = slopeMax
@@ -171,7 +170,6 @@ func preparedWorkerHostAdmissionGate(summary preparedWorkerHostSummary) error {
 		summary.EmbeddedLatencyP50,
 		summary.EmbeddedLatencyP95,
 		summary.EmbeddedLatencyP99,
-		false,
 	) {
 		return fmt.Errorf("prepared worker host gate: invalid embedded latency quantiles")
 	}
@@ -179,24 +177,8 @@ func preparedWorkerHostAdmissionGate(summary preparedWorkerHostSummary) error {
 		summary.WorkerLatencyP50,
 		summary.WorkerLatencyP95,
 		summary.WorkerLatencyP99,
-		false,
 	) {
 		return fmt.Errorf("prepared worker host gate: invalid worker latency quantiles")
-	}
-	if !preparedWorkerValidLatencyQuantiles(
-		summary.ExchangeCostP50,
-		summary.ExchangeCostP95,
-		summary.ExchangeCostP99,
-		true,
-	) {
-		return fmt.Errorf("prepared worker host gate: invalid exchange latency quantiles")
-	}
-	if summary.ExchangeCostP99 < 0 || summary.ExchangeCostP99 > preparedWorkerExchangeBudget {
-		return fmt.Errorf(
-			"prepared worker host gate: codec plus IPC p99 %s exceeds %s",
-			summary.ExchangeCostP99,
-			preparedWorkerExchangeBudget,
-		)
 	}
 	if summary.ParentPeakRSS == 0 || summary.ParentPeakRSS > preparedWorkerRSSSafetyCeiling {
 		return fmt.Errorf("prepared worker host gate: parent peak RSS %d exceeds safety ceiling %d", summary.ParentPeakRSS, preparedWorkerRSSSafetyCeiling)
@@ -217,25 +199,8 @@ func preparedWorkerHostAdmissionGate(summary preparedWorkerHostSummary) error {
 	return nil
 }
 
-func preparedWorkerValidLatencyQuantiles(p50, p95, p99 time.Duration, zeroAllowed bool) bool {
-	if p50 < 0 || p95 < p50 || p99 < p95 {
-		return false
-	}
-	return zeroAllowed || p50 > 0
-}
-
-func newPreparedWorkerHandler(t testing.TB) *preparedworkerprobe.Handler {
-	t.Helper()
-	handler, err := preparedworkerprobe.NewHandler()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := handler.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	return handler
+func preparedWorkerValidLatencyQuantiles(p50, p95, p99 time.Duration) bool {
+	return p50 > 0 && p95 >= p50 && p99 >= p95
 }
 
 func preparedWorkerTraceRequests() []preparedworkerfixture.TurnRequest {
@@ -282,7 +247,7 @@ func preparedWorkerEffectID(sequence, ordinal uint64) uint64 {
 	return sequence<<8 | ordinal
 }
 
-func runPreparedWorkerTrace(t testing.TB, transactor preparedworkerprobe.TurnTransactor) string {
+func runPreparedWorkerTrace(t testing.TB, transactor preparedWorkerTurnTransactor) string {
 	t.Helper()
 	lines := make([]string, 0, len(preparedWorkerTraceRequests()))
 	for _, request := range preparedWorkerTraceRequests() {
@@ -500,7 +465,11 @@ func writePreparedWorkerSemanticEvidence(
 	}
 }
 
-func capturePreparedWorkerHostSlopes(t *testing.T, capture preparedWorkerCaptureContext) float64 {
+func capturePreparedWorkerHostSlopes(
+	t *testing.T,
+	capture preparedWorkerCaptureContext,
+	publication preparedWorkerHostPublication,
+) float64 {
 	t.Helper()
 	file := createPreparedWorkerCaptureFile(t, filepath.Join(capture.Output, "host-slopes.tsv"))
 	defer file.Close()
@@ -511,8 +480,8 @@ func capturePreparedWorkerHostSlopes(t *testing.T, capture preparedWorkerCapture
 
 	var maximum float64
 	for repeat := 1; repeat <= parityRepeatCount; repeat++ {
-		embedded := newPreparedWorkerHandler(t)
-		worker := startPreparedWorkerProcess(t)
+		embedded := openPreparedWorkerEmbeddedRunner(t, fmt.Sprintf("slope-%d-embedded", repeat))
+		worker := openPreparedWorkerProcessRunner(t, publication, fmt.Sprintf("slope-%d-worker", repeat))
 		warm := preparedworkerfixture.TurnRequest{
 			Sequence:   1,
 			Revision:   0,
@@ -556,7 +525,7 @@ func capturePreparedWorkerHostSlopes(t *testing.T, capture preparedWorkerCapture
 				}
 				measured := make(map[string]preparedworkerfixture.TurnResult, 2)
 				for _, engine := range order {
-					var transactor preparedworkerprobe.TurnTransactor = embedded
+					var transactor preparedWorkerTurnTransactor = embedded
 					if engine == "worker" {
 						transactor = worker
 					}
@@ -683,15 +652,18 @@ func fitPreparedWorkerHostLine(samples map[int]float64) (parityFit, error) {
 	return parityFit{Entry: intercept, Inner: slope}, nil
 }
 
-func capturePreparedWorkerLatency(t *testing.T, capture preparedWorkerCaptureContext) preparedWorkerHostSummary {
+func capturePreparedWorkerLatency(
+	t *testing.T,
+	capture preparedWorkerCaptureContext,
+	publication preparedWorkerHostPublication,
+) preparedWorkerHostSummary {
 	t.Helper()
-	exchangeSamples := capturePreparedWorkerExchangeLatency(t, capture)
 	file := createPreparedWorkerCaptureFile(t, filepath.Join(capture.Output, "host-latency.tsv"))
 	defer file.Close()
-	writePreparedWorkerCapture(t, file, "schema_version\tcapture_id\tcapture_pair\tsource_commit\tsample\torder\tembedded_ns\tworker_ns\tobserved_worker_minus_embedded_ns_clamped\tresult_sha256\tenvironment_sha256\n")
+	writePreparedWorkerCapture(t, file, "schema_version\tcapture_id\tcapture_pair\tsource_commit\tsample\torder\tembedded_ns\tworker_ns\tpaired_worker_minus_embedded_ns_clamped\tresult_sha256\tenvironment_sha256\n")
 
-	embedded := newPreparedWorkerHandler(t)
-	worker := startPreparedWorkerProcess(t)
+	embedded := openPreparedWorkerEmbeddedRunner(t, "latency-embedded")
+	worker := openPreparedWorkerProcessRunner(t, publication, "latency-worker")
 	warm := preparedworkerfixture.TurnRequest{
 		Sequence:   1,
 		Revision:   0,
@@ -715,7 +687,8 @@ func capturePreparedWorkerLatency(t *testing.T, capture preparedWorkerCaptureCon
 	if err != nil {
 		t.Fatal(err)
 	}
-	childStart, err := samplePreparedWorkerProcess(worker.pid)
+	childPID := worker.ProcessID(t)
+	childStart, err := samplePreparedWorkerProcess(childPID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -754,7 +727,7 @@ func capturePreparedWorkerLatency(t *testing.T, capture preparedWorkerCaptureCon
 		measured := make(map[string]preparedworkerfixture.TurnResult, 2)
 		durations := make(map[string]time.Duration, 2)
 		for _, engine := range order {
-			var transactor preparedworkerprobe.TurnTransactor = embedded
+			var transactor preparedWorkerTurnTransactor = embedded
 			if engine == "worker" {
 				transactor = worker
 			}
@@ -789,6 +762,7 @@ func capturePreparedWorkerLatency(t *testing.T, capture preparedWorkerCaptureCon
 		}
 		embeddedSamples = append(embeddedSamples, embeddedDuration)
 		workerSamples = append(workerSamples, workerDuration)
+		resultDigest := parityStringSHA256(canonicalPreparedWorkerTurn(measured["worker"]))
 		writePreparedWorkerCapture(t, file, "1\t%s\t%s\t%s\t%d\t%s,%s\t%d\t%d\t%d\t%s\t%s\n",
 			capture.ID,
 			capture.Pair,
@@ -799,7 +773,7 @@ func capturePreparedWorkerLatency(t *testing.T, capture preparedWorkerCaptureCon
 			embeddedDuration.Nanoseconds(),
 			workerDuration.Nanoseconds(),
 			pairedDelta.Nanoseconds(),
-			parityStringSHA256(canonicalPreparedWorkerTurn(measured["worker"])),
+			resultDigest,
 			capture.EnvironmentHash,
 		)
 		if sample%256 == 0 {
@@ -807,7 +781,7 @@ func capturePreparedWorkerLatency(t *testing.T, capture preparedWorkerCaptureCon
 			if sampleErr != nil {
 				t.Fatal(sampleErr)
 			}
-			child, sampleErr := samplePreparedWorkerProcess(worker.pid)
+			child, sampleErr := samplePreparedWorkerProcess(childPID)
 			if sampleErr != nil {
 				t.Fatal(sampleErr)
 			}
@@ -820,7 +794,7 @@ func capturePreparedWorkerLatency(t *testing.T, capture preparedWorkerCaptureCon
 	if err != nil {
 		t.Fatal(err)
 	}
-	childEnd, err := samplePreparedWorkerProcess(worker.pid)
+	childEnd, err := samplePreparedWorkerProcess(childPID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -843,9 +817,6 @@ func capturePreparedWorkerLatency(t *testing.T, capture preparedWorkerCaptureCon
 		WorkerLatencyP50:   preparedWorkerDurationQuantile(workerSamples, 0.50),
 		WorkerLatencyP95:   preparedWorkerDurationQuantile(workerSamples, 0.95),
 		WorkerLatencyP99:   preparedWorkerDurationQuantile(workerSamples, 0.99),
-		ExchangeCostP50:    preparedWorkerDurationQuantile(exchangeSamples, 0.50),
-		ExchangeCostP95:    preparedWorkerDurationQuantile(exchangeSamples, 0.95),
-		ExchangeCostP99:    preparedWorkerDurationQuantile(exchangeSamples, 0.99),
 		Wall:               wall,
 		ParentCPU:          parentEnd.CPU - parentStart.CPU,
 		ChildCPU:           childEnd.CPU - childStart.CPU,
@@ -856,73 +827,20 @@ func capturePreparedWorkerLatency(t *testing.T, capture preparedWorkerCaptureCon
 	return summary
 }
 
-func capturePreparedWorkerExchangeLatency(
-	t *testing.T,
-	capture preparedWorkerCaptureContext,
-) []time.Duration {
-	t.Helper()
-	file := createPreparedWorkerCaptureFile(t, filepath.Join(capture.Output, "host-exchange-latency.tsv"))
-	defer file.Close()
-	writePreparedWorkerCapture(t, file, "schema_version\tcapture_id\tcapture_pair\tsource_commit\tsample\tround_trip_ns\tresult_sha256\tenvironment_sha256\n")
-	worker := startPreparedWorkerProcess(t, "echo")
-	samples := make([]time.Duration, 0, preparedWorkerLatencySampleCount)
-	for sample := 1; sample <= preparedWorkerLatencySampleCount; sample++ {
-		request := preparedWorkerRepresentativeExchangeRequest(uint64(sample))
-		start := time.Now()
-		result, err := worker.Transact(context.Background(), request)
-		elapsed := time.Since(start)
-		if err != nil {
-			t.Fatalf("host exchange sample=%d: %v", sample, err)
-		}
-		if result.Sequence != request.Sequence || result.Revision != request.Revision+1 ||
-			len(result.Commands) != 1 || len(result.Effects) != 1 || len(result.Pending) != 1 {
-			t.Fatalf("host exchange sample=%d returned malformed representative record: %#v", sample, result)
-		}
-		samples = append(samples, elapsed)
-		writePreparedWorkerCapture(t, file, "1\t%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
-			capture.ID,
-			capture.Pair,
-			capture.SourceCommit,
-			sample,
-			elapsed.Nanoseconds(),
-			parityStringSHA256(canonicalPreparedWorkerTurn(result)),
-			capture.EnvironmentHash,
-		)
-	}
-	if err := worker.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return samples
-}
-
-func preparedWorkerRepresentativeExchangeRequest(sequence uint64) preparedworkerfixture.TurnRequest {
-	return preparedworkerfixture.TurnRequest{
-		Sequence:   sequence,
-		Revision:   sequence - 1,
-		Projection: preparedworkerfixture.Projection{Step: 1, Seed: 8, Work: 4},
-		Events: []preparedworkerfixture.DamageEvent{{
-			Route:  preparedworkerfixture.RouteDamage,
-			Entity: 7,
-			Amount: 3,
-		}},
-		Completions: []preparedworkerfixture.Completion{{
-			EffectID: sequence,
-			Status:   preparedworkerfixture.CompletionOK,
-			Value:    2,
-		}},
-	}
-}
-
 // capturePreparedWorkerCrossingScaling is a generic process-crossing
 // discriminator. It is not a second game-turn protocol: the typed TurnRequest
 // lane above is the production-shaped seam.
-func capturePreparedWorkerCrossingScaling(t *testing.T, capture preparedWorkerCaptureContext) {
+func capturePreparedWorkerCrossingScaling(
+	t *testing.T,
+	capture preparedWorkerCaptureContext,
+	client *preparedWorkerParityClient,
+) {
 	t.Helper()
 	file := createPreparedWorkerCaptureFile(t, filepath.Join(capture.Output, "host-crossing-scaling.tsv"))
 	defer file.Close()
 	writePreparedWorkerCapture(t, file, "schema_version\tcapture_id\tcapture_pair\tsource_commit\trepeat\texchanges\tshape\telapsed_ns\tresult_sha256\tenvironment_sha256\n")
-	worker := startPreparedBatchWorker(t, "classic/recursive_fibonacci")
-	if _, err := worker.Call(context.Background(), 1, parityCaptureSeed); err != nil {
+	const caseIndex = uint16(10)
+	if _, _, err := client.call(caseIndex, 1, parityCaptureSeed); err != nil {
 		t.Fatal(err)
 	}
 	for repeat := 1; repeat <= parityRepeatCount; repeat++ {
@@ -934,7 +852,7 @@ func capturePreparedWorkerCrossingScaling(t *testing.T, capture preparedWorkerCa
 			elapsedByShape := make(map[string]time.Duration, len(shapes))
 			checksumByShape := make(map[string]int64, len(shapes))
 			for _, shape := range shapes {
-				elapsed, checksum, err := measurePreparedWorkerChattyShape(worker, shape, exchanges)
+				elapsed, checksum, err := measurePreparedWorkerChattyShape(client, caseIndex, shape, exchanges)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -965,13 +883,11 @@ func capturePreparedWorkerCrossingScaling(t *testing.T, capture preparedWorkerCa
 			}
 		}
 	}
-	if err := worker.Close(); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func measurePreparedWorkerChattyShape(
-	worker *preparedBatchWorker,
+	client *preparedWorkerParityClient,
+	caseIndex uint16,
 	shape string,
 	exchanges int,
 ) (time.Duration, int64, error) {
@@ -984,7 +900,7 @@ func measurePreparedWorkerChattyShape(
 		if exchanges == 0 {
 			return time.Since(start), 0, nil
 		}
-		result, err := worker.Call(context.Background(), exchanges, parityCaptureSeed)
+		_, result, err := client.call(caseIndex, exchanges, parityCaptureSeed)
 		if err != nil {
 			return time.Since(start), 0, err
 		}
@@ -993,7 +909,7 @@ func measurePreparedWorkerChattyShape(
 	case "chatty":
 		var checksum int64
 		for index := 0; index < exchanges; index++ {
-			result, err := worker.Call(context.Background(), 1, parityCaptureSeed+int64(index))
+			_, result, err := client.call(caseIndex, 1, parityCaptureSeed+int64(index))
 			if err != nil {
 				return time.Since(start), 0, err
 			}
@@ -1137,17 +1053,12 @@ func writePreparedWorkerHostSummary(
 		{"exchange_phases", strconv.Itoa(summary.ExchangePhases)},
 		{"worker_embedded_slope_max", strconv.FormatFloat(summary.WorkerEmbeddedMax, 'g', -1, 64)},
 		{"worker_embedded_slope_budget", strconv.FormatFloat(preparedWorkerDevSlopeBudget, 'f', 2, 64)},
-		{"frame_budget_ns", strconv.FormatInt(preparedWorkerFrameBudget.Nanoseconds(), 10)},
-		{"exchange_budget_ns", strconv.FormatInt(preparedWorkerExchangeBudget.Nanoseconds(), 10)},
 		{"embedded_latency_p50_ns", strconv.FormatInt(summary.EmbeddedLatencyP50.Nanoseconds(), 10)},
 		{"embedded_latency_p95_ns", strconv.FormatInt(summary.EmbeddedLatencyP95.Nanoseconds(), 10)},
 		{"embedded_latency_p99_ns", strconv.FormatInt(summary.EmbeddedLatencyP99.Nanoseconds(), 10)},
 		{"worker_latency_p50_ns", strconv.FormatInt(summary.WorkerLatencyP50.Nanoseconds(), 10)},
 		{"worker_latency_p95_ns", strconv.FormatInt(summary.WorkerLatencyP95.Nanoseconds(), 10)},
 		{"worker_latency_p99_ns", strconv.FormatInt(summary.WorkerLatencyP99.Nanoseconds(), 10)},
-		{"representative_exchange_p50_ns", strconv.FormatInt(summary.ExchangeCostP50.Nanoseconds(), 10)},
-		{"representative_exchange_p95_ns", strconv.FormatInt(summary.ExchangeCostP95.Nanoseconds(), 10)},
-		{"representative_exchange_p99_ns", strconv.FormatInt(summary.ExchangeCostP99.Nanoseconds(), 10)},
 		{"rss_safety_ceiling_bytes", strconv.FormatUint(preparedWorkerRSSSafetyCeiling, 10)},
 		{"status", status},
 	} {

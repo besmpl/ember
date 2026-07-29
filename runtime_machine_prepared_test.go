@@ -6,6 +6,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMachinePreparedBindingRunsGeneratedNumericFunctionAndReplaysFailedGuard(t *testing.T) {
@@ -68,7 +69,7 @@ func TestMachinePreparedBindingRunsGeneratedNumericFunctionAndReplaysFailedGuard
 	}
 }
 
-func TestMachinePreparedControlledExecutionStaysGenericAndChargesExactly(t *testing.T) {
+func TestMachinePreparedBudgetedExecutionStaysGenericAndChargesExactly(t *testing.T) {
 	image := machinePreparedTestImage(t)
 	calls := 0
 	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
@@ -117,6 +118,92 @@ func TestMachinePreparedControlledExecutionStaysGenericAndChargesExactly(t *test
 		t.Fatalf("controlled remaining = %d, generic %d", preparedController.remaining, genericController.remaining)
 	}
 	assertMachineOwnerNumberResult(t, prepared, backendNumericProofExpected(29))
+}
+
+func TestMachinePreparedCancellationOnlyExecutionUsesPreparedCode(t *testing.T) {
+	image := machinePreparedTestImage(t)
+	calls := 0
+	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
+		calls++
+		return backendGeneratedNumericPreparedFixture(context)
+	})
+	owner, err := newMachineOwnerWithPrepared(image, program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := owner.close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	arg, err := owner.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	controller, err := newExecutionController(ctx, ExecutionLimits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runMachinePreparedTestProto(t, owner, 1, []slot{arg}, controller)
+	if calls != 1 {
+		t.Fatalf("prepared function calls = %d, want 1", calls)
+	}
+	assertMachineOwnerNumberResult(t, owner, backendNumericProofExpected(29))
+}
+
+func TestMachinePreparedSafePointReplaysCanceledExecution(t *testing.T) {
+	image := machinePreparedTestImage(t)
+	started := make(chan struct{})
+	program := machinePreparedTestProgram(t, image, 0, 1, func(context machinePreparedContext) machinePreparedExit {
+		close(started)
+		for context.Continue() {
+		}
+		return machinePreparedReplayEntry()
+	})
+	owner, err := newMachineOwnerWithPrepared(image, program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := owner.close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	arg, err := owner.importValueStopped(NumberValue(29))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	controller, err := newExecutionController(ctx, ExecutionLimits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := owner.beginRun()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		defer lease.end()
+		result <- owner.executeStopped(0, 1, machineClosureHandle{}, []slot{arg}, controller, machineRunEffects{})
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("prepared function did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled prepared execution error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("prepared safe point did not stop canceled execution")
+	}
 }
 
 func TestMachinePreparedBindingRejectsMismatchBeforeExecutionAndCopiesInventory(t *testing.T) {

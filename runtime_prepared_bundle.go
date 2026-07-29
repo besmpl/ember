@@ -30,6 +30,15 @@ type PreparedBundle struct {
 	program machinePreparedProgram
 }
 
+// PreparedBundleIdentity is immutable metadata for exact worker attestation.
+// ProtoCounts is detached from the bundle on every Identity call.
+type PreparedBundleIdentity struct {
+	ABIVersion      uint32
+	SemanticVersion uint32
+	ProgramHash     [32]byte
+	ProtoCounts     []uint32
+}
+
 // PreparedBundleError reports that a supplied PreparedBundle does not match
 // the Program being bound. Rebuild the generated bundle from the same Program
 // inputs rather than falling back silently.
@@ -79,6 +88,24 @@ func (bundle *PreparedBundle) machineProgram() *machinePreparedProgram {
 	return &bundle.program
 }
 
+// Identity returns the ABI, semantics, Program hash, and ordered Proto
+// inventory bound by this generated bundle without exposing its functions.
+func (bundle *PreparedBundle) Identity() PreparedBundleIdentity {
+	if bundle == nil {
+		return PreparedBundleIdentity{}
+	}
+	identity := PreparedBundleIdentity{
+		ABIVersion:      bundle.program.abiVersion,
+		SemanticVersion: bundle.program.semanticVersion,
+		ProgramHash:     bundle.program.programHash,
+		ProtoCounts:     make([]uint32, len(bundle.program.modules)),
+	}
+	for index, module := range bundle.program.modules {
+		identity.ProtoCounts[index] = uint32(len(module.functions))
+	}
+	return identity
+}
+
 func preparedBundleErrorf(format string, args ...any) error {
 	return &PreparedBundleError{reason: fmt.Sprintf(format, args...)}
 }
@@ -98,6 +125,13 @@ func (context PreparedContext) IntrinsicUnchanged(pc int32) bool {
 // module.
 func (context PreparedContext) IntrinsicUnchangedAt(protoID, pc int32) bool {
 	return context.intrinsicUnchangedAt(protoID, pc)
+}
+
+// Continue reports whether trusted generated code may continue at a compiler
+// safe point. It is part of the generated-code ABI, not a host scheduling API.
+// A zero or otherwise invalid PreparedContext fails closed.
+func (context PreparedContext) Continue() bool {
+	return context.continueExecution()
 }
 
 // ReplayBeforeOperation returns an exact pre-operation slow-path exit after

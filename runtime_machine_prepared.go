@@ -153,6 +153,10 @@ func (context PreparedContext) intrinsicUnchanged(pc int32) bool {
 	return context.intrinsicUnchangedTarget(context.target, pc)
 }
 
+func (context PreparedContext) continueExecution() bool {
+	return context.machine != nil && context.machine.window.continuePrepared()
+}
+
 func (context PreparedContext) intrinsicUnchangedAt(protoID, pc int32) bool {
 	if context.machine == nil ||
 		context.machine.persistentOwner == nil ||

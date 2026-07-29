@@ -669,6 +669,7 @@ func (emitter *backendGoNumericEmitter) emitFiniteClosureCall(
 				fmt.Fprintf(&emitter.body, "v%d", value)
 				wrote = true
 			}
+			emitter.writePreparedSafePointContext(wrote)
 			emitter.body.WriteString(")\n")
 			fmt.Fprintf(&emitter.body, "\t\tif !ok%d {\n", operation.pc)
 			emitter.emitReplayEntry(3)

@@ -52,6 +52,32 @@ func (window *executionWindow) stepInstruction() error {
 	return nil
 }
 
+// continuePrepared is the cancellation safe point used by trusted generated
+// code. Prepared execution never consumes limit state: callers with any
+// configured limit remain on the canonical Machine path. The shared countdown
+// keeps polling frequency stable across generated helper calls and recursion.
+func (window *executionWindow) continuePrepared() bool {
+	if window == nil || window.controller == nil {
+		return true
+	}
+	controller := window.controller
+	if !controller.preparedCancellationOnly() {
+		return false
+	}
+	if window.pollLeft != 0 {
+		window.pollLeft--
+		return true
+	}
+	if err := controller.checkContext(); err != nil {
+		// A generated replay must hand the canceled invocation back to a
+		// Machine window that observes cancellation on its first instruction.
+		window.pollLeft = 0
+		return false
+	}
+	window.pollLeft = executionPollInterval - 1
+	return true
+}
+
 func (window *executionWindow) limitError(count uint64) error {
 	if window == nil || window.controller == nil {
 		return nil
@@ -98,6 +124,10 @@ type executionController struct {
 	generatedStringBytes  uint64
 	runtimeObjects        uint64
 	inheritedScriptFrames []ScriptFrame
+}
+
+func (controller *executionController) preparedCancellationOnly() bool {
+	return controller != nil && controller.limits == (ExecutionLimits{})
 }
 
 func (controller *executionController) pushInheritedScriptFrames(frames []ScriptFrame) func() {

@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	backendPreparedABIVersion      uint32 = 1
+	backendPreparedABIVersion      uint32 = 2
 	backendPreparedSemanticVersion uint32 = 1
 )
 

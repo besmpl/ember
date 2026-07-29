@@ -4,95 +4,27 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/besmpl/ember/internal/preparedworkerfixture"
+	"github.com/besmpl/ember/preparedworker"
 )
 
 const (
-	preparedBatchWorkerChildEnvironment = "EMBER_PREPARED_BATCH_WORKER_CHILD"
-	preparedBatchWorkerMagic            = "EPB1"
-	preparedBatchWorkerMaxError         = 4 << 10
 	preparedWorkerAdmissionEnvironment  = "EMBER_PREPARED_WORKER_ADMISSION_LIVE"
 	preparedWorkerScheduleEnvironment   = "PREPARED_WORKER_SCHEDULE"
 	preparedWorkerParityCalibrationRuns = 3
 	preparedWorkerParityMaximumScale    = 1024
 	preparedWorkerParityTarget          = 10 * time.Millisecond
 )
-
-func TestPreparedBatchWorkerMatchesEmbedded(t *testing.T) {
-	const caseID = "classic/recursive_fibonacci"
-	entry := preparedWorkerParityEntry(t, caseID)
-	programSource, _, err := runtimeParityGuestBatchProgram(entry.Case.source, parityDefaultFixtureVariant)
-	if err != nil {
-		t.Fatal(err)
-	}
-	embedded, err := prepareParityExactGuestBatch(
-		programSource + "return " + parityDefaultFixtureVariant.batchName + "\n",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := embedded.close(); err != nil {
-			t.Error(err)
-		}
-	})
-	worker := startPreparedBatchWorker(t, caseID)
-
-	wantValues, err := embedded.callBatch(3, 17)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, err := parityExactIntegerResult(wantValues)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := worker.Transact(context.Background(), preparedworkerfixture.BatchRequest{
-		Iterations: 3,
-		Seed:       17,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strconv.FormatInt(got.Checksum, 10) != want || got.Checksum != 90152 {
-		t.Fatalf("worker result = %d, embedded = %q, want frozen 90152", got.Checksum, want)
-	}
-}
-
-func TestPreparedBatchWorkerDeadlineAbortsBlockedIO(t *testing.T) {
-	blocked := make(chan struct{})
-	var once sync.Once
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	err := performPreparedWorkerIO(
-		ctx,
-		func() error {
-			once.Do(func() { close(blocked) })
-			return nil
-		},
-		func() error {
-			<-blocked
-			return io.ErrClosedPipe
-		},
-	)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("blocked batch I/O error = %v, want deadline exceeded", err)
-	}
-}
 
 func TestPreparedWorkerAdmissionGateRequiresBothSlopeAndLuauTargets(t *testing.T) {
 	if _, err := preparedWorkerAdmissionGate(
@@ -264,6 +196,51 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 	if err := os.Mkdir(output, 0o700); err != nil {
 		t.Fatalf("create prepared worker capture: %v", err)
 	}
+	capture := preparedWorkerCaptureContext{
+		ID:              captureID,
+		Pair:            pair,
+		SourceCommit:    sourceCommit,
+		EnvironmentHash: environmentHash,
+		Output:          output,
+		LuauPath:        environment.LuauPath,
+	}
+	caseIndices := preparedWorkerParityCaseIndices()
+	artifact := preparedWorkerParityArtifact(t, parityDefaultFixtureVariant)
+	publication := buildPreparedWorkerParityPublication(
+		t, artifact, t.TempDir(), "ember-epw2-parity-admission",
+	)
+	embeddedClient := openPreparedWorkerEmbeddedObserver(t, capture)
+	processRunner, _, err := preparedworker.OpenDevelopment(
+		context.Background(),
+		preparedWorkerParityRunnerOptions(t, "admission-process"),
+		publication.build,
+	)
+	if err != nil {
+		if closeErr := embeddedClient.Close(); closeErr != nil {
+			t.Errorf("close embedded observer after process open failed: %v", closeErr)
+		}
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := embeddedClient.Close(); err != nil {
+			t.Errorf("close embedded observer: %v", err)
+		}
+		closePreparedWorkerParityRunner(t, processRunner)
+	})
+	processClient := preparedWorkerParityClient{runner: processRunner}
+	for _, entry := range selected {
+		caseID := entry.Corpus + "/" + entry.Name
+		caseIndex, ok := caseIndices[caseID]
+		if !ok {
+			t.Fatalf("%s is absent from the combined prepared worker Program", caseID)
+		}
+		if _, _, err := embeddedClient.call(caseIndex, 1, parityCaptureSeed); err != nil {
+			t.Fatalf("warm embedded %s: %v", caseID, err)
+		}
+		if _, _, err := processClient.call(caseIndex, 1, parityCaptureSeed); err != nil {
+			t.Fatalf("warm process %s: %v", caseID, err)
+		}
+	}
 	raw := createPreparedWorkerCaptureFile(t, filepath.Join(output, "raw.tsv"))
 	defer raw.Close()
 	slopes := createPreparedWorkerCaptureFile(t, filepath.Join(output, "slopes.tsv"))
@@ -300,14 +277,8 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 	writePreparedWorkerCapture(t, summaryFile, "schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tcall_scale\tworker_luau_median\tworker_luau_p90\tembedded_luau_median\tembedded_luau_p90\tworker_embedded_max\tstatus\tenvironment_sha256\n")
 	writePreparedWorkerCapture(t, scheduleFile, "schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tcall_scale\tenvironment_sha256\n")
 	writePreparedWorkerCapture(t, calibrationFile, "schema_version\tcapture_id\tcapture_pair\tsource_commit\tcorpus\tname\tmode\tcall_scale\ttrial\telapsed_ns\tselected\tenvironment_sha256\n")
-	capturePreparedWorkerHostAdmission(t, preparedWorkerCaptureContext{
-		ID:              captureID,
-		Pair:            pair,
-		SourceCommit:    sourceCommit,
-		EnvironmentHash: environmentHash,
-		Output:          output,
-		LuauPath:        environment.LuauPath,
-	})
+	writePreparedWorkerParityBuildEvidence(t, output, capture, publication)
+	capturePreparedWorkerHostAdmission(t, capture, &processClient)
 
 	pairIndex := 1
 	if pair == "b" {
@@ -316,28 +287,33 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 	var gateFailures []string
 	for _, entry := range selected {
 		caseID := entry.Corpus + "/" + entry.Name
+		caseIndex := caseIndices[caseID]
 		programSource, seededSource, err := runtimeParityGuestBatchProgram(entry.Case.source, parityDefaultFixtureVariant)
 		if err != nil {
 			t.Fatalf("%s build guest batch: %v", caseID, err)
 		}
-		preparedSource := programSource + "return " + parityDefaultFixtureVariant.batchName + "\n"
-		embedded, err := prepareParityExactGuestBatch(preparedSource)
-		if err != nil {
-			t.Fatalf("%s prepare embedded: %v", caseID, err)
-		}
 		var calibration preparedWorkerParityCalibration
 		if calibrationMode == "adaptive" {
-			calibration, err = calibratePreparedWorkerParityCallScale(embedded)
+			calibration, err = calibratePreparedWorkerParityClientScale(embeddedClient, caseIndex)
 		} else {
-			calibration, err = verifyPreparedWorkerParityCallableScale(scheduledScales[caseID], embedded)
-		}
-		if closeErr := embedded.close(); err == nil {
-			err = closeErr
+			calibration, err = verifyPreparedWorkerParityClientScale(
+				scheduledScales[caseID], embeddedClient, caseIndex,
+			)
 		}
 		if err != nil {
 			t.Fatalf("%s calibrate measurement window: %v", caseID, err)
 		}
 		callScale := calibration.Scale
+		// Calibration already gives the embedded adapter three maximum-point
+		// calls. Give the persistent process adapter the same heap/GC ramp-up so
+		// its first fitted repeat does not measure construction-era growth that
+		// the guest-throughput contract deliberately excludes.
+		maximumN := parityIterations[len(parityIterations)-1] * callScale
+		for trial := 1; trial <= preparedWorkerParityCalibrationRuns; trial++ {
+			if _, _, err := processClient.call(caseIndex, maximumN, parityCaptureSeed); err != nil {
+				t.Fatalf("%s warm process measurement window trial %d: %v", caseID, trial, err)
+			}
+		}
 		writePreparedWorkerCapture(t, scheduleFile, "1\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
 			captureID,
 			pair,
@@ -362,26 +338,15 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 				environmentHash,
 			)
 		}
-		embedded, err = prepareParityExactGuestBatch(preparedSource)
-		if err != nil {
-			t.Fatalf("%s prepare measured embedded: %v", caseID, err)
-		}
-		worker := startPreparedBatchWorker(t, caseID)
 		luauSource, err := parityGuestBatchLuauSource(entry.Case.source, parityDefaultFixtureVariant)
 		if err != nil {
-			_ = embedded.close()
-			_ = worker.Close()
 			t.Fatalf("%s build Luau batch: %v", caseID, err)
 		}
 		scriptPath := filepath.Join(output, "scripts", entry.Corpus+"-"+entry.Name+".luau")
 		if err := os.MkdirAll(filepath.Dir(scriptPath), 0o700); err != nil {
-			_ = embedded.close()
-			_ = worker.Close()
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(scriptPath, []byte(luauSource), 0o700); err != nil {
-			_ = embedded.close()
-			_ = worker.Close()
 			t.Fatal(err)
 		}
 
@@ -410,9 +375,9 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 						var measureErr error
 						switch engine {
 						case "embedded":
-							elapsed, result, measureErr = measureParityEmberGuestBatch(embedded, n, parityCaptureSeed)
+							elapsed, result, measureErr = embeddedClient.call(caseIndex, n, parityCaptureSeed)
 						case "worker":
-							elapsed, result, measureErr = measurePreparedBatchWorker(worker, n, parityCaptureSeed)
+							elapsed, result, measureErr = processClient.call(caseIndex, n, parityCaptureSeed)
 						case "luau":
 							elapsed, result, measureErr = measureParityLuauGuestBatch(environment.LuauPath, scriptPath, n, parityCaptureSeed)
 						default:
@@ -448,8 +413,6 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 					return measurements, nil
 				}, func() { time.Sleep(parityPointRetryDelay) })
 				if err != nil {
-					_ = embedded.close()
-					_ = worker.Close()
 					t.Fatalf("%s repeat=%d N=%d: %v", caseID, repeat, n, err)
 				}
 				for _, measurement := range point {
@@ -483,21 +446,15 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 			fits[engine] = make([]float64, parityRepeatCount)
 			for repeat := 1; repeat <= parityRepeatCount; repeat++ {
 				if err := validatePreparedWorkerParityWindow(timings[engine][repeat], callScale); err != nil {
-					_ = embedded.close()
-					_ = worker.Close()
 					t.Fatalf("%s %s repeat=%d: %v", caseID, engine, repeat, err)
 				}
 				fit, err := fitPreparedWorkerParityLine(timings[engine][repeat], callScale)
 				if err != nil {
-					_ = embedded.close()
-					_ = worker.Close()
 					t.Fatalf("%s %s repeat=%d: %v", caseID, engine, repeat, err)
 				}
 				fits[engine][repeat-1] = fit.Inner
 				resultHash, err := preparedWorkerResultSetSHA256(results[engine][repeat], callScale)
 				if err != nil {
-					_ = embedded.close()
-					_ = worker.Close()
 					t.Fatal(err)
 				}
 				writePreparedWorkerCapture(t, slopes, "1\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%d\t%.17g\t%.17g\t%s\t%s\t%s\t%s\n",
@@ -539,12 +496,6 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 			status,
 			environmentHash,
 		)
-		if err := embedded.close(); err != nil {
-			t.Fatalf("%s close embedded: %v", caseID, err)
-		}
-		if err := worker.Close(); err != nil {
-			t.Fatalf("%s close worker: %v", caseID, err)
-		}
 		t.Logf(
 			"%s worker/Luau %.4f/%.4f embedded/Luau %.4f/%.4f worker/embedded max %.4f %s",
 			caseID,
@@ -559,344 +510,6 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 	if len(gateFailures) != 0 {
 		t.Fatalf("prepared worker admission failures:\n%s", strings.Join(gateFailures, "\n"))
 	}
-}
-
-func TestPreparedBatchWorkerChild(t *testing.T) {
-	caseID := os.Getenv(preparedBatchWorkerChildEnvironment)
-	if caseID == "" {
-		t.Skip("run as the prepared batch worker child")
-	}
-	entry := preparedWorkerParityEntry(t, caseID)
-	programSource, _, err := runtimeParityGuestBatchProgram(entry.Case.source, parityDefaultFixtureVariant)
-	if err != nil {
-		t.Fatal(err)
-	}
-	callable, err := prepareParityExactGuestBatch(
-		programSource + "return " + parityDefaultFixtureVariant.batchName + "\n",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := callable.close(); err != nil {
-			t.Error(err)
-		}
-	}()
-	if _, err := callable.callBatch(1, parityCaptureSeed); err != nil {
-		t.Fatal(err)
-	}
-	if err := servePreparedBatchWorker(os.Stdin, os.Stdout, callable); err != nil {
-		t.Fatal(err)
-	}
-}
-
-type preparedBatchWorker struct {
-	mu      sync.Mutex
-	command preparedWorkerCommand
-	pid     int
-	input   io.WriteCloser
-	output  io.ReadCloser
-	reader  *bufio.Reader
-	writer  *bufio.Writer
-	stderr  *bytes.Buffer
-	closed  bool
-	aborted bool
-}
-
-func startPreparedBatchWorker(t *testing.T, caseID string) *preparedBatchWorker {
-	t.Helper()
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command(executable, "-test.run=^TestPreparedBatchWorkerChild$", "-test.count=1")
-	command.Env = append(os.Environ(), preparedBatchWorkerChildEnvironment+"="+caseID)
-	input, err := command.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	output, err := command.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stderr := &bytes.Buffer{}
-	command.Stderr = stderr
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	processCommand := preparedWorkerCommand{
-		wait: command.Wait,
-		kill: func() error { return command.Process.Kill() },
-	}
-	reader := bufio.NewReader(output)
-	magic := make([]byte, len(preparedBatchWorkerMagic))
-	readyContext, cancelReady := context.WithTimeout(context.Background(), preparedWorkerReadyTimeout)
-	readyErr := performPreparedWorkerIO(
-		readyContext,
-		processCommand.terminate,
-		func() error {
-			if _, err := io.ReadFull(reader, magic); err != nil {
-				return err
-			}
-			if string(magic) != preparedBatchWorkerMagic {
-				return fmt.Errorf("READY %q, want %q", magic, preparedBatchWorkerMagic)
-			}
-			return nil
-		},
-	)
-	cancelReady()
-	if readyErr != nil {
-		_ = input.Close()
-		_ = output.Close()
-		_ = waitPreparedWorkerCommand(processCommand, preparedWorkerCloseTimeout)
-		t.Fatalf("start prepared batch worker: %v: %s", readyErr, stderr.String())
-	}
-	worker := &preparedBatchWorker{
-		command: processCommand,
-		pid:     command.Process.Pid,
-		input:   input,
-		output:  output,
-		reader:  reader,
-		writer:  bufio.NewWriter(input),
-		stderr:  stderr,
-	}
-	t.Cleanup(func() {
-		if err := worker.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	return worker
-}
-
-func (worker *preparedBatchWorker) Call(ctx context.Context, iterations int, seed int64) (string, error) {
-	if worker == nil {
-		return "", fmt.Errorf("prepared batch worker: closed")
-	}
-	worker.mu.Lock()
-	defer worker.mu.Unlock()
-	if worker.closed {
-		return "", fmt.Errorf("prepared batch worker: closed")
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if _, ok := ctx.Deadline(); !ok {
-		bounded, cancel := context.WithTimeout(ctx, preparedWorkerTransactionTimeout)
-		defer cancel()
-		ctx = bounded
-	}
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	if iterations <= 0 {
-		return "", fmt.Errorf("prepared batch worker: iterations %d, want positive", iterations)
-	}
-	var request [16]byte
-	binary.BigEndian.PutUint64(request[:8], uint64(iterations))
-	binary.BigEndian.PutUint64(request[8:], uint64(seed))
-	var result string
-	err := performPreparedWorkerIO(
-		ctx,
-		func() error {
-			worker.aborted = true
-			return errors.Join(worker.command.terminate(), worker.input.Close(), worker.output.Close())
-		},
-		func() error {
-			if _, err := worker.writer.Write(request[:]); err != nil {
-				return fmt.Errorf("prepared batch worker: write: %w", err)
-			}
-			if err := worker.writer.Flush(); err != nil {
-				return fmt.Errorf("prepared batch worker: flush: %w", err)
-			}
-			status, err := worker.reader.ReadByte()
-			if err != nil {
-				return fmt.Errorf("prepared batch worker: read status: %w", err)
-			}
-			if status == 1 {
-				message, err := readPreparedBatchWorkerError(worker.reader)
-				if err != nil {
-					return err
-				}
-				return errors.New(message)
-			}
-			if status != 0 {
-				return fmt.Errorf("prepared batch worker: status %d is invalid", status)
-			}
-			var encoded [8]byte
-			if _, err := io.ReadFull(worker.reader, encoded[:]); err != nil {
-				return fmt.Errorf("prepared batch worker: read result: %w", err)
-			}
-			result = strconv.FormatInt(int64(binary.BigEndian.Uint64(encoded[:])), 10)
-			return nil
-		},
-	)
-	if err != nil {
-		return "", err
-	}
-	return result, nil
-}
-
-func (worker *preparedBatchWorker) Transact(
-	ctx context.Context,
-	request preparedworkerfixture.BatchRequest,
-) (preparedworkerfixture.BatchResult, error) {
-	if request.Iterations == 0 || uint64(request.Iterations) > uint64(^uint(0)>>1) {
-		return preparedworkerfixture.BatchResult{}, fmt.Errorf(
-			"prepared batch worker: iterations %d are out of bounds",
-			request.Iterations,
-		)
-	}
-	result, err := worker.Call(ctx, int(request.Iterations), request.Seed)
-	if err != nil {
-		return preparedworkerfixture.BatchResult{}, err
-	}
-	checksum, err := strconv.ParseInt(result, 10, 64)
-	if err != nil {
-		return preparedworkerfixture.BatchResult{}, fmt.Errorf("prepared batch worker: checksum: %w", err)
-	}
-	return preparedworkerfixture.BatchResult{Checksum: checksum}, nil
-}
-
-func (worker *preparedBatchWorker) Close() error {
-	if worker == nil {
-		return nil
-	}
-	worker.mu.Lock()
-	defer worker.mu.Unlock()
-	if worker.closed {
-		return nil
-	}
-	worker.closed = true
-	inputErr := worker.input.Close()
-	waitErr := waitPreparedWorkerCommand(worker.command, preparedWorkerCloseTimeout)
-	outputErr := worker.output.Close()
-	if waitErr != nil && !worker.aborted {
-		return fmt.Errorf("prepared batch worker: wait: %w: %s", waitErr, worker.stderr.String())
-	}
-	if inputErr != nil && !errors.Is(inputErr, os.ErrClosed) {
-		return fmt.Errorf("prepared batch worker: close input: %w", inputErr)
-	}
-	if outputErr != nil && !errors.Is(outputErr, os.ErrClosed) {
-		return fmt.Errorf("prepared batch worker: close output: %w", outputErr)
-	}
-	return nil
-}
-
-func performPreparedWorkerIO(ctx context.Context, abort func() error, operation func() error) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	completed := make(chan error, 1)
-	go func() { completed <- operation() }()
-	select {
-	case err := <-completed:
-		return err
-	case <-ctx.Done():
-		return errors.Join(ctx.Err(), abort())
-	}
-}
-
-func servePreparedBatchWorker(reader io.Reader, writer io.Writer, callable *parityPreparedCallable) error {
-	bufferedReader := bufio.NewReader(reader)
-	bufferedWriter := bufio.NewWriter(writer)
-	if _, err := bufferedWriter.WriteString(preparedBatchWorkerMagic); err != nil {
-		return err
-	}
-	if err := bufferedWriter.Flush(); err != nil {
-		return err
-	}
-	for {
-		var request [16]byte
-		read, err := io.ReadFull(bufferedReader, request[:])
-		if errors.Is(err, io.EOF) && read == 0 {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		iterations := binary.BigEndian.Uint64(request[:8])
-		if iterations == 0 || iterations > uint64(^uint(0)>>1) {
-			if err := writePreparedBatchWorkerError(bufferedWriter, fmt.Errorf("invalid iterations %d", iterations)); err != nil {
-				return err
-			}
-			continue
-		}
-		seed := int64(binary.BigEndian.Uint64(request[8:]))
-		values, err := callable.callBatch(int(iterations), seed)
-		if err != nil {
-			if err := writePreparedBatchWorkerError(bufferedWriter, err); err != nil {
-				return err
-			}
-			continue
-		}
-		result, err := parityExactIntegerResult(values)
-		if err != nil {
-			if err := writePreparedBatchWorkerError(bufferedWriter, err); err != nil {
-				return err
-			}
-			continue
-		}
-		integer, err := strconv.ParseInt(result, 10, 64)
-		if err != nil {
-			return err
-		}
-		var response [9]byte
-		binary.BigEndian.PutUint64(response[1:], uint64(integer))
-		if _, err := bufferedWriter.Write(response[:]); err != nil {
-			return err
-		}
-		if err := bufferedWriter.Flush(); err != nil {
-			return err
-		}
-	}
-}
-
-func writePreparedBatchWorkerError(writer *bufio.Writer, resultErr error) error {
-	message := resultErr.Error()
-	if len(message) > preparedBatchWorkerMaxError {
-		return fmt.Errorf("prepared batch worker: error exceeds %d bytes", preparedBatchWorkerMaxError)
-	}
-	var header [3]byte
-	header[0] = 1
-	binary.BigEndian.PutUint16(header[1:], uint16(len(message)))
-	if _, err := writer.Write(header[:]); err != nil {
-		return err
-	}
-	if _, err := writer.WriteString(message); err != nil {
-		return err
-	}
-	return writer.Flush()
-}
-
-func readPreparedBatchWorkerError(reader *bufio.Reader) (string, error) {
-	var encoded [2]byte
-	if _, err := io.ReadFull(reader, encoded[:]); err != nil {
-		return "", err
-	}
-	size := int(binary.BigEndian.Uint16(encoded[:]))
-	if size == 0 || size > preparedBatchWorkerMaxError {
-		return "", fmt.Errorf("prepared batch worker: error size %d is invalid", size)
-	}
-	message := make([]byte, size)
-	if _, err := io.ReadFull(reader, message); err != nil {
-		return "", err
-	}
-	return string(message), nil
-}
-
-func preparedWorkerParityEntry(t testing.TB, caseID string) parityManifestEntry {
-	t.Helper()
-	selected, err := parityManifestSelection(caseID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(selected) != 1 || selected[0].Corpus+"/"+selected[0].Name != caseID {
-		t.Fatalf("prepared worker case selection = %#v, want exactly %s", selected, caseID)
-	}
-	return selected[0]
 }
 
 type preparedWorkerParityCalibrationSample struct {
@@ -987,23 +600,6 @@ func verifyPreparedWorkerParityCallScale(
 		)
 	}
 	return calibration, nil
-}
-
-func calibratePreparedWorkerParityCallScale(callable *parityPreparedCallable) (preparedWorkerParityCalibration, error) {
-	return selectPreparedWorkerParityCallScale(func(iterations int) (float64, error) {
-		elapsed, _, err := measureParityEmberGuestBatch(callable, iterations, parityCaptureSeed)
-		return elapsed, err
-	})
-}
-
-func verifyPreparedWorkerParityCallableScale(
-	callScale int,
-	callable *parityPreparedCallable,
-) (preparedWorkerParityCalibration, error) {
-	return verifyPreparedWorkerParityCallScale(callScale, func(iterations int) (float64, error) {
-		elapsed, _, err := measureParityEmberGuestBatch(callable, iterations, parityCaptureSeed)
-		return elapsed, err
-	})
 }
 
 func validatePreparedWorkerParityCallScale(callScale int) error {
@@ -1245,17 +841,6 @@ func preparedWorkerEngineOrder(pair, repeat, iterationIndex int) [3]string {
 		{"luau", "embedded", "worker"},
 	}
 	return orders[(pair+repeat+iterationIndex)%len(orders)]
-}
-
-func measurePreparedBatchWorker(
-	worker *preparedBatchWorker,
-	iterations int,
-	seed int64,
-) (float64, string, error) {
-	start := time.Now()
-	result, err := worker.Call(context.Background(), iterations, seed)
-	elapsed := time.Since(start)
-	return float64(elapsed.Nanoseconds()), result, err
 }
 
 func createPreparedWorkerCaptureFile(t testing.TB, path string) *os.File {

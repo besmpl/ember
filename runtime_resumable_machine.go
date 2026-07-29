@@ -192,9 +192,16 @@ func (owner *machineOwner) resumeHostCoroutineTransfersStopped(
 	handled := false
 	errorPC := 0
 	var runErr error
-	if action.kind == machineCoroutineActionStart && machine.window.controller == nil {
-		target := &machine.image.prototypes[machine.activeProto]
-		handled, errorPC, runErr = owner.executePreparedStopped(machine.activeModule, machine.activeProto, target)
+	if action.kind == machineCoroutineActionStart &&
+		(machine.window.controller == nil || machine.window.controller.preparedCancellationOnly()) {
+		if controller != nil {
+			runErr = controller.checkContext()
+			handled = runErr != nil
+		}
+		if runErr == nil {
+			target := &machine.image.prototypes[machine.activeProto]
+			handled, errorPC, runErr = owner.executePreparedStopped(machine.activeModule, machine.activeProto, target)
+		}
 	}
 	if !handled && runErr == nil {
 		errorPC, runErr = runGeneratedScalarMachineLoop(machine)

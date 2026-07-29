@@ -30,8 +30,8 @@ and retire or delete it when the slice lands or is abandoned.
 - `public-surface.md`: initial import and API surface rules.
 - `embedding.md`: generic host invocation, dispatch, typed catalogs, and
   cooperative suspension; Hearth appears only as a first-host case study.
-- `prepared.md`: static prepared-Go generation, reload-time native
-  ARM64/x86-64 generations, exact Machine replay, and explicit runtime binding.
+- `prepared.md`: static prepared-Go generation, typed transactional worker
+  reload, exact Machine replay, and explicit artifact/runtime binding.
 - `golang-rules.md`: Go coding rules for this repository.
 - `checks.md`: local verification commands.
 - `adr/0001-go-native-runtime-mapping.md`: public Go ownership decision; ADR 0007
@@ -50,9 +50,21 @@ and retire or delete it when the slice lands or is abandoned.
 - `adr/0009-generated-adaptive-superword-vm.md`: rejected bounded dynamic-VM
   experiment, exact four-family failure evidence, transferable mechanisms,
   and completed deletion gate.
-- `adr/0010-hybrid-aot-generation-reload.md`: static prepared releases,
-  no-cgo reload-time native generations, exact Machine replay, and explicit
-  executable/state lifetime constraints.
+- `adr/0010-hybrid-aot-generation-reload.md`: retained static prepared release
+  and exact Machine replay clauses; ADR 0011 supersedes its reload design.
+- `adr/0011-supervised-aot-worker-generations.md`: accepted no-cgo supervised
+  static-AOT workers, typed transaction semantics, recovery, and generation
+  lifetime.
+- `adr/0012-language-owned-runtimes-and-staged-prepared-sharing.md`: superseded
+  research and proof history for the later focused multi-language decisions.
+- `adr/0013-language-owned-compilers-and-post-lowering-integration.md`: accepted
+  language ownership and narrow post-lowering integration boundary.
+- `adr/0014-layer-compilation-and-delivery-identities-by-owner.md`: accepted
+  layered identity and invalidation ownership across compiler, generated,
+  build, and launch products.
+- `adr/0015-require-receipts-for-architecture-promotion.md`: accepted
+  receipt-gated compatibility, portability, performance, and lifecycle
+  promotion policy.
 
 ## Workflow Documents
 
@@ -60,14 +72,11 @@ and retire or delete it when the slice lands or is abandoned.
   interface decisions.
 - `../performance-audit.md`: current reproducible performance evidence and
   noise envelope.
-- `../luau-parity-no-cgo-ssa-aot-implementation-plan.md`: active Simple Loop
-  delivery contract for the prepared parity architecture.
-- `../runtime-speed-2x-no-cgo-production-migration-implementation-plan.md`:
-  retained background for the compact Machine migration. ADR 0008 and the
-  prepared parity plan supersede its final-backend and final-target direction.
-- `../no-cgo-aot-reload-architecture-plan.md`: implementation audit for the
-  measured native hot-reload architecture, rejected experiments, proof, and
-  remaining platform limits. ADR 0010 is the durable decision.
+- `../static-aot-transactional-worker-complete-cutover-implementation-plan.md`:
+  active worker-cutover delivery contract. Its seven ordered S0 stages cover
+  stabilization, Luau prepared replay, AOT recertification, owner-framed
+  identities, embedded durability, EPW2 lifecycle, and final admission; stages
+  8-17 and the functional/3D language remain gated.
 
 Historical performance execution plans are intentionally not part of the
 navigation. Their durable decisions remain in the performance audit and ADRs;

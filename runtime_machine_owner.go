@@ -482,7 +482,12 @@ func (owner *machineOwner) executeStopped(moduleID programModuleID, protoID int3
 	handled := false
 	errorPC := 0
 	var err error
-	if controller == nil {
+	if controller == nil || controller.preparedCancellationOnly() {
+		if controller != nil {
+			if err := controller.checkContext(); err != nil {
+				return machine.wrapError(0, err)
+			}
+		}
 		handled, errorPC, err = owner.executePreparedStopped(moduleID, protoID, target)
 	}
 	if !handled && err == nil {

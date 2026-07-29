@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+cd "$(dirname "$0")/.."
+
+worker_target_dir=$(mktemp -d "${TMPDIR:-/tmp}/ember-prepared-worker-targets.XXXXXX")
+cleanup_worker_targets() {
+	if [ -n "$worker_target_dir" ] && [ -d "$worker_target_dir" ]; then
+		rm -rf -- "$worker_target_dir"
+	fi
+}
+trap cleanup_worker_targets EXIT HUP INT TERM
+
+for worker_target in \
+	darwin/amd64 \
+	darwin/arm64 \
+	linux/amd64 \
+	linux/arm64 \
+	windows/amd64 \
+	windows/arm64
+do
+	worker_goos=${worker_target%/*}
+	worker_goarch=${worker_target#*/}
+	worker_output="$worker_target_dir/epw2-$worker_goos-$worker_goarch"
+	observer_output="$worker_target_dir/embedded-observer-$worker_goos-$worker_goarch"
+	if [ "$worker_goos" = windows ]; then
+		worker_output=$worker_output.exe
+		observer_output=$observer_output.exe
+	fi
+	printf 'check-prepared-worker-targets: %s/%s\n' "$worker_goos" "$worker_goarch"
+	CGO_ENABLED=0 GOOS="$worker_goos" GOARCH="$worker_goarch" \
+		go build -trimpath -o "$worker_output" ./internal/preparedworkerparity/cmd/worker
+	CGO_ENABLED=0 GOOS="$worker_goos" GOARCH="$worker_goarch" \
+		go build -trimpath -o "$observer_output" ./internal/preparedworkerparity/cmd/embeddedobserver
+done
+
+printf '%s\n' 'check-prepared-worker-targets: PASS'

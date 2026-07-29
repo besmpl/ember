@@ -298,7 +298,9 @@ func (emitter *backendGoNumericEmitter) emitRecordIndexFunctionGet(
 	if wrote {
 		emitter.body.WriteString(", ")
 	}
-	fmt.Fprintf(&emitter.body, "uint32(%d))\n", call.key)
+	fmt.Fprintf(&emitter.body, "uint32(%d)", call.key)
+	emitter.writePreparedSafePointContext(true)
+	emitter.body.WriteString(")\n")
 	fmt.Fprintf(&emitter.body, "\t\tif !ok%d {\n", operation.pc)
 	emitter.emitReplayEntry(3)
 	emitter.body.WriteString("\t\t}\n")

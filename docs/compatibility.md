@@ -61,7 +61,7 @@ remain the source of truth for semantics and expected values.
 | iteration | `next`, `pairs`, `ipairs`, and direct table generic iteration | Executed | `TestCompileAndRunGenericForPairsLoop`, `TestCompileAndRunGenericForIPairsLoop`, `TestCompileAndRunGenericForNextTableLoop`, `TestCompileAndRunGenericForDirectTableLoop` |
 | coroutines | create, yield, resume, status, wrap, and close | Executed | `TestCompileAndRunCoroutineCreateResumeAndStatus`, `TestCompileAndRunCoroutineYieldAndResumeValues`, `TestCompileAndRunCoroutineCloseSuspendedCoroutine`, `TestCompileAndRunCoroutineWrapResumesAndReturnsValues` |
 | modules | module loading, require caching, direct or named single-module invocation, and optional ordered entrypoint dispatch | Embedded | `TestInvokeSupportsRequestMiddlewareHost`, `TestIndependentInvocationsShareSuspendedModuleInitialization`, `TestRuntimeRunHookSharesRequireCacheAcrossEntrypoints`, `TestRuntimeHostReceivesEntrypointLoadAndHookCalls` |
-| prepared-reload | exact static prepared binding plus cross-platform reload-time numeric ARM64/x86-64 qualification, policy/stack fallback, safe activation, and generation retirement | Embedded | `TestPreparedRuntimeSlotPreparesSourceUnknownAtHostBuild`, `TestPreparedNativeGeneralRowsUseNativeBatchOnBothArchitectures`, `TestPreparedRuntimeSlotMutableCaptureUsesCanonicalFallback`, `TestBackendNativeStackBudgetPrunesUnsafeCallGraphs`, `TestPreparedRuntimeSlotExecutionPolicyUsesCanonicalMachine`, `TestPreparedRuntimeSlotRepeatedReloadsReclaimNativeImages` |
+| prepared-worker | exact static prepared binding plus typed transactional embedded/process execution, source first observed after the parent build, durable replay and uncertainty, quiescent hot reload, cancellation, and generation retirement | Embedded | `TestPreparedWorkerPublicRunnerReplaysCommittedOperation`, `TestPreparedWorkerProcessMatchesEmbeddedTurn`, `TestPreparedWorkerRestartsOnlyFromQuiescentApplicationState`, `TestPreparedWorkerRejectsLossyInputBeforeAdvancing`, `TestPreparedWorkerRejectsOverflowingTurnAndReactivatesFromDurableHead`, `TestPreparedWorkerDeadlineTerminatesStalledGeneration`, `TestPreparedWorkerTerminalFailureCannotBeRetried`, `TestPreparedWorkerParityTypedEmbeddedAndProcessAgreeAll37` |
 | typed-syntax | erased Luau annotations, aliases, generic function parameters, `typeof`, and casts | Parsed | `TestCompileAndRunLocalTypeAnnotationIsErased`, `TestCompileAndRunTypeAliasDeclarationsAreErased`, `TestCompileAndRunGenericFunctionTypeParametersAreErased`, `TestCompileAndRunTypeofTypeAnnotationIsErased`, `TestCompileAndRunTypeCastIsErased` |
 | strict-check | `--!strict` checking foothold and typed diagnostics | Compiled | `TestCheckRequiresStrictDirective`, `TestCheckReturnsTypeDiagnosticAsError`, `TestCheckAcceptsStrictDirective` |
 | protected-calls | `pcall` and `xpcall` capture ordinary script/host errors while limits and cancellation escape | Executed | `TestCompileAndRunProtectedCallCapturesRuntimeError`, `TestCompileAndRunProtectedXCallUsesErrorHandler`, `TestProtectedCallsPropagateCancellationAndEveryLimitKind` |
@@ -81,7 +81,7 @@ run, check, or embedding interface.
 
 ## Non-Goals For Early Ember
 
-- Full-language native codegen.
+- Full-language prepared codegen without canonical Machine replay.
 - Full analyzer parity.
 - C API compatibility.
 - Automatic translation of upstream C++ files.
@@ -92,8 +92,9 @@ The following are also explicitly unsupported or outside the current claim:
   the manifest;
 - full analyzer/type-checker parity (the typed-syntax row is parsing/erasure,
   while strict checking remains a foothold);
-- C API compatibility and full Luau native-code/JIT parity beyond the tested
-  prepared numeric subset;
+- C API compatibility and full Luau native-code/JIT parity; Ember's performance
+  claim is limited to the retained generated-Go corpus evidence and exact
+  Machine replay contract;
 - implicit host I/O, networking, filesystem, or platform services in the root
   runtime package;
 - portability of raw table iteration order beyond Ember's documented insertion

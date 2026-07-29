@@ -745,7 +745,9 @@ func (emitter *backendGoNumericEmitter) emitMutationMetatableGet(
 	if len(emitter.plan.mutationMetatable.fields) != 0 {
 		emitter.body.WriteString(", ")
 	}
-	fmt.Fprintf(&emitter.body, "%s)\n", keyExpression)
+	fmt.Fprintf(&emitter.body, "%s", keyExpression)
+	emitter.writePreparedSafePointContext(true)
+	emitter.body.WriteString(")\n")
 	fmt.Fprintf(&emitter.body, "\tif !ok%d {\n", operation.pc)
 	emitter.emitReplayEntry(2)
 	emitter.body.WriteString("\t}\n")
@@ -787,7 +789,9 @@ func (emitter *backendGoNumericEmitter) emitMutationMetatableSet(
 	if wrote {
 		emitter.body.WriteString(", ")
 	}
-	fmt.Fprintf(&emitter.body, "v%d, v%d)\n", key, source)
+	fmt.Fprintf(&emitter.body, "v%d, v%d", key, source)
+	emitter.writePreparedSafePointContext(true)
+	emitter.body.WriteString(")\n")
 	fmt.Fprintf(&emitter.body, "\tif !ok%d {\n", operation.pc)
 	emitter.emitReplayEntry(2)
 	emitter.body.WriteString("\t}\n")

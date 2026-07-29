@@ -3,11 +3,12 @@
 package preparedworkerfixturegenerated
 
 import (
+	"context"
 	emberapi "github.com/besmpl/ember"
 	"math"
 )
 
-func emberPreparedM1Proto1(p0 float64, p1 float64) (float64, bool) {
+func emberPreparedM1Proto1(p0 float64, p1 float64, context emberapi.PreparedContext) (float64, bool) {
 	var v1 float64
 	var v2 float64
 	var v15 float64
@@ -52,6 +53,9 @@ func emberPreparedM1Proto1(p0 float64, p1 float64) (float64, bool) {
 	var v67 float64
 	v1 = p0
 	v2 = p1
+	if !context.Continue() {
+		return 0, false
+	}
 	v43 = math.Float64frombits(0x0000000000000000)
 	v44 = v2
 	v45 = math.Float64frombits(0x3ff0000000000000)
@@ -121,6 +125,9 @@ b4:
 	v62 = v38
 	v63 = v61
 	v64 = v39 + v41
+	if !context.Continue() {
+		return 0, false
+	}
 	v37 = v62
 	v38 = v63
 	v39 = v64
@@ -129,6 +136,9 @@ b5:
 	v65 = v37
 	v66 = v31 + v65
 	v67 = v32 + v34
+	if !context.Continue() {
+		return 0, false
+	}
 	v15 = v29
 	v17 = v66
 	v18 = v67
@@ -184,6 +194,9 @@ func emberPreparedM1PreparedProto1Body(context emberapi.PreparedContext, p0 floa
 	var v67 float64
 	v1 = p0
 	v2 = p1
+	if !context.Continue() {
+		return emberapi.PreparedReplayEntry()
+	}
 	v43 = math.Float64frombits(0x0000000000000000)
 	v44 = v2
 	v45 = math.Float64frombits(0x3ff0000000000000)
@@ -304,6 +317,9 @@ b4:
 	v62 = v38
 	v63 = v61
 	v64 = v39 + v41
+	if !context.Continue() {
+		return emberapi.PreparedReplayEntry()
+	}
 	v37 = v62
 	v38 = v63
 	v39 = v64
@@ -312,6 +328,9 @@ b5:
 	v65 = v37
 	v66 = v31 + v65
 	v67 = v32 + v34
+	if !context.Continue() {
+		return emberapi.PreparedReplayEntry()
+	}
 	v15 = v29
 	v17 = v66
 	v18 = v67
@@ -333,11 +352,14 @@ func emberPreparedM1PreparedProto1(context emberapi.PreparedContext) emberapi.Pr
 	}
 	return emberPreparedM1PreparedProto1Body(context, p0, p1)
 }
-func emberPreparedM2Proto1(p0 float64) (float64, bool) {
+func emberPreparedM2Proto1(p0 float64, context emberapi.PreparedContext) (float64, bool) {
 	var v1 float64
 	var v3 float64
 	var v4 float64
 	v1 = p0
+	if !context.Continue() {
+		return 0, false
+	}
 	v3 = v1
 	v4 = v3 + math.Float64frombits(0x3ff0000000000000)
 	return v4, true
@@ -348,6 +370,9 @@ func emberPreparedM2PreparedProto1Body(context emberapi.PreparedContext, p0 floa
 	var v3 float64
 	var v4 float64
 	v1 = p0
+	if !context.Continue() {
+		return emberapi.PreparedReplayEntry()
+	}
 	v3 = v1
 	v4 = v3 + math.Float64frombits(0x3ff0000000000000)
 	return emberapi.PreparedReturnOneNumber(v4)
@@ -361,4 +386,14 @@ func emberPreparedM2PreparedProto1(context emberapi.PreparedContext) emberapi.Pr
 	return emberPreparedM2PreparedProto1Body(context, p0)
 }
 
-var Bundle = emberapi.NewPreparedBundle(1, 1, [32]byte{0xe6, 0xb6, 0x55, 0x67, 0xf2, 0x6f, 0x6f, 0x95, 0xad, 0x56, 0x6d, 0x5a, 0x17, 0xc1, 0x7e, 0xf7, 0xe0, 0x6c, 0xcf, 0xd7, 0x83, 0x8a, 0xc5, 0xfa, 0x7c, 0x22, 0x94, 0xd7, 0xae, 0x72, 0x75, 0xdc}, [][]emberapi.PreparedFunction{{nil, nil, nil, nil}, {nil, emberPreparedM1PreparedProto1}, {nil, emberPreparedM2PreparedProto1}})
+var Bundle = emberapi.NewPreparedBundle(2, 1, [32]byte{0xe6, 0xb6, 0x55, 0x67, 0xf2, 0x6f, 0x6f, 0x95, 0xad, 0x56, 0x6d, 0x5a, 0x17, 0xc1, 0x7e, 0xf7, 0xe0, 0x6c, 0xcf, 0xd7, 0x83, 0x8a, 0xc5, 0xfa, 0x7c, 0x22, 0x94, 0xd7, 0xae, 0x72, 0x75, 0xdc}, [][]emberapi.PreparedFunction{{nil, nil, nil, nil}, {nil, emberPreparedM1PreparedProto1}, {nil, emberPreparedM2PreparedProto1}})
+
+func LoadProgram(ctx context.Context, options emberapi.ProgramOptions) (*emberapi.Program, emberapi.LoadReport, error) {
+	recipe, err := emberapi.NewPreparedProgramRecipe([]emberapi.PreparedProgramModule{{Module: emberapi.LogicalModule("prepared-worker/main"), SourceName: "logical:prepared-worker/main", SourceText: "\nreturn {\n    startup = function()\n        capture(1, function(entity, amount)\n            local loaded = wait(1, entity)\n            local dependency = require(\"./shared\")\n            local entityDelta = 0\n            if entity == 7 then\n                entityDelta = amount\n            end\n            local totalDelta = amount + loaded + dependency.bonus\n            command(2, entity, entityDelta, totalDelta)\n            return loaded, totalDelta, entityDelta\n        end)\n    end,\n\n    turn = function(tick, total, ready, entity7, moduleCalls, step, seed, work)\n        local dependency = require(\"./shared\")\n        local compute = require(\"./numeric\")\n        moduleCalls = dependency.next(moduleCalls)\n        tick = tick + step\n        local numeric = compute(seed, work)\n        total = total + step + numeric\n\n        command(1, 0, tick, total)\n        effect(2, 0, numeric)\n\n        return tick, total, ready, entity7, moduleCalls\n    end,\n}\n"}, {Module: emberapi.LogicalModule("prepared-worker/numeric"), SourceName: "logical:prepared-worker/numeric", SourceText: "\nreturn function(seed, work)\n    local numeric = 0\n    for index = 1, work do\n        local n = seed + ((index - 1) % 3)\n        local previous = 0\n        local current = 1\n        for fibIndex = 1, n do\n            local nextValue = previous + current\n            previous = current\n            current = nextValue\n        end\n        numeric = numeric + previous\n    end\n    return numeric\nend\n"}, {Module: emberapi.LogicalModule("prepared-worker/shared"), SourceName: "logical:prepared-worker/shared", SourceText: "\nreturn {\n    bonus = 3,\n    next = function(calls)\n        return calls + 1\n    end,\n}\n"}}, []emberapi.Entrypoint{{Name: "main", Module: emberapi.LogicalModule("prepared-worker/main")}})
+	if err != nil {
+		return nil, emberapi.LoadReport{}, err
+	}
+	return recipe.Load(ctx, options)
+}
+
+var ProgramRecipeDigest = [32]byte{0x95, 0x55, 0x2e, 0x44, 0x59, 0x3b, 0xc9, 0x98, 0x7c, 0x03, 0x01, 0x76, 0x9e, 0x65, 0x73, 0x5b, 0x76, 0xa8, 0xcd, 0xb6, 0xd1, 0x21, 0x10, 0xe0, 0xaf, 0x3c, 0xd9, 0xb0, 0x21, 0x3e, 0xb1, 0x40}

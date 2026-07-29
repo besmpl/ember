@@ -1,0 +1,5 @@
+package score
+
+func Reduce(value i64, divisor i64) i64 {
+  return value / divisor + 1 / value + 2
+}

@@ -37,8 +37,28 @@ Current runtime decisions:
 - `0009-generated-adaptive-superword-vm.md`: records the rejected generated
   adaptive shadow-wordcode experiment, its exact P4 gate failure, and deletion
   from production after scalar wins failed to transfer to object workloads.
-- `0010-hybrid-aot-generation-reload.md`: selects static prepared bundles for
-  releases, reload-time no-cgo ARM64/x86-64 native generations on supported
-  Darwin, Linux, and Windows hosts, exact Machine replay, and a
-  prepared-generation safe-point transaction. The Go-plugin adapter remains an
-  optional separate host choice.
+- `0010-hybrid-aot-generation-reload.md`: retains static prepared bundles for
+  releases and exact Machine replay. ADR 0011 supersedes its same-process
+  native/plugin reload and prepared-slot lifetime clauses.
+- `0011-supervised-aot-worker-generations.md`: accepts content-addressed
+  generated-Go worker generations behind one typed application transaction
+  seam, including durable resolution, quiescent activation, process ownership,
+  and cross-platform no-cgo admission.
+- `0013-language-owned-compilers-and-post-lowering-integration.md`: accepts
+  concrete language-owned semantics and generated products, with sharing only
+  at immutable delivery, application composition, explicit builds, and worker
+  generations. A universal compiler/runtime contract remains rejected.
+- `0014-layer-compilation-and-delivery-identities-by-owner.md`: accepts layered
+  source, check, compile, Program, prepared, Layout, contract, build,
+  executable, and launch identities so each owner invalidates exactly the
+  products it controls.
+- `0015-require-receipts-for-architecture-promotion.md`: requires finite
+  compatibility claims and complete semantic, pure-Go, cross-build,
+  target-native, performance, allocation, and lifecycle receipts before an
+  architecture mechanism is promoted.
+
+Superseded research records:
+
+- `0012-language-owned-runtimes-and-staged-prepared-sharing.md`: retained as
+  the proof ledger that led to ADRs 0013-0015. Its unfinished worker-builder,
+  Ruby, Sprig, and shared-compiler stages are not accepted architecture.

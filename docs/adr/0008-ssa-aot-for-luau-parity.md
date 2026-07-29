@@ -2,10 +2,10 @@
 
 Status: Accepted
 
-ADR 0010 supersedes this ADR's blanket plugin, runtime-compiler, and native-JIT
-prohibitions only at the explicit prepared-generation seam. Static generated
-Go remains the portable release path; supported Darwin hosts may also compile a
-proved numeric subset before hot-reload activation, with exact Machine replay.
+ADR 0011 removes ADR 0010's same-process plugin/native exception. Static
+generated Go remains the portable release path; changed source may be compiled
+as an explicit host-owned build into a supervised worker, with exact Machine
+replay and no runtime loader or executable-memory seam.
 The selected SSA backend IR, exact binding, side exits, and static prepared
 performance evidence remain unchanged. This ADR's native leaf rejection is
 historical evidence for why the later tier needed its own complete lifetime,
@@ -269,11 +269,13 @@ Existing `restartPC` and `skipCharge` behavior is the starting replay seam.
 Operations that cannot exit before mutation require one explicitly tested
 commit protocol; they may not rely on vague "resume nearby" behavior.
 
-Host calls, modules, cancellation, limits, errors, collection, growth,
+Host calls, modules, context errors, limits, errors, collection, growth,
 unsupported metatable paths, and other effects remain owned by the Machine
-effect boundary. Unrestricted hot blocks may bulk-charge proven instruction
-counts. Controlled execution falls back at an exact PC whenever the remaining
-budget cannot cover the block.
+effect boundary. Generated helpers may poll an opaque cancellation-only
+context at compiler safe points and side-exit before effects; the Machine then
+surfaces the exact context failure. Any configured execution limit selects the
+Machine path for exact instruction and resource accounting. Unrestricted hot
+blocks may bulk-charge proven instruction counts.
 
 ### Table shapes
 
@@ -301,10 +303,14 @@ retains this narrow public lifecycle:
 - no registration through `init`, package globals, plugins, helper processes,
   or source-name routing is allowed.
 
-The generated package receives an opaque prepared context. Generated code
-enters it at coarse prepared-function boundaries and does not expose Machine
-registers, arenas, or owner state. Retaining this lifecycle does not itself
-satisfy the separate all-37 performance and allocation acceptance gates below.
+The generated package receives one opaque prepared context across its direct
+helper graph. Compiler-inserted checks at function entries and control-flow
+backedges make cancellation-only execution interruptible without exposing
+Machine registers, arenas, or owner state. A failed check replays before an
+effect. The prepared ABI changes whenever that generated safe-point contract
+changes, so an older bundle cannot bind silently. Retaining this lifecycle does
+not itself satisfy the separate all-37 performance and allocation acceptance
+gates below.
 
 ### Performance claim
 

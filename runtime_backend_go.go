@@ -14,6 +14,7 @@ type backendGoNumericOptions struct {
 	preparedFunctionName string
 	preparedImportPath   string
 	preparedQualifier    string
+	preparedSafePoints   bool
 	directTargets        []backendGoNumericTarget
 	upvalueTargets       map[int32]backendGoNumericTarget
 	targetUpvalueTargets []map[int32]backendGoNumericTarget
@@ -107,7 +108,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		return nil, fmt.Errorf("emit backend Go numeric proof: prepared import path and qualifier must be supplied together")
 	}
 	if options.preparedQualifier != "" {
-		if options.preparedFunctionName == "" {
+		if options.preparedFunctionName == "" && !options.preparedSafePoints {
 			return nil, fmt.Errorf("emit backend Go numeric proof: prepared import requires a prepared function")
 		}
 		if !token.IsIdentifier(options.preparedQualifier) ||
@@ -199,6 +200,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			plan.coroutines.target,
 			*plan.coroutines.targetPlan,
 			plan.coroutines.yields,
+			options,
 		)
 		if err != nil {
 			return nil, err
@@ -243,7 +245,11 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		if wroteUpvalue {
 			source.WriteString(", ")
 		}
-		source.WriteString("p0 float64) (float64, bool) {\n")
+		source.WriteString("p0 float64")
+		if options.preparedSafePoints {
+			fmt.Fprintf(&source, ", context %s", options.preparedContextType())
+		}
+		source.WriteString(") (float64, bool) {\n")
 		for upvalue := range ir.upvalues {
 			if pointerUpvalue(upvalue) {
 				fmt.Fprintf(&source, "\tif u%d == nil || math.IsNaN(*u%d) || math.IsInf(*u%d, 0) {\n\t\treturn 0, false\n\t}\n", upvalue, upvalue, upvalue)
@@ -255,7 +261,15 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 				fmt.Fprintf(&source, "u%d, ", upvalue)
 			}
 		}
-		source.WriteString("p0), true\n}\n\n")
+		source.WriteString("p0")
+		if options.preparedSafePoints {
+			source.WriteString(", context")
+		}
+		if options.preparedSafePoints {
+			source.WriteString(")\n}\n\n")
+		} else {
+			source.WriteString("), true\n}\n\n")
+		}
 		fmt.Fprintf(&source, "func %sBody(", options.functionName)
 		wroteUpvalue = false
 		for upvalue := range ir.upvalues {
@@ -271,7 +285,15 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		if wroteUpvalue {
 			source.WriteString(", ")
 		}
-		source.WriteString("p0 float64) float64 {\n")
+		source.WriteString("p0 float64")
+		if options.preparedSafePoints {
+			fmt.Fprintf(&source, ", context %s", options.preparedContextType())
+		}
+		if options.preparedSafePoints {
+			source.WriteString(") (float64, bool) {\n")
+		} else {
+			source.WriteString(") float64 {\n")
+		}
 	} else {
 		fmt.Fprintf(&source, "func %s(", options.functionName)
 		wroteParameter := false
@@ -313,6 +335,13 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 				return nil, fmt.Errorf("emit backend Go numeric proof: parameter %d has unsupported tags %x", parameter, parameterTags[parameter])
 			}
 			fmt.Fprintf(&source, "p%d %s", parameter, goType)
+			wroteParameter = true
+		}
+		if options.preparedSafePoints {
+			if wroteParameter {
+				source.WriteString(", ")
+			}
+			fmt.Fprintf(&source, "context %s", options.preparedContextType())
 			wroteParameter = true
 		}
 		source.WriteString(") (")
@@ -407,7 +436,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 		needsOK := !backendGoNumericOperationDead(plan, operation) &&
 			(operation.op == opCallOne || operation.op == opCallLocalOne ||
 				operation.op == opCall && backendGoNumericScalarReplacedCall(ir, options, operation) ||
-				operation.op == opCallUpvalueOne && !backendGoNumericSelfRecursiveCall(ir, options, operation) ||
+				operation.op == opCallUpvalueOne && (!backendGoNumericSelfRecursiveCall(ir, options, operation) || options.preparedSafePoints) ||
 				operation.op == opCallMethodOne)
 		if _, ok := plan.indexFunctions.call(operation); ok {
 			needsOK = true
@@ -520,7 +549,7 @@ func emitBackendGoNumericProof(ir *backendProtoIR, options backendGoNumericOptio
 			needsOK := !backendGoNumericOperationDead(plan, operation) &&
 				(operation.op == opCallOne || operation.op == opCallLocalOne ||
 					operation.op == opCall && backendGoNumericScalarReplacedCall(ir, options, operation) ||
-					operation.op == opCallUpvalueOne && !backendGoNumericSelfRecursiveCall(ir, options, operation) ||
+					operation.op == opCallUpvalueOne && (!backendGoNumericSelfRecursiveCall(ir, options, operation) || options.preparedSafePoints) ||
 					operation.op == opCallMethodOne)
 			if _, ok := plan.indexFunctions.call(operation); ok {
 				needsOK = true
@@ -694,6 +723,8 @@ func (options backendGoNumericOptions) preparedContextMethod(name string) string
 		return "IntrinsicUnchanged"
 	case "intrinsicUnchangedAt":
 		return "IntrinsicUnchangedAt"
+	case "continueExecution":
+		return "Continue"
 	case "replayBeforeOperation":
 		return "ReplayBeforeOperation"
 	case "spillNil":
@@ -3007,6 +3038,7 @@ func backendGoNumericTargetResultTag(
 }
 
 func (emitter *backendGoNumericEmitter) emitBody() error {
+	emitter.emitPreparedSafePoint(1)
 	reachable := emitter.generatedReachableBlocks()
 	for blockIndex := range emitter.ir.blocks {
 		block := &emitter.ir.blocks[blockIndex]
@@ -3442,13 +3474,15 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			}
 			fmt.Fprintf(
 				&emitter.body,
-				"\tv%d, _, ok%d = %s(&q0, %s, %t)\n",
+				"\tv%d, _, ok%d = %s(&q0, %s, %t",
 				value,
 				operation.pc,
 				emitter.plan.coroutines.target.functionName,
 				argument,
 				resume.first,
 			)
+			emitter.writePreparedSafePointContext(true)
+			emitter.body.WriteString(")\n")
 			fmt.Fprintf(&emitter.body, "\tif !ok%d {\n", operation.pc)
 			emitter.emitReplayEntry(2)
 			emitter.body.WriteString("\t}\n")
@@ -3738,14 +3772,24 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 		if err != nil {
 			return false, err
 		}
-		if backendGoNumericSelfRecursiveCall(emitter.ir, emitter.options, operation) {
-			fmt.Fprintf(&emitter.body, "\tv%d = %sBody(", destination, emitter.options.functionName)
+		selfRecursive := backendGoNumericSelfRecursiveCall(emitter.ir, emitter.options, operation)
+		wroteParameter := false
+		if selfRecursive {
+			if emitter.options.preparedSafePoints {
+				fmt.Fprintf(&emitter.body, "\tv%d, ok%d = %sBody(", destination, operation.pc, emitter.options.functionName)
+			} else {
+				fmt.Fprintf(&emitter.body, "\tv%d = %sBody(", destination, emitter.options.functionName)
+			}
 			for upvalue := range emitter.ir.upvalues {
 				self, _ := backendGoNumericSelfRecursiveUpvalue(emitter.ir)
 				if int32(upvalue) == self || emitter.plan.tables.tableUpvalue(int32(upvalue)) {
 					continue
 				}
-				fmt.Fprintf(&emitter.body, "u%d, ", upvalue)
+				if wroteParameter {
+					emitter.body.WriteString(", ")
+				}
+				fmt.Fprintf(&emitter.body, "u%d", upvalue)
+				wroteParameter = true
 			}
 		} else {
 			target, ok := backendGoNumericUpvalueTarget(emitter.options, operation)
@@ -3755,7 +3799,7 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			fmt.Fprintf(&emitter.body, "\tv%d, ok%d = %s(", destination, operation.pc, target.functionName)
 		}
 		for argument := int32(0); argument < operation.callArgCount; argument++ {
-			if argument != 0 {
+			if wroteParameter {
 				emitter.body.WriteString(", ")
 			}
 			value, err := use(operation.callArgStart + argument)
@@ -3763,9 +3807,11 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 				return false, err
 			}
 			fmt.Fprintf(&emitter.body, "v%d", value)
+			wroteParameter = true
 		}
+		emitter.writePreparedSafePointContext(wroteParameter)
 		emitter.body.WriteString(")\n")
-		if !backendGoNumericSelfRecursiveCall(emitter.ir, emitter.options, operation) {
+		if !selfRecursive || emitter.options.preparedSafePoints {
 			fmt.Fprintf(&emitter.body, "\tif !ok%d {\n", operation.pc)
 			emitter.emitReplayEntry(2)
 			emitter.body.WriteString("\t}\n")
@@ -3846,6 +3892,7 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			fmt.Fprintf(&emitter.body, "v%d", value)
 			wroteParameter = true
 		}
+		emitter.writePreparedSafePointContext(wroteParameter)
 		emitter.body.WriteString(")\n")
 		fmt.Fprintf(&emitter.body, "\tif !ok%d {\n", operation.pc)
 		emitter.emitReplayEntry(2)
@@ -3896,20 +3943,26 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 					)
 				}
 				fmt.Fprintf(&emitter.body, "\t\tv%d, ok%d = %s(", destination, operation.pc, variant.target.functionName)
+				wroteParameter := false
 				for field := range variant.callerFields {
-					if field != 0 {
+					if wroteParameter {
 						emitter.body.WriteString(", ")
 					}
 					fmt.Fprintf(&emitter.body, "&m%d_%d_%d", operation.pc, variantIndex, field)
+					wroteParameter = true
 				}
 				for argument := int32(1); argument < operation.callArgCount; argument++ {
-					emitter.body.WriteString(", ")
+					if wroteParameter {
+						emitter.body.WriteString(", ")
+					}
 					value, useErr := use(operation.callArgStart + argument)
 					if useErr != nil {
 						return false, useErr
 					}
 					fmt.Fprintf(&emitter.body, "v%d", value)
+					wroteParameter = true
 				}
+				emitter.writePreparedSafePointContext(wroteParameter)
 				emitter.body.WriteString(")\n")
 				fmt.Fprintf(&emitter.body, "\t\tif !ok%d {\n", operation.pc)
 				emitter.emitReplayEntry(3)
@@ -3964,19 +4017,26 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 				fmt.Fprintf(&emitter.body, "\ts%d = c%d\n", call.cellStart+cell, call.cellStart+cell)
 			}
 			fmt.Fprintf(&emitter.body, "\tv%d, ok%d = %s(", destination, operation.pc, call.target.functionName)
+			wroteParameter := false
 			for cell := 0; cell < call.cellCount; cell++ {
-				if cell != 0 {
+				if wroteParameter {
 					emitter.body.WriteString(", ")
 				}
 				fmt.Fprintf(&emitter.body, "&s%d", call.cellStart+cell)
+				wroteParameter = true
 			}
 			for argument := int32(0); argument < operation.callArgCount; argument++ {
 				value, err := use(operation.callArgStart + argument)
 				if err != nil {
 					return false, err
 				}
-				fmt.Fprintf(&emitter.body, ", v%d", value)
+				if wroteParameter {
+					emitter.body.WriteString(", ")
+				}
+				fmt.Fprintf(&emitter.body, "v%d", value)
+				wroteParameter = true
 			}
+			emitter.writePreparedSafePointContext(wroteParameter)
 			emitter.body.WriteString(")\n")
 			fmt.Fprintf(&emitter.body, "\tif !ok%d {\n", operation.pc)
 			emitter.emitReplayEntry(2)
@@ -3995,8 +4055,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			return false, err
 		}
 		fmt.Fprintf(&emitter.body, "\tv%d, ok%d = %s(", destination, operation.pc, target.functionName)
+		wroteParameter := false
 		for argument := int32(0); argument < operation.callArgCount; argument++ {
-			if argument != 0 {
+			if wroteParameter {
 				emitter.body.WriteString(", ")
 			}
 			value, err := use(operation.callArgStart + argument)
@@ -4004,7 +4065,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 				return false, err
 			}
 			fmt.Fprintf(&emitter.body, "v%d", value)
+			wroteParameter = true
 		}
+		emitter.writePreparedSafePointContext(wroteParameter)
 		emitter.body.WriteString(")\n")
 		fmt.Fprintf(&emitter.body, "\tif !ok%d {\n", operation.pc)
 		emitter.emitReplayEntry(2)
@@ -4028,14 +4091,16 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			)
 		}
 		fmt.Fprintf(&emitter.body, "\tv%d, ok%d = %s(", destination, operation.pc, call.target.functionName)
+		wroteParameter := false
 		for field := range call.callerFields {
-			if field != 0 {
+			if wroteParameter {
 				emitter.body.WriteString(", ")
 			}
 			fmt.Fprintf(&emitter.body, "&m%d_%d", operation.pc, field)
+			wroteParameter = true
 		}
 		for argument := int32(1); argument < operation.callArgCount; argument++ {
-			if len(call.callerFields) != 0 || argument != 1 {
+			if wroteParameter {
 				emitter.body.WriteString(", ")
 			}
 			value, err := use(operation.callArgStart + argument)
@@ -4043,7 +4108,9 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 				return false, err
 			}
 			fmt.Fprintf(&emitter.body, "v%d", value)
+			wroteParameter = true
 		}
+		emitter.writePreparedSafePointContext(wroteParameter)
 		emitter.body.WriteString(")\n")
 		fmt.Fprintf(&emitter.body, "\tif !ok%d {\n", operation.pc)
 		emitter.emitReplayEntry(2)
@@ -4079,10 +4146,14 @@ func (emitter *backendGoNumericEmitter) emitOperation(operation *backendOperatio
 			}
 			results[result] = value
 		}
-		if emitter.options.selfRecursive {
-			fmt.Fprintf(&emitter.body, "\treturn v%d\n", results[0])
-		} else if emitter.prepared {
+		if emitter.prepared {
 			fmt.Fprintf(&emitter.body, "\treturn %s(v%d)\n", emitter.options.preparedReturnOneNumber(), results[0])
+		} else if emitter.options.selfRecursive {
+			if emitter.options.preparedSafePoints {
+				fmt.Fprintf(&emitter.body, "\treturn v%d, true\n", results[0])
+			} else {
+				fmt.Fprintf(&emitter.body, "\treturn v%d\n", results[0])
+			}
 		} else {
 			if resultCount == 0 {
 				emitter.body.WriteString("\treturn true\n")
@@ -4279,6 +4350,9 @@ func (emitter *backendGoNumericEmitter) emitBranch(from int32, targetPC int32, c
 
 func (emitter *backendGoNumericEmitter) emitGoto(from, to int32, indent int) {
 	prefix := strings.Repeat("\t", indent)
+	if to >= 0 && to <= from {
+		emitter.emitPreparedSafePoint(indent)
+	}
 	for edgeIndex := range emitter.ir.edges {
 		edge := &emitter.ir.edges[edgeIndex]
 		if edge.from != from || edge.to != to {
@@ -4298,6 +4372,33 @@ func (emitter *backendGoNumericEmitter) emitGoto(from, to int32, indent int) {
 	} else {
 		fmt.Fprintf(&emitter.body, "%s%s\n", prefix, emitter.failureReturn())
 	}
+}
+
+func (emitter *backendGoNumericEmitter) emitPreparedSafePoint(indent int) {
+	if !emitter.options.preparedSafePoints {
+		return
+	}
+	prefix := strings.Repeat("\t", indent)
+	fmt.Fprintf(
+		&emitter.body,
+		"%sif !context.%s() {\n%s\t%s\n%s}\n",
+		prefix,
+		emitter.options.preparedContextMethod("continueExecution"),
+		prefix,
+		emitter.failureReturn(),
+		prefix,
+	)
+}
+
+func (emitter *backendGoNumericEmitter) writePreparedSafePointContext(wrote bool) bool {
+	if !emitter.options.preparedSafePoints {
+		return wrote
+	}
+	if wrote {
+		emitter.body.WriteString(", ")
+	}
+	emitter.body.WriteString("context")
+	return true
 }
 
 func (emitter *backendGoNumericEmitter) emitValueCopy(

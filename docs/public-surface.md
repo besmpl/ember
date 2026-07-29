@@ -12,6 +12,13 @@ The root package starts as the default import. Add subpackages only when a
 slice proves that the split reduces public complexity or creates a useful
 testable seam.
 
+The two proved effectful subpackages are `preparedworker`, which exposes the
+typed transaction/reload seam, and `preparedworkerbuild`, which isolates its
+explicit Go-toolchain build effect. `preparedsource` is a provisional pure
+subpackage: its immutable values and intrinsic policy are implemented and the
+working-tree Luau/embedded path consumes them, but retention still depends on
+the language-neutral worker consumer required by ADR 0012.
+
 ## Surface Rules
 
 - Export only names that callers need for a proven slice.
@@ -140,8 +147,13 @@ testable seam.
   caches, and reusable closure values, so warming one runtime does not mutate
   or contaminate another runtime's state. Host-provided globals and tables
   remain caller-owned and still require ordinary synchronization when shared.
-- `(*Program).WritePreparedGo` writes one deterministic Go source file for the
-  exact loaded Program. `PreparedGoOptions.Package` supplies the generated
+- `(*Program).GeneratePreparedGo` returns an immutable in-memory artifact for
+  the exact loaded Program. Its `Sources()` value is one
+  `preparedsource.Set` containing the fixed `prepared_generated.go` leaf;
+  application mount placement does not alter its identity. `WritePreparedGo`
+  and the raw generated digest remain singular compatibility views for worker
+  builder V1 and use that same Set-backed producer path.
+  `PreparedGoOptions.Package` supplies the canonical lowercase-ASCII generated
   package name; `MaxBytes` rejects oversized output before writing and defaults
   to a conservative bound. The generated package exports one immutable
   `PreparedBundle`, which a host supplies explicitly through
@@ -150,26 +162,52 @@ testable seam.
   mismatch returns `*PreparedBundleError` before runtime-owner mutation and
   never silently falls back. Generated bundles are trusted build artifacts,
   not an untrusted-code sandbox; static runtime binding does not use `init`
-  registration, helper processes, plugins, or runtime Go compilation.
-- `PreparedRuntimeSlot.Prepare` binds one exact Program into an inert candidate
-  while the active generation remains usable. With a non-nil
-  `RuntimeOptions.Prepared`, it uses that static or plugin bundle. With a nil
-  bundle, it explicitly performs reload-time native preparation on supported
-  Darwin, Linux, and Windows ARM64/x86-64 processes and supplies exact Machine
-  replay entries for unsupported functions, values, platforms, or native stack
-  budgets. An invocation with execution limits or a cancellable context uses
-  the policy-capable Machine even when native code is installed. `Activate`
-  retires and publishes at an explicit idle safe point and performs no
-  compilation, mapping, I/O, or guest work; `Use` scopes one serialized host
-  operation to a stable generation. Candidates are slot-bound and reject stale
-  activation. Successful activation closes old callbacks, suspensions, and
-  executable images with their owning Runtime; no script state is migrated
-  implicitly.
-- `preparedplugin.Open` is the optional cgo/platform-gated editor adapter for
-  loading a generated `package main` bundle from an absolute Go-plugin path. It
-  is outside the root runtime and returns `ErrUnsupported` rather than choosing
-  another engine. Static generated packages remain the portable production
-  path.
+  registration, helper processes, plugins, or runtime Go compilation. Public
+  generated helpers receive an opaque `PreparedContext`; its `Continue` method
+  is generated-code ABI for compiler-inserted function-entry and backedge
+  cancellation checks, not a host scheduler. A cancelable unlimited invocation
+  stays prepared, while any configured `ExecutionLimits` selects the canonical
+  Machine for exact accounting.
+- `preparedsource.NewSet` constructs one immutable, canonically ordered
+  generated Go package from exact source and embed-asset bytes;
+  `preparedsource.NewLayout` gives the application a separate immutable value
+  for mounting selected Sets. Both constructors enforce fixed lowercase-ASCII
+  portable names, source/directive policy, work bounds, and versioned framed
+  identities entirely in memory. They do not materialize files, invoke Go,
+  resolve imports, type-check source, or prove a successful build. The package
+  has no language ID, compiler/runtime interface, registry, builder, writer,
+  options graph, or effect owner. The working-tree Luau artifact and
+  `cmd/emberc` materializer now consume the same values. An independently
+  versioned fixture module also imports only `preparedsource`, returns two Sets,
+  and disappears before a zero-dependency application statically executes its
+  two concrete generated packages; the application, not the producer, owns
+  Layout placement. This proves the external artifact boundary without adding
+  a public materializer, Backend, or runtime registry. The package remains
+  provisional until the language-neutral worker overlay consumes that Layout
+  without duplicating its policy; the fixture is not Ruby or Sprig semantic
+  evidence.
+- `preparedworker.Runner` is the complete steady transaction capability:
+  typed `Apply`, durable guest-free `Resolve`, and bounded `Close`. One admitted
+  operation atomically commits its canonical result, optional quiescent
+  checkpoint, and ordered effect outbox. Exact duplicates replay; conflicts and
+  sequence gaps fail before guest entry. `OpenEmbedded` returns only `Runner`.
+- `preparedworker.OpenDevelopment` returns distinct `Runner` and
+  development-only `Reload` capabilities. `Reload.Prepare` accepts only an
+  opaque verified `Build`; its candidate restores and follows durable state
+  while the active worker continues. Candidate `Activate` is a no-I/O,
+  no-guest-work route swap that succeeds only when caught up and quiescent.
+  Values, callbacks, suspensions, tables, Runtime owners, and module caches do
+  not cross the process seam.
+- `preparedworkerbuild.Build` is the explicit host-owned Go-toolchain effect
+  for a changed `PreparedGoArtifact`. The host supplies one explicit
+  `GoCommand`; the builder resolves and uses only that executable under a
+  pinned no-cgo, no-implicit-PGO baseline policy. It binds generated and
+  selected source closure, Program recipe, module graph, transaction contract,
+  exact toolchain bytes, target, policy, and EPW2 protocol into the pre-link
+  Build ID; the manifest separately binds the executable digest and enforces
+  the caller's byte bound on every selection. `preparedworker.OpenBuild`
+  verifies that manifest and returns opaque launch authority. Neither package
+  uses cgo, plugins, executable memory, or a custom loader.
 - Scripts can read and assign globals as expression values, call host global
   functions, access fields or indexes on host global tables, and pass opaque
   host userdata values through script code. Local and upvalue names take

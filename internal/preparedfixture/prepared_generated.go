@@ -7,11 +7,14 @@ import (
 	"math"
 )
 
-func emberPreparedM0Proto1(p0 float64) (float64, bool) {
+func emberPreparedM0Proto1(p0 float64, context emberapi.PreparedContext) (float64, bool) {
 	var v1 float64
 	var v3 float64
 	var v4 float64
 	v1 = p0
+	if !context.Continue() {
+		return 0, false
+	}
 	v3 = v1
 	v4 = v3 + math.Float64frombits(0x3ff0000000000000)
 	return v4, true
@@ -22,6 +25,9 @@ func emberPreparedM0PreparedProto1Body(context emberapi.PreparedContext, p0 floa
 	var v3 float64
 	var v4 float64
 	v1 = p0
+	if !context.Continue() {
+		return emberapi.PreparedReplayEntry()
+	}
 	v3 = v1
 	v4 = v3 + math.Float64frombits(0x3ff0000000000000)
 	return emberapi.PreparedReturnOneNumber(v4)
@@ -35,4 +41,4 @@ func emberPreparedM0PreparedProto1(context emberapi.PreparedContext) emberapi.Pr
 	return emberPreparedM0PreparedProto1Body(context, p0)
 }
 
-var Bundle = emberapi.NewPreparedBundle(1, 1, [32]byte{0x7f, 0xa4, 0x6c, 0x68, 0x08, 0x37, 0x28, 0x61, 0x64, 0x21, 0xcf, 0xd9, 0x89, 0x07, 0x00, 0x7d, 0x2d, 0x48, 0x0f, 0x3b, 0xec, 0x09, 0xd9, 0xcc, 0x9f, 0xf8, 0x55, 0xe4, 0xa0, 0x39, 0x5e, 0xf6}, [][]emberapi.PreparedFunction{{nil, emberPreparedM0PreparedProto1}})
+var Bundle = emberapi.NewPreparedBundle(2, 1, [32]byte{0x7f, 0xa4, 0x6c, 0x68, 0x08, 0x37, 0x28, 0x61, 0x64, 0x21, 0xcf, 0xd9, 0x89, 0x07, 0x00, 0x7d, 0x2d, 0x48, 0x0f, 0x3b, 0xec, 0x09, 0xd9, 0xcc, 0x9f, 0xf8, 0x55, 0xe4, 0xa0, 0x39, 0x5e, 0xf6}, [][]emberapi.PreparedFunction{{nil, emberPreparedM0PreparedProto1}})
