@@ -46,16 +46,19 @@
   `GOTOOLDIR`/include trees, and recaptures inputs after compilation. Focused
   builder, worker, fixture, and six-target cross-build checks pass locally;
   this is not a retained exact-revision native-platform receipt.
-- Local S0 reacquisition exposed two harness defects rather than runtime
+- Local S0 reacquisition exposed three harness defects rather than runtime
   failures. A frozen worker-B schedule incorrectly required capture A's 10 ms
   calibration observation instead of the hard 5 ms evidence floor, and the
   runtime harness inherited Go's 10-minute timeout even though bounded
   contamination retries can legitimately extend a clean acquisition. The
   candidate now keeps A's conservative 10 ms scale selection, verifies B at
-  5 ms, and gives each contaminated or external-engine-timed-out point up to
-  300 one-second retries inside a 35-minute test bound without emitting its
-  partial timing. Attempts interrupted or rejected by external CPU
-  contamination are not promotion evidence and are never converted into PASS.
+  5 ms, gives each contaminated or external-engine-timed-out point up to 300
+  one-second retries inside a 35-minute test bound, and buffers each worker
+  repeat so a structurally invalid fit is discarded for at most three bounded
+  reacquisitions before any rows are published. Semantic/protocol errors and
+  valid ratio failures are never retried. Attempts interrupted or rejected by
+  external CPU contamination are not promotion evidence and are never
+  converted into PASS.
 
 ## Active execution path
 

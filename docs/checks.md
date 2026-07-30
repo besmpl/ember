@@ -237,7 +237,11 @@ second, up to 300 attempts; only clean paired rows are emitted, and exhaustion
 still fails the capture. A failed sampling command is a distinct observer
 error, not runner contention. An external-engine 60-second deadline discards
 that point and enters the same bounded reacquisition loop; its partial timing
-is never emitted or accepted.
+is never emitted or accepted. The three-engine worker gate also buffers one
+complete fitted repeat before publication. A structurally invalid window or
+non-positive/non-finite fit discards that entire repeat and reacquires it up to
+three times; rejected rows are never emitted, while semantic or protocol
+errors still fail immediately and ratio failures are never retried.
 
 ```sh
 scripts/runtime-ratio-gate --derive \

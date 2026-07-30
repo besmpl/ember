@@ -24,6 +24,7 @@ const (
 	preparedWorkerParityCalibrationRuns = 3
 	preparedWorkerParityMaximumScale    = 1024
 	preparedWorkerParityTarget          = 10 * time.Millisecond
+	preparedWorkerParityRepeatAttempts  = 3
 )
 
 func TestPreparedWorkerAdmissionGateRequiresBothSlopeAndLuauTargets(t *testing.T) {
@@ -145,6 +146,126 @@ func TestPreparedWorkerParityCallScaleRejectsUnmeasurableWindow(t *testing.T) {
 	if len(calibration.Samples) != wantSamples {
 		t.Fatalf("calibration recorded %d samples, want %d", len(calibration.Samples), wantSamples)
 	}
+}
+
+func TestPreparedWorkerParityRepeatReacquiresStructurallyInvalidWindow(t *testing.T) {
+	attempts := 0
+	waits := 0
+	got, err := acquirePreparedWorkerParityRepeat(
+		preparedWorkerParityRepeatAttempts,
+		func() (int, error) {
+			attempts++
+			return attempts, nil
+		},
+		func(attempt int) error {
+			if attempt == 1 {
+				return fmt.Errorf("non-positive fitted slope")
+			}
+			return nil
+		},
+		func() { waits++ },
+	)
+	if err != nil || got != 2 || attempts != 2 || waits != 1 {
+		t.Fatalf("reacquired repeat = %d attempts=%d waits=%d error=%v", got, attempts, waits, err)
+	}
+
+	attempts = 0
+	if _, err := acquirePreparedWorkerParityRepeat(
+		2,
+		func() (int, error) {
+			attempts++
+			return attempts, nil
+		},
+		func(int) error { return fmt.Errorf("invalid fit") },
+		func() {},
+	); err == nil || attempts != 2 {
+		t.Fatalf("repeat exhaustion attempts=%d error=%v", attempts, err)
+	}
+
+	attempts = 0
+	if _, err := acquirePreparedWorkerParityRepeat(
+		preparedWorkerParityRepeatAttempts,
+		func() (int, error) {
+			attempts++
+			return 0, fmt.Errorf("semantic failure")
+		},
+		func(int) error { return nil },
+		func() {},
+	); err == nil || attempts != 1 {
+		t.Fatalf("acquisition failure attempts=%d error=%v", attempts, err)
+	}
+}
+
+func acquirePreparedWorkerParityRepeat[T any](
+	maxAttempts int,
+	acquire func() (T, error),
+	validate func(T) error,
+	wait func(),
+) (T, error) {
+	var zero T
+	if maxAttempts <= 0 || acquire == nil || validate == nil || wait == nil {
+		return zero, fmt.Errorf("prepared worker parity repeat: invalid acquisition policy")
+	}
+	var last error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		repeat, err := acquire()
+		if err != nil {
+			return zero, err
+		}
+		if err := validate(repeat); err == nil {
+			return repeat, nil
+		} else {
+			last = err
+		}
+		if attempt < maxAttempts {
+			wait()
+		}
+	}
+	return zero, fmt.Errorf(
+		"prepared worker parity repeat: structural validation failed after %d attempts: %w",
+		maxAttempts,
+		last,
+	)
+}
+
+type preparedWorkerParityRecordedMeasurement struct {
+	iterationIndex int
+	n              int
+	measurement    parityPointMeasurement
+}
+
+type preparedWorkerParityRepeat struct {
+	timings      map[string]map[int]float64
+	results      map[string]map[int]string
+	measurements []preparedWorkerParityRecordedMeasurement
+}
+
+func newPreparedWorkerParityRepeat() preparedWorkerParityRepeat {
+	repeat := preparedWorkerParityRepeat{
+		timings:      make(map[string]map[int]float64, 3),
+		results:      make(map[string]map[int]string, 3),
+		measurements: make([]preparedWorkerParityRecordedMeasurement, 0, len(parityIterations)*3),
+	}
+	for _, engine := range []string{"embedded", "worker", "luau"} {
+		repeat.timings[engine] = make(map[int]float64, len(parityIterations))
+		repeat.results[engine] = make(map[int]string, len(parityIterations))
+	}
+	return repeat
+}
+
+func validatePreparedWorkerParityRepeat(repeat preparedWorkerParityRepeat, callScale int) error {
+	for _, engine := range []string{"embedded", "worker", "luau"} {
+		if err := validatePreparedWorkerParityWindow(repeat.timings[engine], callScale); err != nil {
+			return fmt.Errorf("engine=%s: %w", engine, err)
+		}
+		if _, err := fitPreparedWorkerParityLine(repeat.timings[engine], callScale); err != nil {
+			return fmt.Errorf("engine=%s: %w", engine, err)
+		}
+		if _, err := preparedWorkerResultSetSHA256(repeat.results[engine], callScale); err != nil {
+			return fmt.Errorf("engine=%s: %w", engine, err)
+		}
+	}
+	return nil
 }
 
 func TestPreparedWorkerParityScheduleIsClosedAndCanonical(t *testing.T) {
@@ -374,80 +495,106 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 		workloadHash := parityStringSHA256(seededSource)
 		programHash := parityStringSHA256(programSource)
 		for repeat := 1; repeat <= parityRepeatCount; repeat++ {
-			for iterationIndex, baseN := range parityIterations {
-				n := baseN * callScale
-				order := preparedWorkerEngineOrder(pairIndex, repeat, iterationIndex)
-				point, err := acquireCleanParityPoint(parityPointAttemptLimit, sampleParitySystem, func() ([]parityPointMeasurement, error) {
-					measurements := make([]parityPointMeasurement, 0, len(order))
-					for engineIndex, engine := range order {
-						var elapsed float64
-						var result string
-						var measureErr error
-						switch engine {
-						case "embedded":
-							elapsed, result, measureErr = embeddedClient.call(caseIndex, n, parityCaptureSeed)
-						case "worker":
-							elapsed, result, measureErr = processClient.call(caseIndex, n, parityCaptureSeed)
-						case "luau":
-							elapsed, result, measureErr = measureParityLuauGuestBatch(environment.LuauPath, scriptPath, n, parityCaptureSeed)
-						default:
-							measureErr = fmt.Errorf("unknown engine %q", engine)
+			acceptedRepeat, err := acquirePreparedWorkerParityRepeat(
+				preparedWorkerParityRepeatAttempts,
+				func() (preparedWorkerParityRepeat, error) {
+					candidateRepeat := newPreparedWorkerParityRepeat()
+					for iterationIndex, baseN := range parityIterations {
+						n := baseN * callScale
+						order := preparedWorkerEngineOrder(pairIndex, repeat, iterationIndex)
+						point, err := acquireCleanParityPoint(parityPointAttemptLimit, sampleParitySystem, func() ([]parityPointMeasurement, error) {
+							measurements := make([]parityPointMeasurement, 0, len(order))
+							for engineIndex, engine := range order {
+								var elapsed float64
+								var result string
+								var measureErr error
+								switch engine {
+								case "embedded":
+									elapsed, result, measureErr = embeddedClient.call(caseIndex, n, parityCaptureSeed)
+								case "worker":
+									elapsed, result, measureErr = processClient.call(caseIndex, n, parityCaptureSeed)
+								case "luau":
+									elapsed, result, measureErr = measureParityLuauGuestBatch(environment.LuauPath, scriptPath, n, parityCaptureSeed)
+								default:
+									measureErr = fmt.Errorf("unknown engine %q", engine)
+								}
+								if measureErr != nil {
+									return nil, fmt.Errorf("engine=%s: %w", engine, measureErr)
+								}
+								if elapsed <= 0 || !finiteParityFloat(elapsed) {
+									return nil, fmt.Errorf("engine=%s: invalid timing %v", engine, elapsed)
+								}
+								if err := parityValidateIntegerString(result); err != nil {
+									return nil, fmt.Errorf("engine=%s: %w", engine, err)
+								}
+								measurements = append(measurements, parityPointMeasurement{
+									engineIndex: engineIndex,
+									engine:      engine,
+									elapsed:     elapsed,
+									result:      result,
+								})
+							}
+							if measurements[0].result != measurements[1].result || measurements[0].result != measurements[2].result {
+								return nil, fmt.Errorf(
+									"guest result mismatch: %s=%q %s=%q %s=%q",
+									measurements[0].engine,
+									measurements[0].result,
+									measurements[1].engine,
+									measurements[1].result,
+									measurements[2].engine,
+									measurements[2].result,
+								)
+							}
+							return measurements, nil
+						}, func() { time.Sleep(parityPointRetryDelay) })
+						if err != nil {
+							return preparedWorkerParityRepeat{}, fmt.Errorf("N=%d: %w", n, err)
 						}
-						if measureErr != nil {
-							return nil, fmt.Errorf("engine=%s: %w", engine, measureErr)
+						for _, measurement := range point {
+							candidateRepeat.timings[measurement.engine][n] = measurement.elapsed
+							candidateRepeat.results[measurement.engine][n] = measurement.result
+							candidateRepeat.measurements = append(candidateRepeat.measurements, preparedWorkerParityRecordedMeasurement{
+								iterationIndex: iterationIndex,
+								n:              n,
+								measurement:    measurement,
+							})
 						}
-						if elapsed <= 0 || !finiteParityFloat(elapsed) {
-							return nil, fmt.Errorf("engine=%s: invalid timing %v", engine, elapsed)
-						}
-						if err := parityValidateIntegerString(result); err != nil {
-							return nil, fmt.Errorf("engine=%s: %w", engine, err)
-						}
-						measurements = append(measurements, parityPointMeasurement{
-							engineIndex: engineIndex,
-							engine:      engine,
-							elapsed:     elapsed,
-							result:      result,
-						})
 					}
-					if measurements[0].result != measurements[1].result || measurements[0].result != measurements[2].result {
-						return nil, fmt.Errorf(
-							"guest result mismatch: %s=%q %s=%q %s=%q",
-							measurements[0].engine,
-							measurements[0].result,
-							measurements[1].engine,
-							measurements[1].result,
-							measurements[2].engine,
-							measurements[2].result,
-						)
-					}
-					return measurements, nil
-				}, func() { time.Sleep(parityPointRetryDelay) })
-				if err != nil {
-					t.Fatalf("%s repeat=%d N=%d: %v", caseID, repeat, n, err)
-				}
-				for _, measurement := range point {
-					timings[measurement.engine][repeat][n] = measurement.elapsed
-					results[measurement.engine][repeat][n] = measurement.result
-					acquisitionOrder := (repeat-1)*len(parityIterations)*3 + iterationIndex*3 + measurement.engineIndex + 1
-					writePreparedWorkerCapture(t, raw, "1\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%d\t%d\t%d\t%d\t%.17g\t%s\t%s\t%s\t%s\n",
-						captureID,
-						pair,
-						sourceCommit,
-						entry.Corpus,
-						entry.Name,
-						callScale,
-						measurement.engine,
-						repeat,
-						acquisitionOrder,
-						n,
-						parityCaptureSeed,
-						measurement.elapsed,
-						measurement.result,
-						workloadHash,
-						programHash,
-						environmentHash,
-					)
-				}
+					return candidateRepeat, nil
+				},
+				func(candidateRepeat preparedWorkerParityRepeat) error {
+					return validatePreparedWorkerParityRepeat(candidateRepeat, callScale)
+				},
+				func() { time.Sleep(parityPointRetryDelay) },
+			)
+			if err != nil {
+				t.Fatalf("%s repeat=%d: %v", caseID, repeat, err)
+			}
+			for _, engine := range engines {
+				timings[engine][repeat] = acceptedRepeat.timings[engine]
+				results[engine][repeat] = acceptedRepeat.results[engine]
+			}
+			for _, recorded := range acceptedRepeat.measurements {
+				measurement := recorded.measurement
+				acquisitionOrder := (repeat-1)*len(parityIterations)*3 + recorded.iterationIndex*3 + measurement.engineIndex + 1
+				writePreparedWorkerCapture(t, raw, "1\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%d\t%d\t%d\t%d\t%.17g\t%s\t%s\t%s\t%s\n",
+					captureID,
+					pair,
+					sourceCommit,
+					entry.Corpus,
+					entry.Name,
+					callScale,
+					measurement.engine,
+					repeat,
+					acquisitionOrder,
+					recorded.n,
+					parityCaptureSeed,
+					measurement.elapsed,
+					measurement.result,
+					workloadHash,
+					programHash,
+					environmentHash,
+				)
 			}
 		}
 
