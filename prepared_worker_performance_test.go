@@ -90,7 +90,7 @@ func TestPreparedWorkerParityCallScaleClearsNoiseFloor(t *testing.T) {
 	}
 }
 
-func TestPreparedWorkerParityPrescribedScaleMustClearTarget(t *testing.T) {
+func TestPreparedWorkerParityPrescribedScaleMustClearEvidenceFloor(t *testing.T) {
 	calibration, err := verifyPreparedWorkerParityCallScale(4, func(iterations int) (float64, error) {
 		return float64(iterations * 60), nil
 	})
@@ -100,10 +100,20 @@ func TestPreparedWorkerParityPrescribedScaleMustClearTarget(t *testing.T) {
 	if calibration.Scale != 4 || len(calibration.Samples) != preparedWorkerParityCalibrationRuns {
 		t.Fatalf("prescribed calibration = %#v", calibration)
 	}
+	if _, err := verifyPreparedWorkerParityCallScale(1, func(int) (float64, error) {
+		return float64(parityMinimumMaxPointElapsed.Nanoseconds()), nil
+	}); err != nil {
+		t.Fatalf("prescribed window at evidence floor failed: %v", err)
+	}
 	if _, err := verifyPreparedWorkerParityCallScale(2, func(iterations int) (float64, error) {
 		return float64(iterations), nil
 	}); err == nil {
 		t.Fatal("under-scaled prescribed window passed")
+	}
+	if _, err := verifyPreparedWorkerParityCallScale(1, func(int) (float64, error) {
+		return float64(parityMinimumMaxPointElapsed.Nanoseconds() - 1), nil
+	}); err == nil {
+		t.Fatal("prescribed window below evidence floor passed")
 	}
 }
 
@@ -591,12 +601,12 @@ func verifyPreparedWorkerParityCallScale(
 			minimum = elapsed
 		}
 	}
-	if minimum < float64(preparedWorkerParityTarget.Nanoseconds()) {
+	if minimum < float64(parityMinimumMaxPointElapsed.Nanoseconds()) {
 		return calibration, fmt.Errorf(
 			"prepared worker parity calibration: prescribed scale %d minimum %gns is below %s",
 			callScale,
 			minimum,
-			preparedWorkerParityTarget,
+			parityMinimumMaxPointElapsed,
 		)
 	}
 	return calibration, nil

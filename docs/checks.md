@@ -154,11 +154,15 @@ executable digest. `OpenDevelopment` succeeding proves that the activated
 worker returned the same identities in `READY`; raw timing rows cannot be
 accepted without this chain.
 
-Worker calibration applies that target to the maximum-minus-minimum measured
-guest-work span, not total `Apply` latency, so journal/fsync intercept cannot
-admit a noise-dominated slope. The all-37 worker/Luau and embedded/Luau gates
-are median at most `1.00` and p90 at most `1.05`. The production-shaped
-rich-turn gate separately requires
+Capture A calibrates each case conservatively to the 10 ms target and freezes
+its power-of-two call scale. Capture B reuses that exact schedule but requires
+only the hard 5 ms evidence floor; it does not require ordinary run-to-run
+timing variation to reproduce A's 10 ms calibration observation. Calibration
+applies these thresholds to the maximum-minus-minimum measured guest-work span,
+not total `Apply` latency, so journal/fsync intercept cannot admit a
+noise-dominated slope. The all-37 worker/Luau and embedded/Luau gates are median
+at most `1.00` and p90 at most `1.05`. The production-shaped rich-turn gate
+separately requires
 worker/embedded slope at most `1.50`, an exact semantic trace, and one exchange.
 `host-latency.tsv` retains both absolute durable-turn distributions and the
 paired clamped difference as diagnostics; the difference is not an IPC gate
