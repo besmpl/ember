@@ -18,7 +18,7 @@ The active S0 outcome is one exact candidate whose prepared paths either execute
 
 - Stages 1-6 have their focused local implementation checks. The stage-7 workflow contract declares and statically checks all six no-cgo native target jobs, the paired physical-ISA admission jobs, and bounded 1,024-swap receipts.
 - A clean synthetic exact-candidate worktree passed `CGO_ENABLED=0 go test -count=1 ./...` before the latest acquisition-only timeout repair; the current exact candidate still requires the final complete verification matrix below.
-- Reacquisition found and repaired two evidence-harness defects: frozen capture B now verifies the hard 5 ms floor instead of demanding capture A's 10 ms calibration observation, and runtime parity now gives bounded contamination retries a 35-minute Go test timeout. External-CPU-contaminated, interrupted, incomplete, stale-candidate, or reboot-lost attempts are diagnostics only and do not count toward S0.
+- Reacquisition found and repaired two evidence-harness defects: frozen capture B now verifies the hard 5 ms floor instead of demanding capture A's 10 ms calibration observation, and runtime parity now gives rejected points up to 300 one-second reacquisition attempts inside a 35-minute Go test timeout. External-CPU-contaminated, interrupted, incomplete, stale-candidate, or reboot-lost attempts are diagnostics only and do not count toward S0.
 - No complete same-revision local receipt set or target-native CI receipt set is retained yet. S0 therefore remains unpromoted, and stages 8-17 remain closed.
 
 Stages 8-17 are follow-on gates only and create no implementation authority in this plan:

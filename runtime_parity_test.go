@@ -40,7 +40,7 @@ const (
 	// excludes this measuring process.
 	parityCPUMax = 300.0
 
-	parityPointAttemptLimit    = 60
+	parityPointAttemptLimit    = 300
 	parityPointRetryDelay      = time.Second
 	parityExternalPointTimeout = 60 * time.Second
 	parityCallScaleMaximum     = 1024
@@ -1028,6 +1028,13 @@ func TestRuntimeParityHarness(t *testing.T) {
 	}
 	if parityMinimumMaxPointElapsed != 5*time.Millisecond {
 		t.Fatalf("minimum max-point elapsed = %s, want 5ms", parityMinimumMaxPointElapsed)
+	}
+	if parityPointAttemptLimit != 300 || parityPointRetryDelay != time.Second {
+		t.Fatalf(
+			"contamination retry policy = %d attempts at %s, want 300 attempts at 1s",
+			parityPointAttemptLimit,
+			parityPointRetryDelay,
+		)
 	}
 	adequateWindow := map[int]float64{50000: float64((5 * time.Millisecond).Nanoseconds())}
 	if err := validateParityMeasurementWindow(adequateWindow); err != nil {

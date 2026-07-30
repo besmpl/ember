@@ -233,7 +233,7 @@ shorter default test timeout.
 Live before/after probes cap external processes
 at three cores while excluding the measuring Go process. A live point whose
 before or after probe is contaminated is discarded and retried after one
-second, up to 60 attempts; only clean paired rows are emitted, and exhaustion
+second, up to 300 attempts; only clean paired rows are emitted, and exhaustion
 still fails the capture. A failed sampling command is a distinct observer
 error, not runner contention.
 
