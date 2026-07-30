@@ -246,7 +246,7 @@ Only these repository paths may be created, modified, deleted, or regenerated. A
 - `runtime_prepared_native.go`
 - `runtime_prepared_native_internal_test.go`
 
-Local receipt commands may create only `/tmp/ember-s0-luau-a`, `/tmp/ember-s0-luau-b`, `/tmp/ember-s0-worker-a`, `/tmp/ember-s0-worker-b`, and `/tmp/ember-s0-swap-soak`. Each root must be absent before its command; execution does not delete or overwrite an existing root.
+Local receipt commands first set `EMBER_S0_EVIDENCE_ROOT=/tmp/ember-s0-$(git rev-parse --short=12 HEAD)` and may create only that candidate-owned root and its `luau-a`, `luau-b`, `worker-a`, `worker-b`, and `swap-soak` children. The candidate root must be absent before the first command. Execution never deletes, moves, reuses, or overwrites an earlier candidate's receipt root; a changed exact revision therefore receives a new immutable evidence namespace instead of invalidating historical evidence by path reuse.
 
 ## Implementation Steps
 
@@ -265,7 +265,7 @@ After the accepted-plan checkpoint, the main agent executes the following logica
 
 3. **Recertify Luau owner-entry AOT.**
    **3A — capture contract:** freeze `guest_batch_v2`, seeds, checksums, allocation fields, toolchain, the four base points `N={50,500,5000,50000}` with a conservatively calibrated per-case power-of-two call scale, and the median/p90 comparator in `scripts/check-runtime-parity`, `scripts/check-prepared-worker-admission`, and the matching admission tests. Each raw row records actual scaled N and fitted slopes normalize back to one guest call; this preserves the 5 ms evidence floor without forcing already-slow cases through the scale required by exceptionally fast prepared cases.
-   **3B — independent pair:** run `test ! -e /tmp/ember-s0-luau-a && CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau scripts/check-runtime-parity --phase prepared-parity1x --capture-role candidate --capture-pair a --output /tmp/ember-s0-luau-a`, then run `test ! -e /tmp/ember-s0-luau-b && CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau scripts/check-runtime-parity --phase prepared-parity1x --capture-role candidate --capture-pair b --output /tmp/ember-s0-luau-b`; retain both independently gated outputs without worker promotion claims.
+   **3B — independent pair:** from a clean candidate worktree, run `export EMBER_S0_EVIDENCE_ROOT=/tmp/ember-s0-$(git rev-parse --short=12 HEAD); test ! -e "$EMBER_S0_EVIDENCE_ROOT" && mkdir -m 700 "$EMBER_S0_EVIDENCE_ROOT"`, then run `CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau scripts/check-runtime-parity --phase prepared-parity1x --capture-role candidate --capture-pair a --output "$EMBER_S0_EVIDENCE_ROOT/luau-a"` followed by the same command with `--capture-pair b --output "$EMBER_S0_EVIDENCE_ROOT/luau-b"`; retain both independently gated outputs without worker promotion claims.
    **Acceptance:** both complete compatible captures pass correctness and allocation checks with prepared/Luau median `<=1.00` and p90 `<=1.05`.
 
 4. **Freeze owner-framed identities with reuse bypassed.**
@@ -287,7 +287,7 @@ After the accepted-plan checkpoint, the main agent executes the following logica
    **Acceptance:** embedded and process adapters produce identical canonical behavior for both rich-game and request/job contracts; failed candidates never disturb active work and every child is reaped.
 
 7. **Acquire and decide S0.**
-   **7A — paired worker admission:** run Final Verification commands 8-10 against `/tmp/ember-s0-worker-a` and `/tmp/ember-s0-worker-b`; require all-37 correctness, worker and embedded versus Luau median `<=1.00` and p90 `<=1.05`, worker/embedded `<=1.50`, and one exchange per timed Apply.
+   **7A — paired worker admission:** run Final Verification commands 8-10 against `$EMBER_S0_EVIDENCE_ROOT/worker-a` and `$EMBER_S0_EVIDENCE_ROOT/worker-b`; require all-37 correctness, worker and embedded versus Luau median `<=1.00` and p90 `<=1.05`, worker/embedded `<=1.50`, and one exchange per timed Apply.
    **7B — transport and resource receipts:** require the command-10 comparison to validate 4,096 exchanges at 1,024-byte request and 14,398-byte response with p99 `<=1,666,666 ns`; run Final Verification command 11 and require 1,024 alternating generations with per-child RSS `<=256 MiB`, aggregate RSS `<=512 MiB`, and zero retained descendants.
    **7C — portable and native matrix:** run Final Verification command 7 for six `CGO_ENABLED=0` cross-builds, then require command 15's six target-native launch/reload/retirement jobs for Darwin/Linux/Windows on amd64/arm64 and physical arm64/x86-64 performance receipts. Separate explicit authorization is required before any commit, push, or CI dispatch; without it, report the complete local state and remain before S0 PASS.
    **7D — promotion:** after every receipt passes on one exact revision, update only the listed maintained docs/ADRs to record S0 and preserve stages 8-17 as unstarted gates.
@@ -326,10 +326,10 @@ The main agent runs every command from `/Users/mark/Desktop/ember`, records dura
 5. `go test -race -count=1 ./preparedworker ./preparedworkerbuild` — within 25 minutes; no race is reported.
 6. `go test -gcflags=all=-d=checkptr=2 -count=1 ./preparedworker ./preparedworkerbuild` — within 15 minutes; no pointer/lifetime violation is reported.
 7. `scripts/check-prepared-worker-targets` — within 20 minutes; all six no-cgo worker/observer cross-builds pass.
-8. `test ! -e /tmp/ember-s0-worker-a && CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau scripts/check-prepared-worker-admission --capture-pair a --output /tmp/ember-s0-worker-a` — within 35 minutes; clean capture A passes and freezes its schedule.
-9. `test ! -e /tmp/ember-s0-worker-b && CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau scripts/check-prepared-worker-admission --capture-pair b --schedule-from /tmp/ember-s0-worker-a --output /tmp/ember-s0-worker-b` — within 35 minutes; clean capture B passes under A's schedule.
-10. `scripts/check-prepared-worker-admission --compare-pair /tmp/ember-s0-worker-a /tmp/ember-s0-worker-b` — within 5 minutes; all frozen correctness, identity, ratio, transport, and stability gates pass.
-11. `test ! -e /tmp/ember-s0-swap-soak && mkdir /tmp/ember-s0-swap-soak && CGO_ENABLED=0 EMBER_PREPARED_WORKER_SWAP_SOAK=1 EMBER_PREPARED_WORKER_SWAP_SOAK_OUTPUT=/tmp/ember-s0-swap-soak go test -run '^TestPreparedWorkerParityAlternatesIndependentStaticAOTGenerations$' -count=1 .` — within 35 minutes; 1,024 swaps and resource bounds pass.
+8. `test -n "$EMBER_S0_EVIDENCE_ROOT" && test ! -e "$EMBER_S0_EVIDENCE_ROOT/worker-a" && CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau scripts/check-prepared-worker-admission --capture-pair a --output "$EMBER_S0_EVIDENCE_ROOT/worker-a"` — within 35 minutes; clean capture A passes and freezes its schedule.
+9. `test -n "$EMBER_S0_EVIDENCE_ROOT" && test ! -e "$EMBER_S0_EVIDENCE_ROOT/worker-b" && CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau scripts/check-prepared-worker-admission --capture-pair b --schedule-from "$EMBER_S0_EVIDENCE_ROOT/worker-a" --output "$EMBER_S0_EVIDENCE_ROOT/worker-b"` — within 35 minutes; clean capture B passes under A's schedule.
+10. `scripts/check-prepared-worker-admission --compare-pair "$EMBER_S0_EVIDENCE_ROOT/worker-a" "$EMBER_S0_EVIDENCE_ROOT/worker-b"` — within 5 minutes; all frozen correctness, identity, ratio, transport, and stability gates pass.
+11. `test -n "$EMBER_S0_EVIDENCE_ROOT" && test ! -e "$EMBER_S0_EVIDENCE_ROOT/swap-soak" && mkdir "$EMBER_S0_EVIDENCE_ROOT/swap-soak" && CGO_ENABLED=0 EMBER_PREPARED_WORKER_SWAP_SOAK=1 EMBER_PREPARED_WORKER_SWAP_SOAK_OUTPUT="$EMBER_S0_EVIDENCE_ROOT/swap-soak" go test -timeout=35m -run '^TestPreparedWorkerParityAlternatesIndependentStaticAOTGenerations$' -count=1 .` — within 35 minutes; 1,024 swaps and resource bounds pass.
 12. `scripts/check` — within 30 minutes; formatting, script self-tests, all Go tests, pure-Go policy, and diff checks pass.
 13. `go vet ./... && go build ./...` — within 20 minutes; vet and normal builds pass.
 14. `git diff --check && git status --short` — within 1 minute; the main-agent diff review confirms only preserved user work and approved-scope changes.
