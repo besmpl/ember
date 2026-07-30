@@ -6,11 +6,12 @@
 
 - **Eventual goal:** Ship one typed transaction island with fast embedded static AOT and supervised static-AOT hot reload, then remove all same-process native/plugin reload code.
 - **Current run:** The candidate transaction, worker, builder, and deletion
-  architecture exists in the dirty working tree. The stage-4 build-identity
-  candidate is implemented and locally checked, but stages 1-7 still require
-  ordered same-candidate acceptance and one retained exact-revision S0 proof.
-  ADR 0011's Accepted status records direction; it is not a substitute for
-  those receipts.
+  architecture exists in the dirty working tree. Stages 1-6 have focused local
+  implementation evidence, and stage 7 now has the complete six-target native
+  workflow contract plus bounded paired-admission and soak jobs. The exact
+  candidate still lacks one uncontaminated same-revision local receipt set and
+  the target-native CI receipts, so S0 has not passed. ADR 0011's Accepted
+  status records direction; it is not a substitute for those receipts.
 
 ### Done when
 
@@ -45,6 +46,15 @@
   `GOTOOLDIR`/include trees, and recaptures inputs after compilation. Focused
   builder, worker, fixture, and six-target cross-build checks pass locally;
   this is not a retained exact-revision native-platform receipt.
+- Local S0 reacquisition exposed two harness defects rather than runtime
+  failures. A frozen worker-B schedule incorrectly required capture A's 10 ms
+  calibration observation instead of the hard 5 ms evidence floor, and the
+  runtime harness inherited Go's 10-minute timeout even though bounded
+  contamination retries can legitimately extend a clean acquisition. The
+  candidate now keeps A's conservative 10 ms scale selection, verifies B at
+  5 ms, and gives rejected-point reacquisition a 35-minute test bound. Attempts
+  interrupted or rejected by external CPU contamination are not promotion
+  evidence and are never converted into PASS.
 
 ## Active execution path
 
@@ -79,8 +89,11 @@ commands, time bounds, and two workflow checkpoints are in
 
 ### 3. Recertify Luau owner-entry AOT
 
-- **3A — Capture contract:** freeze `guest_batch_v1`, seeds, checksums,
-  allocation fields, schedule, toolchain, and comparator.
+- **3A — Capture contract:** freeze `guest_batch_v2`, seeds, checksums,
+  allocation fields, the four base points with a conservatively selected
+  per-case power-of-two call scale, toolchain, and comparator. Capture A
+  selects against 10 ms; capture B reuses A's schedule and must clear the hard
+  5 ms evidence floor.
 - **3B — Independent pair:** acquire two complete pinned-Luau all-37 captures.
 - **Accept:** prepared/Luau median is `<=1.00`, p90 is `<=1.05`, allocations and
   results match, and both captures pass independently. This does not certify the

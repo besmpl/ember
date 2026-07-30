@@ -14,6 +14,13 @@ The architecture remains language-owned: Luau owns parsing, checking, lowering, 
 
 The active S0 outcome is one exact candidate whose prepared paths either execute exactly or replay through the canonical Machine before effects; whose owner-framed identities invalidate precisely; whose embedded and EPW2 adapters agree on durable transaction behavior; and whose retained performance, resource, cross-build, and target-native receipts all pass. Missing target-native or physical-ISA evidence blocks S0 rather than narrowing the matrix.
 
+## Current Evidence Status
+
+- Stages 1-6 have their focused local implementation checks. The stage-7 workflow contract declares and statically checks all six no-cgo native target jobs, the paired physical-ISA admission jobs, and bounded 1,024-swap receipts.
+- A clean synthetic exact-candidate worktree passed `CGO_ENABLED=0 go test -count=1 ./...` before the latest acquisition-only timeout repair; the current exact candidate still requires the final complete verification matrix below.
+- Reacquisition found and repaired two evidence-harness defects: frozen capture B now verifies the hard 5 ms floor instead of demanding capture A's 10 ms calibration observation, and runtime parity now gives bounded contamination retries a 35-minute Go test timeout. External-CPU-contaminated, interrupted, incomplete, stale-candidate, or reboot-lost attempts are diagnostics only and do not count toward S0.
+- No complete same-revision local receipt set or target-native CI receipt set is retained yet. S0 therefore remains unpromoted, and stages 8-17 remain closed.
+
 Stages 8-17 are follow-on gates only and create no implementation authority in this plan:
 
 8. **Private S4 carrier decision:** after retained S0 PASS, retain or replace `preparedsource.Set`/`Layout` based on demonstrated net policy deletion at embedded and build/process boundaries.
