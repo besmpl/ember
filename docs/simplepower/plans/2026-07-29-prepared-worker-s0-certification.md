@@ -246,7 +246,7 @@ Only these repository paths may be created, modified, deleted, or regenerated. A
 - `runtime_prepared_native.go`
 - `runtime_prepared_native_internal_test.go`
 
-Local receipt commands first set `EMBER_S0_EVIDENCE_ROOT=/tmp/ember-s0-$(git rev-parse --short=12 HEAD)` and may create only that candidate-owned root and its `luau-a`, `luau-b`, `worker-a`, `worker-b`, and `swap-soak` children. The candidate root must be absent before the first command. Execution never deletes, moves, reuses, or overwrites an earlier candidate's receipt root; a changed exact revision therefore receives a new immutable evidence namespace instead of invalidating historical evidence by path reuse.
+Local receipt commands first set `EMBER_S0_EVIDENCE_ROOT=/tmp/ember-s0-$(git rev-parse --short=12 HEAD)-$(date -u +%Y%m%dT%H%M%SZ)` and may create only that candidate-attempt root and its `luau-a`, `luau-b`, `worker-a`, `worker-b`, and `swap-soak` children. The candidate-attempt root must be absent before the first command. Execution never deletes, moves, reuses, or overwrites an earlier attempt's receipt root; a changed exact revision or contaminated acquisition therefore receives a new immutable evidence namespace while the failed attempt remains diagnostic evidence.
 
 ## Implementation Steps
 
@@ -265,7 +265,7 @@ After the accepted-plan checkpoint, the main agent executes the following logica
 
 3. **Recertify Luau owner-entry AOT.**
    **3A — capture contract:** freeze `guest_batch_v2`, seeds, checksums, allocation fields, toolchain, the four base points `N={50,500,5000,50000}` with a conservatively calibrated per-case power-of-two call scale, and the median/p90 comparator in `scripts/check-runtime-parity`, `scripts/check-prepared-worker-admission`, and the matching admission tests. Each raw row records actual scaled N and fitted slopes normalize back to one guest call; this preserves the 5 ms evidence floor without forcing already-slow cases through the scale required by exceptionally fast prepared cases.
-   **3B — independent pair:** from a clean candidate worktree, run `export EMBER_S0_EVIDENCE_ROOT=/tmp/ember-s0-$(git rev-parse --short=12 HEAD); test ! -e "$EMBER_S0_EVIDENCE_ROOT" && mkdir -m 700 "$EMBER_S0_EVIDENCE_ROOT"`, then run `CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau scripts/check-runtime-parity --phase prepared-parity1x --capture-role candidate --capture-pair a --output "$EMBER_S0_EVIDENCE_ROOT/luau-a"` followed by the same command with `--capture-pair b --output "$EMBER_S0_EVIDENCE_ROOT/luau-b"`; retain both independently gated outputs without worker promotion claims.
+   **3B — independent pair:** from a clean candidate worktree, run `export EMBER_S0_EVIDENCE_ROOT=/tmp/ember-s0-$(git rev-parse --short=12 HEAD)-$(date -u +%Y%m%dT%H%M%SZ); test ! -e "$EMBER_S0_EVIDENCE_ROOT" && mkdir -m 700 "$EMBER_S0_EVIDENCE_ROOT"`, then run `CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau scripts/check-runtime-parity --phase prepared-parity1x --capture-role candidate --capture-pair a --output "$EMBER_S0_EVIDENCE_ROOT/luau-a"` followed by the same command with `--capture-pair b --output "$EMBER_S0_EVIDENCE_ROOT/luau-b"`; retain both independently gated outputs without worker promotion claims.
    **Acceptance:** both complete compatible captures pass correctness and allocation checks with prepared/Luau median `<=1.00` and p90 `<=1.05`.
 
 4. **Freeze owner-framed identities with reuse bypassed.**
