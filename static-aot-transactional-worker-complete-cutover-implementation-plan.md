@@ -52,8 +52,9 @@
   runtime harness inherited Go's 10-minute timeout even though bounded
   contamination retries can legitimately extend a clean acquisition. The
   candidate now keeps A's conservative 10 ms scale selection, verifies B at
-  5 ms, and gives each rejected point up to 300 one-second retries inside a
-  35-minute test bound. Attempts interrupted or rejected by external CPU
+  5 ms, and gives each contaminated or external-engine-timed-out point up to
+  300 one-second retries inside a 35-minute test bound without emitting its
+  partial timing. Attempts interrupted or rejected by external CPU
   contamination are not promotion evidence and are never converted into PASS.
 
 ## Active execution path

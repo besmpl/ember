@@ -235,7 +235,9 @@ at three cores while excluding the measuring Go process. A live point whose
 before or after probe is contaminated is discarded and retried after one
 second, up to 300 attempts; only clean paired rows are emitted, and exhaustion
 still fails the capture. A failed sampling command is a distinct observer
-error, not runner contention.
+error, not runner contention. An external-engine 60-second deadline discards
+that point and enters the same bounded reacquisition loop; its partial timing
+is never emitted or accepted.
 
 ```sh
 scripts/runtime-ratio-gate --derive \

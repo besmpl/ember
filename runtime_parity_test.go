@@ -781,6 +781,14 @@ func acquireCleanParityPoint(
 		}
 		point, err := measure()
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				last = before
+				stage = "measurement timeout"
+				if attempt < maxAttempts {
+					wait()
+				}
+				continue
+			}
 			return nil, err
 		}
 		after, err := sample()
@@ -1259,6 +1267,22 @@ func TestRuntimeParityHarness(t *testing.T) {
 	})
 	if err != nil || len(point) != 1 || point[0].elapsed != 2 || measureCount != 2 || waitCount != 2 {
 		t.Fatalf("retried point = %#v, measures=%d waits=%d error=%v", point, measureCount, waitCount, err)
+	}
+	measureCount = 0
+	waitCount = 0
+	point, err = acquireCleanParityPoint(2, func() (paritySystemSample, error) {
+		return paritySystemSample{Load: 1, CPU: 0}, nil
+	}, func() ([]parityPointMeasurement, error) {
+		measureCount++
+		if measureCount == 1 {
+			return nil, fmt.Errorf("external engine: %w", context.DeadlineExceeded)
+		}
+		return []parityPointMeasurement{{elapsed: 2}}, nil
+	}, func() {
+		waitCount++
+	})
+	if err != nil || len(point) != 1 || point[0].elapsed != 2 || measureCount != 2 || waitCount != 1 {
+		t.Fatalf("retried timed-out point = %#v, measures=%d waits=%d error=%v", point, measureCount, waitCount, err)
 	}
 	if _, err := acquireCleanParityPoint(2, func() (paritySystemSample, error) {
 		return paritySystemSample{Load: 1, CPU: parityCPUMax + 1}, nil
