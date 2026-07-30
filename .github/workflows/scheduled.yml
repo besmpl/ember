@@ -46,7 +46,7 @@ jobs:
   prepared-worker-soak:
     name: EPW2 1024 swaps (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 40
     env:
       CGO_ENABLED: '0'
     strategy:
@@ -73,7 +73,7 @@ jobs:
       - name: Run exact alternating-generation soak
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
           test "$(go env GOOS)/$(go env GOARCH)" = '${{ matrix.target }}'
           mkdir -p prepared-worker-soak
           {
@@ -85,8 +85,10 @@ jobs:
           EMBER_PREPARED_WORKER_SWAP_SOAK=1 \
             EMBER_PREPARED_WORKER_SWAP_SOAK_OUTPUT="$PWD/prepared-worker-soak" \
             go test \
+            -timeout=35m \
             -run '^TestPreparedWorkerParityAlternatesIndependentStaticAOTGenerations$' \
             -count=1 . 2>&1 | tee prepared-worker-soak/acquisition.log
+          test -f prepared-worker-soak/resource-summary.tsv
 
       - name: Preserve EPW2 soak evidence
         if: ${{ always() }}

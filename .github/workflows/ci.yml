@@ -28,6 +28,10 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - name: Verify Linux x86-64 target
+        run: |
+          test "$(go env GOOS)/$(go env GOARCH)" = linux/amd64
+
       - name: Run tests
         run: scripts/check
 
@@ -106,6 +110,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+
+      - name: Verify Linux ARM64 target
+        run: |
+          test "$(go env GOOS)/$(go env GOARCH)" = linux/arm64
 
       - name: Run Linux arm64 tests
         run: go test -count=1 ./...
@@ -186,6 +194,7 @@ jobs:
           EMBER_PREPARED_WORKER_SWAP_SOAK=1 \
             EMBER_PREPARED_WORKER_SWAP_SOAK_OUTPUT="${soak}" \
             go test \
+            -timeout=35m \
             -run '^TestPreparedWorkerParityAlternatesIndependentStaticAOTGenerations$' \
             -count=1 . 2>&1 | tee "${soak}/acquisition.log"
           test -f "${soak}/resource-summary.tsv"
