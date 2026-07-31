@@ -159,8 +159,12 @@ accepted without this chain.
 Capture A calibrates each case conservatively to the 10 ms target and freezes
 its power-of-two call scale. Capture B reuses that exact schedule but requires
 only the hard 5 ms evidence floor; it does not require ordinary run-to-run
-timing variation to reproduce A's 10 ms calibration observation. Calibration
-applies these thresholds to the maximum-minus-minimum measured guest-work span,
+timing variation to reproduce A's 10 ms calibration observation. Capture B
+buffers one complete three-sample prescribed calibration before publication;
+a structurally sub-floor set is discarded and reacquired at most three times,
+while measurement errors remain terminal and rejected samples are never
+emitted. These thresholds apply to the maximum-minus-minimum measured
+guest-work span,
 not total `Apply` latency, so journal/fsync intercept cannot admit a
 noise-dominated slope. The all-37 worker/Luau and embedded/Luau gates are median
 at most `1.00` and p90 at most `1.05`. The production-shaped rich-turn gate
@@ -237,7 +241,10 @@ second, up to 300 attempts; only clean paired rows are emitted, and exhaustion
 still fails the capture. A failed sampling command is a distinct observer
 error, not runner contention. An external-engine 60-second deadline discards
 that point and enters the same bounded reacquisition loop; its partial timing
-is never emitted or accepted. The three-engine worker gate also buffers one
+is never emitted or accepted. Capture B applies the same bounded whole-set
+policy to a structurally sub-floor prescribed calibration: at most three
+complete three-sample attempts, with no rejected calibration rows emitted.
+The three-engine worker gate also buffers one
 complete fitted repeat before publication. A structurally invalid window or
 non-positive/non-finite fit discards that entire repeat and reacquires it up to
 three times; rejected rows are never emitted, while semantic or protocol

@@ -118,6 +118,35 @@ func TestPreparedWorkerParityPrescribedScaleMustClearEvidenceFloor(t *testing.T)
 	}
 }
 
+func TestPreparedWorkerParityPrescribedScaleReacquiresWholeCalibration(t *testing.T) {
+	spans := []float64{
+		4 * float64(time.Millisecond),
+		6 * float64(time.Millisecond),
+		6 * float64(time.Millisecond),
+		7 * float64(time.Millisecond),
+		8 * float64(time.Millisecond),
+		9 * float64(time.Millisecond),
+	}
+	measurements := 0
+	waits := 0
+	calibration, err := acquirePreparedWorkerParityCallScale(
+		preparedWorkerRepeatAttemptLimit,
+		1,
+		func(int) (float64, error) {
+			elapsed := spans[measurements]
+			measurements++
+			return elapsed, nil
+		},
+		func() { waits++ },
+	)
+	if err != nil || measurements != 6 || waits != 1 {
+		t.Fatalf("reacquired calibration after measurements=%d waits=%d: %v", measurements, waits, err)
+	}
+	if len(calibration.Samples) != 3 || calibration.Samples[0].Elapsed != 7*float64(time.Millisecond) {
+		t.Fatalf("accepted calibration contains rejected samples: %#v", calibration)
+	}
+}
+
 func TestPreparedWorkerParityCallScaleUsesConservativeTrial(t *testing.T) {
 	trial := 0
 	calibration, err := selectPreparedWorkerParityCallScale(func(iterations int) (float64, error) {
@@ -722,6 +751,36 @@ func verifyPreparedWorkerParityCallScale(
 	callScale int,
 	measure func(int) (float64, error),
 ) (preparedWorkerParityCalibration, error) {
+	calibration, err := measurePreparedWorkerParityCallScale(callScale, measure)
+	if err != nil {
+		return calibration, err
+	}
+	if err := validatePreparedWorkerParityCalibrationFloor(calibration); err != nil {
+		return calibration, err
+	}
+	return calibration, nil
+}
+
+func acquirePreparedWorkerParityCallScale(
+	maxAttempts int,
+	callScale int,
+	measure func(int) (float64, error),
+	wait func(),
+) (preparedWorkerParityCalibration, error) {
+	return acquirePreparedWorkerRepeat(
+		maxAttempts,
+		func() (preparedWorkerParityCalibration, error) {
+			return measurePreparedWorkerParityCallScale(callScale, measure)
+		},
+		validatePreparedWorkerParityCalibrationFloor,
+		wait,
+	)
+}
+
+func measurePreparedWorkerParityCallScale(
+	callScale int,
+	measure func(int) (float64, error),
+) (preparedWorkerParityCalibration, error) {
 	calibration := preparedWorkerParityCalibration{Scale: callScale}
 	if err := validatePreparedWorkerParityCallScale(callScale); err != nil {
 		return calibration, err
@@ -729,7 +788,6 @@ func verifyPreparedWorkerParityCallScale(
 	if measure == nil {
 		return calibration, fmt.Errorf("prepared worker parity calibration: nil measurement")
 	}
-	minimum := float64(0)
 	maximumN := parityIterations[len(parityIterations)-1]
 	for trial := 1; trial <= preparedWorkerParityCalibrationRuns; trial++ {
 		elapsed, err := measure(maximumN * callScale)
@@ -744,19 +802,41 @@ func verifyPreparedWorkerParityCallScale(
 			Trial:   trial,
 			Elapsed: elapsed,
 		})
-		if minimum == 0 || elapsed < minimum {
-			minimum = elapsed
+	}
+	return calibration, nil
+}
+
+func validatePreparedWorkerParityCalibrationFloor(calibration preparedWorkerParityCalibration) error {
+	if err := validatePreparedWorkerParityCallScale(calibration.Scale); err != nil {
+		return err
+	}
+	if len(calibration.Samples) != preparedWorkerParityCalibrationRuns {
+		return fmt.Errorf(
+			"prepared worker parity calibration: prescribed scale %d has %d samples, want %d",
+			calibration.Scale,
+			len(calibration.Samples),
+			preparedWorkerParityCalibrationRuns,
+		)
+	}
+	minimum := float64(0)
+	for index, sample := range calibration.Samples {
+		if sample.Scale != calibration.Scale || sample.Trial != index+1 ||
+			sample.Elapsed <= 0 || !finiteParityFloat(sample.Elapsed) {
+			return fmt.Errorf("prepared worker parity calibration: invalid sample %#v", sample)
+		}
+		if minimum == 0 || sample.Elapsed < minimum {
+			minimum = sample.Elapsed
 		}
 	}
 	if minimum < float64(parityMinimumMaxPointElapsed.Nanoseconds()) {
-		return calibration, fmt.Errorf(
+		return fmt.Errorf(
 			"prepared worker parity calibration: prescribed scale %d minimum %gns is below %s",
-			callScale,
+			calibration.Scale,
 			minimum,
 			parityMinimumMaxPointElapsed,
 		)
 	}
-	return calibration, nil
+	return nil
 }
 
 func validatePreparedWorkerParityCallScale(callScale int) error {

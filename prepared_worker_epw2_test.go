@@ -124,9 +124,14 @@ func verifyPreparedWorkerParityClientScale(
 	client preparedWorkerParityCaller,
 	caseIndex uint16,
 ) (preparedWorkerParityCalibration, error) {
-	return verifyPreparedWorkerParityCallScale(callScale, func(iterations int) (float64, error) {
-		return measurePreparedWorkerParityClientSpan(client, caseIndex, iterations)
-	})
+	return acquirePreparedWorkerParityCallScale(
+		preparedWorkerRepeatAttemptLimit,
+		callScale,
+		func(iterations int) (float64, error) {
+			return measurePreparedWorkerParityClientSpan(client, caseIndex, iterations)
+		},
+		func() { time.Sleep(parityPointRetryDelay) },
+	)
 }
 
 func measurePreparedWorkerParityClientSpan(

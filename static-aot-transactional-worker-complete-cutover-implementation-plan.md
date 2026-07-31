@@ -46,13 +46,17 @@
   `GOTOOLDIR`/include trees, and recaptures inputs after compilation. Focused
   builder, worker, fixture, and six-target cross-build checks pass locally;
   this is not a retained exact-revision native-platform receipt.
-- Local S0 reacquisition exposed three harness defects rather than runtime
+- Local S0 reacquisition exposed four harness defects rather than runtime
   failures. A frozen worker-B schedule incorrectly required capture A's 10 ms
-  calibration observation instead of the hard 5 ms evidence floor, and the
+  calibration observation instead of the hard 5 ms evidence floor, a single
+  noisy baseline subtraction could reject B without reacquiring its complete
+  prescribed calibration, and the
   runtime harness inherited Go's 10-minute timeout even though bounded
   contamination retries can legitimately extend a clean acquisition. The
   candidate now keeps A's conservative 10 ms scale selection, verifies B at
-  5 ms, gives each contaminated or external-engine-timed-out point up to 300
+  5 ms while reacquiring a structurally sub-floor complete three-sample B
+  calibration at most three times, gives each contaminated or
+  external-engine-timed-out point up to 300
   one-second retries inside a 35-minute test bound, and buffers each worker
   repeat so a structurally invalid fit is discarded for at most three bounded
   reacquisitions before any rows are published. Semantic/protocol errors and
@@ -97,7 +101,9 @@ commands, time bounds, and two workflow checkpoints are in
   allocation fields, the four base points with a conservatively selected
   per-case power-of-two call scale, toolchain, and comparator. Capture A
   selects against 10 ms; capture B reuses A's schedule and must clear the hard
-  5 ms evidence floor.
+  5 ms evidence floor. B may discard and reacquire a complete structurally
+  sub-floor three-sample prescribed calibration at most three times, but never
+  emits rejected samples or retries measurement errors.
 - **3B — Independent pair:** acquire two complete pinned-Luau all-37 captures.
 - **Accept:** prepared/Luau median is `<=1.00`, p90 is `<=1.05`, allocations and
   results match, and both captures pass independently. This does not certify the
