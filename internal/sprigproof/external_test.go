@@ -108,7 +108,7 @@ func main(){ r,err:=counter.Reduce(context.Background(),[]counter.Reading{{Value
 		t.Fatalf("nonstandard deps=%v", gotDeps)
 	}
 	flags := []string{"build", "-x", "-mod=readonly", "-buildvcs=false", "-trimpath", "-pgo=off", "-buildmode=exe"}
-	freshBinary := filepath.Join(root, "fresh-app")
+	freshBinary := nativeTestExecutable(root, "fresh-app")
 	fresh := runCommand(t, root, env, "go", append(flags, "-o", freshBinary, "./cmd/app")...)
 	assertCompileCounts(t, "fresh", fresh, map[string]int{"example.com/sprig-project/generated/counter": 1, "example.com/sprig-project/generated/math": 1, "main": 1})
 	baseIDs := packageBuildIDs(t, root, env)
@@ -117,7 +117,7 @@ func main(){ r,err:=counter.Reduce(context.Background(),[]counter.Reading{{Value
 		t.Fatalf("missing application BuildID: %v", baseIDs)
 	}
 	freshDigest := fileDigest(t, freshBinary)
-	warmBinary := filepath.Join(root, "warm-app")
+	warmBinary := nativeTestExecutable(root, "warm-app")
 	warm := runCommand(t, root, env, "go", append(flags, "-o", warmBinary, "./cmd/app")...)
 	assertCompileCounts(t, "warm", warm, map[string]int{"example.com/sprig-project/generated/counter": 0, "example.com/sprig-project/generated/math": 0, "main": 0})
 	if got := packageBuildIDs(t, root, env); !reflect.DeepEqual(got, baseIDs) {
@@ -150,7 +150,7 @@ func main(){ r,err:=counter.Reduce(context.Background(),[]counter.Reading{{Value
 		t.Fatal("Layout identity did not change")
 	}
 	writeLayout(t, root, changedLayout)
-	changedBinary := filepath.Join(root, "changed-app")
+	changedBinary := nativeTestExecutable(root, "changed-app")
 	changedTrace := runCommand(t, root, env, "go", append(flags, "-o", changedBinary, "./cmd/app")...)
 	assertCompileCounts(t, "root change", changedTrace, map[string]int{"example.com/sprig-project/generated/counter": 1, "example.com/sprig-project/generated/math": 0, "main": 1})
 	changedIDs := packageBuildIDs(t, root, env)
@@ -178,7 +178,7 @@ func main(){ r,err:=counter.Reduce(context.Background(),[]counter.Reading{{Value
 		t.Fatal(err)
 	}
 	writeLayout(t, root, dependencyLayout)
-	dependencyBinary := filepath.Join(root, "dependency-app")
+	dependencyBinary := nativeTestExecutable(root, "dependency-app")
 	dependencyTrace := runCommand(t, root, env, "go", append(flags, "-o", dependencyBinary, "./cmd/app")...)
 	assertCompileCounts(t, "dependency change", dependencyTrace, map[string]int{"example.com/sprig-project/generated/counter": 1, "example.com/sprig-project/generated/math": 1, "main": 1})
 	dependencyIDs := packageBuildIDs(t, root, env)
@@ -334,12 +334,12 @@ func main(){
 		t.Fatalf("nonstandard deps=%v want %v", gotDeps, wantDeps)
 	}
 	flags := []string{"build", "-x", "-mod=readonly", "-buildvcs=false", "-trimpath", "-pgo=off", "-buildmode=exe"}
-	baseBinary := filepath.Join(root, "base-app")
+	baseBinary := nativeTestExecutable(root, "base-app")
 	fresh := runCommand(t, root, env, "go", append(flags, "-o", baseBinary, "./cmd/app")...)
 	assertCompileCounts(t, "linked fresh", fresh, map[string]int{module + "/generated/counter": 1, module + "/generated/math": 1, module + "/generated/util": 1, "main": 1})
 	baseIDs := packageBuildIDs(t, root, env)
 	baseDigest := fileDigest(t, baseBinary)
-	warm := runCommand(t, root, env, "go", append(flags, "-o", filepath.Join(root, "warm-app"), "./cmd/app")...)
+	warm := runCommand(t, root, env, "go", append(flags, "-o", nativeTestExecutable(root, "warm-app"), "./cmd/app")...)
 	assertCompileCounts(t, "linked warm", warm, map[string]int{module + "/generated/counter": 0, module + "/generated/math": 0, module + "/generated/util": 0, "main": 0})
 	if output := strings.TrimSpace(runCommand(t, root, env, baseBinary)); output != "4|7|1|2|true|true" {
 		t.Fatalf("linked native output=%q", output)
@@ -369,7 +369,7 @@ func main(){
 		t.Fatal("root change reached linked dependencies")
 	}
 	writePreparedPackages(t, root, rootPrepared)
-	rootBinary := filepath.Join(root, "root-app")
+	rootBinary := nativeTestExecutable(root, "root-app")
 	rootTrace := runCommand(t, root, env, "go", append(flags, "-o", rootBinary, "./cmd/app")...)
 	assertCompileCounts(t, "linked root change", rootTrace, map[string]int{module + "/generated/counter": 1, module + "/generated/math": 0, module + "/generated/util": 0, "main": 1})
 	rootIDs := packageBuildIDs(t, root, env)
@@ -401,7 +401,7 @@ func main(){
 		t.Fatal("dependency source change was not localized to the linked leaf source")
 	}
 	writePreparedPackages(t, root, dependencyPrepared)
-	dependencyBinary := filepath.Join(root, "dependency-app")
+	dependencyBinary := nativeTestExecutable(root, "dependency-app")
 	dependencyTrace := runCommand(t, root, env, "go", append(flags, "-o", dependencyBinary, "./cmd/app")...)
 	assertCompileCounts(t, "linked dependency change", dependencyTrace, map[string]int{module + "/generated/counter": 1, module + "/generated/math": 1, module + "/generated/util": 1, "main": 1})
 	dependencyIDs := packageBuildIDs(t, root, env)
@@ -487,6 +487,15 @@ func writeLayout(t *testing.T, root string, layout preparedsource.Layout) {
 		}
 	}
 }
+
+func nativeTestExecutable(root, name string) string {
+	path := filepath.Join(root, name)
+	if runtime.GOOS == "windows" {
+		path += ".exe"
+	}
+	return path
+}
+
 func assertCompileCounts(t *testing.T, phase, trace string, want map[string]int) {
 	t.Helper()
 	for pkg, n := range want {

@@ -26,6 +26,7 @@ const (
 	parityLuauVersion          = "0.728"
 	parityPlatform             = "Darwin 24.6.0 arm64"
 	parityCPU                  = "Apple M1"
+	parityDarwinBrewPath       = "/opt/homebrew/bin/brew"
 	parityLinuxAMD64LuauSHA256 = "2a6ff9e7c17a0a6fed47c04da67495d1594eda38ce915f01c78c7fa5e9e796b8"
 	parityRawHeader            = "schema_version\tcapture_phase\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\texecution_mode\tengine\trepeat\tacquisition_order\tn_guest_calls\truntime_seed\telapsed_ns\tresult_integer\tworkload_sha256\tprogram_sha256\tenvironment_sha256\tcontaminated"
 	paritySlopeHeader          = "schema_version\tcapture_phase\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\texecution_mode\tengine\trepeat\tslope_ns_per_guest_call\tintercept_ns\tresult_set_sha256\tworkload_sha256\tprogram_sha256\tenvironment_sha256"
@@ -105,7 +106,7 @@ type parityHostProfile struct {
 	Platform   string
 	CPU        string
 	LuauSHA256 string
-	VerifyBrew bool
+	BrewPath   string
 }
 
 func parityHostProfileFor(name string) (parityHostProfile, error) {
@@ -121,7 +122,7 @@ func parityHostProfileFor(name string) (parityHostProfile, error) {
 			Platform:   parityPlatform,
 			CPU:        parityCPU,
 			LuauSHA256: parityLuauSHA256,
-			VerifyBrew: true,
+			BrewPath:   parityDarwinBrewPath,
 		}, nil
 	case "linux-amd64":
 		return parityHostProfile{
@@ -566,7 +567,7 @@ func paritySHA256(path string) (string, error) {
 
 func parityCommandOutput(name string, args ...string) (string, error) {
 	switch name {
-	case "uname", "sysctl", "brew":
+	case "uname", "sysctl", parityDarwinBrewPath:
 	default:
 		return "", fmt.Errorf("parity runner command %q is not approved", name)
 	}
@@ -630,8 +631,8 @@ func inspectParityEnvironment() (parityEnvironment, error) {
 	if digest != profile.LuauSHA256 {
 		return parityEnvironment{}, fmt.Errorf("parity runner Luau SHA-256: want %s, got %s", profile.LuauSHA256, digest)
 	}
-	if profile.VerifyBrew {
-		brewVersion, err := parityCommandOutput("brew", "info", "luau", "--json=v2")
+	if profile.BrewPath != "" {
+		brewVersion, err := parityCommandOutput(profile.BrewPath, "info", "luau", "--json=v2")
 		if err != nil {
 			return parityEnvironment{}, fmt.Errorf("parity runner Homebrew Luau info: %w", err)
 		}
@@ -1094,7 +1095,7 @@ func TestRuntimeParityHarness(t *testing.T) {
 	if darwinProfile.Name != "darwin-arm64-m1" || darwinProfile.GOOS != "darwin" ||
 		darwinProfile.GOARCH != "arm64" || darwinProfile.Platform != "Darwin 24.6.0 arm64" ||
 		darwinProfile.CPU != "Apple M1" || darwinProfile.LuauSHA256 != parityLuauSHA256 ||
-		!darwinProfile.VerifyBrew {
+		darwinProfile.BrewPath != parityDarwinBrewPath {
 		t.Fatalf("default parity profile = %#v", darwinProfile)
 	}
 	linuxProfile, err := parityHostProfileFor("linux-amd64")
@@ -1104,7 +1105,7 @@ func TestRuntimeParityHarness(t *testing.T) {
 	if linuxProfile.Name != "linux-amd64" || linuxProfile.GOOS != "linux" ||
 		linuxProfile.GOARCH != "amd64" || linuxProfile.Platform != "" || linuxProfile.CPU != "" ||
 		linuxProfile.LuauSHA256 != "2a6ff9e7c17a0a6fed47c04da67495d1594eda38ce915f01c78c7fa5e9e796b8" ||
-		linuxProfile.VerifyBrew {
+		linuxProfile.BrewPath != "" {
 		t.Fatalf("Linux parity profile = %#v", linuxProfile)
 	}
 	if _, err := parityHostProfileFor("unknown"); err == nil {
