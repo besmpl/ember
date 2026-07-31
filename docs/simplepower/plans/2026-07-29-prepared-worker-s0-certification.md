@@ -39,6 +39,14 @@ The active S0 outcome is one exact candidate whose prepared paths either execute
   its cross-block slowest/fastest combination was `1.094`. Both repairs
   invalidate the in-flight receipts; neither failed artifact is reinterpreted
   as PASS. S0 remains unpromoted and stages 8-17 remain closed.
+- Exact revision `5491fe5` then passed the hosted workflow validation and both
+  1,024-swap Linux/Darwin soaks, but ordinary CI correctly rejected its process
+  helper: the pipe-lifetime regression had moved `*exec.Cmd` across the reviewed
+  pure-Go launch seam and added a second test constructor. The repair keeps one
+  allowlisted private production constructor and passes it only executable,
+  arguments, and environment values; the regression uses that same owner and no
+  longer imports `os/exec`. All `5491fe5` receipts remain diagnostic, and a
+  fresh exact revision is required before S0 promotion.
 
 Stages 8-17 are follow-on gates only and create no implementation authority in this plan:
 

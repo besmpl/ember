@@ -90,6 +90,12 @@
   decoding the final frame, reproduces the former `file already closed`
   failure, and proves the new ownership ordering. The failed soak and every
   in-flight receipt from that revision are diagnostic only.
+- Revision `5491fe5` then proved the repaired 1,024-swap lifetime on hosted
+  Linux and Darwin, but was rejected by the pure-Go boundary because the new
+  regression had widened `os/exec` construction across two owners. The
+  follow-up preserves one private allowlisted constructor taking plain
+  executable, argument, and environment values. Evidence from the rejected
+  revision is diagnostic only.
 
 ## Active execution path
 

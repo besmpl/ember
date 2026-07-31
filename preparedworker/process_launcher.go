@@ -26,18 +26,15 @@ func (osProcessLauncher) Launch(artifact *processArtifact) (*processChild, error
 	if artifact == nil || artifact.executable == "" {
 		return nil, fmt.Errorf("prepared worker process backend: missing executable")
 	}
-	command := exec.Command(artifact.executable)
-	command.Env = workerProcessEnvironment()
-	return launchWorkerCommand(command)
+	return launchWorkerCommand(artifact.executable, nil, workerProcessEnvironment())
 }
 
-func launchWorkerCommand(command *exec.Cmd) (*processChild, error) {
-	if command == nil {
-		return nil, fmt.Errorf("prepared worker process backend: nil command")
+func launchWorkerCommand(executable string, arguments, environment []string) (*processChild, error) {
+	if executable == "" {
+		return nil, fmt.Errorf("prepared worker process backend: missing executable")
 	}
-	if command.Stdin != nil || command.Stdout != nil {
-		return nil, fmt.Errorf("prepared worker process backend: command transport is already configured")
-	}
+	command := exec.Command(executable, arguments...)
+	command.Env = environment
 	configureWorkerCommand(command)
 	lease, err := newWorkerParentLease(command)
 	if err != nil {

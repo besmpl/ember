@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -26,9 +25,11 @@ func TestOSProcessLauncherRetainsFinalFrameAfterWait(t *testing.T) {
 		os.Exit(0)
 	}
 
-	command := exec.Command(os.Args[0], "-test.run=^TestOSProcessLauncherRetainsFinalFrameAfterWait$")
-	command.Env = append(os.Environ(), processLauncherFinalFrameChild+"=1")
-	child, err := launchWorkerCommand(command)
+	child, err := launchWorkerCommand(
+		os.Args[0],
+		[]string{"-test.run=^TestOSProcessLauncherRetainsFinalFrameAfterWait$"},
+		append(os.Environ(), processLauncherFinalFrameChild+"=1"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -8,7 +8,7 @@ internal/rubyproof/external_test.go	runWithInput	test-helper	Run the Go toolchai
 internal/sprigproof/external_test.go	runCommand	test-helper	Run the Go toolchain and generated proof application inside one bounded disposable offline test root.
 preparedsource/external_producer_integration_test.go	runCommand	test-helper	Run the Go toolchain and generated static application inside one bounded disposable offline test root.
 preparedsource/external_producer_integration_test.go	runCommandMustFail	test-helper	Verify rejected Go commands fail inside the bounded disposable external-producer test root.
-preparedworker/process_launcher.go	Launch	worker-launch	Launch one verified immutable EPW2 executable under the reviewed parent-lifetime owner.
+preparedworker/process_launcher.go	launchWorkerCommand	worker-launch	Launch one verified immutable EPW2 executable under the reviewed parent-lifetime owner.
 preparedworker/process_transport_admission_test.go	Launch	test-helper	Launch the bounded EPW2 transport observer from the current no-cgo test binary.
 preparedworkerbuild/build.go	runGoCommand	toolchain-build	Run the Go toolchain only during the explicit host-owned worker build effect.
 prepared_worker_embedded_observer_test.go	openPreparedWorkerEmbeddedObserver	test-helper	Launch the digest-verified production embedded observer used only by admission capture.
