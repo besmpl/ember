@@ -203,7 +203,7 @@ jobs:
     # This label set is intentionally explicit: parity numbers are only
     # meaningful on the pinned controlled self-hosted reference runner.
     runs-on: [self-hosted, macOS, ARM64, apple-m1, ember-parity]
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       CGO_ENABLED: '0'
       GOMAXPROCS: '1'

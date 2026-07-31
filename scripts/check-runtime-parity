@@ -303,6 +303,8 @@ command="CGO_ENABLED=0 GOMAXPROCS=1 EMBER_RUNTIME_ACCEPTANCE_PROFILE=$acceptance
 printf '%s\n' "$command" >"$output/command.txt"
 printf '%s\n' "${cases:-all-37}" >"$output/cases.txt"
 capture_id=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$source_commit" "$environment_hash" "$phase" "$execution_mode" "$role" "$pair" "$output" | hash_stdin)
+runtime_test_timeout=35m
+[ "$phase" != full ] || runtime_test_timeout=60m
 
 if ! CGO_ENABLED=0 GOMAXPROCS=1 EMBER_RUNTIME_ENGINE="$engine" LUAU_BIN="$LUAU_BIN" \
 	EMBER_RUNTIME_PARITY_LIVE=1 \
@@ -316,7 +318,7 @@ if ! CGO_ENABLED=0 GOMAXPROCS=1 EMBER_RUNTIME_ENGINE="$engine" LUAU_BIN="$LUAU_B
 	RUNTIME_PARITY_CAPTURE_ID="$capture_id" \
 	RUNTIME_PARITY_SOURCE_COMMIT="$source_commit" \
 	RUNTIME_PARITY_ENVIRONMENT_SHA256="$environment_hash" \
-	go test -timeout=35m -run '^TestRuntimeParityLive$' -count=1 . >"$output/acquisition.log" 2>&1; then
+	go test -timeout="$runtime_test_timeout" -run '^TestRuntimeParityLive$' -count=1 . >"$output/acquisition.log" 2>&1; then
 	die "parity acquisition failed; see $output/acquisition.log"
 fi
 

@@ -80,9 +80,11 @@ Ember target, records every actual N in `raw.tsv`, and normalizes the fitted
 slope back to one guest call. Every engine/repeat must still spend at least 5
 ms at its scaled maximum point or acquisition fails before the slope is
 accepted. Public-call lifecycle and allocation measurements remain separate.
-Contaminated points are retried but never accepted; the harness gives those
-bounded retries a 35-minute test timeout rather than Go's brittle 10-minute
-default. Output directories are caller-owned and must not already exist.
+Contaminated points are retried but never accepted. The intrinsically slow
+full VM all-37 capture receives a 60-minute test timeout; dynamic and prepared
+captures retain 35 minutes. These explicit bounds replace Go's brittle
+10-minute default. Output directories are caller-owned and must not already
+exist.
 
 ```sh
 CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau \
