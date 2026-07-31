@@ -9,8 +9,10 @@
   architecture exists in the dirty working tree. Stages 1-6 have focused local
   implementation evidence, and stage 7 now has the complete six-target native
   workflow contract plus bounded paired-admission and soak jobs. The exact
-  candidate still lacks one uncontaminated same-revision local receipt set and
-  the target-native CI receipts, so S0 has not passed. ADR 0011's Accepted
+  candidate still lacks one uncontaminated same-revision remote receipt set and
+  the complete target-native CI receipts, so S0 has not passed. Long evidence
+  acquisition is forbidden on the developer Mac; physical ARM64 and x86-64
+  receipts run on GitHub-hosted machines. ADR 0011's Accepted
   status records direction; it is not a substitute for those receipts.
 
 ### Done when

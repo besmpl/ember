@@ -226,7 +226,13 @@ target-native jobs for all six pairs. Pull-request Linux x86-64 admission
 retains paired Luau captures and the matching 1,024-swap receipt for the same
 commit in one artifact; scheduled physical Darwin ARM64 and Linux x86-64 jobs
 retain independent lifecycle receipts. Paired Luau admission also runs on the
-controlled Darwin ARM64 runner. The Linux profile requires Go 1.26.4 and the
+GitHub-hosted physical Darwin ARM64 runner, never on a developer machine. The
+Darwin profile requires Go 1.26.4 and the official Luau 0.728 ARM64 executable
+at SHA-256
+`22571bbeea6bae3e6b2b3d6cbe41da9d6f3e3a7dd9edd1660b006476ce46db78`;
+the downloaded archive is pinned at SHA-256
+`60541670fc8b8a8289df3ff37bd88e81b8f7b45219b777d6f4afd4e8e3af07ec`.
+The Linux profile requires Go 1.26.4 and the
 official Luau 0.728 Linux executable at SHA-256
 `2a6ff9e7c17a0a6fed47c04da67495d1594eda38ce915f01c78c7fa5e9e796b8`.
 
@@ -1691,21 +1697,24 @@ never acceptance evidence.
 
 ## Scheduled evidence
 
-`.github/workflows/scheduled.yml` runs the long-lived checks weekly (and by
-manual dispatch). The five fuzz targets each have a separate matrix entry,
+`.github/workflows/scheduled.yml` runs the long-lived checks weekly. Manual
+dispatch defaults to the narrower `s0` scope, which runs only validation,
+physical ARM64 admission, and Linux/Darwin lifecycle so certification does not
+start unrelated fuzz, full-VM parity, or profiling work. The explicit `full`
+scope runs the complete scheduled suite. All long jobs use GitHub-hosted
+runners; developer machines are not evidence workers. The five fuzz targets
+each have a separate matrix entry,
 `fail-fast: false`, and a bounded 10-minute fuzz budget. Every entry uploads its
 log and `testdata/fuzz/<target>` corpus, including when the fuzz process fails.
 
-The runtime parity job runs caller-named `full` and `speed2x` all-37 captures on the
-controlled self-hosted Darwin 24.6.0 arm64 Apple M1 runner labeled
-`[self-hosted, macOS, ARM64, apple-m1, ember-parity]`, with the pinned Luau
+The runtime parity job runs caller-named `full` and `speed2x` all-37 captures on
+a GitHub-hosted physical Darwin ARM64 runner with the pinned official Luau
 executable. It uploads exact schema-v2 raw and fitted-slope artifacts plus the command,
 source, toolchain, Luau, CPU, OS, and environment fingerprint. Invalid or
 contaminated acquisition fails; a baseline speed miss is retained honestly.
 
-The performance job runs `scripts/performance-audit --profiles` on a controlled
-Apple M1 runner labeled
-`[self-hosted, macOS, ARM64, apple-m1, ember-performance]`. This covers the
+The performance job runs `scripts/performance-audit --profiles` on a
+GitHub-hosted physical Darwin ARM64 runner. This covers the
 Scenario, recursive Fibonacci, sparse-grid, compiler-stage, and runtime-mode
 families, and writes CPU and allocation profiles for each. Its output, command
 log, fingerprint, and any `INCOMPLETE` marker are uploaded regardless of the
@@ -1715,7 +1724,7 @@ duplicating noisy wall-time assertions in PRs.
 
 Scheduled EPW2 jobs retain exact 1,024-swap logs plus per-swap child/RSS samples
 and a summary PASS marker on physical Linux x86-64 and Darwin ARM64 hosts. A
-separate controlled Apple M1 job acquires and compares the two all-37
+separate GitHub-hosted Apple Silicon job acquires and compares the two all-37
 prepared-worker admission captures. Pull-request Linux x86-64 CI owns the
 same-revision x86-64 admission artifact: paired captures under `a` and `b`, and
 the resource receipt under `soak`.

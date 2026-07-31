@@ -8,6 +8,7 @@ repo_root=$(cd "$script_dir/.." && pwd)
 header='schema_version	go_version	goos	goarch	os_build	cpu_model	cgo_enabled	gomaxprocs	luau_version	luau_sha256'
 
 configure_profile() {
+	expected_cpu_prefix=
 	case "$1" in
 	darwin-arm64-m1)
 		profile=darwin-arm64-m1
@@ -18,6 +19,17 @@ configure_profile() {
 		expected_cpu='Apple M1'
 		expected_luau_version=0.728
 		expected_luau_sha256=c921fa51dbc0d81f9acbddcfa9208aa58f039388301f9fba77d2c5a324cb42bd
+		;;
+	darwin-arm64-github-hosted)
+		profile=darwin-arm64-github-hosted
+		expected_go=go1.26.4
+		expected_goos=darwin
+		expected_goarch=arm64
+		expected_os_build=
+		expected_cpu=
+		expected_cpu_prefix='Apple '
+		expected_luau_version=0.728
+		expected_luau_sha256=22571bbeea6bae3e6b2b3d6cbe41da9d6f3e3a7dd9edd1660b006476ce46db78
 		;;
 	linux-amd64)
 		profile=linux-amd64
@@ -73,6 +85,11 @@ validate_values() {
 	fi
 	if [ -n "$expected_cpu" ]; then
 		[ "$actual_cpu" = "$expected_cpu" ] || { fail "CPU must be $expected_cpu, got $actual_cpu"; return 1; }
+	elif [ -n "$expected_cpu_prefix" ]; then
+		case "$actual_cpu" in
+		"$expected_cpu_prefix"*) ;;
+		*) fail "CPU must start with $expected_cpu_prefix, got $actual_cpu"; return 1 ;;
+		esac
 	else
 		[ -n "$actual_cpu" ] || { fail 'CPU model must not be empty'; return 1; }
 	fi
@@ -179,6 +196,16 @@ run_self_test() {
 	actual_cpu='Example x86 CPU'
 	validate_values || fail 'self-test rejected valid Linux amd64 parity values'
 	[ "$expected_luau_sha256" = 2a6ff9e7c17a0a6fed47c04da67495d1594eda38ce915f01c78c7fa5e9e796b8 ] || fail 'Linux Luau pin changed'
+	configure_profile darwin-arm64-github-hosted
+	set_valid_fixture parity
+	actual_os_build=24.6.0
+	actual_cpu='Apple M2'
+	validate_values || fail 'self-test rejected valid GitHub-hosted Darwin ARM64 parity values'
+	[ "$expected_luau_sha256" = 22571bbeea6bae3e6b2b3d6cbe41da9d6f3e3a7dd9edd1660b006476ce46db78 ] || fail 'GitHub-hosted Darwin Luau pin changed'
+	actual_cpu='Not Apple Silicon'
+	if validate_values >/dev/null 2>&1; then
+		fail 'self-test accepted non-Apple GitHub-hosted CPU'
+	fi
 	if configure_profile unknown >/dev/null 2>&1; then
 		fail 'self-test accepted unknown profile'
 	fi
@@ -243,7 +270,7 @@ case "$capture_kind" in
 performance|parity|allocation) ;;
 *) fail "unknown capture kind: $capture_kind"; exit 2 ;;
 esac
-[ "$profile" = darwin-arm64-m1 ] || [ "$capture_kind" = parity ] || {
+[ "$profile" = darwin-arm64-m1 ] || [ "$profile" = darwin-arm64-github-hosted ] || [ "$capture_kind" = parity ] || {
 	fail "profile $profile supports parity captures only"
 	exit 2
 }

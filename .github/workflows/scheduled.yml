@@ -4,6 +4,15 @@ on:
   schedule:
     - cron: '23 3 * * 0'
   workflow_dispatch:
+    inputs:
+      scope:
+        description: Evidence scope
+        required: true
+        default: s0
+        type: choice
+        options:
+          - s0
+          - full
 
 permissions:
   contents: read
@@ -100,14 +109,13 @@ jobs:
           path: prepared-worker-soak
 
   prepared-worker-admission-arm64:
-    name: EPW2 admission (Darwin arm64 Apple M1)
-    runs-on: [self-hosted, macOS, ARM64, apple-m1, ember-parity]
+    name: EPW2 admission (GitHub-hosted Darwin arm64)
+    runs-on: macos-15
     timeout-minutes: 120
     env:
       CGO_ENABLED: '0'
       GOMAXPROCS: '1'
-      LUAU_BIN: /opt/homebrew/bin/luau
-      EMBER_RUNTIME_ACCEPTANCE_PROFILE: darwin-arm64-m1
+      EMBER_RUNTIME_ACCEPTANCE_PROFILE: darwin-arm64-github-hosted
 
     steps:
       - name: Check out repository
@@ -118,6 +126,28 @@ jobs:
         with:
           go-version: "1.26.4"
           cache: false
+
+      - name: Install pinned Luau 0.728 oracle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          oracle_dir="${RUNNER_TEMP}/luau-0.728-darwin-arm64"
+          mkdir -p "${oracle_dir}"
+          gh release download 0.728 \
+            --repo luau-lang/luau \
+            --pattern luau-macos.zip \
+            --dir "${oracle_dir}"
+          printf '%s  %s\n' \
+            60541670fc8b8a8289df3ff37bd88e81b8f7b45219b777d6f4afd4e8e3af07ec \
+            "${oracle_dir}/luau-macos.zip" | shasum -a 256 -c -
+          unzip -q "${oracle_dir}/luau-macos.zip" -d "${oracle_dir}/bin"
+          printf '%s  %s\n' \
+            22571bbeea6bae3e6b2b3d6cbe41da9d6f3e3a7dd9edd1660b006476ce46db78 \
+            "${oracle_dir}/bin/luau" | shasum -a 256 -c -
+          chmod 0500 "${oracle_dir}/bin/luau"
+          printf 'LUAU_BIN=%s\n' "${oracle_dir}/bin/luau" >>"${GITHUB_ENV}"
 
       - name: Capture paired all-37 EPW2 admission
         shell: bash
@@ -146,6 +176,7 @@ jobs:
 
   fuzz:
     name: fuzz ${{ matrix.target }}
+    if: github.event_name == 'schedule' || inputs.scope == 'full'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -199,15 +230,16 @@ jobs:
             testdata/fuzz/${{ matrix.target }}
 
   parity:
-    name: runtime parity (Darwin arm64 Apple M1)
-    # This label set is intentionally explicit: parity numbers are only
-    # meaningful on the pinned controlled self-hosted reference runner.
-    runs-on: [self-hosted, macOS, ARM64, apple-m1, ember-parity]
+    name: runtime parity (GitHub-hosted Darwin arm64)
+    if: github.event_name == 'schedule' || inputs.scope == 'full'
+    # Keep long acquisition off developer machines. The exact runner image,
+    # physical Apple CPU, toolchain, and oracle remain part of each receipt.
+    runs-on: macos-15
     timeout-minutes: 120
     env:
       CGO_ENABLED: '0'
       GOMAXPROCS: '1'
-      LUAU_BIN: /opt/homebrew/bin/luau
+      EMBER_RUNTIME_ACCEPTANCE_PROFILE: darwin-arm64-github-hosted
 
     steps:
       - name: Check out repository
@@ -218,6 +250,28 @@ jobs:
         with:
           go-version: "1.26.4"
           cache: false
+
+      - name: Install pinned Luau 0.728 oracle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          oracle_dir="${RUNNER_TEMP}/luau-0.728-darwin-arm64"
+          mkdir -p "${oracle_dir}"
+          gh release download 0.728 \
+            --repo luau-lang/luau \
+            --pattern luau-macos.zip \
+            --dir "${oracle_dir}"
+          printf '%s  %s\n' \
+            60541670fc8b8a8289df3ff37bd88e81b8f7b45219b777d6f4afd4e8e3af07ec \
+            "${oracle_dir}/luau-macos.zip" | shasum -a 256 -c -
+          unzip -q "${oracle_dir}/luau-macos.zip" -d "${oracle_dir}/bin"
+          printf '%s  %s\n' \
+            22571bbeea6bae3e6b2b3d6cbe41da9d6f3e3a7dd9edd1660b006476ce46db78 \
+            "${oracle_dir}/bin/luau" | shasum -a 256 -c -
+          chmod 0500 "${oracle_dir}/bin/luau"
+          printf 'LUAU_BIN=%s\n' "${oracle_dir}/bin/luau" >>"${GITHUB_ENV}"
 
       - name: Select parity artifact directory
         shell: bash
@@ -245,8 +299,8 @@ jobs:
           mkdir -p "$PARITY_ARTIFACT_ROOT"
           {
             printf '%s\n' '# ember scheduled parity fingerprint/v1'
-            printf 'full_command=LUAU_BIN=/opt/homebrew/bin/luau CGO_ENABLED=0 GOMAXPROCS=1 scripts/check-runtime-parity --phase full --output %s/full-all37\n' "$PARITY_ARTIFACT_ROOT"
-            printf 'speed_command=LUAU_BIN=/opt/homebrew/bin/luau CGO_ENABLED=0 GOMAXPROCS=1 scripts/check-runtime-parity --phase speed2x --capture-only --capture-role frozen-current --capture-pair a --output %s/speed2x-a\n' "$PARITY_ARTIFACT_ROOT"
+            printf 'full_command=LUAU_BIN=%s CGO_ENABLED=0 GOMAXPROCS=1 scripts/check-runtime-parity --phase full --output %s/full-all37\n' "$LUAU_BIN" "$PARITY_ARTIFACT_ROOT"
+            printf 'speed_command=LUAU_BIN=%s CGO_ENABLED=0 GOMAXPROCS=1 scripts/check-runtime-parity --phase speed2x --capture-only --capture-role frozen-current --capture-pair a --output %s/speed2x-a\n' "$LUAU_BIN" "$PARITY_ARTIFACT_ROOT"
             printf 'commit='; git rev-parse HEAD
             printf 'source_fingerprint=%s\n' "$source_fingerprint"
             printf 'source_status_begin\n'; git status --porcelain=v1; printf 'source_status_end\n'
@@ -258,7 +312,7 @@ jobs:
             printf 'cpu='; sysctl -n machdep.cpu.brand_string
             printf 'luau_path=%s\n' "$LUAU_BIN"
             printf 'luau_sha256='; shasum -a 256 "$LUAU_BIN" | awk '{print $1}'
-            printf 'luau_homebrew_info_begin\n'; /opt/homebrew/bin/brew info luau --json=v2; printf 'luau_homebrew_info_end\n'
+            printf 'runner_environment=%s\n' "$RUNNER_ENVIRONMENT"
             printf 'environment_begin\n'
             env | LC_ALL=C sort | awk -F= '/^(CGO_ENABLED|GOMAXPROCS|GOFLAGS|GODEBUG|LUAU_BIN|BENCHTIME|RUNTIME_PARITY_CASES|RUNTIME_PARITY_RAW)=/ {print}'
             printf 'environment_end\n'
@@ -306,15 +360,17 @@ jobs:
           path: ${{ env.PARITY_ARTIFACT_ROOT }}
 
   performance:
-    name: performance audit (Darwin arm64 Apple M1)
+    name: performance audit (GitHub-hosted Darwin arm64)
+    if: github.event_name == 'schedule' || inputs.scope == 'full'
     # The audit is controlled for CPU/OS noise, but does not duplicate the
     # structural and allocation gates already enforced by pull-request CI.
-    runs-on: [self-hosted, macOS, ARM64, apple-m1, ember-performance]
+    runs-on: macos-15
     timeout-minutes: 90
     env:
       BENCHTIME: 500ms
       CGO_ENABLED: '0'
       GOMAXPROCS: '1'
+      EMBER_RUNTIME_ACCEPTANCE_PROFILE: darwin-arm64-github-hosted
 
     steps:
       - name: Check out repository
@@ -369,6 +425,7 @@ jobs:
             printf 'os_release='; sysctl -n kern.osrelease
             printf 'os_machine='; sysctl -n hw.machine
             printf 'cpu='; sysctl -n machdep.cpu.brand_string
+            printf 'runner_environment=%s\n' "$RUNNER_ENVIRONMENT"
             printf 'environment_begin\n'
             env | LC_ALL=C sort | awk -F= '/^(CGO_ENABLED|GOMAXPROCS|GOFLAGS|GODEBUG|LUAU_BIN|BENCHTIME)=/ {print}'
             printf 'environment_end\n'

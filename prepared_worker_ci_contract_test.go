@@ -128,7 +128,7 @@ func TestLinuxAMD64AdmissionCIIncludesResourceSoak(t *testing.T) {
 	}
 }
 
-func TestScheduledControlledM1JobsPinAcceptanceEnvironment(t *testing.T) {
+func TestScheduledHostedARM64JobsPinAcceptanceEnvironment(t *testing.T) {
 	for _, jobName := range []string{"prepared-worker-admission-arm64", "parity", "performance"} {
 		job := workflowJob(t, ".github/workflows/scheduled.yml", jobName)
 		if !strings.Contains(job, `go-version: "1.26.4"`) {
@@ -137,15 +137,29 @@ func TestScheduledControlledM1JobsPinAcceptanceEnvironment(t *testing.T) {
 		if strings.Contains(job, "go-version-file: go.mod") {
 			t.Errorf("scheduled %s job must not float with the go.mod patch version", jobName)
 		}
+		if !strings.Contains(job, "runs-on: macos-15") || strings.Contains(job, "self-hosted") {
+			t.Errorf("scheduled %s job must use GitHub-hosted Darwin ARM64", jobName)
+		}
+		if !strings.Contains(job, "EMBER_RUNTIME_ACCEPTANCE_PROFILE: darwin-arm64-github-hosted") {
+			t.Errorf("scheduled %s job must select the hosted ARM64 acceptance profile", jobName)
+		}
 	}
 
 	admission := workflowJob(t, ".github/workflows/scheduled.yml", "prepared-worker-admission-arm64")
 	if !strings.Contains(admission, `mkdir -p "$evidence"`) {
-		t.Error("scheduled M1 admission must create its evidence parent")
+		t.Error("scheduled hosted ARM64 admission must create its evidence parent")
 	}
-	parity := workflowJob(t, ".github/workflows/scheduled.yml", "parity")
-	if !strings.Contains(parity, "/opt/homebrew/bin/brew info luau --json=v2") {
-		t.Error("scheduled M1 parity fingerprint must use the controlled Homebrew path")
+	for _, jobName := range []string{"prepared-worker-admission-arm64", "parity"} {
+		job := workflowJob(t, ".github/workflows/scheduled.yml", jobName)
+		for label, clause := range map[string]string{
+			"official archive pin": "60541670fc8b8a8289df3ff37bd88e81b8f7b45219b777d6f4afd4e8e3af07ec",
+			"official binary pin":  parityDarwinHostedLuauSHA256,
+			"release asset":        "luau-macos.zip",
+		} {
+			if !strings.Contains(job, clause) {
+				t.Errorf("scheduled %s lacks %s %q", jobName, label, clause)
+			}
+		}
 	}
 }
 

@@ -19,7 +19,13 @@ The active S0 outcome is one exact candidate whose prepared paths either execute
 - Stages 1-6 have their focused local implementation checks. The stage-7 workflow contract declares and statically checks all six no-cgo native target jobs, the paired physical-ISA admission jobs, and bounded 1,024-swap receipts.
 - A clean synthetic exact-candidate worktree passed `CGO_ENABLED=0 go test -count=1 ./...` before the latest acquisition-only timeout repair; the current exact candidate still requires the final complete verification matrix below.
 - Reacquisition found and repaired five evidence-harness defects: frozen capture B now verifies the hard 5 ms floor instead of demanding capture A's 10 ms calibration observation; a structurally sub-floor complete three-sample B calibration is discarded for at most three bounded reacquisitions before publication; runtime parity gives contaminated or external-engine-timed-out points up to 300 one-second reacquisition attempts; the intrinsically slow full VM all-37 capture gets a 60-minute Go test timeout while dynamic/prepared captures retain 35 minutes; and the worker gates buffer complete repeats, discarding a structurally invalid fit for at most three bounded reacquisitions before publication. Rejected samples are never emitted, semantic/protocol or measurement errors still fail immediately, and ratio failures are never retried. External-CPU-contaminated, interrupted, incomplete, stale-candidate, or reboot-lost attempts are diagnostics only and do not count toward S0.
-- No complete same-revision local receipt set or target-native CI receipt set is retained yet. S0 therefore remains unpromoted, and stages 8-17 remain closed.
+- Long performance acquisition is no longer permitted on the developer Mac.
+  The stage-7 contract therefore uses GitHub-hosted physical Darwin ARM64 and
+  Linux x86-64 runners, pins the official Luau archive and executable by
+  digest, and retains the exact CPU/OS/toolchain/oracle fingerprint. Manual
+  dispatch defaults to an `s0` scope that excludes unrelated fuzz, full-VM
+  parity, and profiling jobs. No complete same-revision remote receipt set is
+  retained yet, so S0 remains unpromoted and stages 8-17 remain closed.
 
 Stages 8-17 are follow-on gates only and create no implementation authority in this plan:
 
@@ -294,8 +300,8 @@ After the accepted-plan checkpoint, the main agent executes the following logica
    **Acceptance:** embedded and process adapters produce identical canonical behavior for both rich-game and request/job contracts; failed candidates never disturb active work and every child is reaped.
 
 7. **Acquire and decide S0.**
-   **7A — paired worker admission:** run Final Verification commands 8-10 against `$EMBER_S0_EVIDENCE_ROOT/worker-a` and `$EMBER_S0_EVIDENCE_ROOT/worker-b`; require all-37 correctness, worker and embedded versus Luau median `<=1.00` and p90 `<=1.05`, worker/embedded `<=1.50`, and one exchange per timed Apply.
-   **7B — transport and resource receipts:** require the command-10 comparison to validate 4,096 exchanges at 1,024-byte request and 14,398-byte response with p99 `<=1,666,666 ns`; run Final Verification command 11 and require 1,024 alternating generations with per-child RSS `<=256 MiB`, aggregate RSS `<=512 MiB`, and zero retained descendants.
+   **7A — paired worker admission:** require the GitHub-hosted Darwin ARM64 and Linux x86-64 jobs to retain independent A/B captures; require all-37 correctness, worker and embedded versus Luau median `<=1.00` and p90 `<=1.05`, worker/embedded `<=1.50`, and one exchange per timed Apply.
+   **7B — transport and resource receipts:** require each pair comparison to validate 4,096 exchanges at 1,024-byte request and 14,398-byte response with p99 `<=1,666,666 ns`; require the hosted soak jobs to complete 1,024 alternating generations with per-child RSS `<=256 MiB`, aggregate RSS `<=512 MiB`, and zero retained descendants.
    **7C — portable and native matrix:** run Final Verification command 7 for six `CGO_ENABLED=0` cross-builds, then require command 15's six target-native launch/reload/retirement jobs for Darwin/Linux/Windows on amd64/arm64 and physical arm64/x86-64 performance receipts. Separate explicit authorization is required before any commit, push, or CI dispatch; without it, report the complete local state and remain before S0 PASS.
    **7D — promotion:** after every receipt passes on one exact revision, update only the listed maintained docs/ADRs to record S0 and preserve stages 8-17 as unstarted gates.
    **Acceptance:** complete retained S0 PASS; no partial, cached, cross-build-only, emulated-only, or stale-revision evidence promotes the architecture.
@@ -324,7 +330,11 @@ The FAST verifier runs after all active edits and reports command, duration, exi
 
 ## Final Verification
 
-The main agent runs every command from `/Users/mark/Desktop/ember`, records duration/result, inspects the complete file-scoped diff against this plan, and resolves every in-scope issue before the final checkpoint. Local verification may take up to 3 hours; separately authorized native CI may take another 90 minutes.
+The main agent runs commands 1-7 and 12-14 from the isolated candidate worktree,
+records duration/result, inspects the complete file-scoped diff against this
+plan, and resolves every in-scope issue before the final checkpoint. Commands
+8-11 are remote retained workflow receipts: long benchmark, admission, parity,
+profiling, and soak work must not run on the developer Mac.
 
 1. `go generate ./... && go run ./cmd/ember-vmgen -check` — within 10 minutes; generated artifacts are fresh.
 2. `go test -count=1 ./preparedworker ./preparedworkerbuild` — within 5 minutes; focused worker packages pass uncached.
@@ -333,10 +343,10 @@ The main agent runs every command from `/Users/mark/Desktop/ember`, records dura
 5. `go test -race -count=1 ./preparedworker ./preparedworkerbuild` — within 25 minutes; no race is reported.
 6. `go test -gcflags=all=-d=checkptr=2 -count=1 ./preparedworker ./preparedworkerbuild` — within 15 minutes; no pointer/lifetime violation is reported.
 7. `scripts/check-prepared-worker-targets` — within 20 minutes; all six no-cgo worker/observer cross-builds pass.
-8. `test -n "$EMBER_S0_EVIDENCE_ROOT" && test ! -e "$EMBER_S0_EVIDENCE_ROOT/worker-a" && CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau scripts/check-prepared-worker-admission --capture-pair a --output "$EMBER_S0_EVIDENCE_ROOT/worker-a"` — within 35 minutes; clean capture A passes and freezes its schedule.
-9. `test -n "$EMBER_S0_EVIDENCE_ROOT" && test ! -e "$EMBER_S0_EVIDENCE_ROOT/worker-b" && CGO_ENABLED=0 GOMAXPROCS=1 LUAU_BIN=/opt/homebrew/bin/luau scripts/check-prepared-worker-admission --capture-pair b --schedule-from "$EMBER_S0_EVIDENCE_ROOT/worker-a" --output "$EMBER_S0_EVIDENCE_ROOT/worker-b"` — within 35 minutes; clean capture B passes under A's schedule.
-10. `scripts/check-prepared-worker-admission --compare-pair "$EMBER_S0_EVIDENCE_ROOT/worker-a" "$EMBER_S0_EVIDENCE_ROOT/worker-b"` — within 5 minutes; all frozen correctness, identity, ratio, transport, and stability gates pass.
-11. `test -n "$EMBER_S0_EVIDENCE_ROOT" && test ! -e "$EMBER_S0_EVIDENCE_ROOT/swap-soak" && mkdir "$EMBER_S0_EVIDENCE_ROOT/swap-soak" && CGO_ENABLED=0 EMBER_PREPARED_WORKER_SWAP_SOAK=1 EMBER_PREPARED_WORKER_SWAP_SOAK_OUTPUT="$EMBER_S0_EVIDENCE_ROOT/swap-soak" go test -timeout=35m -run '^TestPreparedWorkerParityAlternatesIndependentStaticAOTGenerations$' -count=1 .` — within 35 minutes; 1,024 swaps and resource bounds pass.
+8. Exact-revision GitHub-hosted Darwin ARM64 paired admission — within 120 minutes; clean capture A passes, freezes its schedule, capture B passes that schedule, and the pair comparison passes.
+9. Exact-revision GitHub-hosted Linux x86-64 paired admission — within 120 minutes; the independent physical-ISA pair and comparison pass.
+10. Both paired-admission artifacts — all frozen correctness, identity, ratio, transport, stability, exact-source, and environment gates pass with no missing file.
+11. GitHub-hosted Darwin ARM64 and Linux x86-64 soak jobs — within 40 minutes; each retains a `resource-summary.tsv` PASS marker for 1,024 swaps and all resource bounds.
 12. `scripts/check` — within 30 minutes; formatting, script self-tests, all Go tests, pure-Go policy, and diff checks pass.
 13. `go vet ./... && go build ./...` — within 20 minutes; vet and normal builds pass.
 14. `git diff --check && git status --short` — within 1 minute; the main-agent diff review confirms only preserved user work and approved-scope changes.

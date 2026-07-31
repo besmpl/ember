@@ -22,19 +22,20 @@ import (
 )
 
 const (
-	parityLuauSHA256           = "c921fa51dbc0d81f9acbddcfa9208aa58f039388301f9fba77d2c5a324cb42bd"
-	parityLuauVersion          = "0.728"
-	parityPlatform             = "Darwin 24.6.0 arm64"
-	parityCPU                  = "Apple M1"
-	parityDarwinBrewPath       = "/opt/homebrew/bin/brew"
-	parityLinuxAMD64LuauSHA256 = "2a6ff9e7c17a0a6fed47c04da67495d1594eda38ce915f01c78c7fa5e9e796b8"
-	parityRawHeader            = "schema_version\tcapture_phase\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\texecution_mode\tengine\trepeat\tacquisition_order\tn_guest_calls\truntime_seed\telapsed_ns\tresult_integer\tworkload_sha256\tprogram_sha256\tenvironment_sha256\tcontaminated"
-	paritySlopeHeader          = "schema_version\tcapture_phase\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\texecution_mode\tengine\trepeat\tslope_ns_per_guest_call\tintercept_ns\tresult_set_sha256\tworkload_sha256\tprogram_sha256\tenvironment_sha256"
-	parityRawDefault           = "tmp/runtime-parity/raw.tsv"
-	parityRepeatCount          = 3
-	parityCaptureSeed          = int64(0x454d42455206)
-	paritySeedVersion          = "guest-seed-v1"
-	paritySeedHash             = "391b333d0af12e8757b34878f0f601c550c1dce902e7077bab3a532889c375fa"
+	parityLuauSHA256             = "c921fa51dbc0d81f9acbddcfa9208aa58f039388301f9fba77d2c5a324cb42bd"
+	parityLuauVersion            = "0.728"
+	parityPlatform               = "Darwin 24.6.0 arm64"
+	parityCPU                    = "Apple M1"
+	parityDarwinBrewPath         = "/opt/homebrew/bin/brew"
+	parityDarwinHostedLuauSHA256 = "22571bbeea6bae3e6b2b3d6cbe41da9d6f3e3a7dd9edd1660b006476ce46db78"
+	parityLinuxAMD64LuauSHA256   = "2a6ff9e7c17a0a6fed47c04da67495d1594eda38ce915f01c78c7fa5e9e796b8"
+	parityRawHeader              = "schema_version\tcapture_phase\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\texecution_mode\tengine\trepeat\tacquisition_order\tn_guest_calls\truntime_seed\telapsed_ns\tresult_integer\tworkload_sha256\tprogram_sha256\tenvironment_sha256\tcontaminated"
+	paritySlopeHeader            = "schema_version\tcapture_phase\tcapture_role\tcapture_pair\tcapture_id\tsource_commit\tcorpus\tname\tlifecycle\texecution_mode\tengine\trepeat\tslope_ns_per_guest_call\tintercept_ns\tresult_set_sha256\tworkload_sha256\tprogram_sha256\tenvironment_sha256"
+	parityRawDefault             = "tmp/runtime-parity/raw.tsv"
+	parityRepeatCount            = 3
+	parityCaptureSeed            = int64(0x454d42455206)
+	paritySeedVersion            = "guest-seed-v1"
+	paritySeedHash               = "391b333d0af12e8757b34878f0f601c550c1dce902e7077bab3a532889c375fa"
 
 	// Cap external activity at three logical cores on every acceptance host.
 	// The host's exact CPU is recorded in the evidence, and the live CPU sample
@@ -105,6 +106,7 @@ type parityHostProfile struct {
 	GOARCH     string
 	Platform   string
 	CPU        string
+	CPUPrefix  string
 	LuauSHA256 string
 	BrewPath   string
 }
@@ -123,6 +125,14 @@ func parityHostProfileFor(name string) (parityHostProfile, error) {
 			CPU:        parityCPU,
 			LuauSHA256: parityLuauSHA256,
 			BrewPath:   parityDarwinBrewPath,
+		}, nil
+	case "darwin-arm64-github-hosted":
+		return parityHostProfile{
+			Name:       name,
+			GOOS:       "darwin",
+			GOARCH:     "arm64",
+			CPUPrefix:  "Apple ",
+			LuauSHA256: parityDarwinHostedLuauSHA256,
 		}, nil
 	case "linux-amd64":
 		return parityHostProfile{
@@ -606,6 +616,9 @@ func inspectParityEnvironment() (parityEnvironment, error) {
 	}
 	if profile.CPU != "" && cpu != profile.CPU {
 		return parityEnvironment{}, fmt.Errorf("parity runner: want CPU %q, got %q", profile.CPU, cpu)
+	}
+	if profile.CPUPrefix != "" && !strings.HasPrefix(cpu, profile.CPUPrefix) {
+		return parityEnvironment{}, fmt.Errorf("parity runner: want CPU prefix %q, got %q", profile.CPUPrefix, cpu)
 	}
 	if cgo := os.Getenv("CGO_ENABLED"); cgo != "0" {
 		return parityEnvironment{}, fmt.Errorf("parity runner: CGO_ENABLED must be 0, got %q", cgo)
@@ -1097,6 +1110,18 @@ func TestRuntimeParityHarness(t *testing.T) {
 		darwinProfile.CPU != "Apple M1" || darwinProfile.LuauSHA256 != parityLuauSHA256 ||
 		darwinProfile.BrewPath != parityDarwinBrewPath {
 		t.Fatalf("default parity profile = %#v", darwinProfile)
+	}
+	hostedDarwinProfile, err := parityHostProfileFor("darwin-arm64-github-hosted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hostedDarwinProfile.Name != "darwin-arm64-github-hosted" ||
+		hostedDarwinProfile.GOOS != "darwin" || hostedDarwinProfile.GOARCH != "arm64" ||
+		hostedDarwinProfile.Platform != "" || hostedDarwinProfile.CPU != "" ||
+		hostedDarwinProfile.CPUPrefix != "Apple " ||
+		hostedDarwinProfile.LuauSHA256 != parityDarwinHostedLuauSHA256 ||
+		hostedDarwinProfile.BrewPath != "" {
+		t.Fatalf("GitHub-hosted Darwin parity profile = %#v", hostedDarwinProfile)
 	}
 	linuxProfile, err := parityHostProfileFor("linux-amd64")
 	if err != nil {
