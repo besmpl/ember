@@ -165,7 +165,14 @@ timing variation to reproduce A's 10 ms calibration observation. Capture B
 buffers one complete three-sample prescribed calibration before publication;
 a structurally sub-floor set is discarded and reacquired at most three times,
 while measurement errors remain terminal and rejected samples are never
-emitted. These thresholds apply to the maximum-minus-minimum measured
+emitted. For each fitted all-37 point, each engine is measured three times and
+the engine order rotates between trials. All 108 raw rows per case are
+retained, while the fitted point is the median of its three trials. The
+admission script independently reconstructs those point medians and slopes
+from `raw.tsv`; a missing trial, changed median, or mismatched result fails
+closed. This prevents one scheduler pause from defining a positive but
+meaningless fit without weakening any ratio threshold or hiding an underlying
+measurement. These thresholds apply to the maximum-minus-minimum measured
 guest-work span,
 not total `Apply` latency, so journal/fsync intercept cannot admit a
 noise-dominated slope. The all-37 worker/Luau and embedded/Luau gates are median
@@ -256,7 +263,9 @@ The three-engine worker gate also buffers one
 complete fitted repeat before publication. A structurally invalid window or
 non-positive/non-finite fit discards that entire repeat and reacquires it up to
 three times; rejected rows are never emitted, while semantic or protocol
-errors still fail immediately and ratio failures are never retried.
+errors still fail immediately and ratio failures are never retried. A ratio
+failure derived from the three-trial point medians is terminal; captures are
+never rerun merely to select a passing ratio.
 
 ```sh
 scripts/runtime-ratio-gate --derive \

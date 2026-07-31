@@ -48,7 +48,7 @@
   `GOTOOLDIR`/include trees, and recaptures inputs after compilation. Focused
   builder, worker, fixture, and six-target cross-build checks pass locally;
   this is not a retained exact-revision native-platform receipt.
-- Local S0 reacquisition exposed five harness defects rather than runtime
+- S0 reacquisition exposed six harness defects rather than runtime
   failures. A frozen worker-B schedule incorrectly required capture A's 10 ms
   calibration observation instead of the hard 5 ms evidence floor, a single
   noisy baseline subtraction could reject B without reacquiring its complete
@@ -64,8 +64,14 @@
   one-second retries inside a 60-minute full-VM or 35-minute dynamic/prepared
   test bound, and buffers each worker
   repeat so a structurally invalid fit is discarded for at most three bounded
-  reacquisitions before any rows are published. Semantic/protocol errors and
-  valid ratio failures are never retried. Attempts interrupted or rejected by
+  reacquisitions before any rows are published. A hosted attempt then showed
+  that one positive finite timing per engine/point could still turn a VM
+  scheduler pause into a formally valid but meaningless fitted slope. Each
+  all-37 point now retains three order-rotated trials per engine and fits their
+  median; the verifier independently reconstructs every median and slope from
+  the complete raw evidence. Semantic/protocol errors and valid ratio failures
+  are never retried, and ratio thresholds are unchanged. Attempts interrupted
+  or rejected by
   external CPU contamination are not promotion evidence and are never
   converted into PASS.
 
