@@ -3,6 +3,7 @@ package preparedworker
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"sync"
 )
@@ -27,31 +28,47 @@ func (osProcessLauncher) Launch(artifact *processArtifact) (*processChild, error
 	}
 	command := exec.Command(artifact.executable)
 	command.Env = workerProcessEnvironment()
+	return launchWorkerCommand(command)
+}
+
+func launchWorkerCommand(command *exec.Cmd) (*processChild, error) {
+	if command == nil {
+		return nil, fmt.Errorf("prepared worker process backend: nil command")
+	}
+	if command.Stdin != nil || command.Stdout != nil {
+		return nil, fmt.Errorf("prepared worker process backend: command transport is already configured")
+	}
 	configureWorkerCommand(command)
 	lease, err := newWorkerParentLease(command)
 	if err != nil {
 		return nil, fmt.Errorf("prepared worker process backend: establish parent lease: %w", err)
 	}
-	input, err := command.StdinPipe()
+	workerInput, input, err := os.Pipe()
 	if err != nil {
 		_ = lease.Close()
 		return nil, fmt.Errorf("prepared worker process backend: open stdin: %w", err)
 	}
-	output, err := command.StdoutPipe()
+	output, workerOutput, err := os.Pipe()
 	if err != nil {
+		_ = workerInput.Close()
 		_ = input.Close()
 		_ = lease.Close()
 		return nil, fmt.Errorf("prepared worker process backend: open stdout: %w", err)
 	}
+	command.Stdin = workerInput
+	command.Stdout = workerOutput
 	stderr := &boundedProcessBuffer{limit: processStderrBytes}
 	command.Stderr = stderr
 	if err := command.Start(); err != nil {
+		_ = workerInput.Close()
 		_ = input.Close()
 		_ = output.Close()
+		_ = workerOutput.Close()
 		_ = lease.Close()
 		return nil, err
 	}
-	if err := lease.AfterStart(); err != nil {
+	workerPipeErr := errors.Join(workerInput.Close(), workerOutput.Close())
+	if err := errors.Join(workerPipeErr, lease.AfterStart()); err != nil {
 		_ = command.Process.Kill()
 		_ = command.Wait()
 		_ = input.Close()

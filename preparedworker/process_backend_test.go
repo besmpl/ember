@@ -6,12 +6,49 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
 	"time"
 )
+
+const processLauncherFinalFrameChild = "EMBER_PROCESS_LAUNCHER_FINAL_FRAME_CHILD"
+
+func TestOSProcessLauncherRetainsFinalFrameAfterWait(t *testing.T) {
+	if os.Getenv(processLauncherFinalFrameChild) == "1" {
+		if err := writeProcessFrame(os.Stdout, processFrame{
+			Kind: processMessageClosed, Correlation: 1,
+		}, processMaxFrameBytes); err != nil {
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+
+	command := exec.Command(os.Args[0], "-test.run=^TestOSProcessLauncherRetainsFinalFrameAfterWait$")
+	command.Env = append(os.Environ(), processLauncherFinalFrameChild+"=1")
+	child, err := launchWorkerCommand(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(child.closeTransport)
+	select {
+	case err := <-child.wait:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("helper process did not exit")
+	}
+	frame, err := decodeProcessFrame(child.output, 0)
+	if err != nil {
+		t.Fatalf("decode final frame after process wait: %v", err)
+	}
+	if frame.Kind != processMessageClosed || frame.Correlation != 1 || len(frame.Payload) != 0 {
+		t.Fatalf("final frame = %#v", frame)
+	}
+}
 
 func TestProcessPreparerVerifiesHandshakeAndRunsOneExchangePerApply(t *testing.T) {
 	limits := processProtocolTestLimits()

@@ -221,6 +221,14 @@ rejects creation-order-impossible edges so rapid PID reuse cannot attach an
 older unrelated process to a newly launched worker. The observer is test-only
 and does not widen `Runner`, `Reload`, or EPW2.
 
+The process launcher owns the parent ends of explicit `os.Pipe` transports.
+It does not use `exec.Cmd.StdinPipe` or `StdoutPipe`: `Cmd.Wait` closes those
+managed endpoints after process exit and can otherwise race the parent's final
+`CLOSED` decode. `TestOSProcessLauncherRetainsFinalFrameAfterWait` starts a
+real helper process, waits for exit first, and then proves that the complete
+final protocol frame remains readable. The one-Wait process owner and ordinary
+transport cleanup remain unchanged.
+
 Cross-build all declared worker targets with:
 
 ```sh

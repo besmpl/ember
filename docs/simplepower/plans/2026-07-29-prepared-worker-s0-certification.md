@@ -28,7 +28,13 @@ The active S0 outcome is one exact candidate whose prepared paths either execute
   retained yet. The first hosted attempt passed all six native target jobs and
   both 1,024-swap soaks but exposed the single-trial slope defect in the Darwin
   ARM64 and Linux x86-64 admission jobs; that attempt is diagnostic evidence,
-  not promotion evidence. S0 remains unpromoted and stages 8-17 remain closed.
+  not promotion evidence. A subsequent exact hosted attempt passed the native
+  jobs again but exposed a real process-lifetime defect during the Linux soak:
+  `exec.Cmd.Wait` could close a `StdoutPipe` while the retiring parent was still
+  decoding the worker's final `CLOSED` frame. The launcher now owns explicit
+  `os.Pipe` parent endpoints, and a real-process regression reads the final
+  frame after Wait has completed. That repair invalidates the in-flight
+  admission receipts. S0 remains unpromoted and stages 8-17 remain closed.
 
 Stages 8-17 are follow-on gates only and create no implementation authority in this plan:
 

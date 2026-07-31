@@ -74,6 +74,15 @@
   or rejected by
   external CPU contamination are not promotion evidence and are never
   converted into PASS.
+- A later exact hosted Linux 1,024-swap receipt exposed an implementation
+  defect at retirement: the launcher used `exec.Cmd.StdoutPipe` while its sole
+  Wait owner ran concurrently, allowing Wait to close the parent's response
+  descriptor before the final `CLOSED` frame was decoded. The launcher now
+  uses explicit `os.Pipe` endpoints owned by the parent, while the child gets
+  only inherited copies. A real-process regression waits for child exit before
+  decoding the final frame, reproduces the former `file already closed`
+  failure, and proves the new ownership ordering. The failed soak and every
+  in-flight receipt from that revision are diagnostic only.
 
 ## Active execution path
 
