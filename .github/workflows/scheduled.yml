@@ -116,7 +116,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: "1.26.4"
           cache: false
 
       - name: Capture paired all-37 EPW2 admission
@@ -124,6 +124,7 @@ jobs:
         run: |
           set -euo pipefail
           evidence="$RUNNER_TEMP/ember-prepared-worker-arm64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$evidence"
           scripts/check-prepared-worker-admission \
             --capture-pair a \
             --output "$evidence/a"
@@ -215,7 +216,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: "1.26.4"
           cache: false
 
       - name: Select parity artifact directory
@@ -257,7 +258,7 @@ jobs:
             printf 'cpu='; sysctl -n machdep.cpu.brand_string
             printf 'luau_path=%s\n' "$LUAU_BIN"
             printf 'luau_sha256='; shasum -a 256 "$LUAU_BIN" | awk '{print $1}'
-            printf 'luau_homebrew_info_begin\n'; brew info luau --json=v2; printf 'luau_homebrew_info_end\n'
+            printf 'luau_homebrew_info_begin\n'; /opt/homebrew/bin/brew info luau --json=v2; printf 'luau_homebrew_info_end\n'
             printf 'environment_begin\n'
             env | LC_ALL=C sort | awk -F= '/^(CGO_ENABLED|GOMAXPROCS|GOFLAGS|GODEBUG|LUAU_BIN|BENCHTIME|RUNTIME_PARITY_CASES|RUNTIME_PARITY_RAW)=/ {print}'
             printf 'environment_end\n'
@@ -322,7 +323,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: "1.26.4"
           cache: false
 
       - name: Select performance artifact directory

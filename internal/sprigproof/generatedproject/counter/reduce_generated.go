@@ -86,7 +86,7 @@ func Reduce(sprig_ctx context.Context, sprig_b1 []Reading, sprig_limit uint64) (
 		return Result{}, errors.New("sprig: nil context")
 	}
 	sprig_remaining := sprig_limit
-	_ = sprig_math.MinInt64
+	_ = int64(sprig_math.MinInt64)
 	if err := sprig_poll(sprig_ctx, &sprig_remaining); err != nil {
 		return Result{}, err
 	}

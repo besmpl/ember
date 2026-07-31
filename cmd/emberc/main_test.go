@@ -104,7 +104,7 @@ func TestRunGeneratesChecksAndFreshWriteIsNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o644 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o644 {
 		t.Fatalf("output mode = %v, want 0644", info.Mode())
 	}
 }

@@ -104,12 +104,12 @@ replace github.com/besmpl/ember => %s
 		t.Fatalf("repeated mixed compilation identities differ:\n%s\n%s", identities, repeatedIdentities)
 	}
 	wantIdentities := map[string]string{
-		"layout":        "f7374a3c394fc1c3ab46f527fd4e46bb74b484a2b7b40ff824d3f239105da286",
+		"layout":        "16e6d08c3a1ce7b1023530845f48590b469e51b021400a27df7f9176fea44b3a",
 		"seed_program":  "b5f1ada51772f913502ae4a0cb40790dcfb4f98f620412f33e35df86b5b543f9",
 		"seed_set":      "ab879222f8fb1795de30d5c2c958e3a1253390ee2ff314ec54c8c266ae1c1a67",
 		"sprig_package": "e92a97f8e5fc66e6531402275e1e3f02a9e869df10314603ecc4a7e1c32fb42b",
 		"sprig_project": "d06d57d8034c95e7619a3781a4fb32475d71ef97fed3bbcfb8807053c2f0374f",
-		"sprig_set":     "8fd86e4a044cf616356881fe2a8a055bf147f110cb0a81f80456de880ea8d76b",
+		"sprig_set":     "fae4349553ee6e4d68731e64ca23d1c44142ded3e9721fbcd2edfa3dae4f3bc2",
 	}
 	if got := identityMap(t, identities); !reflect.DeepEqual(got, wantIdentities) {
 		t.Fatalf("mixed compiler identities = %#v, want %#v", got, wantIdentities)

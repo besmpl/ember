@@ -99,7 +99,11 @@ func TestScheduledPhysicalSoaksRetainBoundedPassReceipts(t *testing.T) {
 
 func TestLinuxAMD64AdmissionCIIncludesResourceSoak(t *testing.T) {
 	job := workflowJob(t, ".github/workflows/ci.yml", "linux-amd64-performance")
+	admission := workflowStep(t, job, "Run paired Linux x86-64 EPW2 admission")
 	step := workflowStep(t, job, "Run Linux x86-64 resource-bounded reload soak")
+	if !strings.Contains(admission, `mkdir -p "${evidence}"`) {
+		t.Error("linux-amd64-performance admission must create its evidence parent")
+	}
 
 	required := map[string]string{
 		"pipeline failure propagation": `set -euo pipefail`,
@@ -121,6 +125,27 @@ func TestLinuxAMD64AdmissionCIIncludesResourceSoak(t *testing.T) {
 	upload := strings.Index(job, "uses: actions/upload-artifact@v4")
 	if soak < 0 || upload < 0 || soak > upload {
 		t.Errorf("resource soak must run before evidence upload: soak index %d, upload index %d", soak, upload)
+	}
+}
+
+func TestScheduledControlledM1JobsPinAcceptanceEnvironment(t *testing.T) {
+	for _, jobName := range []string{"prepared-worker-admission-arm64", "parity", "performance"} {
+		job := workflowJob(t, ".github/workflows/scheduled.yml", jobName)
+		if !strings.Contains(job, `go-version: "1.26.4"`) {
+			t.Errorf("scheduled %s job must pin the acceptance Go version", jobName)
+		}
+		if strings.Contains(job, "go-version-file: go.mod") {
+			t.Errorf("scheduled %s job must not float with the go.mod patch version", jobName)
+		}
+	}
+
+	admission := workflowJob(t, ".github/workflows/scheduled.yml", "prepared-worker-admission-arm64")
+	if !strings.Contains(admission, `mkdir -p "$evidence"`) {
+		t.Error("scheduled M1 admission must create its evidence parent")
+	}
+	parity := workflowJob(t, ".github/workflows/scheduled.yml", "parity")
+	if !strings.Contains(parity, "/opt/homebrew/bin/brew info luau --json=v2") {
+		t.Error("scheduled M1 parity fingerprint must use the controlled Homebrew path")
 	}
 }
 

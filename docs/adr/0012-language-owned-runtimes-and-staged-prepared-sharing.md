@@ -808,11 +808,11 @@ Repeated compilation pins Sprig Project
 Sprig package
 `e92a97f8e5fc66e6531402275e1e3f02a9e869df10314603ecc4a7e1c32fb42b`,
 Sprig Set
-`8fd86e4a044cf616356881fe2a8a055bf147f110cb0a81f80456de880ea8d76b`,
+`fae4349553ee6e4d68731e64ca23d1c44142ded3e9721fbcd2edfa3dae4f3bc2`,
 Seed Program and Set identities recorded above, and mixed Layout
-`f7374a3c394fc1c3ab46f527fd4e46bb74b484a2b7b40ff824d3f239105da286`.
-The generated Sprig source is 3,395 bytes with SHA-256
-`f2c4908c957902413eed32c1bea0123e4ffc3a5423a204723b17571fec40e0d6`;
+`16e6d08c3a1ce7b1023530845f48590b469e51b021400a27df7f9176fea44b3a`.
+The generated Sprig source is 3,402 bytes with SHA-256
+`bbda8b676e490ad73ed273600ca736681178fc793fc4f631ae7bad3689b1ecec`;
 the 1,216-byte application handler has SHA-256
 `93e8291be58f31ad94af156c5ff9be955de55e28564af94b29cc9d83ce0175f7`.
 

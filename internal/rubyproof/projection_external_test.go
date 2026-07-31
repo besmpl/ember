@@ -185,7 +185,11 @@ func TestRubyProjectionApplicationBuildsTwoGenerationsWithoutCompilerOrSharedRun
 			t.Fatalf("binary symbols do not retain concrete generated package %q", required)
 		}
 	}
-	for _, forbidden := range []string{"preparedsource", "preparedworker", "registry", "plugin", "Backend", "Compiler"} {
+	// Do not match the generic word "registry": Windows binaries legitimately
+	// retain internal/syscall/windows/registry. The package graph and the exact
+	// compiler-name checks above prove the tooling exclusion without that false
+	// positive.
+	for _, forbidden := range []string{"preparedsource", "preparedworker", "plugin", "Backend", "Compiler"} {
 		if strings.Contains(symbols, forbidden) {
 			t.Fatalf("projection binary retained forbidden shared/tooling symbol %q", forbidden)
 		}

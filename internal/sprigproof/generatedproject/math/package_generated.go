@@ -15,7 +15,7 @@ func sprig_checked_add(a, b int64) (int64, bool) {
 	return sum, (b > 0 && sum < a) || (b < 0 && sum > a)
 }
 
-var _ = sprig_math.MinInt64
+var _ int64 = sprig_math.MinInt64
 
 func Add(sprig_b3 int64, sprig_b4 int64) (int64, DomainCode) {
 	sprigpure_sum1, sprigpure_overflow2 := sprig_checked_add(sprig_b3, sprig_b4)

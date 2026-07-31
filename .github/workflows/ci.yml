@@ -167,6 +167,7 @@ jobs:
         run: |
           set -euo pipefail
           evidence="${RUNNER_TEMP}/ember-prepared-worker-linux-amd64"
+          mkdir -p "${evidence}"
           scripts/check-prepared-worker-admission \
             --capture-pair a \
             --output "${evidence}/a"

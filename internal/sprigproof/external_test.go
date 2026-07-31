@@ -492,7 +492,7 @@ func assertCompileCounts(t *testing.T, phase, trace string, want map[string]int)
 	for pkg, n := range want {
 		got := 0
 		for _, line := range strings.Split(trace, "\n") {
-			if strings.Contains(line, "/compile ") && strings.Contains(line, " -p "+pkg+" ") {
+			if isGoCompileTrace(line) && strings.Contains(line, " -p "+pkg+" ") {
 				got++
 			}
 		}
@@ -501,6 +501,40 @@ func assertCompileCounts(t *testing.T, phase, trace string, want map[string]int)
 		}
 	}
 }
+
+func isGoCompileTrace(line string) bool {
+	output := strings.Index(line, " -o ")
+	if output < 0 {
+		return false
+	}
+	tool := strings.Trim(strings.TrimSpace(line[:output]), `"`)
+	tool = strings.ReplaceAll(tool, `\`, "/")
+	if slash := strings.LastIndexByte(tool, '/'); slash >= 0 {
+		tool = tool[slash+1:]
+	}
+	return tool == "compile" || tool == "compile.exe"
+}
+
+func TestGoCompileTraceRecognizesNativeToolPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{"Unix", `/opt/go/pkg/tool/darwin_arm64/compile -o $WORK/b001/_pkg_.a -p main -pack main.go`, true},
+		{"Windows", `"C:\hostedtoolcache\windows\go\1.26.5\x64\pkg\tool\windows_amd64\compile.exe" -o "$WORK\b001\_pkg_.a" -p main -pack main.go`, true},
+		{"linker", `/opt/go/pkg/tool/darwin_arm64/link -o app -buildmode=exe`, false},
+		{"compiler argument", `/usr/bin/env -o output -p compile`, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isGoCompileTrace(test.line); got != test.want {
+				t.Fatalf("isGoCompileTrace(%q) = %v, want %v", test.line, got, test.want)
+			}
+		})
+	}
+}
+
 func packageBuildIDs(t *testing.T, root string, env []string) map[string]string {
 	t.Helper()
 	out := map[string]string{}

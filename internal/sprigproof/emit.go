@@ -170,7 +170,7 @@ func (e *goEmitter) emit(packageName string) (string, error) {
 	e.indent++
 	e.line("if sprig_ctx == nil { return Result{}, errors.New(\"sprig: nil context\") }")
 	e.line("sprig_remaining := sprig_limit")
-	e.line("_ = %s.MinInt64", e.mathName)
+	e.line("_ = int64(%s.MinInt64)", e.mathName)
 	e.line("if err := %s(sprig_ctx, &sprig_remaining); err != nil { return Result{}, err }", e.pollName)
 	e.line("if len(%s) > %d { return Result{}, fmt.Errorf(\"sprig: input length %%d exceeds limit %%d\", len(%s), %d) }", parameterName, maximumInput, parameterName, maximumInput)
 	e.emitStatements(e.program.function.body)
@@ -370,7 +370,7 @@ func (e *goEmitter) emitPurePackage(packageName string) (string, error) {
 	e.line("type DomainCode int64")
 	e.line("const ( DomainOverflow DomainCode = 1; DomainDivideByZero DomainCode = 2 )")
 	e.line("func %s(a,b int64)(int64,bool){ sum:=a+b; return sum,(b>0&&sum<a)||(b<0&&sum>a) }", e.checkedAdd)
-	e.line("var _ = %s.MinInt64", e.mathName)
+	e.line("var _ int64 = %s.MinInt64", e.mathName)
 	e.line("")
 	e.emitImportedHelpers()
 	names := make([]string, 0, len(e.program.pkg.functions))
