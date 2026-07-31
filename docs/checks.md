@@ -172,8 +172,16 @@ admission script independently reconstructs those point medians and slopes
 from `raw.tsv`; a missing trial, changed median, or mismatched result fails
 closed. This prevents one scheduler pause from defining a positive but
 meaningless fit without weakening any ratio threshold or hiding an underlying
-measurement. These thresholds apply to the maximum-minus-minimum measured
-guest-work span,
+measurement. Each repeat is one acquisition block: all three engines run at
+every point, and their order rotates across trials and points. The comparator
+therefore divides slopes only within the same repeat. It sorts the three
+matched ratios, uses the second as the median, and uses the third (the worst
+matched repeat) as nearest-rank p90. Cartesian recombination is invalid here:
+it can divide the slowest numerator time block by the fastest denominator time
+block and turn common frequency or host drift into an unrelated hidden
+stability gate. The admission script independently derives the same blocked
+ratios from `slopes.tsv`. These thresholds apply to the
+maximum-minus-minimum measured guest-work span,
 not total `Apply` latency, so journal/fsync intercept cannot admit a
 noise-dominated slope. The all-37 worker/Luau and embedded/Luau gates are median
 at most `1.00` and p90 at most `1.05`. The production-shaped rich-turn gate
@@ -290,11 +298,16 @@ The ratio gate rejects any missing, extra, duplicate, contaminated, malformed,
 nonpositive, cross-schema, dynamically relabeled, seed-changing, result-
 mismatched, workload-mismatched, or provenance-mismatched row. It recomputes
 every slope result-set hash from raw integer checksums and independently checks
-all 37 cases in both captures. Dynamic acceptance defaults to per-row median at
-most 1.85 and p90 at most 2.0. Prepared final evidence uses median at most 1.0
-and p90 at most 1.05. Candidate/current comparisons bind the
-manifest and both baseline directories and require each paired median to stay
-at or below 1.05.
+all 37 cases in both captures. Within one capture, every repeat is an
+acquisition block containing both order-rotated engines, so the gate forms
+three same-repeat Ember/Luau ratios. Their second value is the median and their
+third (worst matched repeat) is nearest-rank p90; cross-repeat Cartesian
+recombination would turn common host drift into an unrelated stability gate.
+Dynamic acceptance defaults to median at most 1.85 and p90 at most 2.0.
+Prepared final evidence uses median at most 1.0 and p90 at most 1.05.
+Candidate/current comparisons are separate captures rather than acquisition
+blocks, so they retain Cartesian comparison, bind the manifest and both
+baseline directories, and require each paired median to stay at or below 1.05.
 
 Allocation evidence is separate. Capture two baselines with explicit pairs,
 derive the exact 56-row ceiling manifest, then compare candidate evidence:

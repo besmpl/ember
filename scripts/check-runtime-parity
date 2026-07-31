@@ -130,23 +130,21 @@ gate_single_capture() {
 			for (id in ids) {
 				delete ratio
 				count = 0
-				for (ember_repeat = 1; ember_repeat <= 3; ember_repeat++) {
-					for (luau_repeat = 1; luau_repeat <= 3; luau_repeat++) {
-						e = id SUBSEP "ember" SUBSEP ember_repeat
-						l = id SUBSEP "luau" SUBSEP luau_repeat
-						if (!(e in slope) || !(l in slope) || slope[e] <= 0 || slope[l] <= 0) invalid = 1
-						else ratio[++count] = slope[e] / slope[l]
-					}
+				for (repeat = 1; repeat <= 3; repeat++) {
+					e = id SUBSEP "ember" SUBSEP repeat
+					l = id SUBSEP "luau" SUBSEP repeat
+					if (!(e in slope) || !(l in slope) || slope[e] <= 0 || slope[l] <= 0) invalid = 1
+					else ratio[++count] = slope[e] / slope[l]
 				}
-				if (count != 9) invalid = 1
+				if (count != 3) invalid = 1
 				for (i = 2; i <= count; i++) {
 					value = ratio[i]
 					j = i - 1
 					while (j >= 1 && ratio[j] > value) { ratio[j + 1] = ratio[j]; j-- }
 					ratio[j + 1] = value
 				}
-				status = (ratio[5] <= median_max && ratio[9] <= p90_max ? "PASS" : "FAIL")
-				printf "%s\tmedian=%.6g\tp90=%.6g\t%s\n", id, ratio[5], ratio[9], status
+				status = (ratio[2] <= median_max && ratio[3] <= p90_max ? "PASS" : "FAIL")
+				printf "%s\tmedian=%.6g\tp90=%.6g\t%s\n", id, ratio[2], ratio[3], status
 				if (status == "FAIL") failed = 1
 			}
 			if (invalid) exit 2
@@ -235,6 +233,15 @@ schema_version	capture_phase	capture_role	capture_pair	capture_id	source_commit	
 EOF
 	if apply_capture_policy speed2x 0 "$q/failing-slopes.tsv" machine >/dev/null 2>&1; then die 'known-failing speed2x fixture passed'; fi
 	apply_capture_policy speed2x 1 "$q/failing-slopes.tsv" machine >/dev/null || die 'capture-only rejected valid failing evidence'
+	awk -F '\t' 'BEGIN { OFS = "\t" } NR == 1 { print; next } {
+		factor = ($12 == 1 ? 1 : $12 == 2 ? 2 : 4)
+		$13 = ($11 == "ember" ? 150 : 100) * factor
+		print
+	}' "$q/failing-slopes.tsv" >"$q/matched-drift-slopes.tsv"
+	apply_capture_policy speed2x 0 "$q/matched-drift-slopes.tsv" machine >/dev/null || die 'matched common-drift fixture failed'
+	awk -F '\t' 'BEGIN { OFS = "\t" } $11 == "ember" && $12 == 2 { $13 = 420 } { print }' \
+		"$q/matched-drift-slopes.tsv" >"$q/over-matched-drift-slopes.tsv"
+	if apply_capture_policy speed2x 0 "$q/over-matched-drift-slopes.tsv" machine >/dev/null 2>&1; then die 'over-limit matched repeat passed'; fi
 	sed 's/speed2x/prepared-parity1x/g; s/	guest_batch	machine	/	guest_batch	prepared	/g; s/	210	/	101	/g' "$q/failing-slopes.tsv" >"$q/prepared-slopes.tsv"
 	if apply_capture_policy prepared-parity1x 0 "$q/prepared-slopes.tsv" prepared >/dev/null 2>&1; then die 'prepared 1.01x fixture passed'; fi
 	if gate_single_capture prepared-parity1x prepared "$q/failing-slopes.tsv" >/dev/null 2>&1; then die 'prepared policy accepted dynamic evidence'; fi

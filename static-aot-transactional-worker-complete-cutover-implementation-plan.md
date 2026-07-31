@@ -48,7 +48,7 @@
   `GOTOOLDIR`/include trees, and recaptures inputs after compilation. Focused
   builder, worker, fixture, and six-target cross-build checks pass locally;
   this is not a retained exact-revision native-platform receipt.
-- S0 reacquisition exposed six harness defects rather than runtime
+- S0 reacquisition exposed seven harness defects rather than runtime
   failures. A frozen worker-B schedule incorrectly required capture A's 10 ms
   calibration observation instead of the hard 5 ms evidence floor, a single
   noisy baseline subtraction could reject B without reacquiring its complete
@@ -69,8 +69,15 @@
   scheduler pause into a formally valid but meaningless fitted slope. Each
   all-37 point now retains three order-rotated trials per engine and fits their
   median; the verifier independently reconstructs every median and slope from
-  the complete raw evidence. Semantic/protocol errors and valid ratio failures
-  are never retried, and ratio thresholds are unchanged. Attempts interrupted
+  the complete raw evidence. A later hosted Darwin capture exposed that the
+  comparator then discarded the acquisition blocks and formed Cartesian ratios
+  across different repeats. It now compares only slopes from the same
+  order-rotated repeat, sorts those three matched ratios, and treats the worst
+  as nearest-rank p90. This removes common whole-repeat host drift from the
+  implementation effect without changing the `1.00/1.05` limits. The failed
+  artifact remains diagnostic and a fresh exact revision is required.
+  Semantic/protocol errors and valid ratios under the frozen blocked comparator
+  are never retried. Attempts interrupted
   or rejected by
   external CPU contamination are not promotion evidence and are never
   converted into PASS.
@@ -175,6 +182,7 @@ commands, time bounds, and two workflow checkpoints are in
 ### 7. Acquire and decide S0
 
 - **7A — Paired worker admission:** acquire two frozen-schedule all-37 pairs;
+  derive each capture's median/p90 from three matched repeat-block ratios, then
   require worker and embedded versus Luau median `<=1.00`/p90 `<=1.05`, worker/
   embedded `<=1.50`, exact results, and one timed exchange.
 - **7B — Transport and resources:** require 4,096 fixed-size exchanges at p99

@@ -81,6 +81,7 @@ make_fixture() {
 	pair=$4
 	source_commit=$5
 	phase=${6:-speed2x}
+	repeat_drift=${7:-0}
 	mkdir -p "$directory"
 	printf '%s\n' 'fixture environment' >"$directory/environment.tsv"
 	environment_hash=$(hash_file "$directory/environment.tsv")
@@ -92,7 +93,8 @@ make_fixture() {
 	esac
 	awk -v ratio="$ratio" -v phase="$phase" -v role="$role" -v pair="$pair" \
 		-v source="$source_commit" -v environment="$environment_hash" \
-		-v execution_mode="$execution_mode" -v capture_id="id-$phase-$role-$pair" '
+		-v execution_mode="$execution_mode" -v capture_id="id-$phase-$role-$pair" \
+		-v repeat_drift="$repeat_drift" '
 	BEGIN {
 		OFS = "\t"
 		raw = "'"$directory"'/raw.tsv"
@@ -108,18 +110,19 @@ make_fixture() {
 			corpus = (case_index <= 10 ? "top10" : case_index <= 12 ? "classic" : "scenario")
 			name = cases[case_index]
 			for (repeat = 1; repeat <= 3; repeat++) {
+				factor = (repeat_drift ? (repeat == 1 ? 1 : repeat == 2 ? 2 : 4) : 1)
 				for (point = 1; point <= 4; point++) {
 					n = (point == 1 ? 1 : point == 2 ? 10 : point == 3 ? 100 : 1000)
 					result = n * 17
 					for (engine_index = 1; engine_index <= 2; engine_index++) {
 						engine = (engine_index == 1 ? "ember" : "luau")
-						slope = (engine == "ember" ? ratio * 100 : 100)
+						slope = (engine == "ember" ? ratio * 100 : 100) * factor
 						order = (repeat - 1) * 8 + (point - 1) * 2 + engine_index
 						print 2,phase,role,pair,capture_id,source,corpus,name,"guest_batch",execution_mode,engine,repeat,order,n,76198126637574,1000+slope*n,result,workload,program,environment,0 >> raw
 					}
 				}
-				print 2,phase,role,pair,capture_id,source,corpus,name,"guest_batch",execution_mode,"ember",repeat,ratio*100,1000,result_set,workload,program,environment >> slopes
-				print 2,phase,role,pair,capture_id,source,corpus,name,"guest_batch",execution_mode,"luau",repeat,100,1000,result_set,workload,program,environment >> slopes
+				print 2,phase,role,pair,capture_id,source,corpus,name,"guest_batch",execution_mode,"ember",repeat,ratio*100*factor,1000,result_set,workload,program,environment >> slopes
+				print 2,phase,role,pair,capture_id,source,corpus,name,"guest_batch",execution_mode,"luau",repeat,100*factor,1000,result_set,workload,program,environment >> slopes
 			}
 		}
 	}' /dev/null
@@ -139,6 +142,8 @@ if [ "$self_test" -eq 1 ]; then
 	make_fixture "$test_root/over-b" 2.1 candidate b "$source_two"
 	make_fixture "$test_root/prepared-a" 1 candidate a "$source_two" prepared-parity1x
 	make_fixture "$test_root/prepared-b" 1 candidate b "$source_two" prepared-parity1x
+	make_fixture "$test_root/drift-a" 1.5 candidate a "$source_two" speed2x 1
+	make_fixture "$test_root/drift-b" 1.5 candidate b "$source_two" speed2x 1
 	manifest=$test_root/manifest.tsv
 	"$0" --derive --baseline-a "$test_root/a" --baseline-b "$test_root/b" --output "$manifest" >/dev/null
 	cp -R "$test_root/a" "$test_root/incomplete"
@@ -152,6 +157,7 @@ if [ "$self_test" -eq 1 ]; then
 	if "$0" --capture-a "$test_root/ca" --capture-b "$test_root/over-b" >/dev/null 2>&1; then die 'self-test over-2x'; fi
 	if "$0" --capture-a "$test_root/ca" --capture-b "$test_root/cb" --baseline-a "$test_root/a" --baseline-b "$test_root/b" --baseline-manifest "$manifest" >/dev/null 2>&1; then die 'self-test one-pass-one-fail'; fi
 	"$0" --capture-a "$test_root/prepared-a" --capture-b "$test_root/prepared-b" --median-max 1 --p90-max 1.05 >/dev/null || die 'self-test prepared evidence'
+	"$0" --capture-a "$test_root/drift-a" --capture-b "$test_root/drift-b" >/dev/null || die 'self-test matched common drift'
 	cp -R "$test_root/a" "$test_root/missing"
 	sed -i.bak '2d' "$test_root/missing/raw.tsv"
 	rm -f "$test_root/missing/raw.tsv.bak"
@@ -528,10 +534,8 @@ END {
 			id = ids[case_index]
 			count = 0
 			delete ratios
-			for (ember_repeat = 1; ember_repeat <= 3; ember_repeat++) {
-				for (luau_repeat = 1; luau_repeat <= 3; luau_repeat++) {
-					ratios[++count] = slope[tag SUBSEP id SUBSEP "ember" SUBSEP ember_repeat] / slope[tag SUBSEP id SUBSEP "luau" SUBSEP luau_repeat]
-				}
+			for (repeat = 1; repeat <= 3; repeat++) {
+				ratios[++count] = slope[tag SUBSEP id SUBSEP "ember" SUBSEP repeat] / slope[tag SUBSEP id SUBSEP "luau" SUBSEP repeat]
 			}
 			for (ratio_index = 2; ratio_index <= count; ratio_index++) {
 				value = ratios[ratio_index]
@@ -542,8 +546,8 @@ END {
 				}
 				ratios[previous + 1] = value
 			}
-			median = ratios[5]
-			p90 = ratios[9]
+			median = ratios[2]
+			p90 = ratios[3]
 			status = median <= median_max && p90 <= p90_max ? "PASS" : "FAIL"
 			if (status == "FAIL") failed++
 			printf "%s\t%s\tmedian=%.6g\tp90=%.6g\t%s\n", tag, id, median, p90, status

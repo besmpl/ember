@@ -60,6 +60,15 @@ Captures report separately:
   artifact size; and
 - swaps, child counts, retirement, journal release, and cleanup.
 
+Comparators preserve the acquisition design. When implementations are
+order-rotated inside the same repeat, that repeat is a block and ratios compare
+only matched observations from that block; Cartesian recombination is reserved
+for genuinely independent samples. Otherwise host or frequency drift between
+blocks becomes a hidden gate unrelated to the implementation effect. A repair
+to the acquisition or comparator contract is frozen before a fresh candidate
+capture, and every artifact acquired under the replaced contract remains
+diagnostic rather than being reinterpreted as promotion evidence.
+
 The authoritative commands, numeric thresholds, sampling rules, and capture
 formats live in `docs/checks.md` and the repository scripts. This ADR records
 the decision rule rather than duplicating values that would drift.

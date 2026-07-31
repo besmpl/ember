@@ -59,6 +59,27 @@ func TestPreparedWorkerAdmissionGateRequiresBothSlopeAndLuauTargets(t *testing.T
 	}
 }
 
+func TestPreparedWorkerAdmissionGateUsesMatchedRepeatBlocks(t *testing.T) {
+	summary, err := preparedWorkerAdmissionGate(
+		[]float64{90, 120, 100},
+		[]float64{80, 100, 90},
+		[]float64{100, 130, 110},
+	)
+	if err != nil {
+		t.Fatalf("common repeat drift failed matched comparison: %v", err)
+	}
+	if summary.EmbeddedLuauP90 >= 1 || summary.WorkerLuauP90 >= 1 {
+		t.Fatalf("matched summary = %#v, want both deployments faster in every repeat", summary)
+	}
+	if _, err := preparedWorkerAdmissionGate(
+		[]float64{90, 120, 100},
+		[]float64{80, 100, 90},
+		[]float64{100, 100, 110},
+	); err == nil {
+		t.Fatal("one over-limit matched repeat passed")
+	}
+}
+
 func TestPreparedWorkerParityCallScalePreservesPerCallSlope(t *testing.T) {
 	const callScale = 32
 	samples := make(map[int]float64, len(parityIterations))
@@ -1078,19 +1099,19 @@ func preparedWorkerAdmissionGate(
 			parityRepeatCount,
 		)
 	}
-	workerLuau, err := preparedWorkerCrossRatios(worker, luau)
+	workerLuau, err := preparedWorkerMatchedRatios(worker, luau)
 	if err != nil {
 		return preparedWorkerAdmissionSummary{}, err
 	}
-	embeddedLuau, err := preparedWorkerCrossRatios(embedded, luau)
+	embeddedLuau, err := preparedWorkerMatchedRatios(embedded, luau)
 	if err != nil {
 		return preparedWorkerAdmissionSummary{}, err
 	}
 	summary := preparedWorkerAdmissionSummary{
-		WorkerLuauMedian:   workerLuau[4],
-		WorkerLuauP90:      workerLuau[8],
-		EmbeddedLuauMedian: embeddedLuau[4],
-		EmbeddedLuauP90:    embeddedLuau[8],
+		WorkerLuauMedian:   workerLuau[1],
+		WorkerLuauP90:      workerLuau[2],
+		EmbeddedLuauMedian: embeddedLuau[1],
+		EmbeddedLuauP90:    embeddedLuau[2],
 	}
 	for index := range worker {
 		if embedded[index] <= 0 || !finiteParityFloat(embedded[index]) ||
@@ -1119,18 +1140,20 @@ func preparedWorkerAdmissionGate(
 	return summary, nil
 }
 
-func preparedWorkerCrossRatios(left, right []float64) ([]float64, error) {
-	ratios := make([]float64, 0, len(left)*len(right))
-	for _, numerator := range left {
+func preparedWorkerMatchedRatios(left, right []float64) ([]float64, error) {
+	if len(left) != parityRepeatCount || len(right) != parityRepeatCount {
+		return nil, fmt.Errorf("prepared worker gate: want %d matched slopes per engine", parityRepeatCount)
+	}
+	ratios := make([]float64, 0, parityRepeatCount)
+	for index, numerator := range left {
 		if numerator <= 0 || !finiteParityFloat(numerator) {
 			return nil, fmt.Errorf("prepared worker gate: invalid numerator slope %v", numerator)
 		}
-		for _, denominator := range right {
-			if denominator <= 0 || !finiteParityFloat(denominator) {
-				return nil, fmt.Errorf("prepared worker gate: invalid denominator slope %v", denominator)
-			}
-			ratios = append(ratios, numerator/denominator)
+		denominator := right[index]
+		if denominator <= 0 || !finiteParityFloat(denominator) {
+			return nil, fmt.Errorf("prepared worker gate: invalid denominator slope %v", denominator)
 		}
+		ratios = append(ratios, numerator/denominator)
 	}
 	sort.Float64s(ratios)
 	return ratios, nil
