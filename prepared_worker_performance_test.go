@@ -24,7 +24,7 @@ const (
 	preparedWorkerParityCalibrationRuns = 3
 	preparedWorkerParityMaximumScale    = 1024
 	preparedWorkerParityTarget          = 10 * time.Millisecond
-	preparedWorkerParityRepeatAttempts  = 3
+	preparedWorkerRepeatAttemptLimit    = 3
 )
 
 func TestPreparedWorkerAdmissionGateRequiresBothSlopeAndLuauTargets(t *testing.T) {
@@ -151,8 +151,8 @@ func TestPreparedWorkerParityCallScaleRejectsUnmeasurableWindow(t *testing.T) {
 func TestPreparedWorkerParityRepeatReacquiresStructurallyInvalidWindow(t *testing.T) {
 	attempts := 0
 	waits := 0
-	got, err := acquirePreparedWorkerParityRepeat(
-		preparedWorkerParityRepeatAttempts,
+	got, err := acquirePreparedWorkerRepeat(
+		preparedWorkerRepeatAttemptLimit,
 		func() (int, error) {
 			attempts++
 			return attempts, nil
@@ -170,7 +170,7 @@ func TestPreparedWorkerParityRepeatReacquiresStructurallyInvalidWindow(t *testin
 	}
 
 	attempts = 0
-	if _, err := acquirePreparedWorkerParityRepeat(
+	if _, err := acquirePreparedWorkerRepeat(
 		2,
 		func() (int, error) {
 			attempts++
@@ -183,8 +183,8 @@ func TestPreparedWorkerParityRepeatReacquiresStructurallyInvalidWindow(t *testin
 	}
 
 	attempts = 0
-	if _, err := acquirePreparedWorkerParityRepeat(
-		preparedWorkerParityRepeatAttempts,
+	if _, err := acquirePreparedWorkerRepeat(
+		preparedWorkerRepeatAttemptLimit,
 		func() (int, error) {
 			attempts++
 			return 0, fmt.Errorf("semantic failure")
@@ -196,7 +196,7 @@ func TestPreparedWorkerParityRepeatReacquiresStructurallyInvalidWindow(t *testin
 	}
 }
 
-func acquirePreparedWorkerParityRepeat[T any](
+func acquirePreparedWorkerRepeat[T any](
 	maxAttempts int,
 	acquire func() (T, error),
 	validate func(T) error,
@@ -204,7 +204,7 @@ func acquirePreparedWorkerParityRepeat[T any](
 ) (T, error) {
 	var zero T
 	if maxAttempts <= 0 || acquire == nil || validate == nil || wait == nil {
-		return zero, fmt.Errorf("prepared worker parity repeat: invalid acquisition policy")
+		return zero, fmt.Errorf("prepared worker repeat: invalid acquisition policy")
 	}
 	var last error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -222,7 +222,7 @@ func acquirePreparedWorkerParityRepeat[T any](
 		}
 	}
 	return zero, fmt.Errorf(
-		"prepared worker parity repeat: structural validation failed after %d attempts: %w",
+		"prepared worker repeat: structural validation failed after %d attempts: %w",
 		maxAttempts,
 		last,
 	)
@@ -495,8 +495,8 @@ func TestPreparedWorkerAll37AdmissionLive(t *testing.T) {
 		workloadHash := parityStringSHA256(seededSource)
 		programHash := parityStringSHA256(programSource)
 		for repeat := 1; repeat <= parityRepeatCount; repeat++ {
-			acceptedRepeat, err := acquirePreparedWorkerParityRepeat(
-				preparedWorkerParityRepeatAttempts,
+			acceptedRepeat, err := acquirePreparedWorkerRepeat(
+				preparedWorkerRepeatAttemptLimit,
 				func() (preparedWorkerParityRepeat, error) {
 					candidateRepeat := newPreparedWorkerParityRepeat()
 					for iterationIndex, baseN := range parityIterations {

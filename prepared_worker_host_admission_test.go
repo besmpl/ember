@@ -2,7 +2,9 @@ package ember_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -25,6 +27,21 @@ const (
 )
 
 var preparedWorkerHostWork = [...]int{200, 2000, 10_000, 20_000}
+
+type preparedWorkerHostSlopeMeasurement struct {
+	engine     string
+	trial      int
+	order      [2]string
+	work       int
+	elapsed    time.Duration
+	resultHash string
+}
+
+type preparedWorkerHostSlopeRepeat struct {
+	timings      map[string]map[int]float64
+	measurements []preparedWorkerHostSlopeMeasurement
+	resultHash   string
+}
 
 type preparedWorkerCaptureContext struct {
 	ID              string
@@ -96,6 +113,54 @@ func TestPreparedWorkerHostAdmissionGate(t *testing.T) {
 				t.Fatal("invalid host admission passed")
 			}
 		})
+	}
+}
+
+func TestPreparedWorkerHostSlopeRepeatPublishesOnlyAcceptedAttempt(t *testing.T) {
+	invalid := preparedWorkerHostSlopeRepeat{
+		timings: map[string]map[int]float64{
+			"embedded": {200: 8e6, 2000: 7e6, 10_000: 6e6, 20_000: 5e6},
+			"worker":   {200: 8e6, 2000: 7e6, 10_000: 6e6, 20_000: 5e6},
+		},
+		measurements: []preparedWorkerHostSlopeMeasurement{{engine: "embedded", resultHash: "rejected"}},
+		resultHash:   "rejected",
+	}
+	valid := preparedWorkerHostSlopeRepeat{
+		timings: map[string]map[int]float64{
+			"embedded": {200: 5.2e6, 2000: 7e6, 10_000: 15e6, 20_000: 25e6},
+			"worker":   {200: 5.4e6, 2000: 7.2e6, 10_000: 15.2e6, 20_000: 25.2e6},
+		},
+		measurements: []preparedWorkerHostSlopeMeasurement{{
+			engine: "embedded", trial: 1, order: [2]string{"embedded", "worker"}, work: 200,
+			elapsed: time.Millisecond, resultHash: "accepted",
+		}},
+		resultHash: "accepted",
+	}
+	attempts := 0
+	waits := 0
+	accepted, err := acquirePreparedWorkerRepeat(
+		preparedWorkerRepeatAttemptLimit,
+		func() (preparedWorkerHostSlopeRepeat, error) {
+			attempts++
+			if attempts == 1 {
+				return invalid, nil
+			}
+			return valid, nil
+		},
+		validatePreparedWorkerHostSlopeRepeat,
+		func() { waits++ },
+	)
+	if err != nil || attempts != 2 || waits != 1 {
+		t.Fatalf("accepted host slope repeat after attempts=%d waits=%d: %v", attempts, waits, err)
+	}
+	var raw strings.Builder
+	var slopes strings.Builder
+	writePreparedWorkerHostSlopeRepeat(t, &raw, &slopes, preparedWorkerCaptureContext{}, 1, accepted)
+	if strings.Contains(raw.String(), "rejected") || strings.Contains(slopes.String(), "rejected") {
+		t.Fatalf("rejected attempt was published:\nraw=%q\nslopes=%q", raw.String(), slopes.String())
+	}
+	if !strings.Contains(raw.String(), "accepted") || !strings.Contains(slopes.String(), "accepted") {
+		t.Fatalf("accepted attempt was not published:\nraw=%q\nslopes=%q", raw.String(), slopes.String())
 	}
 }
 
@@ -480,129 +545,188 @@ func capturePreparedWorkerHostSlopes(
 
 	var maximum float64
 	for repeat := 1; repeat <= parityRepeatCount; repeat++ {
-		embedded := openPreparedWorkerEmbeddedRunner(t, fmt.Sprintf("slope-%d-embedded", repeat))
-		worker := openPreparedWorkerProcessRunner(t, publication, fmt.Sprintf("slope-%d-worker", repeat))
-		warm := preparedworkerfixture.TurnRequest{
-			Sequence:   1,
-			Revision:   0,
-			Projection: preparedworkerfixture.Projection{Step: 1, Seed: 8, Work: 1},
-		}
-		want, err := embedded.Transact(context.Background(), warm)
+		attempt := 0
+		accepted, err := acquirePreparedWorkerRepeat(
+			preparedWorkerRepeatAttemptLimit,
+			func() (preparedWorkerHostSlopeRepeat, error) {
+				attempt++
+				return acquirePreparedWorkerHostSlopeRepeat(t, capture, publication, repeat, attempt)
+			},
+			func(candidate preparedWorkerHostSlopeRepeat) error {
+				err := validatePreparedWorkerHostSlopeRepeat(candidate)
+				if err != nil {
+					t.Logf("discard host slope repeat=%d attempt=%d: %v", repeat, attempt, err)
+				}
+				return err
+			},
+			func() { time.Sleep(parityPointRetryDelay) },
+		)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("host slope repeat=%d: %v", repeat, err)
 		}
-		got, err := worker.Transact(context.Background(), warm)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("host slope warmup differs: worker=%#v embedded=%#v", got, want)
-		}
-		state := got.State
-
-		timings := map[string]map[int]float64{
-			"embedded": {},
-			"worker":   {},
-		}
-		var resultDigests strings.Builder
-		sequence := uint64(1)
-		for index, work := range preparedWorkerHostWork {
-			durations := map[string][]time.Duration{
-				"embedded": make([]time.Duration, 0, preparedWorkerHostPointTrials),
-				"worker":   make([]time.Duration, 0, preparedWorkerHostPointTrials),
-			}
-			for trial := 1; trial <= preparedWorkerHostPointTrials; trial++ {
-				sequence++
-				request := preparedworkerfixture.TurnRequest{
-					Sequence:   sequence,
-					Revision:   sequence - 1,
-					State:      state,
-					Projection: preparedworkerfixture.Projection{Step: 1, Seed: 8, Work: int64(work)},
-				}
-				order := [2]string{"embedded", "worker"}
-				if (repeat+trial+index+preparedWorkerPairIndex(capture.Pair))%2 != 0 {
-					order = [2]string{"worker", "embedded"}
-				}
-				measured := make(map[string]preparedworkerfixture.TurnResult, 2)
-				for _, engine := range order {
-					var transactor preparedWorkerTurnTransactor = embedded
-					if engine == "worker" {
-						transactor = worker
-					}
-					start := time.Now()
-					result, err := transactor.Transact(context.Background(), request)
-					elapsed := time.Since(start)
-					if err != nil {
-						t.Fatalf("host slope %s repeat=%d trial=%d work=%d: %v", engine, repeat, trial, work, err)
-					}
-					durations[engine] = append(durations[engine], elapsed)
-					measured[engine] = result
-					writePreparedWorkerCapture(t, raw, "1\t%s\t%s\t%s\t%s\t%d\t%d\t%s,%s\t%d\t%d\t%s\t%s\n",
-						capture.ID,
-						capture.Pair,
-						capture.SourceCommit,
-						engine,
-						repeat,
-						trial,
-						order[0],
-						order[1],
-						work,
-						elapsed.Nanoseconds(),
-						parityStringSHA256(canonicalPreparedWorkerTurn(result)),
-						capture.EnvironmentHash,
-					)
-				}
-				if !reflect.DeepEqual(measured["worker"], measured["embedded"]) {
-					t.Fatalf("host slope repeat=%d trial=%d work=%d results differ", repeat, trial, work)
-				}
-				state = measured["worker"].State
-				fmt.Fprintf(
-					&resultDigests,
-					"%d/%d=%s\n",
-					work,
-					trial,
-					parityStringSHA256(canonicalPreparedWorkerTurn(measured["worker"])),
-				)
-			}
-			for _, engine := range []string{"embedded", "worker"} {
-				timings[engine][work] = float64(preparedWorkerDurationQuantile(durations[engine], 0.50).Nanoseconds())
-			}
-		}
-		resultHash := parityStringSHA256(resultDigests.String())
-		fits := make(map[string]parityFit, 2)
-		for _, engine := range []string{"embedded", "worker"} {
-			if err := validatePreparedWorkerHostWindow(timings[engine]); err != nil {
-				t.Fatalf("host slope %s repeat=%d: %v", engine, repeat, err)
-			}
-			fit, err := fitPreparedWorkerHostLine(timings[engine])
-			if err != nil {
-				t.Fatal(err)
-			}
-			fits[engine] = fit
-			writePreparedWorkerCapture(t, file, "1\t%s\t%s\t%s\t%s\t%d\t%.17g\t%.17g\t%s\t%s\n",
-				capture.ID,
-				capture.Pair,
-				capture.SourceCommit,
-				engine,
-				repeat,
-				fit.Inner,
-				fit.Entry,
-				resultHash,
-				capture.EnvironmentHash,
-			)
-		}
+		fits := writePreparedWorkerHostSlopeRepeat(t, raw, file, capture, repeat, accepted)
 		ratio := fits["worker"].Inner / fits["embedded"].Inner
 		if ratio > maximum {
 			maximum = ratio
 		}
-		if err := worker.Close(); err != nil {
-			t.Fatal(err)
-		}
-		if err := embedded.Close(); err != nil {
-			t.Fatal(err)
-		}
 	}
 	return maximum
+}
+
+func acquirePreparedWorkerHostSlopeRepeat(
+	t testing.TB,
+	capture preparedWorkerCaptureContext,
+	publication preparedWorkerHostPublication,
+	repeat int,
+	attempt int,
+) (result preparedWorkerHostSlopeRepeat, err error) {
+	t.Helper()
+	embedded := openPreparedWorkerEmbeddedRunner(t, fmt.Sprintf("slope-%d-attempt-%d-embedded", repeat, attempt))
+	worker := openPreparedWorkerProcessRunner(t, publication, fmt.Sprintf("slope-%d-attempt-%d-worker", repeat, attempt))
+	defer func() {
+		err = errors.Join(err, worker.Close(), embedded.Close())
+	}()
+	warm := preparedworkerfixture.TurnRequest{
+		Sequence:   1,
+		Revision:   0,
+		Projection: preparedworkerfixture.Projection{Step: 1, Seed: 8, Work: 1},
+	}
+	want, err := embedded.Transact(context.Background(), warm)
+	if err != nil {
+		return result, fmt.Errorf("warm embedded host slope: %w", err)
+	}
+	got, err := worker.Transact(context.Background(), warm)
+	if err != nil {
+		return result, fmt.Errorf("warm worker host slope: %w", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		return result, fmt.Errorf("host slope warmup differs: worker=%#v embedded=%#v", got, want)
+	}
+	state := got.State
+	result.timings = map[string]map[int]float64{
+		"embedded": {},
+		"worker":   {},
+	}
+	result.measurements = make([]preparedWorkerHostSlopeMeasurement, 0, len(preparedWorkerHostWork)*preparedWorkerHostPointTrials*2)
+	var resultDigests strings.Builder
+	sequence := uint64(1)
+	for index, work := range preparedWorkerHostWork {
+		durations := map[string][]time.Duration{
+			"embedded": make([]time.Duration, 0, preparedWorkerHostPointTrials),
+			"worker":   make([]time.Duration, 0, preparedWorkerHostPointTrials),
+		}
+		for trial := 1; trial <= preparedWorkerHostPointTrials; trial++ {
+			sequence++
+			request := preparedworkerfixture.TurnRequest{
+				Sequence:   sequence,
+				Revision:   sequence - 1,
+				State:      state,
+				Projection: preparedworkerfixture.Projection{Step: 1, Seed: 8, Work: int64(work)},
+			}
+			order := [2]string{"embedded", "worker"}
+			if (repeat+trial+index+preparedWorkerPairIndex(capture.Pair))%2 != 0 {
+				order = [2]string{"worker", "embedded"}
+			}
+			measured := make(map[string]preparedworkerfixture.TurnResult, 2)
+			for _, engine := range order {
+				var transactor preparedWorkerTurnTransactor = embedded
+				if engine == "worker" {
+					transactor = worker
+				}
+				start := time.Now()
+				turn, transactErr := transactor.Transact(context.Background(), request)
+				elapsed := time.Since(start)
+				if transactErr != nil {
+					return result, fmt.Errorf("host slope %s repeat=%d attempt=%d trial=%d work=%d: %w", engine, repeat, attempt, trial, work, transactErr)
+				}
+				durations[engine] = append(durations[engine], elapsed)
+				measured[engine] = turn
+				result.measurements = append(result.measurements, preparedWorkerHostSlopeMeasurement{
+					engine:     engine,
+					trial:      trial,
+					order:      order,
+					work:       work,
+					elapsed:    elapsed,
+					resultHash: parityStringSHA256(canonicalPreparedWorkerTurn(turn)),
+				})
+			}
+			if !reflect.DeepEqual(measured["worker"], measured["embedded"]) {
+				return result, fmt.Errorf("host slope repeat=%d attempt=%d trial=%d work=%d results differ", repeat, attempt, trial, work)
+			}
+			state = measured["worker"].State
+			fmt.Fprintf(
+				&resultDigests,
+				"%d/%d=%s\n",
+				work,
+				trial,
+				parityStringSHA256(canonicalPreparedWorkerTurn(measured["worker"])),
+			)
+		}
+		for _, engine := range []string{"embedded", "worker"} {
+			result.timings[engine][work] = float64(preparedWorkerDurationQuantile(durations[engine], 0.50).Nanoseconds())
+		}
+	}
+	result.resultHash = parityStringSHA256(resultDigests.String())
+	return result, nil
+}
+
+func validatePreparedWorkerHostSlopeRepeat(repeat preparedWorkerHostSlopeRepeat) error {
+	for _, engine := range []string{"embedded", "worker"} {
+		if _, err := fitPreparedWorkerHostLine(repeat.timings[engine]); err != nil {
+			return fmt.Errorf("engine=%s: %w", engine, err)
+		}
+	}
+	return nil
+}
+
+func writePreparedWorkerHostSlopeRepeat(
+	t testing.TB,
+	raw io.Writer,
+	slopes io.Writer,
+	capture preparedWorkerCaptureContext,
+	repeat int,
+	accepted preparedWorkerHostSlopeRepeat,
+) map[string]parityFit {
+	t.Helper()
+	fits := make(map[string]parityFit, 2)
+	for _, engine := range []string{"embedded", "worker"} {
+		fit, err := fitPreparedWorkerHostLine(accepted.timings[engine])
+		if err != nil {
+			t.Fatalf("validated host slope %s repeat=%d changed: %v", engine, repeat, err)
+		}
+		fits[engine] = fit
+	}
+	for _, measured := range accepted.measurements {
+		writePreparedWorkerCapture(t, raw, "1\t%s\t%s\t%s\t%s\t%d\t%d\t%s,%s\t%d\t%d\t%s\t%s\n",
+			capture.ID,
+			capture.Pair,
+			capture.SourceCommit,
+			measured.engine,
+			repeat,
+			measured.trial,
+			measured.order[0],
+			measured.order[1],
+			measured.work,
+			measured.elapsed.Nanoseconds(),
+			measured.resultHash,
+			capture.EnvironmentHash,
+		)
+	}
+	for _, engine := range []string{"embedded", "worker"} {
+		fit := fits[engine]
+		writePreparedWorkerCapture(t, slopes, "1\t%s\t%s\t%s\t%s\t%d\t%.17g\t%.17g\t%s\t%s\n",
+			capture.ID,
+			capture.Pair,
+			capture.SourceCommit,
+			engine,
+			repeat,
+			fit.Inner,
+			fit.Entry,
+			accepted.resultHash,
+			capture.EnvironmentHash,
+		)
+	}
+	return fits
 }
 
 func validatePreparedWorkerHostWindow(samples map[int]float64) error {
